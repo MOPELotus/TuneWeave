@@ -4,16 +4,16 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, Platform, Playlist, Quality, ResourceRef, Result,
-    SearchKind, SearchQuery, Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, LyricContributor, Lyrics,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, Platform, Playlist, Quality,
+    ResourceRef, Result, SearchKind, SearchQuery, Track, TuneWeaveError,
 };
 
 use crate::{
     NeteaseClient, NeteaseConfig,
     dto::{
-        AudioQuality, PlaylistDetail, PlaylistEnvelope, Privilege, SearchEnvelope, Song,
-        TrackEnvelope,
+        AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
+        Privilege, SearchEnvelope, Song, TrackEnvelope,
     },
 };
 
@@ -74,6 +74,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::PlaylistRead,
+            Capability::Lyrics,
         ])
     }
 
@@ -217,6 +218,146 @@ impl MusicProvider for NeteaseProvider {
                 has_more,
             },
         })
+    }
+
+    async fn lyrics(&self, id: &str, _account: Option<&str>) -> Result<Lyrics> {
+        let id = parse_numeric_id("track", id)?;
+        let response = self
+            .client
+            .request_eapi(
+                "/api/song/lyric/v1",
+                json!({
+                    "id": id,
+                    "cp": false,
+                    "tv": 0,
+                    "lv": 0,
+                    "rv": 0,
+                    "kv": 0,
+                    "yv": 0,
+                    "ytv": 0,
+                    "yrv": 0
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: LyricsEnvelope = parse_body(response.body)?;
+        map_lyrics(id, response)
+    }
+}
+
+fn map_lyrics(id: u64, lyrics: LyricsEnvelope) -> Result<Lyrics> {
+    let track_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid lyrics track id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let plain = lyric_text(lyrics.lrc.as_ref());
+    let translated = lyric_text(lyrics.tlyric.as_ref());
+    let romanized = lyric_text(lyrics.romalrc.as_ref());
+    let word_synced = lyric_text(lyrics.yrc.as_ref());
+    let format = if plain.is_some() {
+        "lrc"
+    } else if word_synced.is_some() {
+        "yrc"
+    } else {
+        "plain"
+    }
+    .to_owned();
+    let mut contributors = Vec::new();
+    if let Some(contributor) = map_lyric_user("lyrics", lyrics.lyric_user)? {
+        contributors.push(contributor);
+    }
+    if let Some(contributor) = map_lyric_user("translation", lyrics.trans_user)? {
+        contributors.push(contributor);
+    }
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "pure_music", lyrics.pure_music);
+    insert_lyric_extension(
+        &mut extensions,
+        "word_synced_translated",
+        lyrics.ytlrc.as_ref(),
+    );
+    insert_lyric_extension(
+        &mut extensions,
+        "word_synced_romanized",
+        lyrics.yromalrc.as_ref(),
+    );
+    insert_lyric_version(&mut extensions, "plain_version", lyrics.lrc.as_ref());
+    insert_lyric_version(
+        &mut extensions,
+        "translated_version",
+        lyrics.tlyric.as_ref(),
+    );
+    insert_lyric_version(
+        &mut extensions,
+        "romanized_version",
+        lyrics.romalrc.as_ref(),
+    );
+    insert_lyric_version(&mut extensions, "word_synced_version", lyrics.yrc.as_ref());
+
+    Ok(Lyrics {
+        track_ref,
+        plain,
+        translated,
+        romanized,
+        word_synced,
+        format,
+        contributors,
+        extensions,
+    })
+}
+
+fn lyric_text(lyrics: Option<&LyricText>) -> Option<String> {
+    lyrics
+        .and_then(|lyrics| lyrics.lyric.as_deref())
+        .map(str::trim)
+        .filter(|lyrics| !lyrics.is_empty())
+        .map(str::to_owned)
+}
+
+fn map_lyric_user(role: &str, user: Option<LyricUser>) -> Result<Option<LyricContributor>> {
+    let Some(user) = user else {
+        return Ok(None);
+    };
+    let Some(name) = user
+        .nickname
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    let resource_ref = user
+        .id
+        .or(user.userid)
+        .or(user.user_id)
+        .filter(|id| *id > 0)
+        .map(|id| ResourceRef::new(Platform::Netease, id.to_string()))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid lyric contributor id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    Ok(Some(LyricContributor {
+        role: role.to_owned(),
+        resource_ref,
+        name,
+    }))
+}
+
+fn insert_lyric_extension(extensions: &mut Extensions, name: &str, lyrics: Option<&LyricText>) {
+    if let Some(lyrics) = lyric_text(lyrics) {
+        extensions.insert(name.to_owned(), json!(lyrics));
+    }
+}
+
+fn insert_lyric_version(extensions: &mut Extensions, name: &str, lyrics: Option<&LyricText>) {
+    if let Some(version) = lyrics.and_then(|lyrics| lyrics.version) {
+        extensions.insert(name.to_owned(), json!(version));
     }
 }
 
@@ -564,6 +705,31 @@ mod tests {
         assert_eq!(playlist.extensions["special_type"], 10);
     }
 
+    #[test]
+    fn maps_netease_lyrics_and_contributors() {
+        let lyrics: LyricsEnvelope = serde_json::from_value(json!({
+            "lrc": {"version": 12, "lyric": "[00:01.00]素胚勾勒出青花"},
+            "tlyric": {"version": 3, "lyric": "[00:01.00]Blue and white porcelain"},
+            "romalrc": {"version": 1, "lyric": "[00:01.00]su pei gou le"},
+            "yrc": {"version": 7, "lyric": "[1000,2000](1000,500,0)素胚"},
+            "ytlrc": {"version": 2, "lyric": "[1000,2000]Blue porcelain"},
+            "yromalrc": null,
+            "lyricUser": {"id": 10, "nickname": "歌词贡献者"},
+            "transUser": {"userId": 11, "nickname": "翻译贡献者"},
+            "pureMusic": false
+        }))
+        .expect("valid lyrics fixture");
+
+        let lyrics = map_lyrics(185809, lyrics).expect("map lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "netease:185809");
+        assert_eq!(lyrics.format, "lrc");
+        assert!(lyrics.plain.is_some_and(|lyrics| lyrics.contains("青花")));
+        assert!(lyrics.word_synced.is_some());
+        assert_eq!(lyrics.contributors.len(), 2);
+        assert_eq!(lyrics.contributors[1].role, "translation");
+        assert_eq!(lyrics.extensions["word_synced_version"], 7);
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_provider_search_and_track_detail() {
@@ -602,5 +768,17 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert!(page.pagination.total.is_some_and(|total| total >= 2));
         assert!(page.items.iter().all(|track| !track.artists.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_track_lyrics() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let lyrics = provider
+            .lyrics("185809", None)
+            .await
+            .expect("live track lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "netease:185809");
+        assert!(lyrics.plain.is_some() || lyrics.word_synced.is_some());
     }
 }

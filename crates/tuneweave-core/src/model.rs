@@ -158,6 +158,26 @@ pub struct Playlist {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LyricContributor {
+    pub role: String,
+    #[serde(rename = "ref")]
+    pub resource_ref: Option<ResourceRef>,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Lyrics {
+    pub track_ref: ResourceRef,
+    pub plain: Option<String>,
+    pub translated: Option<String>,
+    pub romanized: Option<String>,
+    pub word_synced: Option<String>,
+    pub format: String,
+    pub contributors: Vec<LyricContributor>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StreamRequest {
     pub quality: Quality,
     pub account: Option<String>,

@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    Capability, MediaStream, Page, PageRequest, Platform, Playlist, ProviderDescriptor, Result,
-    SearchQuery, StreamRequest, Track, TuneWeaveError,
+    Capability, Lyrics, MediaStream, Page, PageRequest, Platform, Playlist, ProviderDescriptor,
+    Result, SearchQuery, StreamRequest, Track, TuneWeaveError,
 };
 
 /// A dynamically registered music platform adapter.
@@ -53,6 +53,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PlaylistRead,
+        ))
+    }
+
+    async fn lyrics(&self, _id: &str, _account: Option<&str>) -> Result<Lyrics> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Lyrics,
         ))
     }
 

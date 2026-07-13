@@ -64,6 +64,37 @@ pub(crate) struct PlaylistTrackId {
     pub id: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct LyricsEnvelope {
+    pub lrc: Option<LyricText>,
+    pub tlyric: Option<LyricText>,
+    pub romalrc: Option<LyricText>,
+    pub yrc: Option<LyricText>,
+    pub ytlrc: Option<LyricText>,
+    pub yromalrc: Option<LyricText>,
+    #[serde(rename = "lyricUser")]
+    pub lyric_user: Option<LyricUser>,
+    #[serde(rename = "transUser")]
+    pub trans_user: Option<LyricUser>,
+    #[serde(rename = "pureMusic")]
+    pub pure_music: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LyricText {
+    pub lyric: Option<String>,
+    pub version: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LyricUser {
+    pub id: Option<u64>,
+    pub userid: Option<u64>,
+    #[serde(rename = "userId")]
+    pub user_id: Option<u64>,
+    pub nickname: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Song {
     pub id: u64,
