@@ -27,6 +27,14 @@ pub(crate) struct PlaylistEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct UserPlaylistsEnvelope {
+    #[serde(default)]
+    pub playlist: Vec<PlaylistDetail>,
+    #[serde(default)]
+    pub more: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistDetail {
     pub id: u64,
     pub name: String,

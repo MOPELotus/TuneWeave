@@ -21,6 +21,7 @@ use crate::{
     dto::{
         AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
         Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -261,6 +262,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::PasswordLogin,
             Capability::PhoneLogin,
             Capability::SessionManagement,
+            Capability::AccountProfile,
+            Capability::AccountPlaylists,
         ])
     }
 
@@ -405,6 +408,46 @@ impl MusicProvider for NeteaseProvider {
                 has_more,
             },
         })
+    }
+
+    async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let status = client.session_status().await?;
+        if !status.authenticated {
+            return Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                format!("NetEase account alias {account} is not logged in"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "account": account })));
+        }
+        let user_id = status
+            .account
+            .user_id
+            .or(status.account.id)
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase account status did not contain a user id",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+        let limit = request.limit.clamp(1, 100);
+        let response = client
+            .request_weapi(
+                "/api/user/playlist",
+                json!({
+                    "uid": user_id,
+                    "limit": limit,
+                    "offset": request.offset,
+                    "includeVideo": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: UserPlaylistsEnvelope = parse_body(response.body)?;
+        map_user_playlists(response, limit, request.offset)
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -628,6 +671,30 @@ fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> Account
     profile.nickname = summary.nickname;
     profile.avatar_url = summary.avatar_url;
     profile
+}
+
+fn map_user_playlists(
+    response: UserPlaylistsEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Playlist>> {
+    let items = response
+        .playlist
+        .into_iter()
+        .map(map_playlist)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: None,
+            next_offset: response.more.then_some(next_offset),
+            has_more: response.more,
+        },
+    })
 }
 
 fn map_session_profile(account: &str, status: NeteaseSessionStatus) -> AccountProfile {
@@ -1395,6 +1462,8 @@ mod tests {
         assert!(capabilities.contains(&Capability::PasswordLogin));
         assert!(capabilities.contains(&Capability::PhoneLogin));
         assert!(capabilities.contains(&Capability::SessionManagement));
+        assert!(capabilities.contains(&Capability::AccountProfile));
+        assert!(capabilities.contains(&Capability::AccountPlaylists));
     }
 
     #[tokio::test]
@@ -1465,6 +1534,51 @@ mod tests {
             .expect("anonymous profile");
         assert_eq!(profile.account, "missing");
         assert!(!profile.authenticated);
+    }
+
+    #[tokio::test]
+    async fn account_playlists_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_playlists(
+            &provider,
+            &PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn maps_account_playlists_to_unified_pagination() {
+        let response: UserPlaylistsEnvelope = serde_json::from_value(json!({
+            "playlist": [
+                {
+                    "id": 1,
+                    "name": "我喜欢的音乐",
+                    "trackCount": 10,
+                    "subscribed": false
+                },
+                {
+                    "id": 2,
+                    "name": "收藏歌单",
+                    "trackCount": 20,
+                    "subscribed": true
+                }
+            ],
+            "more": true
+        }))
+        .expect("user playlists fixture");
+        let page = map_user_playlists(response, 2, 4).expect("map user playlists");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:1");
+        assert_eq!(page.items[1].subscribed, Some(true));
+        assert_eq!(page.pagination.offset, 4);
+        assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
     }
 
     #[tokio::test]
