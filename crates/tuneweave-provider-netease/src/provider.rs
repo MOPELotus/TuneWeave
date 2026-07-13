@@ -19,9 +19,9 @@ use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
-        Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        AudioQuality, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail,
+        PlaylistEnvelope, Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope,
+        TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -264,6 +264,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SessionManagement,
             Capability::AccountProfile,
             Capability::AccountPlaylists,
+            Capability::Favorites,
         ])
     }
 
@@ -364,36 +365,7 @@ impl MusicProvider for NeteaseProvider {
             .take(limit as usize)
             .map(|track| track.id)
             .collect::<Vec<_>>();
-        let items = if selected_ids.is_empty() {
-            Vec::new()
-        } else {
-            let request_tracks =
-                Value::Array(selected_ids.iter().map(|id| json!({ "id": id })).collect())
-                    .to_string();
-            let response = client
-                .request_eapi("/api/v3/song/detail", json!({ "c": request_tracks }))
-                .await?;
-            ensure_success(&response.body)?;
-            let response: TrackEnvelope = parse_body(response.body)?;
-            let mut songs = response
-                .songs
-                .into_iter()
-                .map(|song| (song.id, song))
-                .collect::<HashMap<_, _>>();
-            let mut privileges = response
-                .privileges
-                .into_iter()
-                .map(|privilege| (privilege.id, privilege))
-                .collect::<HashMap<_, _>>();
-            selected_ids
-                .iter()
-                .filter_map(|id| {
-                    songs
-                        .remove(id)
-                        .map(|song| map_song(song, privileges.remove(id)))
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        let items = fetch_tracks_by_ids(&client, &selected_ids).await?;
         let consumed = selected_ids.len() as u32;
         let next_offset = offset.saturating_add(consumed);
         let has_more = u64::from(next_offset) < total;
@@ -413,26 +385,7 @@ impl MusicProvider for NeteaseProvider {
     async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
         let account = request.account.as_deref().unwrap_or("default");
         let client = self.client_for(Some(account))?;
-        let status = client.session_status().await?;
-        if !status.authenticated {
-            return Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                format!("NetEase account alias {account} is not logged in"),
-            )
-            .with_platform(Platform::Netease)
-            .with_details(json!({ "account": account })));
-        }
-        let user_id = status
-            .account
-            .user_id
-            .or(status.account.id)
-            .ok_or_else(|| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    "NetEase account status did not contain a user id",
-                )
-                .with_platform(Platform::Netease)
-            })?;
+        let user_id = authenticated_user_id(&client, account).await?;
         let limit = request.limit.clamp(1, 100);
         let response = client
             .request_weapi(
@@ -448,6 +401,21 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: UserPlaylistsEnvelope = parse_body(response.body)?;
         map_user_playlists(response, limit, request.offset)
+    }
+
+    async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let user_id = authenticated_user_id(&client, account).await?;
+        let response = client
+            .request_eapi("/api/song/like/get", json!({ "uid": user_id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let response: LikedTracksEnvelope = parse_body(response.body)?;
+        let limit = request.limit.clamp(1, 100);
+        let (selected_ids, pagination) = select_id_page(response.ids, limit, request.offset);
+        let items = fetch_tracks_by_ids(&client, &selected_ids).await?;
+        Ok(Page { items, pagination })
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -663,6 +631,77 @@ impl MusicProvider for NeteaseProvider {
         let status = self.client_for(Some(&account))?.session_status().await?;
         Ok(map_session_profile(&account, status))
     }
+}
+
+async fn authenticated_user_id(client: &NeteaseClient, account: &str) -> Result<String> {
+    let status = client.session_status().await?;
+    if !status.authenticated {
+        return Err(TuneWeaveError::new(
+            ErrorCode::AuthenticationRequired,
+            format!("NetEase account alias {account} is not logged in"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "account": account })));
+    }
+    status.account.user_id.or(status.account.id).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase account status did not contain a user id",
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+async fn fetch_tracks_by_ids(client: &NeteaseClient, ids: &[u64]) -> Result<Vec<Track>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let request_tracks =
+        Value::Array(ids.iter().map(|id| json!({ "id": id })).collect()).to_string();
+    let response = client
+        .request_eapi("/api/v3/song/detail", json!({ "c": request_tracks }))
+        .await?;
+    ensure_success(&response.body)?;
+    let response: TrackEnvelope = parse_body(response.body)?;
+    let mut songs = response
+        .songs
+        .into_iter()
+        .map(|song| (song.id, song))
+        .collect::<HashMap<_, _>>();
+    let mut privileges = response
+        .privileges
+        .into_iter()
+        .map(|privilege| (privilege.id, privilege))
+        .collect::<HashMap<_, _>>();
+    ids.iter()
+        .filter_map(|id| {
+            songs
+                .remove(id)
+                .map(|song| map_song(song, privileges.remove(id)))
+        })
+        .collect()
+}
+
+fn select_id_page(ids: Vec<u64>, limit: u32, offset: u32) -> (Vec<u64>, PageMeta) {
+    let total = ids.len() as u64;
+    let selected = ids
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect::<Vec<_>>();
+    let consumed = selected.len() as u32;
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = u64::from(next_offset) < total;
+    (
+        selected,
+        PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+        },
+    )
 }
 
 fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> AccountProfile {
@@ -1464,6 +1503,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
+        assert!(capabilities.contains(&Capability::Favorites));
     }
 
     #[tokio::test]
@@ -1552,6 +1592,38 @@ mod tests {
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[tokio::test]
+    async fn favorite_tracks_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::favorite_tracks(
+            &provider,
+            &PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn paginates_favorite_track_ids_without_reordering_them() {
+        let (ids, pagination) = select_id_page(vec![1, 2, 3, 4], 2, 1);
+        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(pagination.limit, 2);
+        assert_eq!(pagination.offset, 1);
+        assert_eq!(pagination.total, Some(4));
+        assert_eq!(pagination.next_offset, Some(3));
+        assert!(pagination.has_more);
+
+        let (ids, pagination) = select_id_page(vec![1, 2, 3, 4], 2, 3);
+        assert_eq!(ids, vec![4]);
+        assert_eq!(pagination.next_offset, None);
+        assert!(!pagination.has_more);
+    }
+
     #[test]
     fn maps_account_playlists_to_unified_pagination() {
         let response: UserPlaylistsEnvelope = serde_json::from_value(json!({
@@ -1619,6 +1691,35 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert!(page.pagination.total.is_some_and(|total| total >= 2));
         assert!(page.items.iter().all(|track| !track.artists.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_liked_track_ids_require_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let response = provider
+            .client
+            .request_eapi("/api/song/like/get", json!({ "uid": "32953014" }))
+            .await
+            .expect("live liked track ids");
+        let error = ensure_success(&response.body).expect_err("anonymous request must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NETEASE_COOKIE for a live logged-in account"]
+    async fn live_account_favorite_tracks() {
+        let cookie = std::env::var("NETEASE_COOKIE").expect("NETEASE_COOKIE must be set");
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            cookie: Some(cookie),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let page = MusicProvider::favorite_tracks(&provider, &PageRequest::new(2, 0))
+            .await
+            .expect("live account favorite tracks");
+        assert!(page.pagination.total.is_some());
+        assert!(page.items.iter().all(|track| !track.name.is_empty()));
     }
 
     #[tokio::test]

@@ -35,6 +35,12 @@ pub(crate) struct UserPlaylistsEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct LikedTracksEnvelope {
+    #[serde(default)]
+    pub ids: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistDetail {
     pub id: u64,
     pub name: String,
