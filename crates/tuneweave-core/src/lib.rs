@@ -1,5 +1,6 @@
 //! Platform-neutral domain types and provider interfaces for TuneWeave.
 
+mod auth;
 mod capability;
 mod error;
 mod matcher;
@@ -9,6 +10,10 @@ mod provider;
 mod registry;
 mod resolver;
 
+pub use auth::{
+    AccountProfile, AuthChallengeRequest, AuthState, ChallengeMethod, PasswordFormat,
+    PasswordLoginRequest, PrincipalType, ProviderQrPoll, ProviderQrStart,
+};
 pub use capability::Capability;
 pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};

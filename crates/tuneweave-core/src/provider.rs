@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    Capability, Lyrics, MediaStream, Page, PageRequest, Platform, Playlist, ProviderDescriptor,
+    AccountProfile, AuthChallengeRequest, Capability, Lyrics, MediaStream, Page, PageRequest,
+    PasswordLoginRequest, Platform, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
     Result, SearchQuery, StreamRequest, Track, TuneWeaveError,
 };
 
@@ -67,6 +68,56 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AudioStream,
+        ))
+    }
+
+    async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::QrLogin,
+        ))
+    }
+
+    async fn poll_qr_login(
+        &self,
+        _provider_transaction_id: &str,
+        _account: &str,
+    ) -> Result<ProviderQrPoll> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::QrLogin,
+        ))
+    }
+
+    async fn password_login(&self, _request: &PasswordLoginRequest) -> Result<AccountProfile> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PasswordLogin,
+        ))
+    }
+
+    async fn start_auth_challenge(&self, _request: &AuthChallengeRequest) -> Result<()> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PhoneLogin,
+        ))
+    }
+
+    async fn verify_auth_challenge(
+        &self,
+        _request: &AuthChallengeRequest,
+        _code: &str,
+    ) -> Result<AccountProfile> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PhoneLogin,
+        ))
+    }
+
+    async fn logout(&self, _account: &str) -> Result<bool> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SessionManagement,
         ))
     }
 }
