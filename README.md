@@ -35,7 +35,8 @@ cargo run -p tuneweave-server --bin tuneweave
 当前可直接调用 `/healthz`、`/v1/platforms`、`/v1/capabilities`、
 `/v1/search`、`/v1/tracks/{ref}`、`/v1/tracks/{ref}/lyrics`、
 `/v1/tracks/{ref}/stream`、`/v1/playlists/{ref}` 和
-`/v1/playlists/{ref}/tracks`。完整契约见 [docs/api-v1.md](docs/api-v1.md)。
+`/v1/playlists/{ref}/tracks`。认证已提供二维码、账号密码、短信验证码和
+退出端点；完整契约见 [docs/api-v1.md](docs/api-v1.md)。
 
 ## 许可证
 

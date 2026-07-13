@@ -1,25 +1,119 @@
 mod response;
 
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    routing::get,
+    extract::{Path, Query, State, rejection::JsonRejection},
+    routing::{delete, get, post},
 };
+use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Lyrics, MediaStream, PageRequest, Platform, Playlist, ProviderRegistry, Quality,
-    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, Track, TuneWeaveError,
+    AccountProfile, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, Playlist,
+    PrincipalType, ProviderRegistry, Quality, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
+    StreamResolver, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
+
+const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Default)]
+struct AuthTransactions {
+    entries: Arc<RwLock<HashMap<String, StoredAuthTransaction>>>,
+}
+
+#[derive(Clone)]
+struct StoredAuthTransaction {
+    expires_at: Instant,
+    kind: StoredAuthKind,
+}
+
+#[derive(Clone)]
+enum StoredAuthKind {
+    Qr {
+        platform: Platform,
+        account: String,
+        provider_transaction_id: String,
+    },
+    Challenge {
+        platform: Platform,
+        request: AuthChallengeRequest,
+    },
+}
+
+impl AuthTransactions {
+    fn insert(&self, kind: StoredAuthKind) -> Result<String, TuneWeaveError> {
+        let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
+        let now = Instant::now();
+        entries.retain(|_, transaction| transaction.expires_at > now);
+        for _ in 0..8 {
+            let suffix = rand::rng()
+                .sample_iter(Alphanumeric)
+                .take(24)
+                .map(char::from)
+                .collect::<String>();
+            let transaction_id = format!("tw-auth-{suffix}");
+            if !entries.contains_key(&transaction_id) {
+                entries.insert(
+                    transaction_id.clone(),
+                    StoredAuthTransaction {
+                        expires_at: now + AUTH_TRANSACTION_TTL,
+                        kind,
+                    },
+                );
+                return Ok(transaction_id);
+            }
+        }
+        Err(TuneWeaveError::new(
+            tuneweave_core::ErrorCode::InternalError,
+            "failed to allocate a unique authentication transaction",
+        ))
+    }
+
+    fn get(&self, transaction_id: &str) -> Result<StoredAuthKind, TuneWeaveError> {
+        let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
+        let now = Instant::now();
+        entries.retain(|_, transaction| transaction.expires_at > now);
+        entries
+            .get(transaction_id)
+            .map(|transaction| transaction.kind.clone())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    tuneweave_core::ErrorCode::ResourceNotFound,
+                    "authentication transaction was not found or has expired",
+                )
+            })
+    }
+
+    fn remove(&self, transaction_id: &str) -> Result<(), TuneWeaveError> {
+        self.entries
+            .write()
+            .map_err(|_| auth_store_error())?
+            .remove(transaction_id);
+        Ok(())
+    }
+}
+
+fn auth_store_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        tuneweave_core::ErrorCode::InternalError,
+        "authentication transaction store lock is poisoned",
+    )
+}
 
 #[derive(Clone)]
 pub struct AppState {
     registry: ProviderRegistry,
     resolver: StreamResolver,
+    auth_transactions: AuthTransactions,
     default_platform: Platform,
     started_at: Instant,
 }
@@ -47,6 +141,7 @@ impl AppState {
     ) -> Self {
         Self {
             resolver: StreamResolver::new(registry.clone(), fallback_platforms),
+            auth_transactions: AuthTransactions::default(),
             registry,
             default_platform,
             started_at: Instant::now(),
@@ -63,7 +158,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
-        .route("/playlists/{reference}/tracks", get(playlist_tracks));
+        .route("/playlists/{reference}/tracks", get(playlist_tracks))
+        .route("/auth/qr", post(auth_qr_start))
+        .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
+        .route("/auth/password", post(auth_password))
+        .route("/auth/challenges", post(auth_challenge_start))
+        .route(
+            "/auth/challenges/{transaction_id}/verify",
+            post(auth_challenge_verify),
+        )
+        .route("/auth/session", delete(auth_session_delete));
 
     Router::new()
         .route("/healthz", get(health))
@@ -367,6 +471,270 @@ async fn playlist_tracks(
     Ok(Json(response))
 }
 
+#[derive(Deserialize)]
+struct AuthQrStartBody {
+    platform: String,
+    account: Option<String>,
+    login_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthQrStartData {
+    transaction_id: String,
+    url: String,
+    image_data_url: Option<String>,
+    expires_at: Option<String>,
+}
+
+async fn auth_qr_start(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthQrStartBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthQrStartData>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let start = provider.start_qr_login(body.login_type.as_deref()).await?;
+    let transaction_id = state.auth_transactions.insert(StoredAuthKind::Qr {
+        platform,
+        account: account.clone(),
+        provider_transaction_id: start.provider_transaction_id,
+    })?;
+    let data = AuthQrStartData {
+        transaction_id,
+        url: start.url,
+        image_data_url: start.image_data_url,
+        expires_at: start.expires_at,
+    };
+    Ok(Json(
+        ApiResponse::new(data)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Serialize)]
+struct AuthQrPollData {
+    transaction_id: String,
+    state: AuthState,
+    message: Option<String>,
+    profile: Option<AccountProfile>,
+}
+
+async fn auth_qr_poll(
+    State(state): State<AppState>,
+    Path(transaction_id): Path<String>,
+) -> Result<Json<ApiResponse<AuthQrPollData>>, ApiError> {
+    let stored = state.auth_transactions.get(&transaction_id)?;
+    let StoredAuthKind::Qr {
+        platform,
+        account,
+        provider_transaction_id,
+    } = stored
+    else {
+        return Err(auth_transaction_not_found().into());
+    };
+    let provider = state.registry.require(platform)?;
+    let poll = provider
+        .poll_qr_login(&provider_transaction_id, &account)
+        .await?;
+    if poll.state.is_terminal() {
+        state.auth_transactions.remove(&transaction_id)?;
+    }
+    let data = AuthQrPollData {
+        transaction_id,
+        state: poll.state,
+        message: poll.message,
+        profile: poll.profile,
+    };
+    Ok(Json(
+        ApiResponse::new(data)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthPasswordBody {
+    platform: String,
+    account: Option<String>,
+    principal_type: PrincipalType,
+    principal: String,
+    password: String,
+    #[serde(default)]
+    password_format: PasswordFormat,
+    country_code: Option<String>,
+}
+
+async fn auth_password(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthPasswordBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let profile = provider
+        .password_login(&PasswordLoginRequest {
+            account: account.clone(),
+            principal_type: body.principal_type,
+            principal: body.principal,
+            password: body.password,
+            password_format: body.password_format,
+            country_code: optional_trimmed(body.country_code),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(profile)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthChallengeStartBody {
+    platform: String,
+    account: Option<String>,
+    method: ChallengeMethod,
+    principal: String,
+    country_code: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthChallengeStartData {
+    transaction_id: String,
+    method: ChallengeMethod,
+}
+
+async fn auth_challenge_start(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthChallengeStartBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthChallengeStartData>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let request = AuthChallengeRequest {
+        account: account.clone(),
+        method: body.method,
+        principal: body.principal,
+        country_code: optional_trimmed(body.country_code),
+    };
+    provider.start_auth_challenge(&request).await?;
+    let transaction_id = state
+        .auth_transactions
+        .insert(StoredAuthKind::Challenge { platform, request })?;
+    let data = AuthChallengeStartData {
+        transaction_id,
+        method: body.method,
+    };
+    Ok(Json(
+        ApiResponse::new(data)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthChallengeVerifyBody {
+    code: String,
+}
+
+#[derive(Serialize)]
+struct AuthChallengeVerifyData {
+    state: AuthState,
+    profile: AccountProfile,
+}
+
+async fn auth_challenge_verify(
+    State(state): State<AppState>,
+    Path(transaction_id): Path<String>,
+    payload: Result<Json<AuthChallengeVerifyBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthChallengeVerifyData>>, ApiError> {
+    let body = json_body(payload)?;
+    if body.code.trim().is_empty() {
+        return Err(TuneWeaveError::invalid_request("code must not be empty").into());
+    }
+    let stored = state.auth_transactions.get(&transaction_id)?;
+    let StoredAuthKind::Challenge { platform, request } = stored else {
+        return Err(auth_transaction_not_found().into());
+    };
+    let provider = state.registry.require(platform)?;
+    let profile = provider
+        .verify_auth_challenge(&request, body.code.trim())
+        .await?;
+    state.auth_transactions.remove(&transaction_id)?;
+    let account = request.account;
+    Ok(Json(
+        ApiResponse::new(AuthChallengeVerifyData {
+            state: AuthState::Confirmed,
+            profile,
+        })
+        .with_platform(platform)
+        .with_account(account),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthSessionParams {
+    platform: String,
+    account: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthSessionDeleteData {
+    removed: bool,
+}
+
+async fn auth_session_delete(
+    State(state): State<AppState>,
+    Query(params): Query<AuthSessionParams>,
+) -> Result<Json<ApiResponse<AuthSessionDeleteData>>, ApiError> {
+    let platform = parse_platform_parameter(&params.platform)?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let removed = provider.logout(&account).await?;
+    Ok(Json(
+        ApiResponse::new(AuthSessionDeleteData { removed })
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+    payload
+        .map(|Json(body)| body)
+        .map_err(|_| TuneWeaveError::invalid_request("request body must be valid JSON").into())
+}
+
+fn account_alias(value: Option<&str>) -> Result<String, TuneWeaveError> {
+    let account = value.unwrap_or("default").trim();
+    let account = if account.is_empty() {
+        "default"
+    } else {
+        account
+    };
+    if account.len() > 64 {
+        return Err(TuneWeaveError::invalid_request(
+            "account alias cannot exceed 64 bytes",
+        ));
+    }
+    Ok(account.to_owned())
+}
+
+fn optional_trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn auth_transaction_not_found() -> TuneWeaveError {
+    TuneWeaveError::new(
+        tuneweave_core::ErrorCode::ResourceNotFound,
+        "authentication transaction was not found or has expired",
+    )
+}
+
 fn parse_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
     reference.parse().map_err(|error| {
         TuneWeaveError::invalid_request(format!("{error}"))
@@ -484,12 +852,13 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode},
+        http::{Method, Request, StatusCode, header},
     };
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistSummary, MusicProvider, Page, PageMeta, Result, SearchQuery, StreamRequest,
+        ArtistSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result, SearchQuery,
+        StreamRequest,
     };
 
     use super::*;
@@ -517,6 +886,10 @@ mod tests {
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
+                Capability::QrLogin,
+                Capability::PasswordLogin,
+                Capability::PhoneLogin,
+                Capability::SessionManagement,
             ])
         }
 
@@ -588,6 +961,54 @@ mod tests {
                 attempts: Vec::new(),
             })
         }
+
+        async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {
+            Ok(ProviderQrStart {
+                provider_transaction_id: "provider-qr-key".to_owned(),
+                url: "https://example.test/qr".to_owned(),
+                image_data_url: None,
+                expires_at: None,
+            })
+        }
+
+        async fn poll_qr_login(
+            &self,
+            provider_transaction_id: &str,
+            account: &str,
+        ) -> Result<tuneweave_core::ProviderQrPoll> {
+            assert_eq!(provider_transaction_id, "provider-qr-key");
+            Ok(tuneweave_core::ProviderQrPoll {
+                state: AuthState::Confirmed,
+                message: None,
+                profile: Some(AccountProfile::authenticated(Platform::Netease, account)),
+            })
+        }
+
+        async fn password_login(&self, request: &PasswordLoginRequest) -> Result<AccountProfile> {
+            Ok(AccountProfile::authenticated(
+                Platform::Netease,
+                &request.account,
+            ))
+        }
+
+        async fn start_auth_challenge(&self, _request: &AuthChallengeRequest) -> Result<()> {
+            Ok(())
+        }
+
+        async fn verify_auth_challenge(
+            &self,
+            request: &AuthChallengeRequest,
+            _code: &str,
+        ) -> Result<AccountProfile> {
+            Ok(AccountProfile::authenticated(
+                Platform::Netease,
+                &request.account,
+            ))
+        }
+
+        async fn logout(&self, _account: &str) -> Result<bool> {
+            Ok(true)
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -628,13 +1049,24 @@ mod tests {
     }
 
     async fn json_response_from(app: Router, path: &str) -> (StatusCode, Value) {
+        json_request_from(app, Method::GET, path, None).await
+    }
+
+    async fn json_request_from(
+        app: Router,
+        method: Method,
+        path: &str,
+        json_body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = if let Some(json_body) = json_body {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&json_body).expect("serialize request JSON"))
+        } else {
+            Body::empty()
+        };
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
+            .oneshot(request.body(body).expect("build request"))
             .await
             .expect("request succeeds");
         let status = response.status();
@@ -783,5 +1215,132 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn qr_auth_uses_an_opaque_server_transaction_and_saves_the_account() {
+        let app = test_app_with_provider();
+        let (status, start) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/qr",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "login_type": "pc"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let transaction_id = start["data"]["transaction_id"]
+            .as_str()
+            .expect("transaction id");
+        assert!(transaction_id.starts_with("tw-auth-"));
+        assert!(!transaction_id.contains("provider-qr-key"));
+        assert_eq!(start["data"]["url"], "https://example.test/qr");
+
+        let path = format!("/v1/auth/qr/{transaction_id}");
+        let (status, poll) = json_response_from(app, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(poll["data"]["state"], "confirmed");
+        assert_eq!(poll["data"]["profile"]["account"], "personal");
+        assert_eq!(poll["meta"]["platform"], "netease");
+        assert_eq!(poll["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn password_auth_never_echoes_credentials() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/password",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "principal_type": "email",
+                "principal": "private@example.test",
+                "password": "must-never-appear"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["authenticated"], true);
+        assert_eq!(json["data"]["account"], "personal");
+        let output = serde_json::to_string(&json).expect("serialize response");
+        assert!(!output.contains("private@example.test"));
+        assert!(!output.contains("must-never-appear"));
+    }
+
+    #[tokio::test]
+    async fn sms_challenge_verification_returns_an_authenticated_profile() {
+        let app = test_app_with_provider();
+        let (status, start) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(json!({
+                "platform": "netease",
+                "account": "sms-account",
+                "method": "sms",
+                "principal": "13800138000",
+                "country_code": "86"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let transaction_id = start["data"]["transaction_id"]
+            .as_str()
+            .expect("transaction id");
+        let path = format!("/v1/auth/challenges/{transaction_id}/verify");
+        let (status, verified) =
+            json_request_from(app, Method::POST, &path, Some(json!({ "code": "1234" }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["data"]["state"], "confirmed");
+        assert_eq!(verified["data"]["profile"]["account"], "sms-account");
+    }
+
+    #[tokio::test]
+    async fn auth_logout_uses_the_selected_platform_and_account() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/auth/session?platform=netease&account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["removed"], true);
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn malformed_auth_json_uses_the_error_envelope() {
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("build malformed request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid error JSON");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn unknown_auth_transaction_uses_the_error_envelope() {
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/auth/qr/tw-auth-missing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "resource_not_found");
     }
 }

@@ -261,7 +261,9 @@
 | GET | `/v1/account/favorites/tracks` | `platform`、`account?`、分页 | `Track[]` |
 | GET | `/v1/account/history` | `platform`、`account?`、分页 | 带播放时间/次数的 `Track[]` |
 
-`principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。敏感字段仅在请求生命周期内使用，保存后的平台凭据只通过账户别名引用。
+`principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
+
+二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 
 ### 写操作
 
