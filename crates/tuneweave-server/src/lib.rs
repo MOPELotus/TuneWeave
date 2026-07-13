@@ -171,7 +171,9 @@ pub fn build_router(state: AppState) -> Router {
             "/auth/session",
             get(auth_session_get).delete(auth_session_delete),
         )
-        .route("/auth/session/refresh", post(auth_session_refresh));
+        .route("/auth/session/refresh", post(auth_session_refresh))
+        .route("/account", get(account_profile))
+        .route("/account/playlists", get(account_playlists));
 
     Router::new()
         .route("/healthz", get(health))
@@ -742,6 +744,65 @@ async fn auth_session_delete(
     ))
 }
 
+#[derive(Default, Deserialize)]
+struct AccountQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn account_profile(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let profile = provider.session_profile(&account).await?;
+    if !profile.authenticated {
+        return Err(TuneWeaveError::new(
+            tuneweave_core::ErrorCode::AuthenticationRequired,
+            format!("{platform} account alias {account} is not logged in"),
+        )
+        .with_platform(platform)
+        .with_details(json!({ "account": account }))
+        .into());
+    }
+    Ok(Json(
+        ApiResponse::new(profile)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn account_playlists(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_playlists(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     payload
         .map(|Json(body)| body)
@@ -761,6 +822,10 @@ fn account_alias(value: Option<&str>) -> Result<String, TuneWeaveError> {
         ));
     }
     Ok(account.to_owned())
+}
+
+fn account_platform(state: &AppState, value: Option<&str>) -> Result<Platform, TuneWeaveError> {
+    value.map_or(Ok(state.default_platform), parse_platform_parameter)
 }
 
 fn optional_trimmed(value: Option<String>) -> Option<String> {
@@ -931,6 +996,8 @@ mod tests {
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
                 Capability::SessionManagement,
+                Capability::AccountProfile,
+                Capability::AccountPlaylists,
             ])
         }
 
@@ -958,6 +1025,19 @@ mod tests {
         async fn playlist_tracks(&self, _id: &str, request: &PageRequest) -> Result<Page<Track>> {
             Ok(Page {
                 items: vec![sample_track("123")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
+            Ok(Page {
+                items: vec![sample_playlist("3778678")],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -1396,6 +1476,33 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["extensions"]["refreshed"], true);
         assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn account_profile_selects_platform_and_account_alias() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["authenticated"], true);
+        assert_eq!(json["data"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn account_playlists_use_unified_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/playlists?platform=netease&account=personal&limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:3778678");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
     }
 
     #[tokio::test]
