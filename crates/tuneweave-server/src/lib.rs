@@ -9,7 +9,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -167,7 +167,11 @@ pub fn build_router(state: AppState) -> Router {
             "/auth/challenges/{transaction_id}/verify",
             post(auth_challenge_verify),
         )
-        .route("/auth/session", delete(auth_session_delete));
+        .route(
+            "/auth/session",
+            get(auth_session_get).delete(auth_session_delete),
+        )
+        .route("/auth/session/refresh", post(auth_session_refresh));
 
     Router::new()
         .route("/healthz", get(health))
@@ -681,6 +685,43 @@ struct AuthSessionParams {
     account: Option<String>,
 }
 
+async fn auth_session_get(
+    State(state): State<AppState>,
+    Query(params): Query<AuthSessionParams>,
+) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+    let platform = parse_platform_parameter(&params.platform)?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let profile = provider.session_profile(&account).await?;
+    Ok(Json(
+        ApiResponse::new(profile)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthSessionBody {
+    platform: String,
+    account: Option<String>,
+}
+
+async fn auth_session_refresh(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthSessionBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let profile = provider.refresh_session(&account).await?;
+    Ok(Json(
+        ApiResponse::new(profile)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 #[derive(Serialize)]
 struct AuthSessionDeleteData {
     removed: bool,
@@ -1009,6 +1050,18 @@ mod tests {
         async fn logout(&self, _account: &str) -> Result<bool> {
             Ok(true)
         }
+
+        async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+            Ok(AccountProfile::authenticated(Platform::Netease, account))
+        }
+
+        async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
+            let mut profile = AccountProfile::authenticated(Platform::Netease, account);
+            profile
+                .extensions
+                .insert("refreshed".to_owned(), json!(true));
+            Ok(profile)
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -1311,6 +1364,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["removed"], true);
         assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn auth_session_status_returns_only_the_selected_account_profile() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/auth/session?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["authenticated"], true);
+        assert_eq!(json["data"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn auth_session_refresh_uses_a_json_body_and_returns_fresh_status() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/session/refresh",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["authenticated"], true);
+        assert_eq!(json["data"]["extensions"]["refreshed"], true);
         assert_eq!(json["meta"]["account"], "personal");
     }
 
