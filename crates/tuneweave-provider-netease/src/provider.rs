@@ -8,10 +8,11 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, LyricContributor, Lyrics,
-    MediaStream, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, Platform,
-    Playlist, Quality, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
-    TrialWindow, TuneWeaveError,
+    AccountProfile, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, MusicProvider,
+    Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
+    Platform, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef,
+    Result, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -256,6 +257,10 @@ impl MusicProvider for NeteaseProvider {
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
+            Capability::QrLogin,
+            Capability::PasswordLogin,
+            Capability::PhoneLogin,
+            Capability::SessionManagement,
         ])
     }
 
@@ -464,6 +469,141 @@ impl MusicProvider for NeteaseProvider {
             })?;
         map_stream(track, request, stream, client.is_authenticated())
     }
+
+    async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
+        if let Some(login_type) = login_type.map(str::trim).filter(|value| !value.is_empty())
+            && !matches!(login_type, "default" | "netease" | "pc")
+        {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "unsupported NetEase QR login type: {login_type}"
+            ))
+            .with_platform(Platform::Netease));
+        }
+        let login = NeteaseProvider::create_qr_login(self).await?;
+        Ok(ProviderQrStart {
+            provider_transaction_id: login.key,
+            url: login.url,
+            image_data_url: None,
+            expires_at: None,
+        })
+    }
+
+    async fn poll_qr_login(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+    ) -> Result<ProviderQrPoll> {
+        let check = NeteaseProvider::check_qr_login(self, provider_transaction_id, account).await?;
+        let state = match check.state {
+            NeteaseQrState::Waiting => AuthState::Waiting,
+            NeteaseQrState::Scanned => AuthState::Scanned,
+            NeteaseQrState::Confirmed => AuthState::Confirmed,
+            NeteaseQrState::Expired => AuthState::Expired,
+            NeteaseQrState::Failed => AuthState::Failed,
+        };
+        Ok(ProviderQrPoll {
+            state,
+            message: check.message,
+            profile: (state == AuthState::Confirmed)
+                .then(|| AccountProfile::authenticated(Platform::Netease, account)),
+        })
+    }
+
+    async fn password_login(&self, request: &PasswordLoginRequest) -> Result<AccountProfile> {
+        let country_code = request.country_code.as_deref().unwrap_or("86");
+        let summary = match (request.principal_type, request.password_format) {
+            (PrincipalType::Email, PasswordFormat::Plain) => {
+                NeteaseProvider::login_with_email_password(
+                    self,
+                    &request.account,
+                    &request.principal,
+                    &request.password,
+                )
+                .await?
+            }
+            (PrincipalType::Email, PasswordFormat::Md5) => {
+                NeteaseProvider::login_with_email_md5(
+                    self,
+                    &request.account,
+                    &request.principal,
+                    &request.password,
+                )
+                .await?
+            }
+            (PrincipalType::Phone, PasswordFormat::Plain) => {
+                NeteaseProvider::login_with_phone_password(
+                    self,
+                    &request.account,
+                    &request.principal,
+                    country_code,
+                    &request.password,
+                )
+                .await?
+            }
+            (PrincipalType::Phone, PasswordFormat::Md5) => {
+                NeteaseProvider::login_with_phone_password_md5(
+                    self,
+                    &request.account,
+                    &request.principal,
+                    country_code,
+                    &request.password,
+                )
+                .await?
+            }
+            (PrincipalType::Username, _) => {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase password login supports email or phone principals",
+                )
+                .with_platform(Platform::Netease));
+            }
+        };
+        Ok(map_account_profile(&request.account, summary))
+    }
+
+    async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
+        match request.method {
+            ChallengeMethod::Sms => {
+                NeteaseProvider::send_phone_captcha(
+                    self,
+                    &request.principal,
+                    request.country_code.as_deref().unwrap_or("86"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn verify_auth_challenge(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+    ) -> Result<AccountProfile> {
+        let summary = match request.method {
+            ChallengeMethod::Sms => {
+                NeteaseProvider::login_with_phone_captcha(
+                    self,
+                    &request.account,
+                    &request.principal,
+                    request.country_code.as_deref().unwrap_or("86"),
+                    code,
+                )
+                .await?
+            }
+        };
+        Ok(map_account_profile(&request.account, summary))
+    }
+
+    async fn logout(&self, account: &str) -> Result<bool> {
+        NeteaseProvider::logout_account(self, account).await
+    }
+}
+
+fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> AccountProfile {
+    let mut profile = AccountProfile::authenticated(Platform::Netease, account);
+    profile.user_id = summary.user_id.or(summary.id);
+    profile.nickname = summary.nickname;
+    profile.avatar_url = summary.avatar_url;
+    profile
 }
 
 fn normalize_account_label(account: Option<&str>) -> Result<&str> {
@@ -1215,6 +1355,58 @@ mod tests {
             .err()
             .expect("oversized account alias");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn advertises_every_implemented_authentication_flow() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let capabilities = provider.capabilities();
+        assert!(capabilities.contains(&Capability::QrLogin));
+        assert!(capabilities.contains(&Capability::PasswordLogin));
+        assert!(capabilities.contains(&Capability::PhoneLogin));
+        assert!(capabilities.contains(&Capability::SessionManagement));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_authentication_variants_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let qr_error = MusicProvider::start_qr_login(&provider, Some("mobile"))
+            .await
+            .expect_err("unsupported QR type");
+        assert_eq!(qr_error.code, ErrorCode::InvalidRequest);
+
+        let password_error = MusicProvider::password_login(
+            &provider,
+            &PasswordLoginRequest {
+                account: "default".to_owned(),
+                principal_type: PrincipalType::Username,
+                principal: "username".to_owned(),
+                password: "password".to_owned(),
+                password_format: PasswordFormat::Plain,
+                country_code: None,
+            },
+        )
+        .await
+        .expect_err("unsupported principal type");
+        assert_eq!(password_error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn maps_netease_login_profile_to_the_unified_account_shape() {
+        let profile = map_account_profile(
+            "green-diamond",
+            NeteaseAccountSummary {
+                id: Some("123".to_owned()),
+                user_id: Some("456".to_owned()),
+                nickname: Some("TuneWeave".to_owned()),
+                avatar_url: None,
+            },
+        );
+        assert_eq!(profile.platform, Platform::Netease);
+        assert_eq!(profile.account, "green-diamond");
+        assert_eq!(profile.user_id.as_deref(), Some("456"));
+        assert_eq!(profile.nickname.as_deref(), Some("TuneWeave"));
+        assert!(profile.authenticated);
     }
 
     #[tokio::test]
