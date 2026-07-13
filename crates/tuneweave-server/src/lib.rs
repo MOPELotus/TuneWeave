@@ -10,8 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Lyrics, PageRequest, Platform, Playlist, ProviderRegistry, ResourceRef, SearchKind,
-    SearchQuery, Track, TuneWeaveError,
+    Capability, Lyrics, MediaStream, PageRequest, Platform, Playlist, ProviderRegistry, Quality,
+    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -19,6 +19,7 @@ pub use response::{ApiError, ApiResponse, ResponseMeta};
 #[derive(Clone)]
 pub struct AppState {
     registry: ProviderRegistry,
+    resolver: StreamResolver,
     default_platform: Platform,
     started_at: Instant,
 }
@@ -26,7 +27,26 @@ pub struct AppState {
 impl AppState {
     #[must_use]
     pub fn new(registry: ProviderRegistry, default_platform: Platform) -> Self {
+        Self::with_fallbacks(
+            registry,
+            default_platform,
+            vec![
+                Platform::Netease,
+                Platform::Qq,
+                Platform::Kugou,
+                Platform::Migu,
+            ],
+        )
+    }
+
+    #[must_use]
+    pub fn with_fallbacks(
+        registry: ProviderRegistry,
+        default_platform: Platform,
+        fallback_platforms: Vec<Platform>,
+    ) -> Self {
         Self {
+            resolver: StreamResolver::new(registry.clone(), fallback_platforms),
             registry,
             default_platform,
             started_at: Instant::now(),
@@ -41,6 +61,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
+        .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
         .route("/playlists/{reference}/tracks", get(playlist_tracks));
 
@@ -219,6 +240,65 @@ async fn track_lyrics(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct StreamParams {
+    quality: Option<String>,
+    playback_platform: Option<String>,
+    fallback: Option<String>,
+    fallback_platforms: Option<String>,
+    account: Option<String>,
+}
+
+async fn track_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<StreamParams>,
+) -> Result<Json<ApiResponse<MediaStream>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let quality = parse_quality(params.quality.as_deref())?;
+    let fallback = parse_bool_parameter("fallback", params.fallback.as_deref(), true)?;
+    let preferred_platform = params
+        .playback_platform
+        .as_deref()
+        .map(parse_platform_parameter)
+        .transpose()?;
+    let fallback_platforms = parse_platform_list(params.fallback_platforms.as_deref())?;
+    let mut playback_platforms = Vec::new();
+    if let Some(platform) = preferred_platform {
+        playback_platforms.push(platform);
+    } else if !fallback_platforms.is_empty() {
+        playback_platforms.push(reference.platform());
+    }
+    playback_platforms.extend(fallback_platforms);
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+        .map(str::to_owned);
+    let account_platform = preferred_platform.unwrap_or(reference.platform());
+    let mut request = ResolveRequest {
+        quality,
+        playback_platforms,
+        fallback,
+        ..ResolveRequest::default()
+    };
+    if let Some(account) = account.clone() {
+        request.accounts.insert(account_platform, account);
+    }
+
+    let origin_provider = state.registry.require(reference.platform())?;
+    let origin = origin_provider.track(reference.id(), None).await?;
+    let stream = state.resolver.resolve(&origin, &request).await?;
+    let resolved_platform = stream.resolved_platform;
+    let mut response = ApiResponse::new(stream).with_platform(resolved_platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
 async fn playlist(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -294,6 +374,59 @@ fn parse_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
     })
 }
 
+fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(Quality::Auto),
+        "low" => Ok(Quality::Low),
+        "standard" => Ok(Quality::Standard),
+        "high" => Ok(Quality::High),
+        "lossless" => Ok(Quality::Lossless),
+        "hires" => Ok(Quality::Hires),
+        "spatial" => Ok(Quality::Spatial),
+        "master" => Ok(Quality::Master),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported quality: {value}"
+        ))),
+    }
+}
+
+fn parse_bool_parameter(
+    name: &str,
+    value: Option<&str>,
+    default: bool,
+) -> Result<bool, TuneWeaveError> {
+    match value.map(str::trim).map(str::to_ascii_lowercase) {
+        None => Ok(default),
+        Some(value) if value == "true" || value == "1" => Ok(true),
+        Some(value) if value == "false" || value == "0" => Ok(false),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "{name} must be true or false"
+        ))
+        .with_details(json!({ "parameter": name, "value": value }))),
+    }
+}
+
+fn parse_platform_parameter(value: &str) -> Result<Platform, TuneWeaveError> {
+    let value = value.trim();
+    value
+        .parse()
+        .map_err(|_| TuneWeaveError::invalid_request(format!("unsupported platform: {value}")))
+}
+
+fn parse_platform_list(value: Option<&str>) -> Result<Vec<Platform>, TuneWeaveError> {
+    value.map_or_else(
+        || Ok(Vec::new()),
+        |value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|platform| !platform.is_empty())
+                .map(parse_platform_parameter)
+                .collect()
+        },
+    )
+}
+
 fn search_platform(state: &AppState, value: Option<&str>) -> Result<Platform, TuneWeaveError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(state.default_platform);
@@ -355,7 +488,9 @@ mod tests {
     };
     use serde_json::Value;
     use tower::ServiceExt;
-    use tuneweave_core::{ArtistSummary, MusicProvider, Page, PageMeta, Result, SearchQuery};
+    use tuneweave_core::{
+        ArtistSummary, MusicProvider, Page, PageMeta, Result, SearchQuery, StreamRequest,
+    };
 
     use super::*;
 
@@ -381,6 +516,7 @@ mod tests {
                 Capability::TrackDetail,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
+                Capability::AudioStream,
             ])
         }
 
@@ -430,6 +566,28 @@ mod tests {
                 extensions: Default::default(),
             })
         }
+
+        async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+            Ok(MediaStream {
+                url: "https://example.test/audio.mp3".to_owned(),
+                backup_urls: Vec::new(),
+                headers: Default::default(),
+                expires_at: None,
+                format: Some("mp3".to_owned()),
+                codec: Some("mp3".to_owned()),
+                bitrate: Some(320_000),
+                size: Some(1024),
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: Quality::High,
+                trial: None,
+                origin_track: Some(track.resource_ref.clone()),
+                resolved_track: track.resource_ref.clone(),
+                resolved_platform: Platform::Netease,
+                match_score: Some(1.0),
+                attempts: Vec::new(),
+            })
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -441,6 +599,7 @@ mod tests {
             resource_ref: None,
             name: "周杰伦".to_owned(),
         });
+        track.duration_ms = Some(258_000);
         track
     }
 
@@ -584,5 +743,45 @@ mod tests {
         assert_eq!(json["data"]["track_ref"], "netease:185809");
         assert_eq!(json["data"]["format"], "lrc");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn track_stream_reports_resolution_attempts() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/stream?quality=high&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["requested_quality"], "high");
+        assert_eq!(json["data"]["actual_quality"], "high");
+        assert_eq!(json["data"]["origin_track"], "netease:2709812973");
+        assert_eq!(json["data"]["resolved_track"], "netease:2709812973");
+        assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["data"]["attempts"][0]["status"], "success");
+        assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn invalid_stream_quality_uses_the_error_envelope() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/stream?quality=studio",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn invalid_stream_platform_uses_the_error_envelope() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/stream?playback_platform=unknown",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 }
