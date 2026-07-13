@@ -1676,6 +1676,7 @@ name = "tuneweave-provider-netease"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "async-trait",
  "ecb",
  "hex",
  "md-5",

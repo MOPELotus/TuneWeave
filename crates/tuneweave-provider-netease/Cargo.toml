@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 aes.workspace = true
+async-trait.workspace = true
 ecb.workspace = true
 hex.workspace = true
 md-5.workspace = true
