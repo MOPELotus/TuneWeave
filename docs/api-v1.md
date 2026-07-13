@@ -250,13 +250,18 @@
 | --- | --- | --- | --- |
 | POST | `/v1/auth/qr` | `{platform, account?, login_type?}` | 二维码事务 ID、二维码 URL/图片、过期时间 |
 | GET | `/v1/auth/qr/{transaction_id}` | 无 | `waiting/scanned/confirmed/expired/failed`；成功时保存登录态 |
+| POST | `/v1/auth/password` | `{platform, account?, principal_type, principal, password}` | 登录状态和脱敏账户摘要 |
 | POST | `/v1/auth/challenges` | `{platform, method, principal, account?}` | 短信等挑战事务 |
 | POST | `/v1/auth/challenges/{transaction_id}/verify` | `{code}` | 验证状态；成功时保存登录态 |
+| POST | `/v1/auth/session/refresh` | `{platform, account?}` | 刷新状态和脱敏账户摘要 |
+| GET | `/v1/auth/session` | `platform`、`account?` | 当前会话状态，不返回凭据 |
 | DELETE | `/v1/auth/session` | `platform`、`account?` | 删除结果 |
 | GET | `/v1/account` | `platform`、`account?` | 脱敏账户资料与权益摘要 |
 | GET | `/v1/account/playlists` | `platform`、`account?`、分页 | `Playlist[]` |
 | GET | `/v1/account/favorites/tracks` | `platform`、`account?`、分页 | `Track[]` |
 | GET | `/v1/account/history` | `platform`、`account?`、分页 | 带播放时间/次数的 `Track[]` |
+
+`principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。敏感字段仅在请求生命周期内使用，保存后的平台凭据只通过账户别名引用。
 
 ### 写操作
 
