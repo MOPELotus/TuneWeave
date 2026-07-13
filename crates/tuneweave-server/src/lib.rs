@@ -173,7 +173,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
-        .route("/account/playlists", get(account_playlists));
+        .route("/account/playlists", get(account_playlists))
+        .route("/account/favorites/tracks", get(account_favorite_tracks));
 
     Router::new()
         .route("/healthz", get(health))
@@ -803,6 +804,33 @@ async fn account_playlists(
     ))
 }
 
+async fn account_favorite_tracks(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .favorite_tracks(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     payload
         .map(|Json(body)| body)
@@ -998,6 +1026,7 @@ mod tests {
                 Capability::SessionManagement,
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
+                Capability::Favorites,
             ])
         }
 
@@ -1038,6 +1067,19 @@ mod tests {
         async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
             Ok(Page {
                 items: vec![sample_playlist("3778678")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![sample_track("185809")],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -1500,6 +1542,20 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"][0]["ref"], "netease:3778678");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn account_favorite_tracks_use_unified_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/favorites/tracks?platform=netease&account=personal&limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:185809");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
