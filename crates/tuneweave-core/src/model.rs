@@ -183,6 +183,27 @@ pub struct StreamRequest {
     pub account: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResolveRequest {
+    pub quality: Quality,
+    pub playback_platforms: Vec<Platform>,
+    pub fallback: bool,
+    pub accounts: BTreeMap<Platform, String>,
+    pub strict_match: bool,
+}
+
+impl Default for ResolveRequest {
+    fn default() -> Self {
+        Self {
+            quality: Quality::Auto,
+            playback_platforms: Vec::new(),
+            fallback: true,
+            accounts: BTreeMap::new(),
+            strict_match: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrialWindow {
     pub start_ms: u64,
