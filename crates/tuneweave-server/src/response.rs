@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tuneweave_core::{ErrorCode, Platform, TuneWeaveError};
+use tuneweave_core::{ErrorCode, PageMeta, Platform, TuneWeaveError};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -36,6 +36,18 @@ impl<T> ApiResponse<T> {
         self.meta.platform = Some(platform);
         self
     }
+
+    #[must_use]
+    pub fn with_account(mut self, account: impl Into<String>) -> Self {
+        self.meta.account = Some(account.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_pagination(mut self, pagination: PageMeta) -> Self {
+        self.meta.pagination = Some(pagination);
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +57,8 @@ pub struct ResponseMeta {
     platform: Option<Platform>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pagination: Option<PageMeta>,
     cached: bool,
 }
 
@@ -59,6 +73,7 @@ impl ResponseMeta {
             request_id: format!("tw-{timestamp:x}-{sequence:x}"),
             platform: None,
             account: None,
+            pagination: None,
             cached: false,
         }
     }

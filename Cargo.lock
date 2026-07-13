@@ -1692,6 +1692,7 @@ dependencies = [
 name = "tuneweave-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "serde",
  "serde_json",
@@ -1700,6 +1701,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tuneweave-core",
+ "tuneweave-provider-netease",
 ]
 
 [[package]]

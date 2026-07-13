@@ -20,8 +20,10 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tuneweave-core.workspace = true
+tuneweave-provider-netease.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tower.workspace = true
 
 [lints]

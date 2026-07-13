@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tuneweave_core::{Platform, ProviderRegistry};
+use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_server::{AppState, build_router};
 
 #[tokio::main]
@@ -16,7 +17,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let bind = env::var("TUNEWEAVE_BIND").unwrap_or_else(|_| "127.0.0.1:7832".to_owned());
     let address: SocketAddr = bind.parse()?;
-    let state = AppState::new(ProviderRegistry::new(), Platform::Netease);
+    let mut registry = ProviderRegistry::new();
+    let netease_config = NeteaseConfig {
+        cookie: env::var("TUNEWEAVE_NETEASE_COOKIE")
+            .ok()
+            .filter(|cookie| !cookie.trim().is_empty()),
+        ..NeteaseConfig::default()
+    };
+    registry.register(NeteaseProvider::new(netease_config)?)?;
+    let state = AppState::new(registry, Platform::Netease);
     let app = build_router(state);
     let listener = TcpListener::bind(address).await?;
 
