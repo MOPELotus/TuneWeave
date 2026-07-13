@@ -24,6 +24,7 @@ pub enum Capability {
     AccountPlaylists,
     PlaylistWrite,
     Favorites,
+    ListeningHistory,
     Recommendations,
     MusicPartner,
 }

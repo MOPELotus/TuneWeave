@@ -4,8 +4,9 @@ use async_trait::async_trait;
 
 use crate::{
     AccountProfile, AuthChallengeRequest, Capability, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    Result, SearchQuery, StreamRequest, Track, TuneWeaveError,
+    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, Result, SearchQuery, StreamRequest, Track,
+    TuneWeaveError,
 };
 
 /// A dynamically registered music platform adapter.
@@ -79,6 +80,27 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Favorites,
+        ))
+    }
+
+    async fn account_history(
+        &self,
+        _request: &PlaybackHistoryRequest,
+    ) -> Result<Page<PlaybackHistoryEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ListeningHistory,
+        ))
+    }
+
+    async fn user_history(
+        &self,
+        _user_id: &str,
+        _request: &PlaybackHistoryRequest,
+    ) -> Result<Page<PlaybackHistoryEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ListeningHistory,
         ))
     }
 

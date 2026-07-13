@@ -41,6 +41,22 @@ pub(crate) struct LikedTracksEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct PlayHistoryEnvelope {
+    #[serde(rename = "allData", default)]
+    pub all_data: Vec<PlayHistoryRecord>,
+    #[serde(rename = "weekData", default)]
+    pub week_data: Vec<PlayHistoryRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlayHistoryRecord {
+    pub song: Song,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    pub score: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistDetail {
     pub id: u64,
     pub name: String,

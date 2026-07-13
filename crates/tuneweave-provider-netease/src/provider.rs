@@ -11,17 +11,18 @@ use tuneweave_core::{
     AccountProfile, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState, Capability,
     ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, MusicProvider,
     Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
-    Platform, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef,
-    Result, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
+    Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchKind,
+    SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AudioQuality, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail,
-        PlaylistEnvelope, Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope,
-        TrackEnvelope, UserPlaylistsEnvelope,
+        AudioQuality, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -265,6 +266,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountProfile,
             Capability::AccountPlaylists,
             Capability::Favorites,
+            Capability::ListeningHistory,
         ])
     }
 
@@ -418,6 +420,26 @@ impl MusicProvider for NeteaseProvider {
         let user_id = parse_numeric_id("user", user_id)?.to_string();
         let client = self.client_for(request.account.as_deref())?;
         fetch_favorite_tracks(&client, &user_id, request).await
+    }
+
+    async fn account_history(
+        &self,
+        request: &PlaybackHistoryRequest,
+    ) -> Result<Page<PlaybackHistoryEntry>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let user_id = authenticated_user_id(&client, account).await?;
+        fetch_play_history(&client, &user_id, request).await
+    }
+
+    async fn user_history(
+        &self,
+        user_id: &str,
+        request: &PlaybackHistoryRequest,
+    ) -> Result<Page<PlaybackHistoryEntry>> {
+        let user_id = parse_numeric_id("user", user_id)?.to_string();
+        let client = self.client_for(request.account.as_deref())?;
+        fetch_play_history(&client, &user_id, request).await
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -695,14 +717,68 @@ async fn fetch_favorite_tracks(
     ensure_success(&response.body)?;
     let response: LikedTracksEnvelope = parse_body(response.body)?;
     let limit = request.limit.clamp(1, 100);
-    let (selected_ids, pagination) = select_id_page(response.ids, limit, request.offset);
+    let (selected_ids, pagination) = select_page(response.ids, limit, request.offset);
     let items = fetch_tracks_by_ids(client, &selected_ids).await?;
     Ok(Page { items, pagination })
 }
 
-fn select_id_page(ids: Vec<u64>, limit: u32, offset: u32) -> (Vec<u64>, PageMeta) {
-    let total = ids.len() as u64;
-    let selected = ids
+async fn fetch_play_history(
+    client: &NeteaseClient,
+    user_id: &str,
+    request: &PlaybackHistoryRequest,
+) -> Result<Page<PlaybackHistoryEntry>> {
+    let history_type = match request.period {
+        PlaybackHistoryPeriod::AllTime => 0,
+        PlaybackHistoryPeriod::Week => 1,
+    };
+    let response = client
+        .request_weapi(
+            "/api/v1/play/record",
+            json!({ "uid": user_id, "type": history_type }),
+        )
+        .await?;
+    ensure_account_access(client, &response.body, "play history")?;
+    let response: PlayHistoryEnvelope = parse_body(response.body)?;
+    let records = match request.period {
+        PlaybackHistoryPeriod::AllTime => response.all_data,
+        PlaybackHistoryPeriod::Week => response.week_data,
+    };
+    let limit = request.limit.clamp(1, 100);
+    let (records, pagination) = select_page(records, limit, request.offset);
+    let items = records
+        .into_iter()
+        .map(map_play_history_record)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page { items, pagination })
+}
+
+fn map_play_history_record(record: PlayHistoryRecord) -> Result<PlaybackHistoryEntry> {
+    Ok(PlaybackHistoryEntry {
+        track: map_song(record.song, None)?,
+        play_count: record.play_count,
+        score: record.score,
+        last_played_at: None,
+        extensions: Extensions::new(),
+    })
+}
+
+fn ensure_account_access(client: &NeteaseClient, body: &Value, operation: &str) -> Result<()> {
+    match ensure_success(body) {
+        Err(error) if error.code == ErrorCode::PermissionDenied && !client.is_authenticated() => {
+            Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                format!("NetEase {operation} requires a logged-in session"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(error.details))
+        }
+        result => result,
+    }
+}
+
+fn select_page<T>(items: Vec<T>, limit: u32, offset: u32) -> (Vec<T>, PageMeta) {
+    let total = items.len() as u64;
+    let selected = items
         .into_iter()
         .skip(offset as usize)
         .take(limit as usize)
@@ -1248,7 +1324,7 @@ fn ensure_success(body: &Value) -> Result<()> {
         .unwrap_or("NetEase request failed");
     let error_code = match code {
         301 | 401 => ErrorCode::AuthenticationRequired,
-        403 => ErrorCode::PermissionDenied,
+        -2 | 403 => ErrorCode::PermissionDenied,
         404 => ErrorCode::ResourceNotFound,
         429 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
@@ -1522,6 +1598,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::Favorites));
+        assert!(capabilities.contains(&Capability::ListeningHistory));
     }
 
     #[tokio::test]
@@ -1652,9 +1729,69 @@ mod tests {
         assert_eq!(missing_account.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[tokio::test]
+    async fn play_history_requires_a_valid_user_and_selected_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = PlaybackHistoryRequest::new(PlaybackHistoryPeriod::Week, 30, 0);
+        let account_error = MusicProvider::account_history(
+            &provider,
+            &PlaybackHistoryRequest {
+                account: Some("missing".to_owned()),
+                ..request.clone()
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+
+        let invalid_user = MusicProvider::user_history(&provider, "not-a-number", &request)
+            .await
+            .expect_err("invalid user id");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
+
+        let missing_account = MusicProvider::user_history(
+            &provider,
+            "32953014",
+            &PlaybackHistoryRequest {
+                account: Some("missing".to_owned()),
+                ..request
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(missing_account.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn maps_play_history_metadata_without_hiding_the_track() {
+        let entry = map_play_history_record(PlayHistoryRecord {
+            song: fixture_song(),
+            play_count: Some(42),
+            score: Some(99),
+        })
+        .expect("map play history");
+        assert_eq!(entry.track.resource_ref.to_string(), "netease:123");
+        assert_eq!(entry.play_count, Some(42));
+        assert_eq!(entry.score, Some(99));
+        assert_eq!(entry.last_played_at, None);
+    }
+
+    #[test]
+    fn maps_anonymous_play_history_permission_to_authentication_required() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
+        let error = ensure_account_access(
+            &client,
+            &json!({ "code": -2, "message": "无权限访问" }),
+            "play history",
+        )
+        .expect_err("anonymous access must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["upstream_code"], -2);
+    }
+
     #[test]
     fn paginates_favorite_track_ids_without_reordering_them() {
-        let (ids, pagination) = select_id_page(vec![1, 2, 3, 4], 2, 1);
+        let (ids, pagination) = select_page(vec![1, 2, 3, 4], 2, 1);
         assert_eq!(ids, vec![2, 3]);
         assert_eq!(pagination.limit, 2);
         assert_eq!(pagination.offset, 1);
@@ -1662,7 +1799,7 @@ mod tests {
         assert_eq!(pagination.next_offset, Some(3));
         assert!(pagination.has_more);
 
-        let (ids, pagination) = select_id_page(vec![1, 2, 3, 4], 2, 3);
+        let (ids, pagination) = select_page(vec![1, 2, 3, 4], 2, 3);
         assert_eq!(ids, vec![4]);
         assert_eq!(pagination.next_offset, None);
         assert!(!pagination.has_more);
@@ -1764,6 +1901,43 @@ mod tests {
             .expect("live account favorite tracks");
         assert!(page.pagination.total.is_some());
         assert!(page.items.iter().all(|track| !track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_play_history_requires_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::user_history(
+            &provider,
+            "32953014",
+            &PlaybackHistoryRequest::new(PlaybackHistoryPeriod::Week, 20, 0),
+        )
+        .await
+        .expect_err("anonymous request must fail");
+        assert_eq!(
+            error.code,
+            ErrorCode::AuthenticationRequired,
+            "unexpected live error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NETEASE_COOKIE for a live logged-in account"]
+    async fn live_account_play_history() {
+        let cookie = std::env::var("NETEASE_COOKIE").expect("NETEASE_COOKIE must be set");
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            cookie: Some(cookie),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let page = MusicProvider::account_history(
+            &provider,
+            &PlaybackHistoryRequest::new(PlaybackHistoryPeriod::Week, 20, 0),
+        )
+        .await
+        .expect("live account play history");
+        assert!(page.pagination.total.is_some());
+        assert!(page.items.iter().all(|entry| !entry.track.name.is_empty()));
     }
 
     #[tokio::test]

@@ -86,6 +86,34 @@ impl PageRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackHistoryPeriod {
+    #[default]
+    AllTime,
+    Week,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackHistoryRequest {
+    pub period: PlaybackHistoryPeriod,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PlaybackHistoryRequest {
+    #[must_use]
+    pub fn new(period: PlaybackHistoryPeriod, limit: u32, offset: u32) -> Self {
+        Self {
+            period,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
@@ -137,6 +165,15 @@ impl Track {
             extensions: Extensions::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackHistoryEntry {
+    pub track: Track,
+    pub play_count: Option<u64>,
+    pub score: Option<u64>,
+    pub last_played_at: Option<String>,
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
