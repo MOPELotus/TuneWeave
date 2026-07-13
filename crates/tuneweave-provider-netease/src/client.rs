@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     process,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -49,6 +50,41 @@ pub struct NeteaseResponse {
     pub status: StatusCode,
     pub body: Value,
     pub cookies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeteaseQrLogin {
+    pub key: String,
+    pub url: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NeteaseQrState {
+    Waiting,
+    Scanned,
+    Confirmed,
+    Expired,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeteaseQrCheck {
+    pub code: i64,
+    pub state: NeteaseQrState,
+    pub message: Option<String>,
+    session_cookie: Option<String>,
+}
+
+impl NeteaseQrCheck {
+    #[must_use]
+    pub fn session_cookie(&self) -> Option<&str> {
+        self.session_cookie.as_deref()
+    }
+
+    #[must_use]
+    pub fn into_session_cookie(self) -> Option<String> {
+        self.session_cookie
+    }
 }
 
 #[derive(Serialize)]
@@ -184,11 +220,142 @@ impl NeteaseClient {
         })
     }
 
+    pub async fn create_qr_login(&self) -> Result<NeteaseQrLogin> {
+        let response = self
+            .request_eapi("/api/login/qrcode/unikey", json!({ "type": 3 }))
+            .await?;
+        ensure_response_code(&response.body, 200, "create QR login")?;
+        let key = response
+            .body
+            .get("unikey")
+            .or_else(|| response.body.pointer("/data/unikey"))
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase QR login response did not contain a key",
+                )
+                .with_platform(Platform::Netease)
+            })?
+            .to_owned();
+        let url = format!("https://music.163.com/login?codekey={key}");
+        Ok(NeteaseQrLogin { key, url })
+    }
+
+    pub async fn check_qr_login(&self, key: &str) -> Result<NeteaseQrCheck> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(
+                TuneWeaveError::invalid_request("NetEase QR login key cannot be empty")
+                    .with_platform(Platform::Netease),
+            );
+        }
+        let response = self
+            .request_eapi(
+                "/api/login/qrcode/client/login",
+                json!({ "key": key, "type": 3 }),
+            )
+            .await?;
+        let code = response_code(&response.body).ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase QR login check did not contain a status code",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let state = qr_state(code);
+        let session_cookie = (state == NeteaseQrState::Confirmed)
+            .then(|| merge_cookie_headers(None, &response.cookies))
+            .flatten();
+        let message = response
+            .body
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Ok(NeteaseQrCheck {
+            code,
+            state,
+            message,
+            session_cookie,
+        })
+    }
+
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
         CookieValues::parse(self.cookie.as_deref())
             .music_u
             .is_some_and(|music_u| !music_u.is_empty())
+    }
+}
+
+fn response_code(body: &Value) -> Option<i64> {
+    body.get("code")
+        .or_else(|| body.pointer("/data/code"))
+        .and_then(Value::as_i64)
+}
+
+fn ensure_response_code(body: &Value, expected: i64, operation: &str) -> Result<()> {
+    let code = response_code(body).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase {operation} response did not contain a status code"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    if code == expected {
+        return Ok(());
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase {operation} failed with code {code}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "code": code })))
+}
+
+fn qr_state(code: i64) -> NeteaseQrState {
+    match code {
+        800 => NeteaseQrState::Expired,
+        801 => NeteaseQrState::Waiting,
+        802 => NeteaseQrState::Scanned,
+        803 => NeteaseQrState::Confirmed,
+        _ => NeteaseQrState::Failed,
+    }
+}
+
+fn merge_cookie_headers(base: Option<&str>, set_cookie: &[String]) -> Option<String> {
+    let mut cookies = BTreeMap::new();
+    for part in base.unwrap_or_default().split(';') {
+        insert_cookie_pair(&mut cookies, part);
+    }
+    for header in set_cookie {
+        if let Some(pair) = header.split(';').next() {
+            insert_cookie_pair(&mut cookies, pair);
+        }
+    }
+    (!cookies.is_empty()).then(|| {
+        cookies
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
+fn insert_cookie_pair(cookies: &mut BTreeMap<String, String>, pair: &str) {
+    let Some((name, value)) = pair.trim().split_once('=') else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        cookies.remove(name);
+    } else {
+        cookies.insert(name.to_owned(), value.to_owned());
     }
 }
 
@@ -311,6 +478,32 @@ mod tests {
         assert!(!anonymous.is_authenticated());
     }
 
+    #[test]
+    fn maps_qr_status_codes_without_treating_waiting_as_an_error() {
+        assert_eq!(qr_state(800), NeteaseQrState::Expired);
+        assert_eq!(qr_state(801), NeteaseQrState::Waiting);
+        assert_eq!(qr_state(802), NeteaseQrState::Scanned);
+        assert_eq!(qr_state(803), NeteaseQrState::Confirmed);
+        assert_eq!(qr_state(500), NeteaseQrState::Failed);
+    }
+
+    #[test]
+    fn extracts_cookie_pairs_and_ignores_set_cookie_attributes() {
+        let cookie = merge_cookie_headers(
+            Some("MUSIC_A=anonymous; stale=remove-me"),
+            &[
+                "MUSIC_U=account-token==; Path=/; Domain=.music.163.com; HttpOnly".to_owned(),
+                "__csrf=csrf-token; Max-Age=1296000".to_owned(),
+                "stale=; Max-Age=0".to_owned(),
+            ],
+        )
+        .expect("merged cookie");
+        assert_eq!(
+            cookie,
+            "MUSIC_A=anonymous; MUSIC_U=account-token==; __csrf=csrf-token"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_eapi_search_returns_songs() {
@@ -333,5 +526,23 @@ mod tests {
                 .as_array()
                 .is_some_and(|songs| !songs.is_empty())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_qr_login_starts_in_a_non_terminal_state() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
+        let login = client.create_qr_login().await.expect("create QR login");
+        assert!(!login.key.is_empty());
+        assert!(login.url.contains(&login.key));
+        let check = client
+            .check_qr_login(&login.key)
+            .await
+            .expect("check QR login");
+        assert!(matches!(
+            check.state,
+            NeteaseQrState::Waiting | NeteaseQrState::Scanned
+        ));
+        assert!(check.session_cookie().is_none());
     }
 }
