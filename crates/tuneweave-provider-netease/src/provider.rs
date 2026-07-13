@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +15,8 @@ use tuneweave_core::{
 };
 
 use crate::{
-    NeteaseClient, NeteaseConfig,
+    NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
+    NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState,
     dto::{
         AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
         Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope,
@@ -24,23 +26,197 @@ use crate::{
 #[derive(Clone)]
 pub struct NeteaseProvider {
     client: NeteaseClient,
+    accounts: Arc<RwLock<BTreeMap<String, NeteaseClient>>>,
 }
 
 impl NeteaseProvider {
     pub fn new(config: NeteaseConfig) -> Result<Self> {
         Ok(Self {
             client: NeteaseClient::new(config)?,
+            accounts: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
     #[must_use]
     pub fn from_client(client: NeteaseClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            accounts: Arc::new(RwLock::new(BTreeMap::new())),
+        }
     }
 
-    async fn playlist_detail(&self, id: u64) -> Result<PlaylistDetail> {
-        let response = self
+    pub async fn create_qr_login(&self) -> Result<NeteaseQrLogin> {
+        self.client.create_qr_login().await
+    }
+
+    pub async fn check_qr_login(&self, key: &str, account: &str) -> Result<NeteaseQrCheck> {
+        let account = normalize_account_label(Some(account))?.to_owned();
+        let check = self.client.check_qr_login(key).await?;
+        if check.state == NeteaseQrState::Confirmed {
+            let cookie = check.session_cookie().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase confirmed QR login without returning MUSIC_U",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            self.install_session(&account, cookie.to_owned())?;
+        }
+        Ok(check)
+    }
+
+    pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
+        self.client.send_phone_captcha(phone, country_code).await
+    }
+
+    pub async fn verify_phone_captcha(
+        &self,
+        phone: &str,
+        country_code: &str,
+        captcha: &str,
+    ) -> Result<NeteaseCaptchaVerification> {
+        self.client
+            .verify_phone_captcha(phone, country_code, captcha)
+            .await
+    }
+
+    pub async fn login_with_email_password(
+        &self,
+        account: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<NeteaseAccountSummary> {
+        let account = normalize_account_label(Some(account))?;
+        let login = self
             .client
+            .login_with_email_password(email, password)
+            .await?;
+        self.persist_login(account, login)
+    }
+
+    pub async fn login_with_email_md5(
+        &self,
+        account: &str,
+        email: &str,
+        password_md5: &str,
+    ) -> Result<NeteaseAccountSummary> {
+        let account = normalize_account_label(Some(account))?;
+        let login = self
+            .client
+            .login_with_email_md5(email, password_md5)
+            .await?;
+        self.persist_login(account, login)
+    }
+
+    pub async fn login_with_phone_password(
+        &self,
+        account: &str,
+        phone: &str,
+        country_code: &str,
+        password: &str,
+    ) -> Result<NeteaseAccountSummary> {
+        let account = normalize_account_label(Some(account))?;
+        let login = self
+            .client
+            .login_with_phone_password(phone, country_code, password)
+            .await?;
+        self.persist_login(account, login)
+    }
+
+    pub async fn login_with_phone_password_md5(
+        &self,
+        account: &str,
+        phone: &str,
+        country_code: &str,
+        password_md5: &str,
+    ) -> Result<NeteaseAccountSummary> {
+        let account = normalize_account_label(Some(account))?;
+        let login = self
+            .client
+            .login_with_phone_password_md5(phone, country_code, password_md5)
+            .await?;
+        self.persist_login(account, login)
+    }
+
+    pub async fn login_with_phone_captcha(
+        &self,
+        account: &str,
+        phone: &str,
+        country_code: &str,
+        captcha: &str,
+    ) -> Result<NeteaseAccountSummary> {
+        let account = normalize_account_label(Some(account))?;
+        let login = self
+            .client
+            .login_with_phone_captcha(phone, country_code, captcha)
+            .await?;
+        self.persist_login(account, login)
+    }
+
+    pub async fn logout_account(&self, account: &str) -> Result<bool> {
+        let account = normalize_account_label(Some(account))?.to_owned();
+        let client = self.client_for(Some(&account))?;
+        client.logout().await?;
+        self.remove_session(&account)
+    }
+
+    fn persist_login(
+        &self,
+        account: &str,
+        login: NeteaseLoginResult,
+    ) -> Result<NeteaseAccountSummary> {
+        let summary = login.account.clone();
+        self.install_session(account, login.into_session_cookie())?;
+        Ok(summary)
+    }
+
+    fn client_for(&self, account: Option<&str>) -> Result<NeteaseClient> {
+        let account = normalize_account_label(account)?;
+        let accounts = self.accounts.read().map_err(|_| account_store_error())?;
+        if let Some(client) = accounts.get(account) {
+            return Ok(client.clone());
+        }
+        if account == "default" {
+            return Ok(self.client.clone());
+        }
+        Err(TuneWeaveError::new(
+            ErrorCode::AuthenticationRequired,
+            format!("NetEase account alias {account} is not logged in"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "account": account })))
+    }
+
+    fn install_session(&self, account: &str, cookie: String) -> Result<()> {
+        let account = normalize_account_label(Some(account))?.to_owned();
+        if !crate::client::has_authenticated_cookie(Some(cookie.as_str())) {
+            return Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                "NetEase session cookie does not contain MUSIC_U",
+            )
+            .with_platform(Platform::Netease));
+        }
+        self.accounts
+            .write()
+            .map_err(|_| account_store_error())?
+            .insert(account, self.client.with_cookie(cookie));
+        Ok(())
+    }
+
+    fn remove_session(&self, account: &str) -> Result<bool> {
+        let account = normalize_account_label(Some(account))?;
+        let mut accounts = self.accounts.write().map_err(|_| account_store_error())?;
+        let removed = accounts.remove(account).is_some();
+        if account == "default" {
+            let had_default = removed || self.client.is_authenticated();
+            accounts.insert(account.to_owned(), self.client.without_cookie());
+            return Ok(had_default);
+        }
+        Ok(removed)
+    }
+
+    async fn playlist_detail(&self, client: &NeteaseClient, id: u64) -> Result<PlaylistDetail> {
+        let response = client
             .request_eapi(
                 "/api/v6/playlist/detail",
                 json!({
@@ -97,8 +273,8 @@ impl MusicProvider for NeteaseProvider {
             ));
         }
         let limit = query.limit.clamp(1, 100);
-        let response = self
-            .client
+        let client = self.client_for(query.account.as_deref())?;
+        let response = client
             .request_eapi(
                 "/api/search/get",
                 json!({
@@ -133,10 +309,10 @@ impl MusicProvider for NeteaseProvider {
         })
     }
 
-    async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
+    async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
         let id = parse_numeric_id("track", id)?;
-        let response = self
-            .client
+        let client = self.client_for(account)?;
+        let response = client
             .request_eapi(
                 "/api/v3/song/detail",
                 json!({
@@ -160,14 +336,16 @@ impl MusicProvider for NeteaseProvider {
         map_song(song, privilege)
     }
 
-    async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
         let id = parse_numeric_id("playlist", id)?;
-        map_playlist(self.playlist_detail(id).await?)
+        let client = self.client_for(account)?;
+        map_playlist(self.playlist_detail(&client, id).await?)
     }
 
     async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
         let id = parse_numeric_id("playlist", id)?;
-        let playlist = self.playlist_detail(id).await?;
+        let client = self.client_for(request.account.as_deref())?;
+        let playlist = self.playlist_detail(&client, id).await?;
         let total = playlist.track_ids.len() as u64;
         let limit = request.limit.clamp(1, 100);
         let offset = request.offset;
@@ -184,8 +362,7 @@ impl MusicProvider for NeteaseProvider {
             let request_tracks =
                 Value::Array(selected_ids.iter().map(|id| json!({ "id": id })).collect())
                     .to_string();
-            let response = self
-                .client
+            let response = client
                 .request_eapi("/api/v3/song/detail", json!({ "c": request_tracks }))
                 .await?;
             ensure_success(&response.body)?;
@@ -225,10 +402,10 @@ impl MusicProvider for NeteaseProvider {
         })
     }
 
-    async fn lyrics(&self, id: &str, _account: Option<&str>) -> Result<Lyrics> {
+    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
         let id = parse_numeric_id("track", id)?;
-        let response = self
-            .client
+        let client = self.client_for(account)?;
+        let response = client
             .request_eapi(
                 "/api/song/lyric/v1",
                 json!({
@@ -261,8 +438,8 @@ impl MusicProvider for NeteaseProvider {
             .with_details(json!({ "track_ref": track.resource_ref })));
         }
         let id = parse_numeric_id("track", &track.id)?;
-        let response = self
-            .client
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
             .request_eapi(
                 "/api/song/enhance/player/url",
                 json!({
@@ -285,8 +462,32 @@ impl MusicProvider for NeteaseProvider {
                 .with_platform(Platform::Netease)
                 .with_details(json!({ "id": id }))
             })?;
-        map_stream(track, request, stream, self.client.is_authenticated())
+        map_stream(track, request, stream, client.is_authenticated())
     }
+}
+
+fn normalize_account_label(account: Option<&str>) -> Result<&str> {
+    let account = account.unwrap_or("default").trim();
+    let account = if account.is_empty() {
+        "default"
+    } else {
+        account
+    };
+    if account.len() > 64 {
+        return Err(
+            TuneWeaveError::invalid_request("account alias cannot exceed 64 bytes")
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok(account)
+}
+
+fn account_store_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::InternalError,
+        "NetEase account store lock is poisoned",
+    )
+    .with_platform(Platform::Netease)
 }
 
 fn map_stream(
@@ -971,6 +1172,49 @@ mod tests {
             unix_rfc3339(1_704_067_200).as_deref(),
             Some("2024-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn account_aliases_select_isolated_authenticated_clients() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        assert!(
+            !provider
+                .client_for(Some("default"))
+                .expect("default client")
+                .is_authenticated()
+        );
+        let missing = provider
+            .client_for(Some("green-diamond"))
+            .err()
+            .expect("unknown alias");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        provider
+            .install_session("green-diamond", "MUSIC_U=account-session".to_owned())
+            .expect("install account session");
+        assert!(
+            provider
+                .client_for(Some("green-diamond"))
+                .expect("account client")
+                .is_authenticated()
+        );
+        assert!(
+            provider
+                .remove_session("green-diamond")
+                .expect("remove account session")
+        );
+        assert!(provider.client_for(Some("green-diamond")).is_err());
+    }
+
+    #[test]
+    fn account_aliases_are_validated_before_store_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let alias = "x".repeat(65);
+        let error = provider
+            .client_for(Some(&alias))
+            .err()
+            .expect("oversized account alias");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]

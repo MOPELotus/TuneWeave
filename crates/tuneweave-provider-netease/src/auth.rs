@@ -53,6 +53,11 @@ pub struct NeteaseCaptchaVerification {
 }
 
 impl NeteaseClient {
+    pub async fn logout(&self) -> Result<()> {
+        let response = self.request_eapi("/api/logout", json!({})).await?;
+        ensure_response_code(&response.body, 200, "logout")
+    }
+
     pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
         let phone = required_value("phone", phone)?;
         let country_code = normalized_country_code(country_code);

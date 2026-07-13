@@ -330,6 +330,18 @@ impl NeteaseClient {
     pub(crate) fn configured_cookie(&self) -> Option<&str> {
         self.cookie.as_deref()
     }
+
+    pub(crate) fn with_cookie(&self, cookie: String) -> Self {
+        let mut client = self.clone();
+        client.cookie = Some(cookie);
+        client
+    }
+
+    pub(crate) fn without_cookie(&self) -> Self {
+        let mut client = self.clone();
+        client.cookie = None;
+        client
+    }
 }
 
 async fn parse_response(response: reqwest::Response) -> Result<NeteaseResponse> {
