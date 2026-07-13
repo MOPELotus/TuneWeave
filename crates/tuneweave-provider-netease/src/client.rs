@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    process,
+    fmt, process,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -54,11 +54,22 @@ pub struct NeteaseClient {
     device_id: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NeteaseResponse {
     pub status: StatusCode,
     pub body: Value,
     pub cookies: Vec<String>,
+}
+
+impl fmt::Debug for NeteaseResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NeteaseResponse")
+            .field("status", &self.status)
+            .field("code", &response_code(&self.body))
+            .field("cookie_count", &self.cookies.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,12 +87,24 @@ pub enum NeteaseQrState {
     Failed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct NeteaseQrCheck {
     pub code: i64,
     pub state: NeteaseQrState,
     pub message: Option<String>,
     session_cookie: Option<String>,
+}
+
+impl fmt::Debug for NeteaseQrCheck {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NeteaseQrCheck")
+            .field("code", &self.code)
+            .field("state", &self.state)
+            .field("message", &self.message)
+            .field("has_session_cookie", &self.session_cookie.is_some())
+            .finish()
+    }
 }
 
 impl NeteaseQrCheck {
@@ -301,9 +324,11 @@ impl NeteaseClient {
 
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        CookieValues::parse(self.cookie.as_deref())
-            .music_u
-            .is_some_and(|music_u| !music_u.is_empty())
+        has_authenticated_cookie(self.cookie.as_deref())
+    }
+
+    pub(crate) fn configured_cookie(&self) -> Option<&str> {
+        self.cookie.as_deref()
     }
 }
 
@@ -343,13 +368,13 @@ async fn parse_response(response: reqwest::Response) -> Result<NeteaseResponse> 
     })
 }
 
-fn response_code(body: &Value) -> Option<i64> {
+pub(crate) fn response_code(body: &Value) -> Option<i64> {
     body.get("code")
         .or_else(|| body.pointer("/data/code"))
         .and_then(Value::as_i64)
 }
 
-fn ensure_response_code(body: &Value, expected: i64, operation: &str) -> Result<()> {
+pub(crate) fn ensure_response_code(body: &Value, expected: i64, operation: &str) -> Result<()> {
     let code = response_code(body).ok_or_else(|| {
         TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -378,7 +403,7 @@ fn qr_state(code: i64) -> NeteaseQrState {
     }
 }
 
-fn merge_cookie_headers(base: Option<&str>, set_cookie: &[String]) -> Option<String> {
+pub(crate) fn merge_cookie_headers(base: Option<&str>, set_cookie: &[String]) -> Option<String> {
     let mut cookies = BTreeMap::new();
     for part in base.unwrap_or_default().split(';') {
         insert_cookie_pair(&mut cookies, part);
@@ -395,6 +420,12 @@ fn merge_cookie_headers(base: Option<&str>, set_cookie: &[String]) -> Option<Str
             .collect::<Vec<_>>()
             .join("; ")
     })
+}
+
+pub(crate) fn has_authenticated_cookie(cookie: Option<&str>) -> bool {
+    CookieValues::parse(cookie)
+        .music_u
+        .is_some_and(|music_u| !music_u.is_empty())
 }
 
 fn insert_cookie_pair(cookies: &mut BTreeMap<String, String>, pair: &str) {
@@ -559,6 +590,26 @@ mod tests {
         assert_eq!(qr_state(802), NeteaseQrState::Scanned);
         assert_eq!(qr_state(803), NeteaseQrState::Confirmed);
         assert_eq!(qr_state(500), NeteaseQrState::Failed);
+    }
+
+    #[test]
+    fn debug_output_redacts_response_and_qr_cookies() {
+        let response = NeteaseResponse {
+            status: StatusCode::OK,
+            body: json!({ "code": 200, "cookie": "body-secret" }),
+            cookies: vec!["MUSIC_U=header-secret".to_owned()],
+        };
+        let check = NeteaseQrCheck {
+            code: 803,
+            state: NeteaseQrState::Confirmed,
+            message: None,
+            session_cookie: Some("MUSIC_U=qr-secret".to_owned()),
+        };
+        let output = format!("{response:?} {check:?}");
+        assert!(!output.contains("body-secret"));
+        assert!(!output.contains("header-secret"));
+        assert!(!output.contains("qr-secret"));
+        assert!(output.contains("has_session_cookie: true"));
     }
 
     #[test]
