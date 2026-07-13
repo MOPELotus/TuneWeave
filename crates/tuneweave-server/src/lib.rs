@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AccountProfile, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, Playlist,
-    PrincipalType, ProviderRegistry, Quality, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, Track, TuneWeaveError,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, Track,
+    TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -163,6 +164,7 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/tracks",
             get(user_favorite_tracks),
         )
+        .route("/users/{reference}/history", get(user_history))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
@@ -178,7 +180,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
         .route("/account/playlists", get(account_playlists))
-        .route("/account/favorites/tracks", get(account_favorite_tracks));
+        .route("/account/favorites/tracks", get(account_favorite_tracks))
+        .route("/account/history", get(account_history));
 
     Router::new()
         .route("/healthz", get(health))
@@ -514,6 +517,48 @@ async fn user_favorite_tracks(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct HistoryParams {
+    period: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    account: Option<String>,
+}
+
+async fn user_history(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<HistoryParams>,
+) -> Result<Json<ApiResponse<Vec<PlaybackHistoryEntry>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let period = parse_history_period(params.period.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = account_alias(params.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .user_history(
+            reference.id(),
+            &PlaybackHistoryRequest {
+                period,
+                limit,
+                offset,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 #[derive(Deserialize)]
 struct AuthQrStartBody {
     platform: String,
@@ -785,6 +830,7 @@ async fn auth_session_delete(
 struct AccountQuery {
     platform: Option<String>,
     account: Option<String>,
+    period: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
 }
@@ -867,6 +913,35 @@ async fn account_favorite_tracks(
     ))
 }
 
+async fn account_history(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<PlaybackHistoryEntry>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let period = parse_history_period(params.period.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_history(&PlaybackHistoryRequest {
+            period,
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     payload
         .map(|Json(body)| body)
@@ -924,6 +999,21 @@ fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
         "master" => Ok(Quality::Master),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported quality: {value}"
+        ))),
+    }
+}
+
+fn parse_history_period(value: Option<&str>) -> Result<PlaybackHistoryPeriod, TuneWeaveError> {
+    match value
+        .unwrap_or("all_time")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "all" | "all_time" => Ok(PlaybackHistoryPeriod::AllTime),
+        "week" => Ok(PlaybackHistoryPeriod::Week),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported history period: {value}"
         ))),
     }
 }
@@ -1063,6 +1153,7 @@ mod tests {
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
                 Capability::Favorites,
+                Capability::ListeningHistory,
             ])
         }
 
@@ -1133,6 +1224,39 @@ mod tests {
         ) -> Result<Page<Track>> {
             Ok(Page {
                 items: vec![sample_track(user_id)],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn account_history(
+            &self,
+            request: &PlaybackHistoryRequest,
+        ) -> Result<Page<PlaybackHistoryEntry>> {
+            Ok(Page {
+                items: vec![sample_history("185809")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn user_history(
+            &self,
+            user_id: &str,
+            request: &PlaybackHistoryRequest,
+        ) -> Result<Page<PlaybackHistoryEntry>> {
+            Ok(Page {
+                items: vec![sample_history(user_id)],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -1266,6 +1390,16 @@ mod tests {
             subscribed: Some(false),
             created_at: None,
             updated_at: None,
+            extensions: Default::default(),
+        }
+    }
+
+    fn sample_history(id: &str) -> PlaybackHistoryEntry {
+        PlaybackHistoryEntry {
+            track: sample_track(id),
+            play_count: Some(42),
+            score: Some(99),
+            last_played_at: None,
             extensions: Default::default(),
         }
     }
@@ -1626,6 +1760,42 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn account_history_maps_period_and_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/history?platform=netease&account=personal&period=week&limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["track"]["ref"], "netease:185809");
+        assert_eq!(json["data"][0]["play_count"], 42);
+        assert_eq!(json["data"][0]["score"], 99);
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn user_history_selects_reference_platform_and_rejects_bad_periods() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014/history?account=personal&period=all_time",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["track"]["ref"], "netease:32953014");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014/history?period=month",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
