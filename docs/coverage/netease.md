@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=384`、`partial=8`、`implemented=6`、`verified=6`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=384`、`partial=7`、`implemented=7`、`verified=6`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -142,7 +142,7 @@
 | `inner_version` | `/inner/version` | `pending` | — |
 | `lbs_city_code` | `/lbs/city/code` | `pending` | — |
 | `like` | `/like` | `pending` | — |
-| `likelist` | `/likelist` | `partial` | `GET /v1/account/favorites/tracks`（已验证匿名请求返回登录要求；待补显式 `uid` 输入与真实账户验证） |
+| `likelist` | `/likelist` | `implemented` | `GET /v1/account/favorites/tracks`、`GET /v1/users/{ref}/favorites/tracks`（已验证匿名请求返回登录要求；待真实账户验证） |
 | `listen_data_realtime_report` | `/listen/data/realtime/report` | `pending` | — |
 | `listen_data_report` | `/listen/data/report` | `pending` | — |
 | `listen_data_song_play_rank` | `/listen/data/song/play/rank` | `pending` | — |

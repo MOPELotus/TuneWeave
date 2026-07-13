@@ -209,6 +209,7 @@
 | GET | `/v1/artists/{ref}/albums` | 分页 | `Album[]` |
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist` |
 | GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]` |
+| GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/charts` | `platform?` | `Playlist[]`，其中榜单仍用歌单模型表示 |
 | GET | `/v1/charts/{ref}/tracks` | 分页 | `Track[]` |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、分页 | `Track[]` |
