@@ -10,8 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Platform, ProviderRegistry, ResourceRef, SearchKind, SearchQuery, Track,
-    TuneWeaveError,
+    Capability, PageRequest, Platform, Playlist, ProviderRegistry, ResourceRef, SearchKind,
+    SearchQuery, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -39,7 +39,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
-        .route("/tracks/{reference}", get(track));
+        .route("/tracks/{reference}", get(track))
+        .route("/playlists/{reference}", get(playlist))
+        .route("/playlists/{reference}/tracks", get(playlist_tracks));
 
     Router::new()
         .route("/healthz", get(health))
@@ -168,19 +170,16 @@ async fn search(
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct TrackParams {
+struct AccountParams {
     account: Option<String>,
 }
 
 async fn track(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<TrackParams>,
+    Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<Track>>, ApiError> {
-    let reference = reference.parse::<ResourceRef>().map_err(|error| {
-        TuneWeaveError::invalid_request(error.to_string())
-            .with_details(json!({ "reference": reference }))
-    })?;
+    let reference = parse_reference(reference)?;
     let account = params
         .account
         .as_deref()
@@ -195,6 +194,81 @@ async fn track(
     }
 
     Ok(Json(response))
+}
+
+async fn playlist(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let playlist = provider.playlist(reference.id(), account).await?;
+    let mut response = ApiResponse::new(playlist).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PlaylistTracksParams {
+    limit: Option<String>,
+    offset: Option<String>,
+    account: Option<String>,
+}
+
+async fn playlist_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PlaylistTracksParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+        .map(str::to_owned);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .playlist_tracks(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
+fn parse_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
+    reference.parse().map_err(|error| {
+        TuneWeaveError::invalid_request(format!("{error}"))
+            .with_details(json!({ "reference": reference }))
+    })
 }
 
 fn search_platform(state: &AppState, value: Option<&str>) -> Result<Platform, TuneWeaveError> {
@@ -279,7 +353,11 @@ mod tests {
         }
 
         fn capabilities(&self) -> BTreeSet<Capability> {
-            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+            BTreeSet::from([
+                Capability::SearchTracks,
+                Capability::TrackDetail,
+                Capability::PlaylistRead,
+            ])
         }
 
         async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -298,6 +376,23 @@ mod tests {
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
             Ok(sample_track(id))
         }
+
+        async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
+            Ok(sample_playlist(id))
+        }
+
+        async fn playlist_tracks(&self, _id: &str, request: &PageRequest) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![sample_track("123")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -310,6 +405,24 @@ mod tests {
             name: "周杰伦".to_owned(),
         });
         track
+    }
+
+    fn sample_playlist(id: &str) -> Playlist {
+        Playlist {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            name: "云音乐热歌榜".to_owned(),
+            description: "热门歌曲".to_owned(),
+            cover_url: None,
+            creator: None,
+            track_count: Some(1),
+            tags: vec!["流行".to_owned()],
+            subscribed: Some(false),
+            created_at: None,
+            updated_at: None,
+            extensions: Default::default(),
+        }
     }
 
     fn test_app_with_provider() -> Router {
@@ -401,5 +514,28 @@ mod tests {
             json_response_from(test_app_with_provider(), "/v1/tracks/missing-separator").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn playlist_reference_selects_its_provider() {
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/playlists/netease:3778678").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:3778678");
+        assert_eq!(json["data"]["name"], "云音乐热歌榜");
+        assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn playlist_tracks_use_unified_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/playlists/netease:3778678/tracks?limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:123");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
     }
 }
