@@ -12,27 +12,34 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
-use crate::crypto::encrypt_eapi;
+use crate::crypto::{encrypt_eapi, encrypt_weapi};
 
 const DEFAULT_BASE_URL: &str = "https://interface.music.163.com";
+const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
 const DEFAULT_USER_AGENT: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
+const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct NeteaseConfig {
     pub base_url: String,
+    pub web_base_url: String,
     pub cookie: Option<String>,
     pub timeout: Duration,
     pub user_agent: String,
+    pub web_user_agent: String,
 }
 
 impl Default for NeteaseConfig {
     fn default() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_owned(),
+            web_base_url: DEFAULT_WEB_BASE_URL.to_owned(),
             cookie: None,
             timeout: Duration::from_secs(15),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
+            web_user_agent: DEFAULT_WEB_USER_AGENT.to_owned(),
         }
     }
 }
@@ -41,6 +48,8 @@ impl Default for NeteaseConfig {
 pub struct NeteaseClient {
     http: Client,
     base_url: String,
+    web_base_url: String,
+    web_user_agent: String,
     cookie: Option<String>,
     device_id: String,
 }
@@ -134,6 +143,8 @@ impl NeteaseClient {
         Ok(Self {
             http,
             base_url: config.base_url.trim_end_matches('/').to_owned(),
+            web_base_url: config.web_base_url.trim_end_matches('/').to_owned(),
+            web_user_agent: config.web_user_agent,
             cookie: config.cookie,
             device_id,
         })
@@ -184,40 +195,47 @@ impl NeteaseClient {
             .send()
             .await
             .map_err(request_error)?;
+        parse_response(response).await
+    }
 
-        let status = response.status();
-        let cookies = response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok().map(str::to_owned))
-            .collect();
-        let bytes = response.bytes().await.map_err(request_error)?;
-        if !status.is_success() {
-            return Err(TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("NetEase returned HTTP {status}"),
+    pub async fn request_weapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
+        if !path.starts_with("/api/") {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase WeAPI paths must start with /api/",
             )
-            .with_platform(Platform::Netease)
-            .retryable(status.is_server_error())
-            .with_details(json!({ "status": status.as_u16() })));
+            .with_platform(Platform::Netease));
         }
 
-        let body = serde_json::from_slice(&bytes).map_err(|error| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("NetEase returned invalid JSON: {error}"),
+        let cookie = CookieValues::parse(self.cookie.as_deref());
+        let mut payload = payload_object(payload)?;
+        payload.insert(
+            "csrf_token".to_owned(),
+            Value::String(cookie.csrf.unwrap_or("").to_owned()),
+        );
+        let payload = serde_json::to_string(&payload).map_err(json_error)?;
+        let encrypted = encrypt_weapi(&payload);
+        let endpoint = format!(
+            "{}/weapi/{}",
+            self.web_base_url,
+            path.trim_start_matches("/api/")
+        );
+        let response = self
+            .http
+            .post(endpoint)
+            .header(header::REFERER, format!("{}/", self.web_base_url))
+            .header(header::USER_AGENT, &self.web_user_agent)
+            .header(
+                header::COOKIE,
+                weapi_cookie_header(self.cookie.as_deref(), &self.device_id),
             )
-            .with_platform(Platform::Netease)
-            .with_details(json!({
-                "response_preview": String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
-            }))
-        })?;
-        Ok(NeteaseResponse {
-            status,
-            body,
-            cookies,
-        })
+            .form(&[
+                ("params", encrypted.params),
+                ("encSecKey", encrypted.enc_sec_key),
+            ])
+            .send()
+            .await
+            .map_err(request_error)?;
+        parse_response(response).await
     }
 
     pub async fn create_qr_login(&self) -> Result<NeteaseQrLogin> {
@@ -287,6 +305,42 @@ impl NeteaseClient {
             .music_u
             .is_some_and(|music_u| !music_u.is_empty())
     }
+}
+
+async fn parse_response(response: reqwest::Response) -> Result<NeteaseResponse> {
+    let status = response.status();
+    let cookies = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    let bytes = response.bytes().await.map_err(request_error)?;
+    if !status.is_success() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned HTTP {status}"),
+        )
+        .with_platform(Platform::Netease)
+        .retryable(status.is_server_error())
+        .with_details(json!({ "status": status.as_u16() })));
+    }
+
+    let body = serde_json::from_slice(&bytes).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned invalid JSON: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "response_preview": String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
+        }))
+    })?;
+    Ok(NeteaseResponse {
+        status,
+        body,
+        cookies,
+    })
 }
 
 fn response_code(body: &Value) -> Option<i64> {
@@ -412,6 +466,26 @@ fn encode_cookie_header(header: &EapiHeader<'_>) -> String {
         .join("; ")
 }
 
+fn weapi_cookie_header(cookie: Option<&str>, device_id: &str) -> String {
+    let mut cookies = BTreeMap::from([
+        ("appver".to_owned(), "3.1.17.204416".to_owned()),
+        ("deviceId".to_owned(), device_id.to_owned()),
+        ("os".to_owned(), "pc".to_owned()),
+        (
+            "osver".to_owned(),
+            "Microsoft-Windows-10-Professional-build-19045-64bit".to_owned(),
+        ),
+    ]);
+    for part in cookie.unwrap_or_default().split(';') {
+        insert_cookie_pair(&mut cookies, part);
+    }
+    cookies
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn request_error(error: reqwest::Error) -> TuneWeaveError {
     let code = if error.is_timeout() {
         ErrorCode::UpstreamTimeout
@@ -504,6 +578,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn weapi_cookie_header_keeps_session_values_and_device_defaults() {
+        let cookie = weapi_cookie_header(
+            Some("MUSIC_U=account-session; __csrf=csrf-token; os=android"),
+            "device-id",
+        );
+        assert!(cookie.contains("MUSIC_U=account-session"));
+        assert!(cookie.contains("__csrf=csrf-token"));
+        assert!(cookie.contains("deviceId=device-id"));
+        assert!(cookie.contains("os=android"));
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_eapi_search_returns_songs() {
@@ -526,6 +612,17 @@ mod tests {
                 .as_array()
                 .is_some_and(|songs| !songs.is_empty())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_weapi_login_status_returns_a_business_code() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
+        let response = client
+            .request_weapi("/api/w/nuser/account/get", json!({}))
+            .await
+            .expect("live WeAPI request succeeds");
+        assert!(response.body["code"].is_number());
     }
 
     #[tokio::test]
