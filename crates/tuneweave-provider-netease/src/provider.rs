@@ -1,19 +1,23 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, LyricContributor, Lyrics,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, Platform, Playlist, Quality,
-    ResourceRef, Result, SearchKind, SearchQuery, Track, TuneWeaveError,
+    MediaStream, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, Platform,
+    Playlist, Quality, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
+    TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     NeteaseClient, NeteaseConfig,
     dto::{
         AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
-        Privilege, SearchEnvelope, Song, TrackEnvelope,
+        Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope,
     },
 };
 
@@ -75,6 +79,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::TrackDetail,
             Capability::PlaylistRead,
             Capability::Lyrics,
+            Capability::AudioStream,
         ])
     }
 
@@ -243,6 +248,167 @@ impl MusicProvider for NeteaseProvider {
         let response: LyricsEnvelope = parse_body(response.body)?;
         map_lyrics(id, response)
     }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        if track.platform != Platform::Netease
+            || track.resource_ref.platform() != Platform::Netease
+            || track.resource_ref.id() != track.id
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase provider can only resolve NetEase tracks",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "track_ref": track.resource_ref })));
+        }
+        let id = parse_numeric_id("track", &track.id)?;
+        let response = self
+            .client
+            .request_eapi(
+                "/api/song/enhance/player/url",
+                json!({
+                    "ids": Value::Array(vec![json!(id.to_string())]).to_string(),
+                    "br": requested_bitrate(request.quality)
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: StreamEnvelope = parse_body(response.body)?;
+        let stream = response
+            .data
+            .into_iter()
+            .find(|stream| stream.id == id)
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase omitted the requested stream result",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "id": id }))
+            })?;
+        map_stream(track, request, stream, self.client.is_authenticated())
+    }
+}
+
+fn map_stream(
+    track: &Track,
+    request: &StreamRequest,
+    stream: StreamData,
+    authenticated: bool,
+) -> Result<MediaStream> {
+    let url = stream
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| stream_unavailable(&stream, authenticated))?;
+    let actual_quality = stream_quality(stream.level.as_deref(), stream.br);
+    let trial = stream.free_trial_info.and_then(|trial| {
+        let start_ms = trial.start?.checked_mul(1_000)?;
+        let end_ms = trial.end?.checked_mul(1_000)?;
+        (end_ms > start_ms).then_some(TrialWindow { start_ms, end_ms })
+    });
+
+    Ok(MediaStream {
+        url,
+        backup_urls: Vec::new(),
+        headers: BTreeMap::new(),
+        expires_at: stream
+            .expi
+            .filter(|expires_in_seconds| *expires_in_seconds > 0)
+            .and_then(expiration_rfc3339),
+        format: stream.kind.clone(),
+        codec: stream.encode_type.or(stream.kind),
+        bitrate: stream.br,
+        size: stream.size,
+        duration_ms: stream.time.or(track.duration_ms),
+        requested_quality: request.quality,
+        actual_quality,
+        trial,
+        origin_track: Some(track.resource_ref.clone()),
+        resolved_track: track.resource_ref.clone(),
+        resolved_platform: Platform::Netease,
+        match_score: Some(1.0),
+        attempts: Vec::new(),
+    })
+}
+
+fn stream_unavailable(stream: &StreamData, authenticated: bool) -> TuneWeaveError {
+    let code = if !authenticated && stream.fee.is_some_and(|fee| fee > 0) {
+        ErrorCode::AuthenticationRequired
+    } else if stream.code == Some(404) {
+        ErrorCode::ResourceNotFound
+    } else {
+        ErrorCode::PermissionDenied
+    };
+    TuneWeaveError::new(code, "NetEase did not return a playable stream")
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "id": stream.id,
+            "upstream_code": stream.code,
+            "fee": stream.fee,
+            "level": stream.level
+        }))
+}
+
+fn requested_bitrate(quality: Quality) -> u64 {
+    match quality {
+        Quality::Low | Quality::Standard => 128_000,
+        Quality::High => 320_000,
+        Quality::Auto | Quality::Lossless | Quality::Hires | Quality::Spatial | Quality::Master => {
+            999_000
+        }
+    }
+}
+
+fn stream_quality(level: Option<&str>, bitrate: Option<u64>) -> Quality {
+    match level.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "standard" => Quality::Standard,
+        "higher" | "exhigh" => Quality::High,
+        "lossless" => Quality::Lossless,
+        "hires" => Quality::Hires,
+        "jyeffect" | "sky" | "dolby" => Quality::Spatial,
+        "jymaster" => Quality::Master,
+        _ => match bitrate {
+            None | Some(0) => Quality::Auto,
+            Some(1..=96_000) => Quality::Low,
+            Some(96_001..=192_000) => Quality::Standard,
+            Some(192_001..=500_000) => Quality::High,
+            Some(500_001..) => Quality::Lossless,
+        },
+    }
+}
+
+fn expiration_rfc3339(expires_in_seconds: u64) -> Option<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    unix_rfc3339(now.checked_add(expires_in_seconds)?)
+}
+
+fn unix_rfc3339(timestamp: u64) -> Option<String> {
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds = timestamp % 86_400;
+    let z = days.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
 }
 
 fn map_lyrics(id: u64, lyrics: LyricsEnvelope) -> Result<Lyrics> {
@@ -730,6 +896,83 @@ mod tests {
         assert_eq!(lyrics.extensions["word_synced_version"], 7);
     }
 
+    #[test]
+    fn maps_netease_stream_quality_expiry_and_trial() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("track reference"),
+            "测试歌曲",
+        );
+        let request = StreamRequest {
+            quality: Quality::High,
+            account: None,
+        };
+        let stream: StreamData = serde_json::from_value(json!({
+            "id": 123,
+            "url": "https://example.test/audio.mp3",
+            "br": 320000,
+            "size": 1024,
+            "code": 200,
+            "expi": 1200,
+            "type": "mp3",
+            "level": "exhigh",
+            "encodeType": "mp3",
+            "time": 258000,
+            "fee": 1,
+            "freeTrialInfo": {"start": 0, "end": 30}
+        }))
+        .expect("valid stream fixture");
+
+        let stream = map_stream(&track, &request, stream, false).expect("map stream");
+        assert_eq!(stream.requested_quality, Quality::High);
+        assert_eq!(stream.actual_quality, Quality::High);
+        assert_eq!(stream.bitrate, Some(320000));
+        assert_eq!(stream.trial.expect("trial").end_ms, 30_000);
+        assert!(
+            stream
+                .expires_at
+                .is_some_and(|expires| expires.ends_with('Z'))
+        );
+    }
+
+    #[test]
+    fn reports_missing_paid_stream_as_authentication_required() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("track reference"),
+            "测试歌曲",
+        );
+        let request = StreamRequest {
+            quality: Quality::Lossless,
+            account: None,
+        };
+        let stream: StreamData = serde_json::from_value(json!({
+            "id": 123,
+            "url": null,
+            "br": 999000,
+            "size": 0,
+            "code": 200,
+            "expi": 0,
+            "type": null,
+            "level": "lossless",
+            "encodeType": null,
+            "time": 258000,
+            "fee": 1,
+            "freeTrialInfo": null
+        }))
+        .expect("valid unavailable stream fixture");
+
+        let error = map_stream(&track, &request, stream, false).expect_err("stream must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn formats_unix_time_without_a_datetime_dependency() {
+        assert_eq!(unix_rfc3339(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(
+            unix_rfc3339(1_704_067_200).as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_provider_search_and_track_detail() {
@@ -780,5 +1023,28 @@ mod tests {
             .expect("live track lyrics");
         assert_eq!(lyrics.track_ref.to_string(), "netease:185809");
         assert!(lyrics.plain.is_some() || lyrics.word_synced.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_track_stream() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "live stream fixture",
+        );
+        let stream = provider
+            .stream(
+                &track,
+                &StreamRequest {
+                    quality: Quality::High,
+                    account: None,
+                },
+            )
+            .await
+            .expect("live track stream");
+        assert!(stream.url.starts_with("http"));
+        assert_eq!(stream.resolved_track.to_string(), "netease:2709812973");
+        assert!(stream.bitrate.is_some_and(|bitrate| bitrate > 0));
     }
 }

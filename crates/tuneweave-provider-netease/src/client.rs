@@ -183,6 +183,13 @@ impl NeteaseClient {
             cookies,
         })
     }
+
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        CookieValues::parse(self.cookie.as_deref())
+            .music_u
+            .is_some_and(|music_u| !music_u.is_empty())
+    }
 }
 
 struct CookieValues<'a> {
@@ -286,6 +293,22 @@ mod tests {
         assert_eq!(values.music_u, Some("music-user"));
         assert_eq!(values.csrf, Some("csrf-token"));
         assert_eq!(values.music_a, Some("anonymous"));
+    }
+
+    #[test]
+    fn distinguishes_account_and_anonymous_cookies() {
+        let account = NeteaseClient::new(NeteaseConfig {
+            cookie: Some("MUSIC_U=account-session".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build account client");
+        let anonymous = NeteaseClient::new(NeteaseConfig {
+            cookie: Some("MUSIC_A=anonymous-session".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build anonymous client");
+        assert!(account.is_authenticated());
+        assert!(!anonymous.is_authenticated());
     }
 
     #[tokio::test]

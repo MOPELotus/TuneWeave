@@ -95,6 +95,37 @@ pub(crate) struct LyricUser {
     pub nickname: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct StreamEnvelope {
+    #[serde(default)]
+    pub data: Vec<StreamData>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct StreamData {
+    pub id: u64,
+    pub url: Option<String>,
+    pub br: Option<u64>,
+    pub size: Option<u64>,
+    pub code: Option<i64>,
+    pub expi: Option<u64>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub level: Option<String>,
+    #[serde(rename = "encodeType")]
+    pub encode_type: Option<String>,
+    pub time: Option<u64>,
+    pub fee: Option<i64>,
+    #[serde(rename = "freeTrialInfo")]
+    pub free_trial_info: Option<FreeTrialInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FreeTrialInfo {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Song {
     pub id: u64,
