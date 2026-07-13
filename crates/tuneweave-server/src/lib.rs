@@ -159,6 +159,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
         .route("/playlists/{reference}/tracks", get(playlist_tracks))
+        .route(
+            "/users/{reference}/favorites/tracks",
+            get(user_favorite_tracks),
+        )
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
@@ -433,7 +437,7 @@ async fn playlist(
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct PlaylistTracksParams {
+struct PageParams {
     limit: Option<String>,
     offset: Option<String>,
     account: Option<String>,
@@ -442,7 +446,7 @@ struct PlaylistTracksParams {
 async fn playlist_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<PlaylistTracksParams>,
+    Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
@@ -476,6 +480,38 @@ async fn playlist_tracks(
     }
 
     Ok(Json(response))
+}
+
+async fn user_favorite_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = account_alias(params.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .user_favorite_tracks(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1090,6 +1126,23 @@ mod tests {
             })
         }
 
+        async fn user_favorite_tracks(
+            &self,
+            user_id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![sample_track(user_id)],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
         async fn lyrics(&self, id: &str, _account: Option<&str>) -> Result<Lyrics> {
             Ok(Lyrics {
                 track_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -1559,6 +1612,20 @@ mod tests {
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn user_favorite_tracks_select_reference_platform_and_account() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014/favorites/tracks?account=personal&limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:32953014");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
     }
 
     #[tokio::test]
