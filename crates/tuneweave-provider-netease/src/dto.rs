@@ -21,6 +21,49 @@ pub(crate) struct TrackEnvelope {
     pub privileges: Vec<Privilege>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlaylistEnvelope {
+    pub playlist: Option<PlaylistDetail>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlaylistDetail {
+    pub id: u64,
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(rename = "coverImgUrl")]
+    pub cover_img_url: Option<String>,
+    pub creator: Option<PlaylistCreator>,
+    #[serde(rename = "trackCount")]
+    pub track_count: Option<u64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub subscribed: Option<bool>,
+    #[serde(rename = "createTime")]
+    pub create_time: Option<u64>,
+    #[serde(rename = "updateTime")]
+    pub update_time: Option<u64>,
+    pub privacy: Option<i64>,
+    #[serde(rename = "specialType")]
+    pub special_type: Option<i64>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    #[serde(rename = "trackIds", default)]
+    pub track_ids: Vec<PlaylistTrackId>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlaylistCreator {
+    #[serde(rename = "userId")]
+    pub user_id: u64,
+    pub nickname: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlaylistTrackId {
+    pub id: u64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Song {
     pub id: u64,

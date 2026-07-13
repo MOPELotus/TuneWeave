@@ -69,6 +69,24 @@ pub struct Page<T> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PageRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PageRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
     pub resource_ref: Option<ResourceRef>,

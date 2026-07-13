@@ -10,7 +10,7 @@ mod registry;
 pub use capability::Capability;
 pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use model::{
-    AlbumSummary, ArtistSummary, Extensions, MediaStream, Page, PageMeta, Playlist,
+    AlbumSummary, ArtistSummary, Extensions, MediaStream, Page, PageMeta, PageRequest, Playlist,
     ProviderDescriptor, Quality, ResolutionAttempt, ResolutionStatus, SearchKind, SearchQuery,
     StreamRequest, Track, TrialWindow,
 };

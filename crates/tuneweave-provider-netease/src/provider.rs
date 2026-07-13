@@ -5,13 +5,16 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, MusicProvider, Page, PageMeta,
-    ParseResourceRefError, Platform, Quality, ResourceRef, Result, SearchKind, SearchQuery, Track,
-    TuneWeaveError,
+    PageRequest, ParseResourceRefError, Platform, Playlist, Quality, ResourceRef, Result,
+    SearchKind, SearchQuery, Track, TuneWeaveError,
 };
 
 use crate::{
     NeteaseClient, NeteaseConfig,
-    dto::{AudioQuality, Privilege, SearchEnvelope, Song, TrackEnvelope},
+    dto::{
+        AudioQuality, PlaylistDetail, PlaylistEnvelope, Privilege, SearchEnvelope, Song,
+        TrackEnvelope,
+    },
 };
 
 #[derive(Clone)]
@@ -30,6 +33,30 @@ impl NeteaseProvider {
     pub fn from_client(client: NeteaseClient) -> Self {
         Self { client }
     }
+
+    async fn playlist_detail(&self, id: u64) -> Result<PlaylistDetail> {
+        let response = self
+            .client
+            .request_eapi(
+                "/api/v6/playlist/detail",
+                json!({
+                    "id": id,
+                    "n": 100_000,
+                    "s": 8
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: PlaylistEnvelope = parse_body(response.body)?;
+        response.playlist.ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "NetEase playlist was not found",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "id": id }))
+        })
+    }
 }
 
 #[async_trait]
@@ -43,7 +70,11 @@ impl MusicProvider for NeteaseProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+        BTreeSet::from([
+            Capability::SearchTracks,
+            Capability::TrackDetail,
+            Capability::PlaylistRead,
+        ])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -97,7 +128,7 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
-        let id = parse_track_id(id)?;
+        let id = parse_numeric_id("track", id)?;
         let response = self
             .client
             .request_eapi(
@@ -121,6 +152,137 @@ impl MusicProvider for NeteaseProvider {
         })?;
         let privilege = privileges.remove(&song.id);
         map_song(song, privilege)
+    }
+
+    async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
+        let id = parse_numeric_id("playlist", id)?;
+        map_playlist(self.playlist_detail(id).await?)
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let id = parse_numeric_id("playlist", id)?;
+        let playlist = self.playlist_detail(id).await?;
+        let total = playlist.track_ids.len() as u64;
+        let limit = request.limit.clamp(1, 100);
+        let offset = request.offset;
+        let selected_ids = playlist
+            .track_ids
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        let items = if selected_ids.is_empty() {
+            Vec::new()
+        } else {
+            let request_tracks =
+                Value::Array(selected_ids.iter().map(|id| json!({ "id": id })).collect())
+                    .to_string();
+            let response = self
+                .client
+                .request_eapi("/api/v3/song/detail", json!({ "c": request_tracks }))
+                .await?;
+            ensure_success(&response.body)?;
+            let response: TrackEnvelope = parse_body(response.body)?;
+            let mut songs = response
+                .songs
+                .into_iter()
+                .map(|song| (song.id, song))
+                .collect::<HashMap<_, _>>();
+            let mut privileges = response
+                .privileges
+                .into_iter()
+                .map(|privilege| (privilege.id, privilege))
+                .collect::<HashMap<_, _>>();
+            selected_ids
+                .iter()
+                .filter_map(|id| {
+                    songs
+                        .remove(id)
+                        .map(|song| map_song(song, privileges.remove(id)))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let consumed = selected_ids.len() as u32;
+        let next_offset = offset.saturating_add(consumed);
+        let has_more = u64::from(next_offset) < total;
+
+        Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit,
+                offset,
+                total: Some(total),
+                next_offset: has_more.then_some(next_offset),
+                has_more,
+            },
+        })
+    }
+}
+
+fn map_playlist(playlist: PlaylistDetail) -> Result<Playlist> {
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, playlist.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid playlist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let creator = playlist
+        .creator
+        .map(
+            |creator| -> std::result::Result<ArtistSummary, ParseResourceRefError> {
+                Ok(ArtistSummary {
+                    resource_ref: Some(ResourceRef::new(
+                        Platform::Netease,
+                        creator.user_id.to_string(),
+                    )?),
+                    name: creator.nickname,
+                })
+            },
+        )
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid playlist creator id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "create_time_ms", playlist.create_time);
+    insert_extension(&mut extensions, "update_time_ms", playlist.update_time);
+    insert_extension(&mut extensions, "privacy", playlist.privacy);
+    insert_extension(&mut extensions, "special_type", playlist.special_type);
+    insert_extension(&mut extensions, "play_count", playlist.play_count);
+
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Netease,
+        id: playlist.id.to_string(),
+        name: playlist.name,
+        description: playlist.description.unwrap_or_default(),
+        cover_url: playlist.cover_img_url,
+        creator,
+        track_count: playlist
+            .track_count
+            .or(Some(playlist.track_ids.len() as u64)),
+        tags: playlist.tags,
+        subscribed: playlist.subscribed,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    })
+}
+
+fn insert_extension<T: serde::Serialize>(
+    extensions: &mut Extensions,
+    name: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value.and_then(|value| serde_json::to_value(value).ok()) {
+        extensions.insert(name.to_owned(), value);
     }
 }
 
@@ -250,11 +412,13 @@ fn has_audio(quality: &Option<AudioQuality>) -> bool {
         .is_some_and(|quality| quality.br.unwrap_or(1) > 0)
 }
 
-fn parse_track_id(id: &str) -> Result<u64> {
+fn parse_numeric_id(resource: &str, id: &str) -> Result<u64> {
     id.parse().map_err(|_| {
-        TuneWeaveError::invalid_request("NetEase track id must be an unsigned integer")
-            .with_platform(Platform::Netease)
-            .with_details(json!({ "id": id }))
+        TuneWeaveError::invalid_request(format!(
+            "NetEase {resource} id must be an unsigned integer"
+        ))
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "resource": resource, "id": id }))
     })
 }
 
@@ -373,6 +537,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn maps_netease_playlist_to_unified_model() {
+        let playlist: PlaylistDetail = serde_json::from_value(json!({
+            "id": 3778678,
+            "name": "云音乐热歌榜",
+            "description": "热门歌曲",
+            "coverImgUrl": "https://example.test/playlist.jpg",
+            "creator": {"userId": 1, "nickname": "网易云音乐"},
+            "trackCount": 2,
+            "tags": ["流行"],
+            "subscribed": false,
+            "createTime": 1378721408222_u64,
+            "updateTime": 1783987200000_u64,
+            "privacy": 0,
+            "specialType": 10,
+            "playCount": 12345,
+            "trackIds": [{"id": 185809}, {"id": 186001}]
+        }))
+        .expect("valid playlist fixture");
+
+        let playlist = map_playlist(playlist).expect("map playlist");
+        assert_eq!(playlist.resource_ref.to_string(), "netease:3778678");
+        assert_eq!(playlist.creator.expect("creator").name, "网易云音乐");
+        assert_eq!(playlist.track_count, Some(2));
+        assert_eq!(playlist.extensions["special_type"], 10);
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_provider_search_and_track_detail() {
@@ -391,5 +582,25 @@ mod tests {
         assert_eq!(detail.id, first.id);
         assert!(!detail.name.is_empty());
         assert!(!detail.artists.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_playlist_and_tracks() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let playlist = provider
+            .playlist("3778678", None)
+            .await
+            .expect("live playlist detail");
+        assert_eq!(playlist.resource_ref.to_string(), "netease:3778678");
+        assert!(!playlist.name.is_empty());
+
+        let page = provider
+            .playlist_tracks("3778678", &PageRequest::new(2, 0))
+            .await
+            .expect("live playlist tracks");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.total.is_some_and(|total| total >= 2));
+        assert!(page.items.iter().all(|track| !track.artists.is_empty()));
     }
 }
