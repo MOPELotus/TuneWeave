@@ -52,10 +52,67 @@ pub struct NeteaseCaptchaVerification {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeteaseSessionStatus {
+    pub authenticated: bool,
+    pub account: NeteaseAccountSummary,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct NeteaseSessionRefresh {
+    session_cookie: String,
+}
+
+impl NeteaseSessionRefresh {
+    #[must_use]
+    pub fn session_cookie(&self) -> &str {
+        &self.session_cookie
+    }
+
+    #[must_use]
+    pub fn into_session_cookie(self) -> String {
+        self.session_cookie
+    }
+}
+
+impl fmt::Debug for NeteaseSessionRefresh {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NeteaseSessionRefresh")
+            .field("has_session_cookie", &true)
+            .finish()
+    }
+}
+
 impl NeteaseClient {
     pub async fn logout(&self) -> Result<()> {
         let response = self.request_eapi("/api/logout", json!({})).await?;
         ensure_response_code(&response.body, 200, "logout")
+    }
+
+    pub async fn session_status(&self) -> Result<NeteaseSessionStatus> {
+        let response = self
+            .request_weapi("/api/w/nuser/account/get", json!({}))
+            .await?;
+        session_status_from_body(&response.body)
+    }
+
+    pub async fn refresh_session(&self) -> Result<NeteaseSessionRefresh> {
+        if !self.is_authenticated() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                "NetEase session refresh requires a logged-in account",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let response = self
+            .request_eapi("/api/login/token/refresh", json!({}))
+            .await?;
+        ensure_response_code(&response.body, 200, "refresh session")?;
+        let session_cookie = merge_cookie_headers(self.configured_cookie(), &response.cookies)
+            .filter(|cookie| has_authenticated_cookie(Some(cookie.as_str())))
+            .ok_or_else(|| upstream_error("refresh session", "response did not contain MUSIC_U"))?;
+        Ok(NeteaseSessionRefresh { session_cookie })
     }
 
     pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
@@ -236,6 +293,25 @@ fn map_account(body: &Value) -> NeteaseAccountSummary {
     }
 }
 
+fn session_status_from_body(body: &Value) -> Result<NeteaseSessionStatus> {
+    let code = response_code(body).ok_or_else(|| {
+        upstream_error("session status", "response did not contain a status code")
+    })?;
+    if code != 200 && code != 301 {
+        return Err(upstream_error(
+            "session status",
+            &format!("failed with code {code}"),
+        ));
+    }
+    let account = map_account(body);
+    let authenticated = code == 200
+        && (account.id.is_some() || account.user_id.is_some() || account.nickname.is_some());
+    Ok(NeteaseSessionStatus {
+        authenticated,
+        account,
+    })
+}
+
 fn value_as_id(value: Option<&Value>) -> Option<String> {
     value.and_then(|value| match value {
         Value::String(value) => Some(value.clone()),
@@ -370,6 +446,36 @@ mod tests {
             session_cookie: "MUSIC_U=must-not-appear".to_owned(),
         };
         let output = format!("{result:?}");
+        assert!(!output.contains("must-not-appear"));
+        assert!(output.contains("has_session_cookie: true"));
+    }
+
+    #[test]
+    fn maps_authenticated_and_anonymous_session_statuses() {
+        let authenticated = session_status_from_body(&json!({
+            "code": 200,
+            "account": { "id": 123 },
+            "profile": { "userId": 456, "nickname": "TuneWeave" }
+        }))
+        .expect("authenticated status");
+        assert!(authenticated.authenticated);
+        assert_eq!(authenticated.account.user_id.as_deref(), Some("456"));
+
+        let anonymous = session_status_from_body(&json!({
+            "code": 200,
+            "account": null,
+            "profile": null
+        }))
+        .expect("anonymous status");
+        assert!(!anonymous.authenticated);
+    }
+
+    #[test]
+    fn session_refresh_debug_output_redacts_cookie() {
+        let refresh = NeteaseSessionRefresh {
+            session_cookie: "MUSIC_U=must-not-appear".to_owned(),
+        };
+        let output = format!("{refresh:?}");
         assert!(!output.contains("must-not-appear"));
         assert!(output.contains("has_session_cookie: true"));
     }

@@ -17,7 +17,7 @@ use tuneweave_core::{
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
-    NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState,
+    NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
         AudioQuality, LyricText, LyricUser, LyricsEnvelope, PlaylistDetail, PlaylistEnvelope,
         Privilege, SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope,
@@ -596,6 +596,30 @@ impl MusicProvider for NeteaseProvider {
     async fn logout(&self, account: &str) -> Result<bool> {
         NeteaseProvider::logout_account(self, account).await
     }
+
+    async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+        let account = normalize_account_label(Some(account))?.to_owned();
+        let client = match self.client_for(Some(&account)) {
+            Ok(client) => client,
+            Err(error) if error.code == ErrorCode::AuthenticationRequired => {
+                let mut profile = AccountProfile::authenticated(Platform::Netease, account);
+                profile.authenticated = false;
+                return Ok(profile);
+            }
+            Err(error) => return Err(error),
+        };
+        let status = client.session_status().await?;
+        Ok(map_session_profile(&account, status))
+    }
+
+    async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
+        let account = normalize_account_label(Some(account))?.to_owned();
+        let client = self.client_for(Some(&account))?;
+        let refresh = client.refresh_session().await?;
+        self.install_session(&account, refresh.into_session_cookie())?;
+        let status = self.client_for(Some(&account))?.session_status().await?;
+        Ok(map_session_profile(&account, status))
+    }
 }
 
 fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> AccountProfile {
@@ -603,6 +627,12 @@ fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> Account
     profile.user_id = summary.user_id.or(summary.id);
     profile.nickname = summary.nickname;
     profile.avatar_url = summary.avatar_url;
+    profile
+}
+
+fn map_session_profile(account: &str, status: NeteaseSessionStatus) -> AccountProfile {
+    let mut profile = map_account_profile(account, status.account);
+    profile.authenticated = status.authenticated;
     profile
 }
 
@@ -1407,6 +1437,34 @@ mod tests {
         assert_eq!(profile.user_id.as_deref(), Some("456"));
         assert_eq!(profile.nickname.as_deref(), Some("TuneWeave"));
         assert!(profile.authenticated);
+    }
+
+    #[test]
+    fn maps_anonymous_session_without_claiming_authentication() {
+        let profile = map_session_profile(
+            "missing",
+            NeteaseSessionStatus {
+                authenticated: false,
+                account: NeteaseAccountSummary {
+                    id: None,
+                    user_id: None,
+                    nickname: None,
+                    avatar_url: None,
+                },
+            },
+        );
+        assert_eq!(profile.account, "missing");
+        assert!(!profile.authenticated);
+    }
+
+    #[tokio::test]
+    async fn unknown_account_session_status_is_anonymous_without_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let profile = MusicProvider::session_profile(&provider, "missing")
+            .await
+            .expect("anonymous profile");
+        assert_eq!(profile.account, "missing");
+        assert!(!profile.authenticated);
     }
 
     #[tokio::test]

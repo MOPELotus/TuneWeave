@@ -120,4 +120,18 @@ pub trait MusicProvider: Send + Sync {
             Capability::SessionManagement,
         ))
     }
+
+    async fn session_profile(&self, _account: &str) -> Result<AccountProfile> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SessionManagement,
+        ))
+    }
+
+    async fn refresh_session(&self, _account: &str) -> Result<AccountProfile> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SessionManagement,
+        ))
+    }
 }

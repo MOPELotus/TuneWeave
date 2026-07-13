@@ -681,11 +681,11 @@ mod tests {
     #[ignore = "requires live NetEase access"]
     async fn live_weapi_login_status_returns_a_business_code() {
         let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
-        let response = client
-            .request_weapi("/api/w/nuser/account/get", json!({}))
+        let status = client
+            .session_status()
             .await
-            .expect("live WeAPI request succeeds");
-        assert!(response.body["code"].is_number());
+            .expect("live session status succeeds");
+        assert!(!status.authenticated);
     }
 
     #[tokio::test]
