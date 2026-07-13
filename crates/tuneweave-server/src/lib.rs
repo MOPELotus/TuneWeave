@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Capability, PageRequest, Platform, Playlist, ProviderRegistry, ResourceRef, SearchKind,
+    Capability, Lyrics, PageRequest, Platform, Playlist, ProviderRegistry, ResourceRef, SearchKind,
     SearchQuery, Track, TuneWeaveError,
 };
 
@@ -40,6 +40,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
         .route("/tracks/{reference}", get(track))
+        .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/playlists/{reference}", get(playlist))
         .route("/playlists/{reference}/tracks", get(playlist_tracks));
 
@@ -189,6 +190,28 @@ async fn track(
     let provider = state.registry.require(platform)?;
     let track = provider.track(reference.id(), account).await?;
     let mut response = ApiResponse::new(track).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
+async fn track_lyrics(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let lyrics = provider.lyrics(reference.id(), account).await?;
+    let mut response = ApiResponse::new(lyrics).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -357,6 +380,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::PlaylistRead,
+                Capability::Lyrics,
             ])
         }
 
@@ -391,6 +415,19 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                 },
+            })
+        }
+
+        async fn lyrics(&self, id: &str, _account: Option<&str>) -> Result<Lyrics> {
+            Ok(Lyrics {
+                track_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+                plain: Some("[00:01.00]素胚勾勒出青花".to_owned()),
+                translated: None,
+                romanized: None,
+                word_synced: None,
+                format: "lrc".to_owned(),
+                contributors: Vec::new(),
+                extensions: Default::default(),
             })
         }
     }
@@ -537,5 +574,15 @@ mod tests {
         assert_eq!(json["data"][0]["ref"], "netease:123");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn track_lyrics_use_reference_platform() {
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/tracks/netease:185809/lyrics").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "netease:185809");
+        assert_eq!(json["data"]["format"], "lrc");
+        assert_eq!(json["meta"]["platform"], "netease");
     }
 }
