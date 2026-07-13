@@ -210,6 +210,7 @@
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist` |
 | GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]` |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
+| GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/charts` | `platform?` | `Playlist[]`，其中榜单仍用歌单模型表示 |
 | GET | `/v1/charts/{ref}/tracks` | 分页 | `Track[]` |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、分页 | `Track[]` |
@@ -260,7 +261,7 @@
 | GET | `/v1/account` | `platform`、`account?` | 脱敏账户资料与权益摘要 |
 | GET | `/v1/account/playlists` | `platform`、`account?`、分页 | `Playlist[]` |
 | GET | `/v1/account/favorites/tracks` | `platform`、`account?`、分页 | `Track[]` |
-| GET | `/v1/account/history` | `platform`、`account?`、分页 | 带播放时间/次数的 `Track[]` |
+| GET | `/v1/account/history` | `platform`、`account?`、`period=all_time|week`、分页 | `PlaybackHistoryEntry[]`，含 `track`、`play_count`、`score`、`last_played_at` |
 
 `principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 

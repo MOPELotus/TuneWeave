@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=384`、`partial=7`、`implemented=7`、`verified=6`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=383`、`partial=7`、`implemented=8`、`verified=6`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -363,7 +363,7 @@
 | `user_playlist` | `/user/playlist` | `implemented` | `GET /v1/account/playlists`（待真实账户验证） |
 | `user_playlist_collect` | `/user/playlist/collect` | `pending` | — |
 | `user_playlist_create` | `/user/playlist/create` | `pending` | — |
-| `user_record` | `/user/record` | `pending` | — |
+| `user_record` | `/user/record` | `implemented` | `GET /v1/account/history`、`GET /v1/users/{ref}/history`（`all_time/week`；已验证匿名权限错误映射，待真实账户验证） |
 | `user_replacephone` | `/user/replacephone` | `pending` | — |
 | `user_social_status` | `/user/social/status` | `pending` | — |
 | `user_social_status_edit` | `/user/social/status/edit` | `pending` | — |
