@@ -16,8 +16,12 @@ future ports can be audited precisely.
 
 - Source: https://github.com/MOPELotus/Lotus-ReFactor
 - Reviewed commit: `646400c1cf098c3887ef90886617625169fb58de`
-- License: MIT
-- Used for: NetEase Music Partner task protocol and scoring payload research.
+- License: Lotus-ReFactor Source-Available Proprietary License
+- Used for: NetEase Music Partner request logic and implementation details.
+- Authorization: MOPELotus states that they contributed 100% of
+  Lotus-ReFactor and explicitly authorizes TuneWeave to reference and reuse its
+  logic and implementation. The public Lotus-ReFactor license is still recorded
+  here accurately for third-party readers.
 
 ## L-1124/QQMusicApi
 
@@ -27,8 +31,9 @@ future ports can be audited precisely.
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.
 
-TuneWeave is distributed under GPL-3.0-or-later so code derived from this
-research remains under compatible terms.
+QQMusicApi remains under GPL-3.0-or-later. TuneWeave does not copy, translate,
+link, bundle, or redistribute its source code; the Rust implementation is an
+independent implementation of observed request and response behavior.
 
 ## MakcRe/KuGouMusicApi
 
@@ -63,9 +68,8 @@ research remains under compatible terms.
 - Used for: Bilibili identifier parsing, metadata, multipart video, DASH audio
   and video track, authentication, and request header behavior research.
 
-## Full license texts
+## TuneWeave license texts
 
-The complete license text for TuneWeave is in `LICENSE`. When implementation
-code derived from an MIT or Apache-2.0 source is added, its required copyright
-and license notice will be retained with the relevant module and mirrored
-under `licenses/`.
+TuneWeave is available under either MIT or Apache-2.0 at the user's option.
+The choice is summarized in `LICENSE`; complete texts are in `LICENSE-MIT` and
+`LICENSE-APACHE`. Required third-party notices are retained under `licenses/`.

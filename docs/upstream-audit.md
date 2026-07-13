@@ -9,14 +9,14 @@
 | 平台 | 参考项目 | 审阅提交 | 最近提交时间 | 许可证 |
 | --- | --- | --- | --- | --- |
 | 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `6946dc8e14b6fb125191bc43525d4faa8123d8ae` | 2026-07-12 | MIT |
-| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `646400c1cf098c3887ef90886617625169fb58de` | 2026-07-13 | MIT |
+| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `646400c1cf098c3887ef90886617625169fb58de` | 2026-07-13 | Lotus-ReFactor Source-Available Proprietary License |
 | QQ 音乐 | `L-1124/QQMusicApi` | `b859d8e01566b92c27e78dd400f4f8c6950685f2` | 2026-07-12 | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | 2026-06-30 | MIT |
 | 咪咕 | `Domdkw/miguMusic-api-enhanced` | `45cda48aeee995121ff7987a81e52949732a917c` | 2026-07-13 | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | 2023-07-26 | `LICENSE` 为 Apache-2.0，`package.json` 标为 ISC，需在接入前澄清 |
 | B 站 | `MOPELotus/BBDown` | `259a5558cee0a349a7ebb60bd31e40c88e5bc1ed` | 2026-01-10 | MIT |
 
-QQ 音乐实现使用 GPL-3.0-or-later。TuneWeave 在引入其协议实现前采用 GPL-3.0-or-later，并在 `THIRD_PARTY_NOTICES.md` 逐项保留来源、提交和许可证信息。其他实现也只根据公开协议与算法重写 Rust 代码，不复制整段上游源码。
+TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续约束各项目自身源码；TuneWeave 不复制、翻译、链接、打包或再分发 QQMusicApi 等参考项目的源码，只独立实现经观察确认的请求与响应协议。`Lotus-ReFactor` 对外仍准确标注其 Source-Available Proprietary License；MOPELotus 声明其贡献了该项目的全部代码，并明确授权 TuneWeave 参考和复用其中的逻辑与实现。所有来源、固定提交和实际保留的第三方许可文本记录在 `THIRD_PARTY_NOTICES.md` 与 `licenses/`。
 
 ## 源码结构与可复用逻辑
 
