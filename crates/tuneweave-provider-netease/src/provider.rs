@@ -407,15 +407,17 @@ impl MusicProvider for NeteaseProvider {
         let account = request.account.as_deref().unwrap_or("default");
         let client = self.client_for(Some(account))?;
         let user_id = authenticated_user_id(&client, account).await?;
-        let response = client
-            .request_eapi("/api/song/like/get", json!({ "uid": user_id }))
-            .await?;
-        ensure_success(&response.body)?;
-        let response: LikedTracksEnvelope = parse_body(response.body)?;
-        let limit = request.limit.clamp(1, 100);
-        let (selected_ids, pagination) = select_id_page(response.ids, limit, request.offset);
-        let items = fetch_tracks_by_ids(&client, &selected_ids).await?;
-        Ok(Page { items, pagination })
+        fetch_favorite_tracks(&client, &user_id, request).await
+    }
+
+    async fn user_favorite_tracks(
+        &self,
+        user_id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<Track>> {
+        let user_id = parse_numeric_id("user", user_id)?.to_string();
+        let client = self.client_for(request.account.as_deref())?;
+        fetch_favorite_tracks(&client, &user_id, request).await
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -680,6 +682,22 @@ async fn fetch_tracks_by_ids(client: &NeteaseClient, ids: &[u64]) -> Result<Vec<
                 .map(|song| map_song(song, privileges.remove(id)))
         })
         .collect()
+}
+
+async fn fetch_favorite_tracks(
+    client: &NeteaseClient,
+    user_id: &str,
+    request: &PageRequest,
+) -> Result<Page<Track>> {
+    let response = client
+        .request_eapi("/api/song/like/get", json!({ "uid": user_id }))
+        .await?;
+    ensure_success(&response.body)?;
+    let response: LikedTracksEnvelope = parse_body(response.body)?;
+    let limit = request.limit.clamp(1, 100);
+    let (selected_ids, pagination) = select_id_page(response.ids, limit, request.offset);
+    let items = fetch_tracks_by_ids(client, &selected_ids).await?;
+    Ok(Page { items, pagination })
 }
 
 fn select_id_page(ids: Vec<u64>, limit: u32, offset: u32) -> (Vec<u64>, PageMeta) {
@@ -1606,6 +1624,32 @@ mod tests {
         .await
         .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn user_favorite_tracks_validate_user_and_account_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let invalid_user = MusicProvider::user_favorite_tracks(
+            &provider,
+            "not-a-number",
+            &PageRequest::new(30, 0),
+        )
+        .await
+        .expect_err("invalid user id");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
+
+        let missing_account = MusicProvider::user_favorite_tracks(
+            &provider,
+            "32953014",
+            &PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(missing_account.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
