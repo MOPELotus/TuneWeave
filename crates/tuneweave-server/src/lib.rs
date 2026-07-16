@@ -16,14 +16,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistListRequest, ArtistStats, ArtistVideoListRequest, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    ArtistListRequest, ArtistStats, ArtistUpdatesRequest, ArtistVideoListRequest,
+    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
+    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -208,6 +209,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account", get(account_profile))
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
+        .route(
+            "/account/following/artists/new-videos",
+            get(account_artist_new_videos),
+        )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
         .route("/extensions/netease/api", post(netease_extension_api));
@@ -1486,6 +1491,40 @@ async fn account_albums(
     ))
 }
 
+#[derive(Default, Deserialize)]
+struct ArtistUpdatesParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    before: Option<String>,
+}
+
+async fn account_artist_new_videos(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistUpdatesParams>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_artist_new_videos(&ArtistUpdatesRequest {
+            limit,
+            before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_favorite_tracks(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -1822,6 +1861,20 @@ fn parse_u32_parameter(
     })
 }
 
+fn parse_optional_u64_parameter(
+    name: &str,
+    value: Option<&str>,
+) -> Result<Option<u64>, TuneWeaveError> {
+    value
+        .map(|value| {
+            value.parse().map_err(|_| {
+                TuneWeaveError::invalid_request(format!("{name} must be an unsigned integer"))
+                    .with_details(json!({ "parameter": name, "value": value }))
+            })
+        })
+        .transpose()
+}
+
 fn parse_optional_u16_parameter(
     name: &str,
     value: Option<&str>,
@@ -1900,6 +1953,7 @@ mod tests {
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
+                Capability::AccountArtistNewVideos,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -2239,6 +2293,32 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions,
+                },
+            })
+        }
+
+        async fn account_artist_new_videos(
+            &self,
+            request: &ArtistUpdatesRequest,
+        ) -> Result<Page<Video>> {
+            let mut video = sample_video("1099001");
+            video.title = "新 MV".to_owned();
+            video.extensions.insert(
+                "account".to_owned(),
+                json!(request.account.as_deref().unwrap_or("default")),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("before_ms".to_owned(), json!(request.before_ms));
+            extensions.insert("next_before_ms".to_owned(), json!(1_720_000_000_000_u64));
+            Ok(Page {
+                items: vec![video],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: None,
+                    next_offset: None,
+                    has_more: true,
                     extensions,
                 },
             })
@@ -3259,6 +3339,30 @@ mod tests {
         assert_eq!(
             json["meta"]["pagination"]["extensions"]["response"]["paidCount"],
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn account_artist_new_videos_use_platform_account_and_timestamp_cursor() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists/new-videos?platform=netease&account=personal&limit=2&before=1730000000000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:1099001");
+        assert_eq!(json["data"][0]["title"], "新 MV");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["before_ms"],
+            1_730_000_000_000_u64
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["next_before_ms"],
+            1_720_000_000_000_u64
         );
     }
 
