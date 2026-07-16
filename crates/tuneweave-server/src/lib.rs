@@ -18,8 +18,8 @@ use tuneweave_core::{
     AccountProfile, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
     MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, Track,
-    TuneWeaveError,
+    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
+    StreamResolver, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -165,6 +165,8 @@ pub fn build_router(state: AppState) -> Router {
             get(user_favorite_tracks),
         )
         .route("/users/{reference}/history", get(user_history))
+        .route("/recommendations/tracks", get(recommended_tracks))
+        .route("/recommendations/playlists", get(recommended_playlists))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
@@ -557,6 +559,67 @@ async fn user_history(
             .with_account(account)
             .with_pagination(page.pagination),
     ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RecommendationParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    refresh: Option<String>,
+}
+
+async fn recommended_tracks(
+    State(state): State<AppState>,
+    Query(params): Query<RecommendationParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let request = recommendation_request(&params, account.clone())?;
+    let provider = state.registry.require(platform)?;
+    let page = provider.recommended_tracks(&request).await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn recommended_playlists(
+    State(state): State<AppState>,
+    Query(params): Query<RecommendationParams>,
+) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let request = recommendation_request(&params, account.clone())?;
+    let provider = state.registry.require(platform)?;
+    let page = provider.recommended_playlists(&request).await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+fn recommendation_request(
+    params: &RecommendationParams,
+    account: String,
+) -> Result<RecommendationRequest, TuneWeaveError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "limit must be between 1 and 100",
+        ));
+    }
+    Ok(RecommendationRequest {
+        limit,
+        offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
+        account: Some(account),
+        refresh: parse_bool_parameter("refresh", params.refresh.as_deref(), false)?,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1154,6 +1217,7 @@ mod tests {
                 Capability::AccountPlaylists,
                 Capability::Favorites,
                 Capability::ListeningHistory,
+                Capability::Recommendations,
             ])
         }
 
@@ -1257,6 +1321,39 @@ mod tests {
         ) -> Result<Page<PlaybackHistoryEntry>> {
             Ok(Page {
                 items: vec![sample_history(user_id)],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
+            let mut track = sample_track("185809");
+            track
+                .extensions
+                .insert("refresh".to_owned(), json!(request.refresh));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
+        }
+
+        async fn recommended_playlists(
+            &self,
+            request: &RecommendationRequest,
+        ) -> Result<Page<Playlist>> {
+            Ok(Page {
+                items: vec![sample_playlist("99")],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -1792,6 +1889,41 @@ mod tests {
         let (status, json) = json_response_from(
             test_app_with_provider(),
             "/v1/users/netease:32953014/history?period=month",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn recommendation_endpoints_share_platform_account_and_pagination() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/tracks?platform=netease&account=personal&refresh=true&limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:185809");
+        assert_eq!(tracks["data"][0]["extensions"]["refresh"], true);
+        assert_eq!(tracks["meta"]["platform"], "netease");
+        assert_eq!(tracks["meta"]["account"], "personal");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 10);
+
+        let (status, playlists) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/playlists?platform=netease&account=personal&limit=5",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(playlists["data"][0]["ref"], "netease:99");
+        assert_eq!(playlists["meta"]["pagination"]["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn recommendation_refresh_rejects_invalid_booleans() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/tracks?refresh=sometimes",
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
