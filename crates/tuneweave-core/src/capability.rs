@@ -49,6 +49,7 @@ pub enum Capability {
     QrLogin,
     PasswordLogin,
     PhoneLogin,
+    CountryCallingCodes,
     ChallengeValidation,
     PrincipalStatus,
     SessionManagement,
@@ -108,6 +109,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::PrincipalStatus).expect("serialize capability"),
             serde_json::json!("principal_status")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::CountryCallingCodes)
+                .expect("serialize country calling codes capability"),
+            serde_json::json!("country_calling_codes")
         );
         assert_eq!(
             serde_json::to_value(Capability::SearchRadioStations)

@@ -586,6 +586,27 @@ pub struct CommentReportResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CountryCallingCodeListRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CountryCallingCode {
+    pub calling_code: String,
+    pub region_code: String,
+    pub name: String,
+    pub english_name: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CountryCallingCodeGroup {
+    pub label: String,
+    pub entries: Vec<CountryCallingCode>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommentListView {
@@ -2437,5 +2458,26 @@ mod tests {
         assert_eq!(result["comment_id"], "123456789");
         assert_eq!(result["reason"], "人身攻击");
         assert_eq!(result["submitted"], true);
+    }
+
+    #[test]
+    fn country_calling_codes_keep_group_and_localized_names_explicit() {
+        let groups = vec![CountryCallingCodeGroup {
+            label: "常用".to_owned(),
+            entries: vec![CountryCallingCode {
+                calling_code: "86".to_owned(),
+                region_code: "CN".to_owned(),
+                name: "中国".to_owned(),
+                english_name: "China".to_owned(),
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        }];
+        let value = serde_json::to_value(groups).expect("serialize country calling codes");
+        assert_eq!(value[0]["label"], "常用");
+        assert_eq!(value[0]["entries"][0]["calling_code"], "86");
+        assert_eq!(value[0]["entries"][0]["region_code"], "CN");
+        assert_eq!(value[0]["entries"][0]["name"], "中国");
+        assert_eq!(value[0]["entries"][0]["english_name"], "China");
     }
 }

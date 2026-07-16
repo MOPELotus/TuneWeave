@@ -13,12 +13,13 @@ use crate::{
     CommentDeleteRequest, CommentListRequest, CommentMutationResult, CommentPage,
     CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
     CommentReactionPage, CommentReportRequest, CommentReportResult, CommentThreadStatsBatch,
-    CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page,
-    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
-    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCodeGroup,
+    CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
+    ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page, PageRequest,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
+    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, Result, SearchItem, SearchKind, SearchQuery, StreamRequest,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
     TuneWeaveError, User, Video,
@@ -507,6 +508,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ChallengeValidation,
+        ))
+    }
+
+    async fn country_calling_codes(
+        &self,
+        _request: &CountryCallingCodeListRequest,
+    ) -> Result<Vec<CountryCallingCodeGroup>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CountryCallingCodes,
         ))
     }
 
