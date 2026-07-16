@@ -15,8 +15,8 @@ use tuneweave_core::{
     Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
     PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError,
+    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -267,6 +267,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AlbumList,
             Capability::AlbumStats,
             Capability::AlbumTrackEntitlements,
+            Capability::AlbumSubscriptionWrite,
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
@@ -470,6 +471,20 @@ impl MusicProvider for NeteaseProvider {
             .map(map_track_entitlement)
             .collect::<Result<Vec<_>>>()?;
         Ok(Page { items, pagination })
+    }
+
+    async fn set_album_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let id = parse_numeric_id("album", id)?;
+        let (path, payload) = netease_album_subscription_request(id, subscribed);
+        let client = self.client_for(account)?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_album_subscription_result(id, subscribed, response.body)
     }
 
     async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
@@ -1240,6 +1255,15 @@ fn normalize_digital_album_area(
     })
 }
 
+fn netease_album_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
+    let path = if subscribed {
+        "/api/album/sub"
+    } else {
+        "/api/album/unsub"
+    };
+    (path, json!({ "id": id }))
+}
+
 fn netease_digital_album_chart_request(
     request: &DigitalAlbumChartRequest,
 ) -> Result<(String, Value)> {
@@ -1885,6 +1909,27 @@ fn map_digital_album_chart_entry(raw: Value, position: u32) -> Result<DigitalAlb
     })
 }
 
+fn map_album_subscription_result(
+    id: u64,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid album id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -2306,6 +2351,22 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_maps_netease_album_subscription_actions() {
+        let (path, payload) = netease_album_subscription_request(32311, true);
+        assert_eq!(path, "/api/album/sub");
+        assert_eq!(payload["id"], 32311);
+        let (path, payload) = netease_album_subscription_request(32311, false);
+        assert_eq!(path, "/api/album/unsub");
+        assert_eq!(payload["id"], 32311);
+
+        let result = map_album_subscription_result(32311, true, json!({ "code": 200 }))
+            .expect("map subscription result");
+        assert_eq!(result.resource_ref.to_string(), "netease:32311");
+        assert!(result.subscribed);
+        assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_digital_album_product_to_the_unified_model() {
         let raw = json!({
             "code": 200,
@@ -2671,6 +2732,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AlbumList));
         assert!(capabilities.contains(&Capability::AlbumStats));
         assert!(capabilities.contains(&Capability::AlbumTrackEntitlements));
+        assert!(capabilities.contains(&Capability::AlbumSubscriptionWrite));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
@@ -3095,6 +3157,16 @@ mod tests {
                 .iter()
                 .all(|entitlement| !entitlement.available_qualities.is_empty())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_album_subscription_requires_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::set_album_subscription(&provider, "32311", true, None)
+            .await
+            .expect_err("anonymous album subscription must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
