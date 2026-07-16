@@ -48,6 +48,12 @@ pub(crate) struct ImageUploadAllocation {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct BannerEnvelope {
+    #[serde(default)]
+    pub banners: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct TrackEnvelope {
     #[serde(default)]
     pub songs: Vec<Song>,

@@ -12,16 +12,16 @@ use tuneweave_core::{
     ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
-    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
-    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
-    Video, VideoKind,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Banner,
+    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CreatorSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, ImageUploadRequest,
+    ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -35,7 +35,7 @@ use crate::{
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
         ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
         ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
-        ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality, BannerEnvelope,
         DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
         DigitalAlbumListEnvelope, DigitalAlbumListItem, ImageUploadAllocationEnvelope,
         LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
@@ -276,6 +276,7 @@ impl MusicProvider for NeteaseProvider {
         BTreeSet::from([
             Capability::SearchTracks,
             Capability::AudioRecognition,
+            Capability::Banners,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -397,6 +398,21 @@ impl MusicProvider for NeteaseProvider {
         let raw_response = response.body.clone();
         let response: AudioMatchEnvelope = parse_body(response.body)?;
         map_audio_recognition(response, raw_response)
+    }
+
+    async fn banners(&self, request: &BannerListRequest) -> Result<Vec<Banner>> {
+        let client_type = netease_banner_client(request.client);
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/v2/banner/get", json!({ "clientType": client_type }))
+            .await?;
+        ensure_success(&response.body)?;
+        let response: BannerEnvelope = parse_body(response.body)?;
+        response
+            .banners
+            .into_iter()
+            .map(|banner| map_banner(banner, request.client))
+            .collect()
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1686,6 +1702,95 @@ fn map_audio_recognition(
         no_match_reason: response.data.no_match_reason,
         extensions,
     })
+}
+
+fn netease_banner_client(client: BannerClient) -> &'static str {
+    match client {
+        BannerClient::Pc => "pc",
+        BannerClient::Android => "android",
+        BannerClient::Iphone => "iphone",
+        BannerClient::Ipad => "ipad",
+    }
+}
+
+fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
+    let image_url = ["pic", "imageUrl", "bigImageUrl"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase banner did not contain an image URL",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let target_type = raw.get("targetType").and_then(json_i64);
+    let target_kind = match target_type {
+        Some(1) => BannerTargetKind::Track,
+        Some(10) => BannerTargetKind::Album,
+        Some(100) => BannerTargetKind::Artist,
+        Some(1_000) => BannerTargetKind::Playlist,
+        Some(1_004) => BannerTargetKind::Video,
+        Some(3_000) => BannerTargetKind::Web,
+        _ => BannerTargetKind::Unknown,
+    };
+    let target_ref = raw
+        .get("targetId")
+        .and_then(json_scalar_string)
+        .filter(|id| id != "0")
+        .map(|id| ResourceRef::new(Platform::Netease, id))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase banner returned an invalid target id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("client".to_owned(), json!(client));
+    extensions.insert("banner".to_owned(), raw.clone());
+    Ok(Banner {
+        id: ["bannerId", "adid"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_scalar_string)),
+        title: ["typeTitle", "mainTitle"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned),
+        image_url,
+        target_ref,
+        target_kind,
+        url: raw
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned),
+        exclusive: raw.get("exclusive").and_then(json_bool),
+        extensions,
+    })
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn json_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => value.as_i64().map(|value| value != 0),
+        Value::String(value) if value.eq_ignore_ascii_case("true") || value == "1" => Some(true),
+        Value::String(value) if value.eq_ignore_ascii_case("false") || value == "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn validate_image_upload(request: &ImageUploadRequest) -> Result<(&str, &str)> {
@@ -4082,6 +4187,71 @@ mod tests {
     }
 
     #[test]
+    fn maps_pc_and_mobile_banners_without_losing_target_semantics() {
+        let pc = map_banner(
+            json!({
+                "bigImageUrl": "https://example.test/banner-large.png",
+                "imageUrl": "https://example.test/banner.png",
+                "targetId": 384808686,
+                "targetType": 10,
+                "typeTitle": "新碟首发",
+                "url": "https://music.163.com/album?id=384808686",
+                "s_ctrp": "trace-metadata"
+            }),
+            BannerClient::Pc,
+        )
+        .expect("map PC banner");
+        assert_eq!(pc.id, None);
+        assert_eq!(pc.image_url, "https://example.test/banner.png");
+        assert_eq!(pc.title.as_deref(), Some("新碟首发"));
+        assert_eq!(pc.target_kind, BannerTargetKind::Album);
+        assert_eq!(
+            pc.target_ref.expect("album target").to_string(),
+            "netease:384808686"
+        );
+        assert_eq!(pc.extensions["client"], "pc");
+        assert_eq!(pc.extensions["banner"]["s_ctrp"], "trace-metadata");
+
+        let mobile = map_banner(
+            json!({
+                "bannerId": "1717750403848278",
+                "pic": "https://example.test/mobile.jpg",
+                "targetId": "0",
+                "targetType": "3000",
+                "typeTitle": "独家策划",
+                "url": "https://example.test/event",
+                "exclusive": "false",
+                "monitorClickList": []
+            }),
+            BannerClient::Iphone,
+        )
+        .expect("map mobile banner");
+        assert_eq!(mobile.id.as_deref(), Some("1717750403848278"));
+        assert_eq!(mobile.target_ref, None);
+        assert_eq!(mobile.target_kind, BannerTargetKind::Web);
+        assert_eq!(mobile.exclusive, Some(false));
+        assert_eq!(mobile.extensions["client"], "iphone");
+    }
+
+    #[test]
+    fn banner_mapping_rejects_items_without_any_image() {
+        let error = map_banner(
+            json!({"targetId": 185809, "targetType": 1}),
+            BannerClient::Android,
+        )
+        .expect_err("missing banner image");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn maps_all_banner_clients_to_reference_values() {
+        assert_eq!(netease_banner_client(BannerClient::Pc), "pc");
+        assert_eq!(netease_banner_client(BannerClient::Android), "android");
+        assert_eq!(netease_banner_client(BannerClient::Iphone), "iphone");
+        assert_eq!(netease_banner_client(BannerClient::Ipad), "ipad");
+    }
+
+    #[test]
     fn maps_image_upload_without_exposing_the_nos_token() {
         let allocation: ImageUploadAllocationEnvelope = serde_json::from_value(json!({
             "result": {
@@ -6207,6 +6377,29 @@ mod tests {
         assert!(recognition.matches.is_empty());
         assert!(recognition.no_match_reason.is_some());
         assert!(recognition.extensions.contains_key("response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_banners_cover_every_reference_client() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for client in [
+            BannerClient::Pc,
+            BannerClient::Android,
+            BannerClient::Iphone,
+            BannerClient::Ipad,
+        ] {
+            let banners = MusicProvider::banners(&provider, &BannerListRequest::new(client))
+                .await
+                .expect("live banners");
+            assert!(!banners.is_empty());
+            assert!(banners.iter().all(|banner| !banner.image_url.is_empty()));
+            assert!(
+                banners
+                    .iter()
+                    .all(|banner| banner.extensions["client"] == json!(client))
+            );
+        }
     }
 
     #[tokio::test]
