@@ -29,12 +29,13 @@ use crate::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
-        ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope, ArtistNewVideoItem,
-        ArtistNewVideosEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
-        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
+        ArtistNewTracksEnvelope, ArtistNewVideoItem, ArtistNewVideosEnvelope, ArtistVideoCreator,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -295,6 +296,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
             Capability::AccountArtistNewVideos,
+            Capability::AccountArtistNewTracks,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -848,6 +850,32 @@ impl MusicProvider for NeteaseProvider {
         let raw_response = response.body.clone();
         let response: ArtistNewVideosEnvelope = parse_body(response.body)?;
         map_artist_new_videos_response(response, raw_response, limit, before_ms)
+    }
+
+    async fn account_artist_new_tracks(
+        &self,
+        request: &ArtistUpdatesRequest,
+    ) -> Result<Page<Track>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.clamp(1, 100);
+        let before_ms = match request.before_ms {
+            Some(before_ms) => before_ms,
+            None => unix_millis_now()?,
+        };
+        let response = client
+            .request_weapi(
+                "/api/sub/artist/new/works/song/list",
+                json!({
+                    "limit": limit,
+                    "startTimestamp": before_ms
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "followed artist new tracks")?;
+        let raw_response = response.body.clone();
+        let response: ArtistNewTracksEnvelope = parse_body(response.body)?;
+        map_artist_new_tracks_response(response, raw_response, limit, before_ms)
     }
 
     async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
@@ -2489,6 +2517,47 @@ fn map_artist_new_videos_response(
     })
 }
 
+fn map_artist_new_tracks_response(
+    response: ArtistNewTracksEnvelope,
+    raw_response: Value,
+    limit: u32,
+    before_ms: u64,
+) -> Result<Page<Track>> {
+    let next_before_ms = response
+        .data
+        .new_works
+        .last()
+        .and_then(artist_update_timestamp);
+    let items = response
+        .data
+        .new_works
+        .into_iter()
+        .map(|raw| {
+            let song: Song = parse_body(raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track.extensions.insert("artist_new_track".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let has_more = response.data.has_more.unwrap_or(consumed == limit);
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    extensions.insert("before_ms".to_owned(), json!(before_ms));
+    insert_extension(&mut extensions, "next_before_ms", next_before_ms);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: 0,
+            total: response.data.new_song_count,
+            next_offset: None,
+            has_more,
+            extensions,
+        },
+    })
+}
+
 fn map_artist_new_video(raw: Value) -> Result<Video> {
     let item: ArtistNewVideoItem = parse_body(raw.clone())?;
     let id = item
@@ -3552,6 +3621,69 @@ mod tests {
     }
 
     #[test]
+    fn maps_followed_artist_new_tracks_and_timestamp_cursor() {
+        let raw = json!({
+            "code": 200,
+            "data": {
+                "hasMore": true,
+                "newSongCount": 3,
+                "newWorks": [
+                    {
+                        "id": 2099001,
+                        "name": "新歌",
+                        "alias": ["New Song"],
+                        "artists": [{ "id": 6452, "name": "周杰伦" }],
+                        "album": {
+                            "id": 3099001,
+                            "name": "新专辑",
+                            "picUrl": "https://example.test/new-album.jpg"
+                        },
+                        "duration": 208000,
+                        "mvid": 1099001,
+                        "publishTime": 1_720_000_000_000_u64
+                    }
+                ]
+            }
+        });
+        let response: ArtistNewTracksEnvelope =
+            serde_json::from_value(raw.clone()).expect("new artist tracks fixture");
+
+        let page = map_artist_new_tracks_response(response, raw, 1, 1_730_000_000_000)
+            .expect("map followed artist tracks");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:2099001");
+        assert_eq!(page.items[0].name, "新歌");
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(
+            page.items[0]
+                .album
+                .as_ref()
+                .and_then(|album| album.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:3099001")
+        );
+        assert_eq!(
+            page.items[0]
+                .mv_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:1099001")
+        );
+        assert_eq!(
+            page.items[0].extensions["artist_new_track"]["publishTime"],
+            1_720_000_000_000_u64
+        );
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(
+            page.pagination.extensions["next_before_ms"],
+            1_720_000_000_000_u64
+        );
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_albums_and_cursor_metadata() {
         let response: ArtistAlbumsEnvelope = serde_json::from_value(json!({
             "artist": { "id": 6452, "name": "周杰伦", "albumSize": 42 },
@@ -4106,6 +4238,17 @@ mod tests {
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[tokio::test]
+    async fn followed_artist_new_tracks_require_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = ArtistUpdatesRequest::new(20);
+        request.account = Some("collector".to_owned());
+        let error = MusicProvider::account_artist_new_tracks(&provider, &request)
+            .await
+            .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[test]
     fn maps_netease_lyrics_and_contributors() {
         let lyrics: LyricsEnvelope = serde_json::from_value(json!({
@@ -4263,6 +4406,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::AccountAlbums));
         assert!(capabilities.contains(&Capability::AccountArtistNewVideos));
+        assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
@@ -4864,6 +5008,24 @@ mod tests {
                 .expect("live followed artist new videos");
         assert!(page.items.len() <= 2);
         assert!(page.items.iter().all(|video| !video.title.is_empty()));
+        assert!(page.pagination.extensions.contains_key("response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NETEASE_COOKIE for a live logged-in account"]
+    async fn live_account_followed_artist_new_tracks() {
+        let cookie = std::env::var("NETEASE_COOKIE").expect("NETEASE_COOKIE must be set");
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            cookie: Some(cookie),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let page =
+            MusicProvider::account_artist_new_tracks(&provider, &ArtistUpdatesRequest::new(2))
+                .await
+                .expect("live followed artist new tracks");
+        assert!(page.items.len() <= 2);
+        assert!(page.items.iter().all(|track| !track.name.is_empty()));
         assert!(page.pagination.extensions.contains_key("response"));
     }
 
