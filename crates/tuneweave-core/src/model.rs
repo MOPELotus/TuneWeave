@@ -118,6 +118,41 @@ pub struct SearchTrendingList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSuggestionClient {
+    #[default]
+    Web,
+    Mobile,
+    Pc,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchSuggestionRequest {
+    pub query: String,
+    pub client: SearchSuggestionClient,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchSuggestion {
+    pub keyword: String,
+    pub kind: Option<SearchKind>,
+    pub display_text: Option<String>,
+    pub icon_url: Option<String>,
+    pub resource: Option<SearchItem>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchSuggestionList {
+    pub query: String,
+    pub client: SearchSuggestionClient,
+    pub suggestions: Vec<SearchSuggestion>,
+    pub recommendations: Vec<SearchSuggestion>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -2296,6 +2331,37 @@ mod tests {
         assert_eq!(value["entries"][0]["keyword"], "薛之谦");
         assert_eq!(value["entries"][0]["score"], 107_509);
         assert_eq!(value["entries"][0]["icon_type"], 4);
+    }
+
+    #[test]
+    fn search_suggestions_keep_client_resources_and_recommendations_separate() {
+        let list = SearchSuggestionList {
+            query: "海阔天空".to_owned(),
+            client: SearchSuggestionClient::Web,
+            suggestions: vec![SearchSuggestion {
+                keyword: "海阔天空".to_owned(),
+                kind: Some(SearchKind::Track),
+                display_text: None,
+                icon_url: None,
+                resource: Some(SearchItem::Track(Track::new(
+                    ResourceRef::new(Platform::Netease, "1357375695")
+                        .expect("valid suggestion track"),
+                    "海阔天空",
+                ))),
+                extensions: Extensions::new(),
+            }],
+            recommendations: Vec::new(),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize search suggestions");
+        assert_eq!(value["client"], "web");
+        assert_eq!(value["suggestions"][0]["kind"], "track");
+        assert_eq!(value["suggestions"][0]["resource"]["type"], "track");
+        assert_eq!(
+            value["suggestions"][0]["resource"]["data"]["ref"],
+            "netease:1357375695"
+        );
+        assert_eq!(value["recommendations"], serde_json::json!([]));
     }
 
     #[test]
