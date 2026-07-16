@@ -24,15 +24,16 @@ use tuneweave_core::{
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
     AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthState, Banner, BannerClient, BannerListRequest, Capability, ChallengeMethod, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
-    Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
+    BannerListRequest, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream,
+    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult,
+    Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -219,6 +220,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/password", post(auth_password))
         .route("/auth/challenges", post(auth_challenge_start))
         .route("/auth/challenges/validate", post(auth_challenge_validate))
+        .route("/auth/principals/status", post(auth_principal_status))
         .route(
             "/auth/challenges/{transaction_id}/verify",
             post(auth_challenge_verify),
@@ -1701,6 +1703,47 @@ struct AuthChallengeValidationBody {
     country_code: Option<Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthPrincipalStatusBody {
+    platform: String,
+    account: Option<String>,
+    principal_type: Option<PrincipalType>,
+    #[serde(alias = "phone")]
+    principal: Value,
+    #[serde(default, alias = "countrycode", alias = "countryCode")]
+    country_code: Option<Value>,
+}
+
+async fn auth_principal_status(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthPrincipalStatusBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthPrincipalStatus>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let principal = required_string_or_number("principal", &body.principal)?;
+    let country_code = match body.country_code.as_ref() {
+        None => "86".to_owned(),
+        Some(Value::String(value)) if value.trim().is_empty() => "86".to_owned(),
+        Some(value) => required_string_or_number("country_code", value)?,
+    };
+    let provider = state.registry.require(platform)?;
+    let status = provider
+        .auth_principal_status(&AuthPrincipalStatusRequest {
+            account: account.clone(),
+            principal_type: body.principal_type.unwrap_or(PrincipalType::Phone),
+            principal,
+            country_code: Some(country_code),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(status)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn auth_challenge_validate(
     State(state): State<AppState>,
     payload: Result<Json<AuthChallengeValidationBody>, JsonRejection>,
@@ -2890,6 +2933,7 @@ mod tests {
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
                 Capability::ChallengeValidation,
+                Capability::PrincipalStatus,
                 Capability::SessionManagement,
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
@@ -3760,6 +3804,38 @@ mod tests {
                 valid,
                 platform_code: Some(platform_code.to_owned()),
                 message: (!valid).then(|| "invalid challenge code".to_owned()),
+                extensions,
+            })
+        }
+
+        async fn auth_principal_status(
+            &self,
+            request: &AuthPrincipalStatusRequest,
+        ) -> Result<AuthPrincipalStatus> {
+            if request.principal_type != PrincipalType::Phone {
+                return Err(TuneWeaveError::invalid_request(
+                    "test principal status only supports phone numbers",
+                )
+                .with_platform(Platform::Netease));
+            }
+            let valid_country_code = request.country_code.as_deref() == Some("86");
+            let exists = valid_country_code && request.principal == "13800138000";
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "response".to_owned(),
+                json!({
+                    "code": 200,
+                    "exist": if exists { 1 } else { -1 },
+                    "cellphone": if exists { "138****8000" } else { "1" }
+                }),
+            );
+            Ok(AuthPrincipalStatus {
+                principal_type: request.principal_type,
+                exists,
+                has_password: Some(exists),
+                display_name: exists.then(|| "masked-user".to_owned()),
+                avatar_url: exists.then(|| "https://example.test/avatar.jpg".to_owned()),
+                platform_code: Some("200".to_owned()),
                 extensions,
             })
         }
@@ -4962,6 +5038,102 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(verified["data"]["state"], "confirmed");
         assert_eq!(verified["data"]["profile"]["account"], "sms-account");
+    }
+
+    #[tokio::test]
+    async fn principal_status_accepts_reference_and_unified_phone_fields() {
+        let (status, registered) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/principals/status",
+            Some(json!({
+                "platform": "netease",
+                "account": "lookup-account",
+                "phone": 13800138000_u64,
+                "countrycode": 86
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registered["data"]["principal_type"], "phone");
+        assert_eq!(registered["data"]["exists"], true);
+        assert_eq!(registered["data"]["has_password"], true);
+        assert_eq!(registered["data"]["display_name"], "masked-user");
+        assert_eq!(registered["data"]["platform_code"], "200");
+        assert_eq!(
+            registered["data"]["extensions"]["response"]["cellphone"],
+            "138****8000"
+        );
+        assert_eq!(registered["meta"]["platform"], "netease");
+        assert_eq!(registered["meta"]["account"], "lookup-account");
+        let serialized = serde_json::to_string(&registered).expect("serialize status response");
+        assert!(!serialized.contains("13800138000"));
+
+        let (status, unregistered) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/principals/status",
+            Some(json!({
+                "platform": "netease",
+                "principal_type": "phone",
+                "principal": "1",
+                "country_code": ""
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unregistered["data"]["exists"], false);
+        assert_eq!(unregistered["data"]["has_password"], false);
+        assert!(unregistered["data"]["display_name"].is_null());
+        assert_eq!(unregistered["meta"]["account"], "default");
+
+        let (status, camel_country) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/principals/status",
+            Some(json!({
+                "platform": "netease",
+                "phone": "1",
+                "countryCode": "86"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(camel_country["data"]["exists"], false);
+    }
+
+    #[tokio::test]
+    async fn principal_status_rejects_unsupported_types_and_non_scalar_values() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/principals/status",
+            Some(json!({
+                "platform": "netease",
+                "principal_type": "email",
+                "principal": "private@example.test"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+        let serialized = serde_json::to_string(&json).expect("serialize unsupported response");
+        assert!(!serialized.contains("private@example.test"));
+
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/principals/status",
+            Some(json!({
+                "platform": "netease",
+                "principal": ["private"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+        let serialized = serde_json::to_string(&json).expect("serialize invalid response");
+        assert!(!serialized.contains("private"));
     }
 
     #[tokio::test]
