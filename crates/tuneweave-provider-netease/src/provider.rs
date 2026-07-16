@@ -32,18 +32,18 @@ use tuneweave_core::{
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
     ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult,
-    LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest,
-    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
-    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
-    User, Video, VideoKind,
+    LyricContributor, Lyrics, MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 use url::Url;
 
@@ -317,6 +317,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchSuggestions,
             Capability::SearchMultiMatch,
             Capability::SearchLocalTrackMatch,
+            Capability::UserMembership,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -532,6 +533,23 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_api(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_local_track_match(&md5, response.body)
+    }
+
+    async fn user_membership(
+        &self,
+        id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<MembershipSummary> {
+        let id = id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| parse_numeric_id("user", id))
+            .transpose()?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_user_membership_request(id);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_user_membership(id, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7806,6 +7824,66 @@ fn map_netease_local_track_match(md5: &str, response: Value) -> Result<LocalTrac
     })
 }
 
+fn netease_user_membership_request(id: Option<u64>) -> (&'static str, Value) {
+    (
+        "/api/music-vip-membership/front/vip/info",
+        json!({ "userId": id.map(|id| id.to_string()).unwrap_or_default() }),
+    )
+}
+
+fn map_netease_user_membership(id: Option<u64>, response: Value) -> Result<MembershipSummary> {
+    let data = response
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase user membership response is missing its data object",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let level = data
+        .get("redVipLevel")
+        .and_then(json_u64)
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase user membership level exceeds the supported range",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "level": data.get("redVipLevel") }))
+        })?;
+    let annual_count = data.get("redVipAnnualCount").and_then(json_i64);
+    let icon_url = data
+        .get("redVipLevelIcon")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let user_ref = id
+        .map(|id| ResourceRef::new(Platform::Netease, id.to_string()))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid membership user id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    Ok(MembershipSummary {
+        user_ref,
+        level,
+        active: None,
+        annual_count,
+        expires_at: None,
+        icon_url,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -8665,6 +8743,79 @@ mod tests {
     }
 
     #[test]
+    fn user_membership_matches_public_and_current_account_request_branches() {
+        assert_eq!(
+            netease_user_membership_request(Some(32_953_014)),
+            (
+                "/api/music-vip-membership/front/vip/info",
+                json!({"userId": "32953014"})
+            )
+        );
+        assert_eq!(
+            netease_user_membership_request(None),
+            (
+                "/api/music-vip-membership/front/vip/info",
+                json!({"userId": ""})
+            )
+        );
+
+        let membership = map_netease_user_membership(
+            Some(32_953_014),
+            json!({
+                "code": 200,
+                "data": {
+                    "redVipAnnualCount": -1,
+                    "redVipDynamicIconUrl": null,
+                    "redVipDynamicIconUrl2": null,
+                    "redVipLevel": 7,
+                    "redVipLevelIcon": "https://example.test/red-vip.png"
+                },
+                "message": "成功"
+            }),
+        )
+        .expect("map public user membership");
+        assert_eq!(
+            membership
+                .user_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:32953014")
+        );
+        assert_eq!(membership.level, Some(7));
+        assert_eq!(membership.annual_count, Some(-1));
+        assert_eq!(
+            membership.icon_url.as_deref(),
+            Some("https://example.test/red-vip.png")
+        );
+        assert_eq!(membership.active, None);
+        assert_eq!(membership.expires_at, None);
+        assert_eq!(membership.extensions["response"]["message"], "成功");
+
+        let current =
+            map_netease_user_membership(None, json!({"code": 200, "data": {"redVipLevel": 0}}))
+                .expect("map current account membership");
+        assert!(current.user_ref.is_none());
+        assert_eq!(current.level, Some(0));
+    }
+
+    #[test]
+    fn user_membership_rejects_missing_data_and_out_of_range_levels() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": []}),
+            json!({"code": 200, "data": {"redVipLevel": 4294967296_u64}}),
+        ] {
+            assert_eq!(
+                map_netease_user_membership(Some(1), response)
+                    .expect_err("malformed user membership")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -8995,6 +9146,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SearchSuggestions));
         assert!(capabilities.contains(&Capability::SearchMultiMatch));
         assert!(capabilities.contains(&Capability::SearchLocalTrackMatch));
+        assert!(capabilities.contains(&Capability::UserMembership));
     }
 
     #[test]
@@ -13995,6 +14147,27 @@ mod tests {
         assert!(no_match.matches.is_empty());
         assert_eq!(no_match.extensions["matched_ids"], json!([]));
         assert_eq!(no_match.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_user_membership_covers_public_user_and_current_account_auth() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let public = MusicProvider::user_membership(&provider, Some("32953014"), None)
+            .await
+            .expect("live public user membership");
+        assert_eq!(
+            public.user_ref.as_ref().map(ToString::to_string).as_deref(),
+            Some("netease:32953014")
+        );
+        assert_eq!(public.level, Some(7));
+        assert_eq!(public.extensions["response"]["code"], 200);
+
+        let error = MusicProvider::user_membership(&provider, None, None)
+            .await
+            .expect_err("anonymous current membership should require authentication");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["upstream_code"], 301);
     }
 
     #[tokio::test]
