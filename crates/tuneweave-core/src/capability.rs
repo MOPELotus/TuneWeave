@@ -42,6 +42,7 @@ pub enum Capability {
     PasswordLogin,
     PhoneLogin,
     ChallengeValidation,
+    PrincipalStatus,
     SessionManagement,
     AccountProfile,
     AccountPlaylists,
@@ -84,6 +85,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::ChallengeValidation).expect("serialize capability"),
             serde_json::json!("challenge_validation")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PrincipalStatus).expect("serialize capability"),
+            serde_json::json!("principal_status")
         );
     }
 }

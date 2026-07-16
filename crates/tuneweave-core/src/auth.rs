@@ -125,6 +125,37 @@ pub struct AuthChallengeValidation {
     pub extensions: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthPrincipalStatusRequest {
+    pub account: String,
+    pub principal_type: PrincipalType,
+    pub principal: String,
+    pub country_code: Option<String>,
+}
+
+impl fmt::Debug for AuthPrincipalStatusRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthPrincipalStatusRequest")
+            .field("account", &self.account)
+            .field("principal_type", &self.principal_type)
+            .field("principal", &"[redacted]")
+            .field("country_code", &self.country_code)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthPrincipalStatus {
+    pub principal_type: PrincipalType,
+    pub exists: bool,
+    pub has_password: Option<bool>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub platform_code: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderQrStart {
     pub provider_transaction_id: String,
@@ -172,10 +203,17 @@ mod tests {
             principal: "13800138000".to_owned(),
             country_code: Some("86".to_owned()),
         };
-        let output = format!("{password:?} {challenge:?}");
+        let status = AuthPrincipalStatusRequest {
+            account: "default".to_owned(),
+            principal_type: PrincipalType::Phone,
+            principal: "13900139000".to_owned(),
+            country_code: Some("86".to_owned()),
+        };
+        let output = format!("{password:?} {challenge:?} {status:?}");
         assert!(!output.contains("secret@example.test"));
         assert!(!output.contains("password-secret"));
         assert!(!output.contains("13800138000"));
+        assert!(!output.contains("13900139000"));
     }
 
     #[test]

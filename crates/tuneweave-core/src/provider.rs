@@ -6,14 +6,14 @@ use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest,
     ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
-    AuthChallengeRequest, AuthChallengeValidation, Banner, BannerListRequest, Capability,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest,
-    ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TuneWeaveError, User, Video,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    Banner, BannerListRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -457,6 +457,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ChallengeValidation,
+        ))
+    }
+
+    async fn auth_principal_status(
+        &self,
+        _request: &AuthPrincipalStatusRequest,
+    ) -> Result<AuthPrincipalStatus> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PrincipalStatus,
         ))
     }
 
