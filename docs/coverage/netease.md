@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=378`、`partial=7`、`implemented=9`、`verified=10`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=377`、`partial=7`、`implemented=9`、`verified=11`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -17,7 +17,7 @@
 | `aidj_content_rcmd` | `/aidj/content/rcmd` | `pending` | — |
 | `album` | `/album` | `verified` | `GET /v1/albums/{ref}`、`GET /v1/albums/{ref}/tracks`（2026-07-16 HTTP 实测 `netease:18915` 返回《范特西》及 10 首曲目） |
 | `album_detail` | `/album/detail` | `verified` | `GET /v1/digital-albums/{ref}`（与 `/digitalAlbum/detail` 共用上游协议；2026-07-16 HTTP 实测 `netease:120605500` 返回《冀西南林路行》及 22 CNY 商品信息） |
-| `album_detail_dynamic` | `/album/detail/dynamic` | `pending` | — |
+| `album_detail_dynamic` | `/album/detail/dynamic` | `verified` | `GET /v1/albums/{ref}/stats`（2026-07-16 HTTP 实测 `netease:32311` 返回收藏状态、71671 收藏、1989 评论及 9306 分享） |
 | `album_list` | `/album/list` | `pending` | — |
 | `album_list_style` | `/album/list/style` | `pending` | — |
 | `album_new` | `/album/new` | `pending` | — |
