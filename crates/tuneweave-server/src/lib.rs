@@ -213,6 +213,10 @@ pub fn build_router(state: AppState) -> Router {
             "/account/following/artists/new-videos",
             get(account_artist_new_videos),
         )
+        .route(
+            "/account/following/artists/new-tracks",
+            get(account_artist_new_tracks),
+        )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
         .route("/extensions/netease/api", post(netease_extension_api));
@@ -1525,6 +1529,32 @@ async fn account_artist_new_videos(
     ))
 }
 
+async fn account_artist_new_tracks(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistUpdatesParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_artist_new_tracks(&ArtistUpdatesRequest {
+            limit,
+            before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_favorite_tracks(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -1954,6 +1984,7 @@ mod tests {
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
                 Capability::AccountArtistNewVideos,
+                Capability::AccountArtistNewTracks,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -2317,6 +2348,32 @@ mod tests {
                     limit: request.limit,
                     offset: 0,
                     total: None,
+                    next_offset: None,
+                    has_more: true,
+                    extensions,
+                },
+            })
+        }
+
+        async fn account_artist_new_tracks(
+            &self,
+            request: &ArtistUpdatesRequest,
+        ) -> Result<Page<Track>> {
+            let mut track = sample_track("2099001");
+            track.name = "新歌".to_owned();
+            track.extensions.insert(
+                "account".to_owned(),
+                json!(request.account.as_deref().unwrap_or("default")),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("before_ms".to_owned(), json!(request.before_ms));
+            extensions.insert("next_before_ms".to_owned(), json!(1_720_000_000_000_u64));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(3),
                     next_offset: None,
                     has_more: true,
                     extensions,
@@ -3356,6 +3413,31 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["before_ms"],
+            1_730_000_000_000_u64
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["next_before_ms"],
+            1_720_000_000_000_u64
+        );
+    }
+
+    #[tokio::test]
+    async fn account_artist_new_tracks_use_platform_account_and_timestamp_cursor() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists/new-tracks?platform=netease&account=personal&limit=2&before=1730000000000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:2099001");
+        assert_eq!(json["data"][0]["name"], "新歌");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["total"], 3);
         assert_eq!(
             json["meta"]["pagination"]["extensions"]["before_ms"],
             1_730_000_000_000_u64
