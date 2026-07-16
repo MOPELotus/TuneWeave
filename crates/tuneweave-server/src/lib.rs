@@ -45,8 +45,8 @@ use tuneweave_core::{
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -1407,44 +1407,89 @@ async fn track_lyrics(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StreamParams {
+    #[serde(alias = "level")]
     quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
+    unblock: Option<String>,
+    source: Option<String>,
     account: Option<String>,
 }
 
 async fn track_stream(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<StreamParams>,
+    params: Result<Query<StreamParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MediaStream>>, ApiError> {
+    let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let quality = parse_quality(params.quality.as_deref())?;
-    let fallback = parse_bool_parameter("fallback", params.fallback.as_deref(), true)?;
-    let preferred_platform = params
-        .playback_platform
-        .as_deref()
-        .map(parse_platform_parameter)
-        .transpose()?;
-    let fallback_platforms = parse_platform_list(params.fallback_platforms.as_deref())?;
-    let mut playback_platforms = Vec::new();
-    if let Some(platform) = preferred_platform {
-        playback_platforms.push(platform);
-    } else if !fallback_platforms.is_empty() {
-        playback_platforms.push(reference.platform());
-    }
-    playback_platforms.extend(fallback_platforms);
+    let variant = parse_stream_variant(params.variant.as_deref())?;
+    let unblock = parse_bool_parameter("unblock", params.unblock.as_deref(), false)?;
+    let requested_fallback = parse_bool_parameter("fallback", params.fallback.as_deref(), true)?;
+    let (fallback, playback_platforms, account_platform) = if unblock {
+        if params.playback_platform.is_some() || params.fallback_platforms.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "unblock cannot be combined with playback_platform or fallback_platforms",
+            )
+            .with_details(json!({
+                "conflicts": ["playback_platform", "fallback_platforms"]
+            }))
+            .into());
+        }
+        let source = params
+            .source
+            .as_deref()
+            .map(parse_platform_parameter)
+            .transpose()?;
+        let mut platforms = source.map_or_else(
+            || {
+                vec![
+                    Platform::Qq,
+                    Platform::Kugou,
+                    Platform::Kuwo,
+                    Platform::Migu,
+                ]
+            },
+            |source| vec![source],
+        );
+        platforms.push(reference.platform());
+        let account_platform = platforms[0];
+        (true, platforms, account_platform)
+    } else {
+        let preferred_platform = params
+            .playback_platform
+            .as_deref()
+            .map(parse_platform_parameter)
+            .transpose()?;
+        let fallback_platforms = parse_platform_list(params.fallback_platforms.as_deref())?;
+        let mut platforms = Vec::new();
+        if let Some(platform) = preferred_platform {
+            platforms.push(platform);
+        } else if !fallback_platforms.is_empty() {
+            platforms.push(reference.platform());
+        }
+        platforms.extend(fallback_platforms);
+        (
+            requested_fallback,
+            platforms,
+            preferred_platform.unwrap_or(reference.platform()),
+        )
+    };
     let account = params
         .account
         .as_deref()
         .map(str::trim)
         .filter(|account| !account.is_empty())
         .map(str::to_owned);
-    let account_platform = preferred_platform.unwrap_or(reference.platform());
     let mut request = ResolveRequest {
         quality,
+        variant,
         playback_platforms,
         fallback,
         ..ResolveRequest::default()
@@ -4070,14 +4115,42 @@ fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
         "auto" => Ok(Quality::Auto),
         "low" => Ok(Quality::Low),
         "standard" => Ok(Quality::Standard),
-        "high" => Ok(Quality::High),
+        "higher" => Ok(Quality::Higher),
+        "high" | "exhigh" => Ok(Quality::High),
         "lossless" => Ok(Quality::Lossless),
-        "hires" => Ok(Quality::Hires),
-        "spatial" => Ok(Quality::Spatial),
-        "master" => Ok(Quality::Master),
+        "hires" | "hi_res" => Ok(Quality::Hires),
+        "surround" | "jyeffect" => Ok(Quality::Surround),
+        "spatial" | "sky" => Ok(Quality::Spatial),
+        "dolby" | "atmos" => Ok(Quality::Dolby),
+        "master" | "jymaster" => Ok(Quality::Master),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported quality: {value}")).with_details(
+                json!({
+                    "allowed": [
+                        "auto", "low", "standard", "higher", "high", "lossless", "hires",
+                        "surround", "spatial", "dolby", "master"
+                    ]
+                }),
+            ),
+        ),
+    }
+}
+
+fn parse_stream_variant(value: Option<&str>) -> Result<StreamVariant, TuneWeaveError> {
+    match value
+        .unwrap_or("default")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "default" | "auto" => Ok(StreamVariant::Default),
+        "legacy" | "old" | "v0" | "song_url" => Ok(StreamVariant::Legacy),
+        "modern" | "new" | "v1" | "song_url_v1" => Ok(StreamVariant::Modern),
         value => Err(TuneWeaveError::invalid_request(format!(
-            "unsupported quality: {value}"
-        ))),
+            "unsupported stream variant: {value}"
+        ))
+        .with_details(json!({ "allowed": ["default", "legacy", "modern"] }))),
     }
 }
 
@@ -4422,7 +4495,7 @@ fn parse_optional_u16_parameter(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use async_trait::async_trait;
     use axum::{
@@ -5583,7 +5656,15 @@ mod tests {
             Ok(MediaStream {
                 url: "https://example.test/audio.mp3".to_owned(),
                 backup_urls: Vec::new(),
-                headers: Default::default(),
+                headers: BTreeMap::from([(
+                    "x-test-stream-variant".to_owned(),
+                    match request.variant {
+                        StreamVariant::Default => "default",
+                        StreamVariant::Legacy => "legacy",
+                        StreamVariant::Modern => "modern",
+                    }
+                    .to_owned(),
+                )]),
                 expires_at: None,
                 format: Some("mp3".to_owned()),
                 codec: Some("mp3".to_owned()),
@@ -8242,6 +8323,104 @@ mod tests {
         assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["data"]["attempts"][0]["status"], "success");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[test]
+    fn stream_quality_parser_accepts_all_unified_and_netease_levels() {
+        for (value, expected) in [
+            ("auto", Quality::Auto),
+            ("low", Quality::Low),
+            ("standard", Quality::Standard),
+            ("higher", Quality::Higher),
+            ("high", Quality::High),
+            ("exhigh", Quality::High),
+            ("lossless", Quality::Lossless),
+            ("hires", Quality::Hires),
+            ("hi_res", Quality::Hires),
+            ("surround", Quality::Surround),
+            ("jyeffect", Quality::Surround),
+            ("spatial", Quality::Spatial),
+            ("sky", Quality::Spatial),
+            ("dolby", Quality::Dolby),
+            ("atmos", Quality::Dolby),
+            ("master", Quality::Master),
+            ("jymaster", Quality::Master),
+        ] {
+            assert_eq!(
+                parse_quality(Some(value)).expect(value),
+                expected,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_variant_parser_accepts_unified_and_netease_aliases() {
+        for (value, expected) in [
+            ("default", StreamVariant::Default),
+            ("auto", StreamVariant::Default),
+            ("legacy", StreamVariant::Legacy),
+            ("old", StreamVariant::Legacy),
+            ("v0", StreamVariant::Legacy),
+            ("song_url", StreamVariant::Legacy),
+            ("modern", StreamVariant::Modern),
+            ("new", StreamVariant::Modern),
+            ("v1", StreamVariant::Modern),
+            ("song-url-v1", StreamVariant::Modern),
+        ] {
+            assert_eq!(
+                parse_stream_variant(Some(value)).expect(value),
+                expected,
+                "{value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn track_stream_accepts_netease_level_and_backend_aliases() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/stream?level=jyeffect&backend=v1&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["requested_quality"], "surround");
+        assert_eq!(json["data"]["headers"]["x-test-stream-variant"], "modern");
+        assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn track_stream_unblock_tries_selected_source_then_origin() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/stream?unblock=true&source=qq&account=green-vip&fallback=false&level=sky&backend=modern",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["requested_quality"], "spatial");
+        assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["data"]["attempts"][0]["platform"], "qq");
+        assert_eq!(json["data"]["attempts"][0]["account"], "green-vip");
+        assert_eq!(json["data"]["attempts"][0]["status"], "unavailable");
+        assert_eq!(json["data"]["attempts"][1]["platform"], "netease");
+        assert_eq!(json["data"]["attempts"][1]["status"], "success");
+        assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn track_stream_rejects_invalid_or_ambiguous_modern_parameters() {
+        for path in [
+            "/v1/tracks/netease:2709812973/stream?variant=future",
+            "/v1/tracks/netease:2709812973/stream?unblock=maybe",
+            "/v1/tracks/netease:2709812973/stream?unblock=true&source=unknown",
+            "/v1/tracks/netease:2709812973/stream?unblock=true&playback_platform=qq",
+            "/v1/tracks/netease:2709812973/stream?unblock=true&fallback_platforms=qq",
+            "/v1/tracks/netease:2709812973/stream?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
