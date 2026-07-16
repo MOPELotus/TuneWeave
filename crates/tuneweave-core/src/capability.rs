@@ -15,6 +15,7 @@ pub enum Capability {
     SearchVideos,
     SearchMixed,
     SearchVoices,
+    SearchDefault,
     AudioRecognition,
     Banners,
     RadioTaxonomy,
@@ -89,6 +90,11 @@ mod tests {
 
     #[test]
     fn radio_station_capabilities_use_stable_discovery_names() {
+        assert_eq!(
+            serde_json::to_value(Capability::SearchDefault)
+                .expect("serialize default search capability"),
+            serde_json::json!("search_default")
+        );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
             serde_json::json!("radio_station_detail")

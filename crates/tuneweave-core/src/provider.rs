@@ -20,9 +20,9 @@ use crate::{
     PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
     RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, Result, SearchItem, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video,
+    RecommendationRequest, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -65,6 +65,16 @@ pub trait MusicProvider: Send + Sync {
             items: page.items.into_iter().map(SearchItem::Track).collect(),
             pagination: page.pagination,
         })
+    }
+
+    async fn default_search_keyword(
+        &self,
+        _request: &SearchDefaultKeywordRequest,
+    ) -> Result<SearchDefaultKeyword> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SearchDefault,
+        ))
     }
 
     async fn recognize_audio(

@@ -71,6 +71,20 @@ impl SearchQuery {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchDefaultKeywordRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchDefaultKeyword {
+    pub keyword: String,
+    pub display_text: String,
+    pub kind: Option<SearchKind>,
+    pub image_url: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -2209,6 +2223,22 @@ mod tests {
 
         let query = SearchQuery::tracks("反方向的钟", 30, 0);
         assert_eq!(query.variant, SearchVariant::Default);
+    }
+
+    #[test]
+    fn default_search_keywords_separate_query_and_display_text() {
+        let prompt = SearchDefaultKeyword {
+            keyword: "周旋".to_owned(),
+            display_text: "🔥周旋 最近很火哦".to_owned(),
+            kind: Some(SearchKind::Track),
+            image_url: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(prompt).expect("serialize default search keyword");
+        assert_eq!(value["keyword"], "周旋");
+        assert_eq!(value["display_text"], "🔥周旋 最近很火哦");
+        assert_eq!(value["kind"], "track");
+        assert!(value["image_url"].is_null());
     }
 
     #[test]
