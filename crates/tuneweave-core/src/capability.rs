@@ -14,6 +14,7 @@ pub enum Capability {
     RadioTaxonomy,
     RadioStationDetail,
     RadioStationList,
+    RadioStationSubscriptionWrite,
     TrackDetail,
     AlbumDetail,
     AlbumList,
@@ -73,6 +74,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::RadioStationList).expect("serialize capability"),
             serde_json::json!("radio_station_list")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::RadioStationSubscriptionWrite)
+                .expect("serialize capability"),
+            serde_json::json!("radio_station_subscription_write")
         );
     }
 }

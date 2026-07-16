@@ -85,6 +85,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn set_radio_station_subscription(
+        &self,
+        _id: &str,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RadioStationSubscriptionWrite,
+        ))
+    }
+
     async fn track(&self, _id: &str, _account: Option<&str>) -> Result<Track> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
