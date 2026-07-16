@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=340`、`partial=6`、`implemented=23`、`verified=35`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=339`、`partial=6`、`implemented=23`、`verified=36`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@
 | `calendar` | `/calendar` | `implemented` | `GET /v1/extensions/netease/calendar`（固定使用 WeAPI 调用 `/api/mcalendar/detail`；完整支持参考 `startTime/endTime`、统一 `start_time/end_time`、任一或全部时间参数缺省时取当前 Unix 毫秒，以及 `account` 登录态别名；显式值归一化为无符号整数，非法或负数在上游请求前返回标准 400；完整上游 JSON 保留在统一包络中；离线测试已覆盖参考/统一参数名、账户隔离、协议与路径、双缺省和非法值；2026-07-16 匿名统一 HTTP 实测正确映射为 401 `authentication_required` 与上游码 301，待真实账户验证成功内容态） |
 | `captcha_sent` | `/captcha/sent` | `implemented` | `POST /v1/auth/challenges`（为避免误发短信不做自动联网测试） |
 | `captcha_verify` | `/captcha/verify` | `implemented` | `POST /v1/auth/challenges/validate`（与验证码登录事务明确分离，仅校验而不登录或保存 Cookie；统一支持 `platform/account/method/principal/code/country_code`，并完整兼容参考 `phone/captcha/ctcode`，手机号和区号接受数字或字符串，`method` 默认 SMS、区号缺省或空值默认 `86`；统一返回 `valid/platform_code/message` 并在 `extensions.response` 保留完整上游响应，错误验证码作为 HTTP 200 的 `valid=false` 正常结果，手机号和验证码不回显；core、适配器映射、参考/统一输入、默认值、非法值及敏感数据边界均有离线测试；2026-07-16 provider 与统一 HTTP 以假验证码真实联网验证成功，返回 `valid=false`、平台码 503 和“验证码错误”，待真实验证码验证 `valid=true` 分支） |
-| `cellphone_existence_check` | `/cellphone/existence/check` | `pending` | — |
+| `cellphone_existence_check` | `/cellphone/existence/check` | `verified` | `POST /v1/auth/principals/status`（统一为不创建会话的 `AuthPrincipalStatus`，网易云限定 `principal_type=phone` 并默认该类型；完整支持统一 `platform/account/principal_type/principal/country_code`、参考 `phone/countrycode`、camelCase `countryCode`，手机号和区号接受数字或字符串，区号缺省或空值默认 `86`；固定 EAPI 调用 `/api/cellphone/existence/check`，严格把已实测 `exist=1/-1` 映射为 `exists=true/false`，统一保留 `has_password/display_name/avatar_url/platform_code` 及 `extensions.response`，不把未知 `exist` 值猜成布尔值，输入请求和 Debug 均脱敏；core、适配器两分支、能力声明、参考/统一输入、默认值、非手机号与非标量拒绝、敏感数据边界均有测试；2026-07-16 provider 与统一 HTTP 真实联网验证已注册 `13800138000` 返回 `exists=true`、`has_password=true`、上游 `exist=1`，未注册输入 `1` 返回 `exists=false`、`has_password=false`、上游 `exist=-1`，两者平台码均 200 且手机号保持上游脱敏） |
 | `chart_detail` | `/chart/detail` | `pending` | — |
 | `chart_song_detail` | `/chart/song/detail` | `pending` | — |
 | `check_music` | `/check/music` | `pending` | — |
