@@ -27,11 +27,12 @@ use tuneweave_core::{
     CommentReactionMutationResult, CommentReactionPage, CommentReplyReference,
     CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
     CommentThreadStats, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
-    CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
-    DimensionChartRequest, DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode,
-    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
-    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    CountryCallingCode, CountryCallingCodeGroup, CountryCallingCodeListRequest, CreatorSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
+    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
     PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
@@ -340,6 +341,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
+            Capability::CountryCallingCodes,
             Capability::ChallengeValidation,
             Capability::PrincipalStatus,
             Capability::SessionManagement,
@@ -1538,6 +1540,18 @@ impl MusicProvider for NeteaseProvider {
             message: verification.message,
             extensions,
         })
+    }
+
+    async fn country_calling_codes(
+        &self,
+        request: &CountryCallingCodeListRequest,
+    ) -> Result<Vec<CountryCallingCodeGroup>> {
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/lbs/countries/v1", json!({}))
+            .await?;
+        ensure_success(&response.body)?;
+        map_netease_country_calling_codes(response.body)
     }
 
     async fn auth_principal_status(
@@ -4666,6 +4680,85 @@ fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> Account
     profile.nickname = summary.nickname;
     profile.avatar_url = summary.avatar_url;
     profile
+}
+
+fn map_netease_country_calling_codes(response: Value) -> Result<Vec<CountryCallingCodeGroup>> {
+    let raw_groups = response
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase country calling codes response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let mut catalog_response = response.clone();
+    if let Some(catalog) = catalog_response.as_object_mut() {
+        catalog.remove("data");
+    }
+    raw_groups
+        .into_iter()
+        .map(|raw_group| {
+            let label = required_country_calling_code_field(&raw_group, "label", "group")?;
+            let raw_entries = raw_group
+                .get("countryList")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase country calling code group is missing countryList",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "group": raw_group }))
+                })?;
+            let entries = raw_entries
+                .into_iter()
+                .map(|raw_entry| {
+                    let calling_code =
+                        required_country_calling_code_field(&raw_entry, "code", "entry")?;
+                    let region_code =
+                        required_country_calling_code_field(&raw_entry, "locale", "entry")?;
+                    let name = required_country_calling_code_field(&raw_entry, "zh", "entry")?;
+                    let english_name =
+                        required_country_calling_code_field(&raw_entry, "en", "entry")?;
+                    Ok(CountryCallingCode {
+                        calling_code,
+                        region_code,
+                        name,
+                        english_name,
+                        extensions: Extensions::from([("response".to_owned(), raw_entry)]),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(CountryCallingCodeGroup {
+                label,
+                entries,
+                extensions: Extensions::from([
+                    ("response".to_owned(), raw_group),
+                    ("catalog_response".to_owned(), catalog_response.clone()),
+                ]),
+            })
+        })
+        .collect()
+}
+
+fn required_country_calling_code_field(raw: &Value, field: &str, scope: &str) -> Result<String> {
+    raw.get(field)
+        .and_then(json_scalar_string)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase country calling code {scope} is missing {field}"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ scope: raw }))
+        })
 }
 
 fn map_user_playlists(
@@ -11657,6 +11750,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::QrLogin));
         assert!(capabilities.contains(&Capability::PasswordLogin));
         assert!(capabilities.contains(&Capability::PhoneLogin));
+        assert!(capabilities.contains(&Capability::CountryCallingCodes));
         assert!(capabilities.contains(&Capability::ChallengeValidation));
         assert!(capabilities.contains(&Capability::PrincipalStatus));
         assert!(capabilities.contains(&Capability::SessionManagement));
@@ -12205,6 +12299,90 @@ mod tests {
         assert!(!page.pagination.has_more);
         assert_eq!(page.pagination.extensions["response"]["paidCount"], 0);
         assert!(page.pagination.extensions["response"].get("data").is_none());
+    }
+
+    #[test]
+    fn maps_country_calling_code_groups_entries_and_catalog_metadata() {
+        let groups = map_netease_country_calling_codes(json!({
+            "code": 200,
+            "message": null,
+            "data": [
+                {
+                    "label": "常用",
+                    "countryList": [
+                        {"code": "86", "en": "China", "locale": "CN", "zh": "中国"},
+                        {"code": "852", "en": "Hongkong", "locale": "HK", "zh": "中国香港"}
+                    ]
+                },
+                {
+                    "label": "A",
+                    "countryList": [
+                        {"code": "355", "en": "Albania", "locale": "AL", "zh": "阿尔巴尼亚"}
+                    ]
+                }
+            ]
+        }))
+        .expect("map country calling code catalog");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].label, "常用");
+        assert_eq!(groups[0].entries.len(), 2);
+        assert_eq!(groups[0].entries[0].calling_code, "86");
+        assert_eq!(groups[0].entries[0].region_code, "CN");
+        assert_eq!(groups[0].entries[0].name, "中国");
+        assert_eq!(groups[0].entries[0].english_name, "China");
+        assert_eq!(groups[0].entries[0].extensions["response"]["locale"], "CN");
+        assert_eq!(groups[0].extensions["catalog_response"]["code"], 200);
+        assert!(
+            groups[0].extensions["catalog_response"]
+                .get("data")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_country_calling_code_catalogs() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": [{"label": "常用"}]}),
+            json!({
+                "code": 200,
+                "data": [{"label": "常用", "countryList": [{"code": "86"}]}]
+            }),
+        ] {
+            assert_eq!(
+                map_netease_country_calling_codes(response)
+                    .expect_err("malformed country calling code catalog")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_country_calling_codes_cover_complete_public_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let groups = MusicProvider::country_calling_codes(
+            &provider,
+            &CountryCallingCodeListRequest { account: None },
+        )
+        .await
+        .expect("live country calling code catalog");
+        let entries = groups
+            .iter()
+            .flat_map(|group| group.entries.iter())
+            .collect::<Vec<_>>();
+        let unique_regions = entries
+            .iter()
+            .map(|entry| entry.region_code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(groups.len(), 22);
+        assert_eq!(entries.len(), 189);
+        assert_eq!(unique_regions.len(), 189);
+        assert!(entries.iter().any(|entry| {
+            entry.calling_code == "86" && entry.region_code == "CN" && entry.name == "中国"
+        }));
     }
 
     #[tokio::test]
