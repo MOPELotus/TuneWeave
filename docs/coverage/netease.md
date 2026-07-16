@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=355`、`partial=7`、`implemented=15`、`verified=27`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=354`、`partial=7`、`implemented=15`、`verified=28`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -39,7 +39,7 @@
 | `artist_new_song` | `/artist/new/song` | `implemented` | `GET /v1/account/following/artists/new-tracks`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一为 `Track[]`，保留新曲总数及完整歌曲原文；离线成功态映射、端点和登录别名测试已完成；2026-07-16 匿名 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
 | `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `implemented` | `GET /v1/account/following/artists/new-works`（完整支持 `before/source_type/first_request`，以 `ArtistWorkUpdate` 区分歌曲、MV 和未知来源，未知结构完整保留；离线已验证歌曲分支、未知来源兼容和端点参数；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容及更多 `sourceType` 样本） |
 | `artist_new_song_playall` | `/artist/new/song/playall` | `implemented` | `GET /v1/account/following/artists/new-tracks/play-all`（固定返回最近至多 50 首 `Track[]` 和上游 `count`，完整歌曲字段保留在扩展；离线成功态映射、账户端点和能力发现测试已完成；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
-| `artist_songs` | `/artist/songs` | `pending` | — |
+| `artist_songs` | `/artist/songs` | `verified` | `GET /v1/artists/{ref}/tracks`（完整支持 `order=hot/time`、分页及 `account` 登录态选择，统一为 `Track[]` 并在 `extensions.artist_track` 保留完整歌曲原文；2026-07-16 真实上游与统一 HTTP 均实测成功，`/v1/artists/netease:6452/tracks?order=time&limit=2` 首项为 `netease:2712553851`《即兴曲》，总数 566、`next_offset=2`、`has_more=true`） |
 | `artist_sub` | `/artist/sub` | `pending` | — |
 | `artist_sublist` | `/artist/sublist` | `pending` | — |
 | `artist_top_song` | `/artist/top/song` | `pending` | — |
