@@ -34,6 +34,20 @@ pub(crate) struct AudioMatchData {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ImageUploadAllocationEnvelope {
+    pub result: ImageUploadAllocation,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ImageUploadAllocation {
+    #[serde(rename = "objectKey")]
+    pub object_key: String,
+    pub token: String,
+    #[serde(rename = "docId")]
+    pub document_id: Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct TrackEnvelope {
     #[serde(default)]
     pub songs: Vec<Song>,

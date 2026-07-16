@@ -15,12 +15,13 @@ use tuneweave_core::{
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
     ChallengeMethod, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
-    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
+    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 use crate::{
@@ -36,11 +37,12 @@ use crate::{
         ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
         ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality,
         DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, ImageUploadAllocationEnvelope,
+        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
+        PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -308,6 +310,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountArtistNewTracks,
             Capability::AccountArtistNewWorks,
             Capability::AccountArtistNewTracksPlayAll,
+            Capability::AccountAvatarWrite,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -1332,6 +1335,44 @@ impl MusicProvider for NeteaseProvider {
         Ok(map_session_profile(&account, status))
     }
 
+    async fn upload_account_avatar(
+        &self,
+        request: &ImageUploadRequest,
+    ) -> Result<ImageUploadResult> {
+        let (filename, content_type) = validate_image_upload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        if !client.is_authenticated() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                "NetEase avatar upload requires a logged-in session",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let allocation_response = client.allocate_image_upload(filename).await?;
+        ensure_account_access(&client, &allocation_response.body, "avatar upload")?;
+        let allocation: ImageUploadAllocationEnvelope = parse_body(allocation_response.body)?;
+        validate_image_allocation(&allocation)?;
+        let upload_response = client
+            .upload_image(
+                &allocation.result.object_key,
+                &allocation.result.token,
+                content_type,
+                &request.data,
+            )
+            .await?;
+        ensure_success(&upload_response.body)?;
+        let update_response = client
+            .update_account_avatar(allocation.result.document_id.clone())
+            .await?;
+        ensure_account_access(&client, &update_response.body, "avatar upload")?;
+        map_image_upload_result(
+            request,
+            allocation,
+            upload_response.body,
+            update_response.body,
+        )
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -1643,6 +1684,112 @@ fn map_audio_recognition(
         matches,
         query_id,
         no_match_reason: response.data.no_match_reason,
+        extensions,
+    })
+}
+
+fn validate_image_upload(request: &ImageUploadRequest) -> Result<(&str, &str)> {
+    let filename = request.filename.trim();
+    if filename.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("image filename cannot be empty")
+                .with_platform(Platform::Netease),
+        );
+    }
+    if filename.len() > 255 || filename.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "image filename must be at most 255 bytes and contain no control characters",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let content_type = request.content_type.trim();
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("image/"))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "image content type must use the image media type",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.data.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("image data cannot be empty")
+                .with_platform(Platform::Netease),
+        );
+    }
+    if request.image_size == Some(0) {
+        return Err(
+            TuneWeaveError::invalid_request("image_size must be greater than zero")
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok((filename, content_type))
+}
+
+fn validate_image_allocation(response: &ImageUploadAllocationEnvelope) -> Result<()> {
+    if response.result.object_key.trim().is_empty()
+        || response.result.token.trim().is_empty()
+        || json_scalar_string(&response.result.document_id)
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase image upload allocation is incomplete",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
+}
+
+fn map_image_upload_result(
+    request: &ImageUploadRequest,
+    allocation: ImageUploadAllocationEnvelope,
+    upload_response: Value,
+    update_response: Value,
+) -> Result<ImageUploadResult> {
+    let image_id = json_scalar_string(&allocation.result.document_id).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase image upload allocation did not contain an image id",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let url_pre = format!("https://p1.music.126.net/{}", allocation.result.object_key);
+    let url = ["/data/url", "/url", "/data/avatarUrl", "/avatarUrl"]
+        .into_iter()
+        .find_map(|pointer| update_response.pointer(pointer).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .or_else(|| Some(url_pre.clone()));
+    let mut extensions = Extensions::new();
+    extensions.insert("url_pre".to_owned(), json!(url_pre));
+    extensions.insert(
+        "allocation".to_owned(),
+        json!({
+            "object_key": allocation.result.object_key,
+            "document_id": allocation.result.document_id
+        }),
+    );
+    extensions.insert("upload_response".to_owned(), upload_response);
+    extensions.insert("response".to_owned(), update_response);
+    if request.image_size.is_some() || request.crop_x.is_some() || request.crop_y.is_some() {
+        extensions.insert(
+            "reference_crop_parameters".to_owned(),
+            json!({
+                "image_size": request.image_size,
+                "crop_x": request.crop_x,
+                "crop_y": request.crop_y,
+                "applied": false
+            }),
+        );
+    }
+    Ok(ImageUploadResult {
+        url,
+        image_id: Some(image_id),
         extensions,
     })
 }
@@ -3935,6 +4082,51 @@ mod tests {
     }
 
     #[test]
+    fn maps_image_upload_without_exposing_the_nos_token() {
+        let allocation: ImageUploadAllocationEnvelope = serde_json::from_value(json!({
+            "result": {
+                "objectKey": "109951168/avatar.jpg",
+                "token": "secret-nos-token",
+                "docId": "109951168000000000"
+            }
+        }))
+        .expect("image allocation fixture");
+        let request = ImageUploadRequest {
+            filename: "avatar.png".to_owned(),
+            content_type: "image/png".to_owned(),
+            data: vec![1, 2, 3],
+            image_size: Some(300),
+            crop_x: Some(0),
+            crop_y: Some(0),
+            account: Some("personal".to_owned()),
+        };
+
+        let result = map_image_upload_result(
+            &request,
+            allocation,
+            json!({"code": 200, "size": "3"}),
+            json!({"code": 200, "url": "https://p1.music.126.net/final-avatar.jpg"}),
+        )
+        .expect("map image upload result");
+
+        assert_eq!(
+            result.url.as_deref(),
+            Some("https://p1.music.126.net/final-avatar.jpg")
+        );
+        assert_eq!(result.image_id.as_deref(), Some("109951168000000000"));
+        assert_eq!(result.extensions["upload_response"]["size"], "3");
+        assert_eq!(
+            result.extensions["reference_crop_parameters"]["applied"],
+            false
+        );
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serialize image upload result")
+                .contains("secret-nos-token")
+        );
+    }
+
+    #[test]
     fn maps_netease_playlist_to_unified_model() {
         let playlist: PlaylistDetail = serde_json::from_value(json!({
             "id": 3778678,
@@ -5256,6 +5448,71 @@ mod tests {
         .await
         .expect_err("oversized fingerprint");
         assert_eq!(oversized.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn avatar_upload_validates_input_and_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let invalid_requests = [
+            ImageUploadRequest {
+                filename: "   ".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                data: vec![1],
+                image_size: None,
+                crop_x: None,
+                crop_y: None,
+                account: None,
+            },
+            ImageUploadRequest {
+                filename: "avatar.txt".to_owned(),
+                content_type: "text/plain".to_owned(),
+                data: vec![1],
+                image_size: None,
+                crop_x: None,
+                crop_y: None,
+                account: None,
+            },
+            ImageUploadRequest {
+                filename: "avatar.jpg".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                data: Vec::new(),
+                image_size: None,
+                crop_x: None,
+                crop_y: None,
+                account: None,
+            },
+            ImageUploadRequest {
+                filename: "avatar.jpg".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                data: vec![1],
+                image_size: Some(0),
+                crop_x: None,
+                crop_y: None,
+                account: None,
+            },
+        ];
+        for request in invalid_requests {
+            let error = MusicProvider::upload_account_avatar(&provider, &request)
+                .await
+                .expect_err("invalid image upload request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let unauthenticated = MusicProvider::upload_account_avatar(
+            &provider,
+            &ImageUploadRequest {
+                filename: "avatar.jpg".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                data: vec![0xff, 0xd8, 0xff, 0xd9],
+                image_size: Some(300),
+                crop_x: Some(0),
+                crop_y: Some(0),
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous avatar upload");
+        assert_eq!(unauthenticated.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]

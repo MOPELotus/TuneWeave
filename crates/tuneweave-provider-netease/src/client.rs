@@ -24,6 +24,7 @@ use crate::crypto::{
 const DEFAULT_BASE_URL: &str = "https://interface.music.163.com";
 const DEFAULT_XEAPI_BASE_URL: &str = "https://interface3.music.163.com";
 const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
+const IMAGE_UPLOAD_BASE_URL: &str = "https://nosup-hz1.127.net/yyimgs";
 const DEFAULT_USER_AGENT: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
 const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
@@ -370,6 +371,67 @@ impl NeteaseClient {
             .await
             .map_err(request_error)?;
         parse_response(response).await
+    }
+
+    pub async fn allocate_image_upload(&self, filename: &str) -> Result<NeteaseResponse> {
+        self.request_weapi(
+            "/api/nos/token/alloc",
+            json!({
+                "bucket": "yyimgs",
+                "ext": "jpg",
+                "filename": filename,
+                "local": false,
+                "nos_product": 0,
+                "return_body": r#"{"code":200,"size":"$(ObjectSize)"}"#,
+                "type": "other"
+            }),
+        )
+        .await
+    }
+
+    pub async fn upload_image(
+        &self,
+        object_key: &str,
+        token: &str,
+        content_type: &str,
+        data: &[u8],
+    ) -> Result<NeteaseResponse> {
+        let object_key = object_key.trim();
+        if object_key.is_empty() || object_key.contains(['?', '#']) {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase returned an invalid image upload object key",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let token = token.parse::<header::HeaderValue>().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase returned an invalid image upload token",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let content_type = content_type.parse::<header::HeaderValue>().map_err(|_| {
+            TuneWeaveError::invalid_request("image content type is not a valid HTTP header")
+                .with_platform(Platform::Netease)
+        })?;
+        let endpoint =
+            format!("{IMAGE_UPLOAD_BASE_URL}/{object_key}?offset=0&complete=true&version=1.0");
+        let response = self
+            .http
+            .post(endpoint)
+            .header("x-nos-token", token)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(request_error)?;
+        parse_response(response).await
+    }
+
+    pub async fn update_account_avatar(&self, image_id: Value) -> Result<NeteaseResponse> {
+        self.request_eapi("/api/user/avatar/upload/v1", json!({ "imgid": image_id }))
+            .await
     }
 
     pub async fn request_linuxapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
