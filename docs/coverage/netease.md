@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=348`、`partial=7`、`implemented=19`、`verified=30`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=347`、`partial=7`、`implemented=19`、`verified=31`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -47,7 +47,7 @@
 | `artists` | `/artists` | `verified` | `GET /v1/artists/{ref}/overview`（统一为 `ArtistOverview`，明确分离歌手摘要、50 首精选 `Track[]` 和 `has_more_tracks`，不与 `/artist/list` 或完整曲目目录误合并；歌手、曲目及完整响应原文分别保留；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦、568 首总曲目计数、50 首精选，首项 `netease:210049`《布拉格广场》，`has_more_tracks=true`） |
 | `audio_match` | `/audio/match` | `implemented` | `POST /v1/audio/recognize`（统一 `platform/account/fingerprint/duration_seconds` 输入，兼容参考项目 `audioFP/duration` 字段；多候选曲目、命中起点、查询 ID、无匹配原因和完整上游响应均已映射；离线成功命中样本、输入边界及 HTTP 端点测试已完成；2026-07-16 匿名 HTTP 实测无匹配路径返回 `code=200`、空 `matches`、`no_match_reason=10` 与真实查询 ID，待有效音频指纹验证真实成功命中） |
 | `avatar_upload` | `/avatar/upload` | `implemented` | `PUT /v1/account/avatar`（统一以 `platform/account/filename` 查询参数、`Content-Type: image/*` 和原始图片请求体写入，最大 20 MiB；完整实现 WeAPI 申请 `yyimgs` NOS 凭据、原始字节上传及 EAPI 提交 `imgId` 三段流程，统一返回 URL/图片 ID，NOS token 不进入响应或日志；兼容 `imgSize/imgX/imgY` 参数并明确记录参考实现未实际应用裁剪；离线映射、认证前置、参数别名、大小边界、标准错误包络及 token 防泄漏测试已完成；2026-07-16 匿名 HTTP 实测在 NOS 分配前稳定返回 401 `authentication_required`，待真实账户验证最终写入） |
-| `banner` | `/banner` | `pending` | — |
+| `banner` | `/banner` | `verified` | `GET /v1/banners`（完整支持 `client=pc/android/iphone/ipad`，并兼容参考项目 `type=0/1/2/3`；图片、标题、横幅 ID、跳转 URL、独家标志及歌曲/专辑/歌手/歌单/MV/网页/未知目标进入稳定字段，监测和广告等完整原文保留在 `extensions.banner`；2026-07-16 适配器与统一 HTTP 均逐分支联网实测成功，PC 7 项、Android 8 项、iPhone 8 项、iPad 6 项，首项目标分别正确映射为网页或 `netease:384808686` 专辑） |
 | `batch` | `/batch` | `pending` | — |
 | `broadcast_category_region_get` | `/broadcast/category/region/get` | `pending` | — |
 | `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `pending` | — |
