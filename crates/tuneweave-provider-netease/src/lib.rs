@@ -5,8 +5,8 @@ mod dto;
 mod provider;
 
 pub use auth::{
-    NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseLoginResult, NeteaseSessionRefresh,
-    NeteaseSessionStatus,
+    NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseCellphoneStatus, NeteaseLoginResult,
+    NeteaseSessionRefresh, NeteaseSessionStatus,
 };
 pub use client::{
     NeteaseClient, NeteaseConfig, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseResponse,

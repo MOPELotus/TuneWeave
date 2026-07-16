@@ -13,17 +13,18 @@ use tuneweave_core::{
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthState, Banner, BannerClient, BannerListRequest, BannerTargetKind, Capability,
-    ChallengeMethod, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
-    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
-    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
+    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, ImageUploadRequest,
+    ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 use crate::{
@@ -309,6 +310,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PasswordLogin,
             Capability::PhoneLogin,
             Capability::ChallengeValidation,
+            Capability::PrincipalStatus,
             Capability::SessionManagement,
             Capability::AccountProfile,
             Capability::AccountPlaylists,
@@ -1422,6 +1424,36 @@ impl MusicProvider for NeteaseProvider {
             valid: verification.valid,
             platform_code: Some(verification.code.to_string()),
             message: verification.message,
+            extensions,
+        })
+    }
+
+    async fn auth_principal_status(
+        &self,
+        request: &AuthPrincipalStatusRequest,
+    ) -> Result<AuthPrincipalStatus> {
+        if request.principal_type != PrincipalType::Phone {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase principal status only supports phone numbers",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let client = self.client_for(Some(&request.account))?;
+        let status = client
+            .cellphone_status(
+                &request.principal,
+                request.country_code.as_deref().unwrap_or("86"),
+            )
+            .await?;
+        let mut extensions = Extensions::new();
+        extensions.insert("response".to_owned(), status.response);
+        Ok(AuthPrincipalStatus {
+            principal_type: request.principal_type,
+            exists: status.exists,
+            has_password: status.has_password,
+            display_name: status.nickname,
+            avatar_url: status.avatar_url,
+            platform_code: Some(status.code.to_string()),
             extensions,
         })
     }
@@ -6779,6 +6811,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PasswordLogin));
         assert!(capabilities.contains(&Capability::PhoneLogin));
         assert!(capabilities.contains(&Capability::ChallengeValidation));
+        assert!(capabilities.contains(&Capability::PrincipalStatus));
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
@@ -7504,6 +7537,36 @@ mod tests {
         assert!(!result.valid);
         assert_ne!(result.platform_code.as_deref(), Some("200"));
         assert!(result.extensions["response"]["code"].is_number());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_phone_principal_status_covers_registered_and_unregistered_values() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = AuthPrincipalStatusRequest {
+            account: "default".to_owned(),
+            principal_type: PrincipalType::Phone,
+            principal: "13800138000".to_owned(),
+            country_code: Some("86".to_owned()),
+        };
+        let registered = MusicProvider::auth_principal_status(&provider, &request)
+            .await
+            .expect("registered phone status");
+        assert!(registered.exists);
+        assert_eq!(registered.has_password, Some(true));
+        assert_eq!(registered.platform_code.as_deref(), Some("200"));
+        assert_eq!(
+            registered.extensions["response"]["cellphone"],
+            "138****8000"
+        );
+
+        request.principal = "1".to_owned();
+        let unregistered = MusicProvider::auth_principal_status(&provider, &request)
+            .await
+            .expect("unregistered phone status");
+        assert!(!unregistered.exists);
+        assert_eq!(unregistered.has_password, Some(false));
+        assert_eq!(unregistered.extensions["response"]["exist"], -1);
     }
 
     #[tokio::test]

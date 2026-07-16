@@ -54,6 +54,16 @@ pub struct NeteaseCaptchaVerification {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeteaseCellphoneStatus {
+    pub code: i64,
+    pub exists: bool,
+    pub has_password: Option<bool>,
+    pub nickname: Option<String>,
+    pub avatar_url: Option<String>,
+    pub response: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NeteaseSessionStatus {
     pub authenticated: bool,
     pub account: NeteaseAccountSummary,
@@ -151,6 +161,25 @@ impl NeteaseClient {
             )
             .await?;
         captcha_verification_from_body(response.body)
+    }
+
+    pub async fn cellphone_status(
+        &self,
+        phone: &str,
+        country_code: &str,
+    ) -> Result<NeteaseCellphoneStatus> {
+        let phone = required_value("phone", phone)?;
+        let response = self
+            .request_eapi(
+                "/api/cellphone/existence/check",
+                json!({
+                    "cellphone": phone,
+                    "countrycode": normalized_country_code(country_code)
+                }),
+            )
+            .await?;
+        ensure_response_code(&response.body, 200, "check cellphone status")?;
+        cellphone_status_from_body(response.body)
     }
 
     pub async fn login_with_email_password(
@@ -255,6 +284,48 @@ fn captcha_verification_from_body(body: Value) -> Result<NeteaseCaptchaVerificat
         code,
         valid: code == 200,
         message: response_message(&body),
+        response: body,
+    })
+}
+
+fn cellphone_status_from_body(body: Value) -> Result<NeteaseCellphoneStatus> {
+    let code = response_code(&body).ok_or_else(|| {
+        upstream_error(
+            "check cellphone status",
+            "response did not contain a status code",
+        )
+    })?;
+    let existence = body["exist"]
+        .as_i64()
+        .or_else(|| body["exist"].as_str().and_then(|value| value.parse().ok()))
+        .ok_or_else(|| {
+            upstream_error(
+                "check cellphone status",
+                "response did not contain an existence value",
+            )
+        })?;
+    let exists = match existence {
+        1 => true,
+        -1 => false,
+        value => {
+            return Err(upstream_error(
+                "check cellphone status",
+                &format!("returned unsupported existence value {value}"),
+            ));
+        }
+    };
+    Ok(NeteaseCellphoneStatus {
+        code,
+        exists,
+        has_password: body.get("hasPassword").and_then(Value::as_bool),
+        nickname: body
+            .get("nickname")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        avatar_url: body
+            .get("avatarUrl")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         response: body,
     })
 }
@@ -409,6 +480,38 @@ mod tests {
 
         let error = captcha_verification_from_body(json!({ "data": false }))
             .expect_err("missing business code");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn cellphone_status_maps_registered_and_unregistered_branches() {
+        let registered = cellphone_status_from_body(json!({
+            "code": 200,
+            "exist": 1,
+            "hasPassword": true,
+            "nickname": "masked",
+            "avatarUrl": "https://example.test/avatar.jpg",
+            "cellphone": "138****8000"
+        }))
+        .expect("registered cellphone");
+        assert!(registered.exists);
+        assert_eq!(registered.has_password, Some(true));
+        assert_eq!(registered.nickname.as_deref(), Some("masked"));
+        assert_eq!(registered.response["cellphone"], "138****8000");
+
+        let unregistered = cellphone_status_from_body(json!({
+            "code": 200,
+            "exist": "-1",
+            "hasPassword": false,
+            "nickname": null
+        }))
+        .expect("unregistered cellphone");
+        assert!(!unregistered.exists);
+        assert_eq!(unregistered.has_password, Some(false));
+        assert!(unregistered.nickname.is_none());
+
+        let error = cellphone_status_from_body(json!({ "code": 200, "exist": 0 }))
+            .expect_err("unknown existence value");
         assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
