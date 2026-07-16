@@ -10,16 +10,17 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
     ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistStats,
-    ArtistSummary, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate,
-    ArtistWorksRequest, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
-    CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
-    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest,
+    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
+    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 use crate::{
@@ -31,14 +32,14 @@ use crate::{
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
         ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
-        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistVideoCreator, ArtistVideoRecord,
-        ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -286,6 +287,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ArtistAlbums,
             Capability::ArtistFans,
             Capability::ArtistVideos,
+            Capability::ArtistTracks,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -750,6 +752,36 @@ impl MusicProvider for NeteaseProvider {
                 map_artist_videos_response(response, limit, request.offset)
             }
         }
+    }
+
+    async fn artist_tracks(
+        &self,
+        id: &str,
+        request: &ArtistTrackListRequest,
+    ) -> Result<Page<Track>> {
+        let id = parse_numeric_id("artist", id)?;
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let order = match request.order {
+            ArtistTrackOrder::Hot => "hot",
+            ArtistTrackOrder::Time => "time",
+        };
+        let response = client
+            .request_api(
+                "/api/v1/artist/songs",
+                json!({
+                    "id": id,
+                    "private_cloud": "true",
+                    "work_type": 1,
+                    "order": order,
+                    "offset": request.offset,
+                    "limit": limit
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: ArtistTracksEnvelope = parse_body(response.body)?;
+        map_artist_tracks_response(response, limit, request.offset)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -2271,6 +2303,40 @@ fn map_artist_albums_response(
     })
 }
 
+fn map_artist_tracks_response(
+    response: ArtistTracksEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Track>> {
+    let total = response.total;
+    let items = response
+        .songs
+        .into_iter()
+        .map(|raw| {
+            let song: Song = parse_body(raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track.extensions.insert("artist_track".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response
+        .more
+        .unwrap_or_else(|| total.map_or(consumed == limit, |total| u64::from(next_offset) < total));
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::new(),
+        },
+    })
+}
+
 fn map_artist_fans_response(
     response: ArtistFansEnvelope,
     limit: u32,
@@ -3726,6 +3792,64 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_tracks_and_pagination() {
+        let response: ArtistTracksEnvelope = serde_json::from_value(json!({
+            "songs": [
+                {
+                    "id": 298317,
+                    "name": "屋顶",
+                    "alia": [],
+                    "ar": [
+                        {"id": 6452, "name": "周杰伦"},
+                        {"id": 7219, "name": "温岚"}
+                    ],
+                    "al": {
+                        "id": 32311,
+                        "name": "吴宗宪的台语歌",
+                        "picUrl": "https://example.test/cover.jpg"
+                    },
+                    "dt": 319000,
+                    "mv": 0,
+                    "fee": 8,
+                    "st": 0,
+                    "mark": 524288,
+                    "privilege": {
+                        "id": 298317,
+                        "st": 0,
+                        "fee": 8,
+                        "pl": 320000,
+                        "maxbr": 999000
+                    },
+                    "copyright": 1
+                }
+            ],
+            "more": true,
+            "total": 566
+        }))
+        .expect("artist tracks fixture");
+
+        let page = map_artist_tracks_response(response, 1, 20).expect("map artist tracks");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:298317");
+        assert_eq!(page.items[0].name, "屋顶");
+        assert_eq!(page.items[0].artists.len(), 2);
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(
+            page.items[0]
+                .album
+                .as_ref()
+                .map(|album| album.name.as_str()),
+            Some("吴宗宪的台语歌")
+        );
+        assert_eq!(page.items[0].duration_ms, Some(319_000));
+        assert_eq!(page.items[0].playable, Some(true));
+        assert_eq!(page.items[0].extensions["artist_track"]["copyright"], 1);
+        assert_eq!(page.pagination.total, Some(566));
+        assert_eq!(page.pagination.next_offset, Some(21));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_videos_and_cursor_to_the_unified_video_model() {
         let response: ArtistVideosEnvelope = serde_json::from_value(json!({
             "data": {
@@ -4552,6 +4676,11 @@ mod tests {
                 .await
                 .expect_err("invalid artist videos id");
         assert_eq!(artist_videos_error.code, ErrorCode::InvalidRequest);
+        let artist_tracks_error =
+            MusicProvider::artist_tracks(&provider, "invalid", &ArtistTrackListRequest::new(20, 0))
+                .await
+                .expect_err("invalid artist tracks id");
+        assert_eq!(artist_tracks_error.code, ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]
@@ -5362,6 +5491,26 @@ mod tests {
                 .as_str()
                 .is_some_and(|cursor| !cursor.is_empty())
         );
+        assert!(page.pagination.has_more);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_tracks() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page =
+            MusicProvider::artist_tracks(&provider, "6452", &ArtistTrackListRequest::new(2, 0))
+                .await
+                .expect("live artist tracks");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|track| !track.name.is_empty()));
+        assert!(
+            page.items
+                .iter()
+                .all(|track| track.artists.iter().any(|artist| artist.name == "周杰伦"))
+        );
+        assert!(page.pagination.total.is_some_and(|total| total > 2));
+        assert_eq!(page.pagination.next_offset, Some(2));
         assert!(page.pagination.has_more);
     }
 
