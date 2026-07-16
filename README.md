@@ -33,10 +33,10 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云登录 Cookie；不会写入响应或日志。
 
 当前可直接调用 `/healthz`、`/v1/platforms`、`/v1/capabilities`、
-`/v1/search`、`/v1/tracks/{ref}`、`/v1/tracks/{ref}/lyrics`、
-`/v1/tracks/{ref}/stream`、`/v1/playlists/{ref}` 和
-`/v1/playlists/{ref}/tracks`。认证已提供二维码、账号密码、短信验证码和
-退出端点；完整契约见 [docs/api-v1.md](docs/api-v1.md)。
+`/v1/search`、`/v1/tracks/{ref}`、`/v1/albums/{ref}`、
+`/v1/artists/{ref}`、`/v1/playlists/{ref}` 及其曲目、歌词、媒体和目录子端点。
+认证已提供二维码、账号密码、短信验证码和退出端点；完整契约见
+[docs/api-v1.md](docs/api-v1.md)。
 
 ## 许可证
 

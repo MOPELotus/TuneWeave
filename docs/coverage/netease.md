@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=367`、`partial=7`、`implemented=11`、`verified=19`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=365`、`partial=7`、`implemented=11`、`verified=21`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -28,8 +28,8 @@
 | `album_sublist` | `/album/sublist` | `implemented` | `GET /v1/account/library/albums`（分页、收藏时间与 `paidCount` 等元数据已完整映射；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证内容成功态） |
 | `api` | `/api` | `verified` | `POST /v1/extensions/netease/api`（仅允许固定网易云域名与 `/api/...` 路径，登录态由 `account` 别名选择；完整支持默认 EAPI 及 `weapi/api/linuxapi/xeapi`，拒绝原始 Cookie、域名、代理和请求头覆盖；2026-07-16 五种协议均以搜索请求联网实测成功，另实测 XEAPI 公钥注册/加密响应及 `e_r=true` EAPI 响应解密） |
 | `artist_album` | `/artist/album` | `verified` | `GET /v1/artists/{ref}/albums`（统一分页并保留歌手级元数据与单项原始字段；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 5 张周杰伦专辑，首项 `netease:274336916`《即兴曲》，`has_more=true`、`next_offset=5`） |
-| `artist_desc` | `/artist/desc` | `pending` | — |
-| `artist_detail` | `/artist/detail` | `pending` | — |
+| `artist_desc` | `/artist/desc` | `verified` | `GET /v1/artists/{ref}`（与 `/artist/detail` 合并为统一 `Artist`，映射简介及分段传记，并在扩展字段保留专题原始响应；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦简介、6 段传记及 3 项专题数据） |
+| `artist_detail` | `/artist/detail` | `verified` | `GET /v1/artists/{ref}`（映射名称、别名、身份、头像、封面及作品计数，并保留完整原始响应；2026-07-16 匿名 HTTP 实测返回 44 张专辑、568 首曲目、9 个 MV 与 8 个视频） |
 | `artist_detail_dynamic` | `/artist/detail/dynamic` | `pending` | — |
 | `artist_fans` | `/artist/fans` | `pending` | — |
 | `artist_follow_count` | `/artist/follow/count` | `pending` | — |
