@@ -124,6 +124,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn artist_albums(&self, _id: &str, _request: &PageRequest) -> Result<Page<Album>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistAlbums,
+        ))
+    }
+
     async fn playlist(&self, _id: &str, _account: Option<&str>) -> Result<Playlist> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
