@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=330`、`partial=6`、`implemented=29`、`verified=39`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=329`、`partial=6`、`implemented=29`、`verified=40`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -67,7 +67,7 @@
 | `cloud_match` | `/cloud/match` | `implemented` | `POST /v1/account/cloud/matches`（统一接收 `user_id/cloud_track_id/target_track_id`，兼容参考 `uid/sid/asid` 和字符串或数字 ID；固定 WeAPI `/api/cloud/user/song/match`，目标为 `0` 或省略时明确映射为取消匹配，非零目标映射为网易歌曲引用；统一返回云盘引用、目标引用与 `matched` 状态并保留完整响应；协议载荷、不透明 ID、匹配/取消两分支、参考/统一字段、非标量拒绝、账户隔离和 HTTP 包络均有离线测试；2026-07-16 以 `asid=0` 匿名真实 HTTP 验证在写请求前稳定返回 401 `authentication_required`，待真实账户验证匹配写入与取消回滚） |
 | `cloud_upload_complete` | `/cloud/upload/complete` | `implemented` | `POST /v1/account/cloud/uploads/complete`（以 `platform/account` 选择隔离登录态，统一接收 `provisional_track_id/resource_id/md5/filename/song_name/artist/album/bitrate`，并兼容参考字段 `songId/resourceId/song`；完整实现 EAPI `/api/upload/cloud/info/v2` 登记与 `/api/cloud/pub/v2` 发布两段事务，曲名缺省时取文件主名，歌手/专辑缺省时分别使用“未知艺术家/未知专辑”，统一返回最终曲目引用并保留两段原始响应；请求边界、元数据默认值、成功映射、账户前置和 HTTP 别名均有离线测试；2026-07-16 匿名真实 HTTP 验证在发起上游登记前稳定返回 401 `authentication_required`，待真实账户验证成功发布） |
 | `cloud_upload_token` | `/cloud/upload/token` | `implemented` | `POST /v1/account/cloud/uploads/ticket`（统一接收 `md5/file_size/filename/bitrate/content_type` 并兼容 `fileSize/contentType`；依次执行 EAPI `/api/cloud/upload/check`、WeAPI `/api/nos/token/alloc` 与真实 LBS 服务发现，完整返回 `needUpload/songId/resourceId` 对应字段、受限 NOS 上传 URL、方法及所需请求头；对象键按路径段编码，上传目标严格限制为无凭据、无自定义端口的 `http(s)://*.127.net` 和精确 `offset=0&complete=true&version=1.0` 参数，拒绝外域、重复参数与目标注入；NOS token 只存在于直传所需响应头映射，Debug 和扩展原文均不泄漏；协议构造、文件/MD5/码率边界、域名白名单、token 脱敏、统一 HTTP 字段及错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在申请 token 前稳定返回 401 `authentication_required`，待真实账户验证票据与原始音频直传成功态） |
-| `cloudsearch` | `/cloudsearch` | `pending` | — |
+| `cloudsearch` | `/cloudsearch` | `verified` | `GET /v1/search`（统一接受 `q/keywords`、平台、账户与分页；完整支持参考项目全部 11 种搜索类型及数字值：歌曲 1、专辑 10、歌手 100、歌单 1000、用户 1002、MV 1004、歌词 1006、广播电台 1009、视频 1014、综合 1018、声音 2000，缺省为歌曲；固定 EAPI `/api/cloudsearch/pc` 并传递 `s/type/limit/offset/total=true`；统一结果使用 `{type,data}` 判别联合，已知结构映射为 `Track/Album/Artist/Playlist/User/Video/RadioStation`，歌词命中仍为歌曲并保留歌词原文，综合/声音及不可稳定映射项用不丢失原文的 `opaque` 表达，完整响应与分页应用状态保留在扩展；类型映射、全部分支、混合已知/未知条目、字段缺失、分页、能力声明、参数别名和 HTTP 错误均有离线测试；2026-07-16 手动运行 11 个显式忽略的 provider 联网测试全部通过，随后匿名真实 HTTP 以 `keywords=周杰伦&limit=2` 验证 11 个类型均返回 200：1/10/100/1000/1002/1004/1006 分别返回 2 项，1009 按上游真实行为返回 10 项并标记 `limit_applied=false`，1014/1018/2000 返回合法空结果） |
 | `comment` | `/comment` | `pending` | — |
 | `comment_album` | `/comment/album` | `pending` | — |
 | `comment_dj` | `/comment/dj` | `pending` | — |
