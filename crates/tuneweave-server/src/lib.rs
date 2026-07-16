@@ -11,7 +11,7 @@ use axum::{
     body::Bytes,
     extract::{
         DefaultBodyLimit, Path, Query, State,
-        rejection::{BytesRejection, JsonRejection},
+        rejection::{BytesRejection, JsonRejection, QueryRejection},
     },
     http::{HeaderMap, header},
     routing::{get, post, put},
@@ -29,7 +29,8 @@ use tuneweave_core::{
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest, CommentReactionPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
     CommentSort, CommentTarget, CommentTargetKind, CommentThreadStatsBatch,
     CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
@@ -241,7 +242,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
-            get(comment_reaction_list),
+            get(comment_reaction_list)
+                .put(comment_reaction_enable)
+                .delete(comment_reaction_disable),
         )
         .route(
             "/users/{reference}/favorites/tracks",
@@ -2656,6 +2659,72 @@ async fn comment_reaction_list(
     ))
 }
 
+async fn comment_reaction_enable(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
+    params: Result<Query<CommentAccountQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
+    execute_comment_reaction_mutation(
+        &state,
+        kind,
+        reference,
+        comment_id,
+        reaction,
+        query_params(params)?,
+        true,
+    )
+    .await
+}
+
+async fn comment_reaction_disable(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
+    params: Result<Query<CommentAccountQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
+    execute_comment_reaction_mutation(
+        &state,
+        kind,
+        reference,
+        comment_id,
+        reaction,
+        query_params(params)?,
+        false,
+    )
+    .await
+}
+
+async fn execute_comment_reaction_mutation(
+    state: &AppState,
+    kind: String,
+    reference: String,
+    comment_id: String,
+    reaction: String,
+    params: CommentAccountQuery,
+    active: bool,
+) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let comment_id = validate_comment_id("comment_id", &comment_id)?;
+    let kind = parse_comment_reaction_kind(&reaction)?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_comment_reaction(&CommentReactionMutationRequest {
+            target,
+            comment_id,
+            kind,
+            active,
+            target_user_ref: None,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommentAccountQuery {
@@ -3363,6 +3432,12 @@ fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> 
         .map_err(|_| TuneWeaveError::invalid_request("request body must be valid JSON").into())
 }
 
+fn query_params<T>(params: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+    params
+        .map(|Query(params)| params)
+        .map_err(|_| TuneWeaveError::invalid_request("query parameters are invalid").into())
+}
+
 fn account_alias(value: Option<&str>) -> Result<String, TuneWeaveError> {
     let account = value.unwrap_or("default").trim();
     let account = if account.is_empty() {
@@ -3967,6 +4042,7 @@ mod tests {
                 Capability::CommentWrite,
                 Capability::CommentsRead,
                 Capability::CommentReactionsRead,
+                Capability::CommentReactionsWrite,
                 Capability::CommentThreadStats,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
@@ -5285,6 +5361,23 @@ mod tests {
             })
         }
 
+        async fn set_comment_reaction(
+            &self,
+            request: &CommentReactionMutationRequest,
+        ) -> Result<CommentReactionMutationResult> {
+            Ok(CommentReactionMutationResult {
+                target: request.target.clone(),
+                comment_id: request.comment_id.clone(),
+                kind: request.kind,
+                active: request.active,
+                target_user_ref: request.target_user_ref.clone(),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("provider".to_owned(), json!("mock")),
+                ]),
+            })
+        }
+
         async fn comment_thread_stats(
             &self,
             request: &CommentThreadStatsRequest,
@@ -6042,6 +6135,57 @@ mod tests {
             "/v1/resources/track/netease:863481066/comments/1167145843/reactions/clap?uid=285516405",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_reaction_put_and_delete_expose_like_and_unlike_actions() {
+        let (status, liked) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/resources/track/netease:29178366/comments/12840183/reactions/like?account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(liked["data"]["target"]["ref"], "netease:29178366");
+        assert_eq!(liked["data"]["target"]["kind"], "track");
+        assert_eq!(liked["data"]["comment_id"], "12840183");
+        assert_eq!(liked["data"]["kind"], "like");
+        assert_eq!(liked["data"]["active"], true);
+        assert!(liked["data"]["target_user_ref"].is_null());
+        assert_eq!(liked["data"]["extensions"]["account"], "personal");
+        assert_eq!(liked["meta"]["platform"], "netease");
+        assert_eq!(liked["meta"]["account"], "personal");
+
+        let (status, unliked) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/resources/event/netease:A_EV_2_6559519868_32953014/comments/1419532712/reactions/like",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            unliked["data"]["target"]["ref"],
+            "netease:A_EV_2_6559519868_32953014"
+        );
+        assert_eq!(unliked["data"]["target"]["kind"], "event");
+        assert_eq!(unliked["data"]["active"], false);
+        assert_eq!(unliked["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn comment_reaction_mutations_reject_unknown_reactions_and_query_fields() {
+        for path in [
+            "/v1/resources/track/netease:29178366/comments/12840183/reactions/clap",
+            "/v1/resources/article/netease:29178366/comments/12840183/reactions/like",
+            "/v1/resources/track/netease:29178366/comments/12840183/reactions/like?unknown=true",
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::PUT, path, None).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
