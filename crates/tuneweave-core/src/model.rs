@@ -75,6 +75,57 @@ pub struct AudioRecognition {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BannerClient {
+    #[default]
+    Pc,
+    Android,
+    Iphone,
+    Ipad,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BannerListRequest {
+    pub client: BannerClient,
+    pub account: Option<String>,
+}
+
+impl BannerListRequest {
+    #[must_use]
+    pub fn new(client: BannerClient) -> Self {
+        Self {
+            client,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerTargetKind {
+    Track,
+    Album,
+    Artist,
+    Playlist,
+    Video,
+    Web,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Banner {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub image_url: String,
+    pub target_ref: Option<ResourceRef>,
+    pub target_kind: BannerTargetKind,
+    pub url: Option<String>,
+    pub exclusive: Option<bool>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct ImageUploadRequest {
     pub filename: String,
@@ -923,6 +974,32 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize image upload result");
         assert_eq!(value["url"], "https://example.test/avatar.png");
         assert_eq!(value["image_id"], "109951168000000000");
+    }
+
+    #[test]
+    fn banner_keeps_client_and_target_semantics_typed() {
+        let request = BannerListRequest::new(BannerClient::Iphone);
+        assert_eq!(
+            serde_json::to_value(request.client).expect("serialize banner client"),
+            "iphone"
+        );
+
+        let banner = Banner {
+            id: Some("4862548".to_owned()),
+            title: Some("新歌首发".to_owned()),
+            image_url: "https://example.test/banner.jpg".to_owned(),
+            target_ref: Some(
+                ResourceRef::new(Platform::Netease, "3402163617").expect("valid target reference"),
+            ),
+            target_kind: BannerTargetKind::Track,
+            url: Some("https://music.163.com/song?id=3402163617".to_owned()),
+            exclusive: Some(false),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(banner).expect("serialize banner");
+        assert_eq!(value["target_ref"], "netease:3402163617");
+        assert_eq!(value["target_kind"], "track");
+        assert_eq!(value["title"], "新歌首发");
     }
 
     #[test]

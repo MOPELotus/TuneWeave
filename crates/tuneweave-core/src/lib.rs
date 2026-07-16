@@ -22,14 +22,14 @@ pub use model::{
     ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
     ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, CreatorSummary, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions, ImageUploadRequest,
-    ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, Page, PageMeta, PageRequest,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, Quality, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest, SubscriptionResult,
-    Track, TrackEntitlement, TrialWindow, User, Video, VideoKind,
+    AudioRecognitionMatch, AudioRecognitionRequest, Banner, BannerClient, BannerListRequest,
+    BannerTargetKind, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions,
+    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, Page,
+    PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RecommendationRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TrialWindow, User, Video, VideoKind,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

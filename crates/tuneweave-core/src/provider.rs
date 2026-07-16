@@ -6,12 +6,12 @@ use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest,
     ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
-    AuthChallengeRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
-    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
-    ProviderQrStart, RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult,
-    Track, TrackEntitlement, TuneWeaveError, User, Video,
+    AuthChallengeRequest, Banner, BannerListRequest, Capability, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
+    ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor,
+    ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -49,6 +49,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AudioRecognition,
+        ))
+    }
+
+    async fn banners(&self, _request: &BannerListRequest) -> Result<Vec<Banner>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Banners,
         ))
     }
 
