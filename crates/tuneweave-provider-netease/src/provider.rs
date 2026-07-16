@@ -20,9 +20,9 @@ use tuneweave_core::{
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResourceRef,
-    Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    RadioCatalogOption, RadioStation, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -308,6 +308,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountProfile,
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
+            Capability::AccountRadioStations,
             Capability::AccountFollowingArtists,
             Capability::AccountArtistNewVideos,
             Capability::AccountArtistNewTracks,
@@ -984,6 +985,20 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_success(&response.body)?;
         map_subscribed_albums_response(response.body, request, limit)
+    }
+
+    async fn account_radio_stations(&self, request: &PageRequest) -> Result<Page<RadioStation>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.max(1);
+        let response = client
+            .request_eapi(
+                "/api/content/channel/collect/list",
+                netease_radio_collection_payload(limit, request.offset),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "broadcast station collection")?;
+        map_radio_collection_response(response.body, limit, request.offset)
     }
 
     async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
@@ -1895,6 +1910,194 @@ fn map_radio_catalog_option(raw: Value, kind: &str) -> Result<RadioCatalogOption
         name,
         extensions,
     })
+}
+
+fn netease_radio_collection_payload(limit: u32, offset: u32) -> Value {
+    json!({
+        "contentType": "BROADCAST",
+        "limit": limit.to_string(),
+        "offset": offset.to_string(),
+        "timeReverseOrder": "true",
+        "startDate": "4762584922000"
+    })
+}
+
+fn map_radio_collection_response(
+    body: Value,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<RadioStation>> {
+    let raw_items = radio_collection_items(&body).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase broadcast station collection did not contain a list",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": body.clone() }))
+    })?;
+    let items = raw_items
+        .into_iter()
+        .map(map_collected_radio_station)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let total = radio_collection_scalar(&body, &["total", "count"]).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    });
+    let explicit_more = radio_collection_scalar(&body, &["hasMore", "more"]).and_then(json_bool);
+    let has_more = if consumed == 0 {
+        false
+    } else if let Some(has_more) = explicit_more {
+        has_more
+    } else if let Some(total) = total {
+        u64::from(next_offset) < total
+    } else {
+        consumed >= limit
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn radio_collection_items(body: &Value) -> Option<Vec<Value>> {
+    let data = body.get("data").unwrap_or(&Value::Null);
+    let nested_data = data.get("data").unwrap_or(&Value::Null);
+    for container in [data, nested_data, body] {
+        if let Some(items) = container.as_array() {
+            return Some(items.clone());
+        }
+        for field in ["list", "items", "records", "contents", "channels"] {
+            if let Some(items) = container.get(field).and_then(Value::as_array) {
+                return Some(items.clone());
+            }
+        }
+    }
+    None
+}
+
+fn radio_collection_scalar<'a>(body: &'a Value, fields: &[&str]) -> Option<&'a Value> {
+    let data = body.get("data").unwrap_or(&Value::Null);
+    let nested_data = data.get("data").unwrap_or(&Value::Null);
+    [data, nested_data, body]
+        .into_iter()
+        .find_map(|container| fields.iter().find_map(|field| container.get(field)))
+}
+
+fn map_collected_radio_station(raw: Value) -> Result<RadioStation> {
+    let station_raw = embedded_radio_station(&raw);
+    let id = radio_scalar_field(&station_raw, &["id", "channelId", "contentId"])
+        .or_else(|| radio_scalar_field(&raw, &["id", "channelId", "contentId"]))
+        .ok_or_else(|| radio_collection_item_error("id", &raw))?;
+    let name = radio_text_field(
+        &station_raw,
+        &["name", "channelName", "contentName", "title"],
+    )
+    .or_else(|| radio_text_field(&raw, &["name", "channelName", "contentName", "title"]))
+    .ok_or_else(|| radio_collection_item_error("name", &raw))?;
+    let reference = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid broadcast station id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "item": raw.clone() }))
+    })?;
+    let mut station = RadioStation::new(reference, name);
+    station.description = radio_text_field(&station_raw, &["description", "desc"])
+        .or_else(|| radio_text_field(&raw, &["description", "desc"]))
+        .unwrap_or_default();
+    station.cover_url = radio_text_field(
+        &station_raw,
+        &["coverUrl", "channelCoverUrl", "picUrl", "imageUrl"],
+    )
+    .or_else(|| radio_text_field(&raw, &["coverUrl", "channelCoverUrl", "picUrl", "imageUrl"]));
+    station.category = radio_text_field(&station_raw, &["categoryName", "category"])
+        .or_else(|| radio_text_field(&raw, &["categoryName", "category"]));
+    station.region = radio_text_field(&station_raw, &["regionName", "region"])
+        .or_else(|| radio_text_field(&raw, &["regionName", "region"]));
+    station.stream_url = radio_text_field(&station_raw, &["playUrl", "streamUrl"])
+        .or_else(|| radio_text_field(&raw, &["playUrl", "streamUrl"]));
+    station.current_program = radio_text_field(&station_raw, &["programName", "currentProgram"])
+        .or_else(|| radio_text_field(&raw, &["programName", "currentProgram"]));
+    station.subscribed = radio_bool_field(&station_raw, &["subed", "subscribed", "collected"])
+        .or_else(|| radio_bool_field(&raw, &["subed", "subscribed", "collected"]))
+        .or(Some(true));
+    station.extensions.insert("collection_item".to_owned(), raw);
+    station
+        .extensions
+        .insert("broadcast_station".to_owned(), station_raw);
+    Ok(station)
+}
+
+fn embedded_radio_station(raw: &Value) -> Value {
+    let mut current = raw.clone();
+    for _ in 0..2 {
+        let Some(next) = [
+            "content",
+            "resource",
+            "channel",
+            "broadcast",
+            "contentJson",
+            "resourceJson",
+            "data",
+        ]
+        .into_iter()
+        .filter_map(|field| current.get(field))
+        .find_map(|candidate| match candidate {
+            Value::Object(_) => Some(candidate.clone()),
+            Value::String(candidate) => serde_json::from_str(candidate)
+                .ok()
+                .filter(Value::is_object),
+            _ => None,
+        }) else {
+            break;
+        };
+        current = next;
+    }
+    current
+}
+
+fn radio_scalar_field(raw: &Value, fields: &[&str]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_scalar_string))
+}
+
+fn radio_text_field(raw: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        raw.get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn radio_bool_field(raw: &Value, fields: &[&str]) -> Option<bool> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_bool))
+}
+
+fn radio_collection_item_error(field: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase broadcast station collection item did not contain a {field}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "item": raw }))
 }
 
 fn json_i64(value: &Value) -> Option<i64> {
@@ -4379,6 +4582,74 @@ mod tests {
     }
 
     #[test]
+    fn maps_collected_broadcast_stations_and_preserves_pagination() {
+        assert_eq!(
+            netease_radio_collection_payload(25, 50),
+            json!({
+                "contentType": "BROADCAST",
+                "limit": "25",
+                "offset": "50",
+                "timeReverseOrder": "true",
+                "startDate": "4762584922000"
+            })
+        );
+
+        let page = map_radio_collection_response(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [
+                        {
+                            "contentId": 362,
+                            "contentName": "金山区广播电视台综合广播",
+                            "collectTime": 1_700_000_000_000_i64,
+                            "content": {
+                                "id": 362,
+                                "name": "金山区广播电视台综合广播",
+                                "coverUrl": "https://example.test/362.jpg",
+                                "regionName": "上海",
+                                "subed": true,
+                                "source": "QT"
+                            }
+                        },
+                        {
+                            "resourceJson": r#"{"id":1069201,"channelName":"24小时资讯热点","channelCoverUrl":"https://example.test/1069201.jpg","regionName":"网络台"}"#
+                        }
+                    ],
+                    "total": 53,
+                    "hasMore": true
+                }
+            }),
+            25,
+            50,
+        )
+        .expect("map broadcast station collection");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:362");
+        assert_eq!(page.items[0].name, "金山区广播电视台综合广播");
+        assert_eq!(page.items[0].region.as_deref(), Some("上海"));
+        assert_eq!(page.items[0].subscribed, Some(true));
+        assert_eq!(
+            page.items[0].extensions["broadcast_station"]["source"],
+            "QT"
+        );
+        assert_eq!(page.items[1].resource_ref.to_string(), "netease:1069201");
+        assert_eq!(page.items[1].name, "24小时资讯热点");
+        assert_eq!(page.items[1].region.as_deref(), Some("网络台"));
+        assert_eq!(page.pagination.total, Some(53));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(52));
+    }
+
+    #[test]
+    fn broadcast_station_collection_rejects_missing_lists() {
+        let error = map_radio_collection_response(json!({ "code": 200, "data": {} }), 25, 0)
+            .expect_err("missing collection list");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
     fn banner_mapping_rejects_items_without_any_image() {
         let error = map_banner(
             json!({"targetId": 185809, "targetType": 1}),
@@ -6061,6 +6332,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::AccountAlbums));
+        assert!(capabilities.contains(&Capability::AccountRadioStations));
         assert!(capabilities.contains(&Capability::AccountArtistNewVideos));
         assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
         assert!(capabilities.contains(&Capability::AccountArtistNewWorks));
@@ -6284,6 +6556,22 @@ mod tests {
     async fn account_albums_require_the_selected_logged_in_alias() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let error = MusicProvider::account_albums(
+            &provider,
+            &PageRequest {
+                limit: 25,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn account_radio_stations_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_radio_stations(
             &provider,
             &PageRequest {
                 limit: 25,
@@ -7076,6 +7364,16 @@ mod tests {
         let error = MusicProvider::account_albums(&provider, &PageRequest::new(2, 0))
             .await
             .expect_err("anonymous subscribed albums must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_broadcast_station_collection_requires_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_radio_stations(&provider, &PageRequest::new(2, 0))
+            .await
+            .expect_err("anonymous broadcast station collection must fail");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
