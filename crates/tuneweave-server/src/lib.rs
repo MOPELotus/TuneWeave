@@ -41,7 +41,12 @@ use tuneweave_core::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
     LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, PageRequest,
     PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, PrincipalType,
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
     ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
@@ -58,6 +63,7 @@ pub use response::{ApiError, ApiResponse, ResponseMeta};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 #[derive(Clone, Default)]
@@ -258,8 +264,34 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
-        .route("/playlists/{reference}", get(playlist))
-        .route("/playlists/{reference}/tracks", get(playlist_tracks))
+        .route("/playlists", post(playlist_create).delete(playlists_delete))
+        .route(
+            "/playlists/{reference}",
+            get(playlist).patch(playlist_update).delete(playlist_delete),
+        )
+        .route(
+            "/playlists/{reference}/tracks",
+            get(playlist_tracks)
+                .post(playlist_tracks_add)
+                .delete(playlist_tracks_remove),
+        )
+        .route(
+            "/playlists/{reference}/videos",
+            post(playlist_videos_add).delete(playlist_videos_remove),
+        )
+        .route(
+            "/playlists/{reference}/items",
+            post(playlist_items_add).delete(playlist_items_remove),
+        )
+        .route(
+            "/playlists/{reference}/tracks/order",
+            put(playlist_tracks_order),
+        )
+        .route(
+            "/playlists/{reference}/cover",
+            put(playlist_cover_update)
+                .layer(DefaultBodyLimit::max(MAX_PLAYLIST_COVER_UPLOAD_BYTES)),
+        )
         .route(
             "/resources/{kind}/comments/stats",
             get(comment_thread_stats),
@@ -329,6 +361,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/cloud/lyrics", get(cloud_lyrics))
         .route("/account/cloud/matches", post(cloud_match))
         .route("/account/playlists", get(account_playlists))
+        .route("/account/playlists/order", put(account_playlists_order))
         .route("/account/library/albums", get(account_albums))
         .route(
             "/account/library/radio-stations",
@@ -2246,6 +2279,685 @@ const fn stream_error_status(code: ErrorCode) -> ResolutionStatus {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PlaylistReferenceValue {
+    String(String),
+    Integer(u64),
+}
+
+impl PlaylistReferenceValue {
+    fn into_string(self) -> String {
+        match self {
+            Self::String(value) => value,
+            Self::Integer(value) => value.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PlaylistReferenceInput {
+    One(PlaylistReferenceValue),
+    Many(Vec<PlaylistReferenceValue>),
+}
+
+impl PlaylistReferenceInput {
+    fn into_values(self) -> Vec<PlaylistReferenceValue> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PlaylistTagsInput {
+    Joined(String),
+    Many(Vec<String>),
+}
+
+impl PlaylistTagsInput {
+    fn into_values(self) -> Vec<String> {
+        match self {
+            Self::Joined(value) if value.trim().is_empty() => Vec::new(),
+            Self::Joined(value) => value.split(';').map(str::to_owned).collect(),
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistCreateBody {
+    platform: Option<String>,
+    account: Option<String>,
+    name: Option<String>,
+    visibility: Option<Value>,
+    privacy: Option<Value>,
+    kind: Option<Value>,
+    #[serde(rename = "type")]
+    playlist_type: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistUpdateBody {
+    account: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    desc: Option<String>,
+    tags: Option<PlaylistTagsInput>,
+    variant: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistDeleteBody {
+    #[serde(alias = "playlist_refs")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id")]
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistItemMutationBody {
+    #[serde(alias = "item_refs", alias = "itemRefs", alias = "tracks")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id", alias = "trackIds")]
+    ids: Option<PlaylistReferenceInput>,
+    kind: Option<Value>,
+    #[serde(rename = "type")]
+    item_type: Option<Value>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistTrackOrderBody {
+    #[serde(alias = "track_refs", alias = "trackRefs", alias = "tracks")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id", alias = "trackIds")]
+    ids: Option<PlaylistReferenceInput>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistOrderBody {
+    #[serde(alias = "playlist_refs", alias = "playlistRefs", alias = "playlists")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id")]
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistAccountParams {
+    account: Option<String>,
+}
+
+async fn playlist_create(
+    State(state): State<AppState>,
+    payload: Result<Json<PlaylistCreateBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = account_platform(&state, body.platform.as_deref())?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .create_playlist(&PlaylistCreateRequest {
+            name: required_trimmed("name", body.name)?,
+            visibility: parse_playlist_visibility(body.visibility.as_ref(), body.privacy.as_ref())?,
+            kind: parse_playlist_kind(body.kind.as_ref(), body.playlist_type.as_ref())?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlist_update(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistUpdateBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let body = json_body(payload)?;
+    let description = match (body.description, body.desc) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "description and desc cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["description", "desc"] }))
+            .into());
+        }
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let account = account_alias(body.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .update_playlist(
+            reference.id(),
+            &PlaylistUpdateRequest {
+                name: body.name,
+                description,
+                tags: body.tags.map(PlaylistTagsInput::into_values),
+                variant: parse_playlist_update_variant(body.variant.as_deref())?,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlist_delete(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PlaylistAccountParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let params = query_params(params)?;
+    let account = account_alias(params.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_playlists(&PlaylistDeleteRequest {
+            playlist_refs: vec![reference],
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlists_delete(
+    State(state): State<AppState>,
+    payload: Result<Json<PlaylistDeleteBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let playlist_refs = parse_playlist_reference_fields(
+        body.refs,
+        body.ids,
+        body.platform.as_deref(),
+        state.default_platform,
+        "playlist",
+    )?;
+    let platform = single_reference_platform("playlist deletion", &playlist_refs)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_playlists(&PlaylistDeleteRequest {
+            playlist_refs,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlist_items_add(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Add,
+        None,
+    )
+    .await
+}
+
+async fn playlist_items_remove(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Remove,
+        None,
+    )
+    .await
+}
+
+async fn playlist_tracks_add(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Add,
+        Some(PlaylistItemKind::Track),
+    )
+    .await
+}
+
+async fn playlist_tracks_remove(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Remove,
+        Some(PlaylistItemKind::Track),
+    )
+    .await
+}
+
+async fn playlist_videos_add(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Add,
+        Some(PlaylistItemKind::Video),
+    )
+    .await
+}
+
+async fn playlist_videos_remove(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    playlist_items_mutation(
+        state,
+        reference,
+        payload,
+        PlaylistItemMutationAction::Remove,
+        Some(PlaylistItemKind::Video),
+    )
+    .await
+}
+
+async fn playlist_items_mutation(
+    state: AppState,
+    reference: String,
+    payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
+    action: PlaylistItemMutationAction,
+    forced_kind: Option<PlaylistItemKind>,
+) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let body = json_body(payload)?;
+    let kind = parse_playlist_item_kind(body.kind.as_ref(), body.item_type.as_ref(), forced_kind)?;
+    let item_refs = parse_playlist_reference_fields(
+        body.refs,
+        body.ids,
+        None,
+        reference.platform(),
+        "playlist item",
+    )?;
+    let account = account_alias(body.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .mutate_playlist_items(
+            reference.id(),
+            action,
+            &PlaylistItemMutationRequest {
+                item_refs,
+                kind,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlist_tracks_order(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistTrackOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistTrackOrderResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let body = json_body(payload)?;
+    let track_refs = parse_playlist_reference_fields(
+        body.refs,
+        body.ids,
+        None,
+        reference.platform(),
+        "playlist track",
+    )?;
+    let account = account_alias(body.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .reorder_playlist_tracks(
+            reference.id(),
+            &PlaylistTrackOrderRequest {
+                track_refs,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn account_playlists_order(
+    State(state): State<AppState>,
+    payload: Result<Json<PlaylistOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistOrderResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let playlist_refs = parse_playlist_reference_fields(
+        body.refs,
+        body.ids,
+        body.platform.as_deref(),
+        state.default_platform,
+        "playlist",
+    )?;
+    let platform = single_reference_platform("account playlist ordering", &playlist_refs)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .reorder_account_playlists(&PlaylistOrderRequest {
+            playlist_refs,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistCoverParams {
+    account: Option<String>,
+    filename: Option<String>,
+    #[serde(alias = "imgSize", alias = "img_size")]
+    image_size: Option<String>,
+    #[serde(alias = "imgX", alias = "img_x")]
+    crop_x: Option<String>,
+    #[serde(alias = "imgY", alias = "img_y")]
+    crop_y: Option<String>,
+}
+
+async fn playlist_cover_update(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PlaylistCoverParams>, QueryRejection>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Json<ApiResponse<PlaylistCoverUpdateResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let params = query_params(params)?;
+    let account = account_alias(params.account.as_deref())?;
+    let request = parse_image_upload_request(
+        headers,
+        payload,
+        ImageUploadOptions {
+            filename: params.filename.as_deref(),
+            default_filename: "playlist-cover.jpg",
+            image_size: params.image_size.as_deref(),
+            crop_x: params.crop_x.as_deref(),
+            crop_y: params.crop_y.as_deref(),
+            account: account.clone(),
+            max_bytes: MAX_PLAYLIST_COVER_UPLOAD_BYTES,
+        },
+    )?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .update_playlist_cover(reference.id(), &request)
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+fn parse_playlist_visibility(
+    visibility: Option<&Value>,
+    privacy: Option<&Value>,
+) -> Result<PlaylistVisibility, TuneWeaveError> {
+    let (name, value) = match (visibility, privacy) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "visibility and privacy cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["visibility", "privacy"] })));
+        }
+        (Some(value), None) => ("visibility", value),
+        (None, Some(value)) => ("privacy", value),
+        (None, None) => return Ok(PlaylistVisibility::Public),
+    };
+    let value = required_string_or_number(name, value)?
+        .trim()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "public" | "0" => Ok(PlaylistVisibility::Public),
+        "private" | "10" => Ok(PlaylistVisibility::Private),
+        _ => Err(TuneWeaveError::invalid_request(format!(
+            "{name} must be public, private, 0, or 10"
+        ))
+        .with_details(json!({ "parameter": name, "value": value }))),
+    }
+}
+
+fn parse_playlist_kind(
+    kind: Option<&Value>,
+    playlist_type: Option<&Value>,
+) -> Result<PlaylistKind, TuneWeaveError> {
+    let (name, value) = match (kind, playlist_type) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "kind and type cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["kind", "type"] })));
+        }
+        (Some(value), None) => ("kind", value),
+        (None, Some(value)) => ("type", value),
+        (None, None) => return Ok(PlaylistKind::Normal),
+    };
+    let value = required_string_or_number(name, value)?
+        .trim()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "normal" | "music" | "track" => Ok(PlaylistKind::Normal),
+        "video" | "mv" => Ok(PlaylistKind::Video),
+        "shared" => Ok(PlaylistKind::Shared),
+        _ => Err(TuneWeaveError::invalid_request(format!(
+            "{name} must be normal, video, or shared"
+        ))
+        .with_details(json!({ "parameter": name, "value": value }))),
+    }
+}
+
+fn parse_playlist_update_variant(
+    value: Option<&str>,
+) -> Result<PlaylistMetadataUpdateVariant, TuneWeaveError> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase().replace('-', "_"))
+        .as_deref()
+    {
+        None | Some("default") | Some("auto") => Ok(PlaylistMetadataUpdateVariant::Default),
+        Some("batch") => Ok(PlaylistMetadataUpdateVariant::Batch),
+        Some("individual") | Some("single") => Ok(PlaylistMetadataUpdateVariant::Individual),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported playlist update variant: {value}"
+        ))
+        .with_details(json!({ "allowed": ["default", "batch", "individual"] }))),
+    }
+}
+
+fn parse_playlist_item_kind(
+    kind: Option<&Value>,
+    item_type: Option<&Value>,
+    forced_kind: Option<PlaylistItemKind>,
+) -> Result<PlaylistItemKind, TuneWeaveError> {
+    let parsed = match (kind, item_type) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "kind and type cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["kind", "type"] })));
+        }
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => {
+            let value = required_string_or_number("kind", value)?
+                .trim()
+                .to_ascii_lowercase();
+            Some(match value.as_str() {
+                "track" | "song" | "music" | "0" => PlaylistItemKind::Track,
+                "video" | "mv" | "3" => PlaylistItemKind::Video,
+                _ => {
+                    return Err(TuneWeaveError::invalid_request(
+                        "playlist item kind must be track or video",
+                    )
+                    .with_details(json!({ "value": value, "allowed": ["track", "video"] })));
+                }
+            })
+        }
+    };
+    if let (Some(forced), Some(parsed)) = (forced_kind, parsed)
+        && forced != parsed
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "playlist item kind conflicts with the selected endpoint",
+        )
+        .with_details(json!({ "endpoint_kind": forced, "requested_kind": parsed })));
+    }
+    Ok(forced_kind.or(parsed).unwrap_or_default())
+}
+
+fn parse_playlist_reference_fields(
+    refs: Option<PlaylistReferenceInput>,
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<&str>,
+    default_platform: Platform,
+    resource: &str,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    match (refs, ids) {
+        (Some(_), Some(_)) => Err(TuneWeaveError::invalid_request(
+            "refs and ids cannot be provided together",
+        )
+        .with_details(json!({ "conflicts": ["refs", "ids"] }))),
+        (None, None) => Err(TuneWeaveError::invalid_request(
+            "one of refs or ids must be provided",
+        )),
+        (Some(refs), None) => {
+            if platform.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "platform can only be used with ids",
+                ));
+            }
+            split_playlist_reference_values("refs", refs.into_values())?
+                .into_iter()
+                .map(parse_reference)
+                .collect()
+        }
+        (None, Some(ids)) => {
+            let platform = platform.map_or(Ok(default_platform), parse_platform_parameter)?;
+            split_playlist_reference_values("ids", ids.into_values())?
+                .into_iter()
+                .map(|id| {
+                    ResourceRef::new(platform, &id).map_err(|error| {
+                        TuneWeaveError::invalid_request(format!("invalid {resource} id: {error}"))
+                            .with_details(json!({ "id": id, "platform": platform }))
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+fn split_playlist_reference_values(
+    name: &str,
+    values: Vec<PlaylistReferenceValue>,
+) -> Result<Vec<String>, TuneWeaveError> {
+    let mut parsed = Vec::new();
+    for value in values {
+        let value = value.into_string();
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "{name} must not contain empty items"
+                ))
+                .with_details(json!({ "parameter": name })));
+            }
+            parsed.push(item.to_owned());
+        }
+    }
+    if parsed.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{name} must not be empty"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn single_reference_platform(
+    operation: &str,
+    references: &[ResourceRef],
+) -> Result<Platform, TuneWeaveError> {
+    let Some(platform) = references.first().map(ResourceRef::platform) else {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{operation} requires at least one reference"
+        )));
+    };
+    if references
+        .iter()
+        .any(|reference| reference.platform() != platform)
+    {
+        return Err(
+            TuneWeaveError::invalid_request(format!("{operation} cannot mix platforms"))
+                .with_details(json!({ "refs": references })),
+        );
+    }
+    Ok(platform)
+}
+
 async fn playlist(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -3272,6 +3984,7 @@ struct AccountQuery {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AvatarUploadParams {
     platform: Option<String>,
     account: Option<String>,
@@ -3284,25 +3997,39 @@ struct AvatarUploadParams {
     crop_y: Option<String>,
 }
 
-async fn account_avatar(
-    State(state): State<AppState>,
-    Query(params): Query<AvatarUploadParams>,
+struct ImageUploadOptions<'a> {
+    filename: Option<&'a str>,
+    default_filename: &'a str,
+    image_size: Option<&'a str>,
+    crop_x: Option<&'a str>,
+    crop_y: Option<&'a str>,
+    account: String,
+    max_bytes: usize,
+}
+
+fn parse_image_upload_request(
     headers: HeaderMap,
     payload: Result<Bytes, BytesRejection>,
-) -> Result<Json<ApiResponse<ImageUploadResult>>, ApiError> {
+    options: ImageUploadOptions<'_>,
+) -> Result<ImageUploadRequest, ApiError> {
+    let max_mebibytes = options.max_bytes / (1024 * 1024);
     let data = payload.map_err(|_| {
-        TuneWeaveError::invalid_request("image body is invalid or exceeds 20 MiB")
-            .with_details(json!({ "max_bytes": MAX_AVATAR_UPLOAD_BYTES }))
+        TuneWeaveError::invalid_request(format!(
+            "image body is invalid or exceeds {max_mebibytes} MiB"
+        ))
+        .with_details(json!({ "max_bytes": options.max_bytes }))
     })?;
     if data.is_empty() {
         return Err(TuneWeaveError::invalid_request("image body must not be empty").into());
     }
-    if data.len() > MAX_AVATAR_UPLOAD_BYTES {
-        return Err(TuneWeaveError::invalid_request("image body exceeds 20 MiB")
-            .with_details(json!({ "max_bytes": MAX_AVATAR_UPLOAD_BYTES }))
-            .into());
+    if data.len() > options.max_bytes {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "image body exceeds {max_mebibytes} MiB"
+        ))
+        .with_details(json!({ "max_bytes": options.max_bytes }))
+        .into());
     }
-    let filename = params.filename.as_deref().unwrap_or("avatar.jpg").trim();
+    let filename = options.filename.unwrap_or(options.default_filename).trim();
     if filename.is_empty() || filename.len() > 255 || filename.chars().any(char::is_control) {
         return Err(TuneWeaveError::invalid_request(
             "filename must be 1 to 255 bytes and contain no control characters",
@@ -3313,8 +4040,9 @@ async fn account_avatar(
         Some(value) => value
             .to_str()
             .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))?
-            .trim(),
-        None => "image/jpeg",
+            .trim()
+            .to_owned(),
+        None => "image/jpeg".to_owned(),
     };
     let media_type = content_type
         .split(';')
@@ -3326,26 +4054,45 @@ async fn account_avatar(
             TuneWeaveError::invalid_request("Content-Type must use the image media type").into(),
         );
     }
-    let image_size = parse_optional_u32_parameter("image_size", params.image_size.as_deref())?;
+    let image_size = parse_optional_u32_parameter("image_size", options.image_size)?;
     if image_size == Some(0) {
         return Err(TuneWeaveError::invalid_request("image_size must be greater than zero").into());
     }
-    let crop_x = parse_optional_u32_parameter("crop_x", params.crop_x.as_deref())?;
-    let crop_y = parse_optional_u32_parameter("crop_y", params.crop_y.as_deref())?;
+    Ok(ImageUploadRequest {
+        filename: filename.to_owned(),
+        content_type,
+        data: data.to_vec(),
+        image_size,
+        crop_x: parse_optional_u32_parameter("crop_x", options.crop_x)?,
+        crop_y: parse_optional_u32_parameter("crop_y", options.crop_y)?,
+        account: Some(options.account),
+    })
+}
+
+async fn account_avatar(
+    State(state): State<AppState>,
+    params: Result<Query<AvatarUploadParams>, QueryRejection>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Json<ApiResponse<ImageUploadResult>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
+    let request = parse_image_upload_request(
+        headers,
+        payload,
+        ImageUploadOptions {
+            filename: params.filename.as_deref(),
+            default_filename: "avatar.jpg",
+            image_size: params.image_size.as_deref(),
+            crop_x: params.crop_x.as_deref(),
+            crop_y: params.crop_y.as_deref(),
+            account: account.clone(),
+            max_bytes: MAX_AVATAR_UPLOAD_BYTES,
+        },
+    )?;
     let provider = state.registry.require(platform)?;
-    let result = provider
-        .upload_account_avatar(&ImageUploadRequest {
-            filename: filename.to_owned(),
-            content_type: content_type.to_owned(),
-            data: data.to_vec(),
-            image_size,
-            crop_x,
-            crop_y,
-            account: Some(account.clone()),
-        })
-        .await?;
+    let result = provider.upload_account_avatar(&request).await?;
     Ok(Json(
         ApiResponse::new(result)
             .with_platform(platform)
@@ -5502,6 +6249,7 @@ mod tests {
                 Capability::ArtistTopTracks,
                 Capability::ArtistSubscriptionWrite,
                 Capability::PlaylistRead,
+                Capability::PlaylistWrite,
                 Capability::Lyrics,
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
@@ -6397,6 +7145,122 @@ mod tests {
                     has_more: false,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn create_playlist(
+            &self,
+            request: &PlaylistCreateRequest,
+        ) -> Result<PlaylistMutationResult> {
+            let mut playlist = sample_playlist("9001");
+            playlist.name.clone_from(&request.name);
+            let mut extensions = Extensions::new();
+            extensions.insert("visibility".to_owned(), json!(request.visibility));
+            extensions.insert("kind".to_owned(), json!(request.kind));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(PlaylistMutationResult {
+                playlist_ref: playlist.resource_ref.clone(),
+                action: tuneweave_core::PlaylistMutationAction::Create,
+                playlist: Some(playlist),
+                extensions,
+            })
+        }
+
+        async fn update_playlist(
+            &self,
+            id: &str,
+            request: &PlaylistUpdateRequest,
+        ) -> Result<PlaylistMutationResult> {
+            let playlist_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid playlist update reference");
+            let mut extensions = Extensions::new();
+            extensions.insert("name".to_owned(), json!(request.name));
+            extensions.insert("description".to_owned(), json!(request.description));
+            extensions.insert("tags".to_owned(), json!(request.tags));
+            extensions.insert("variant".to_owned(), json!(request.variant));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(PlaylistMutationResult {
+                playlist_ref,
+                action: tuneweave_core::PlaylistMutationAction::Update,
+                playlist: None,
+                extensions,
+            })
+        }
+
+        async fn delete_playlists(
+            &self,
+            request: &PlaylistDeleteRequest,
+        ) -> Result<PlaylistDeleteResult> {
+            Ok(PlaylistDeleteResult {
+                playlist_refs: request.playlist_refs.clone(),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn mutate_playlist_items(
+            &self,
+            id: &str,
+            action: PlaylistItemMutationAction,
+            request: &PlaylistItemMutationRequest,
+        ) -> Result<PlaylistItemMutationResult> {
+            Ok(PlaylistItemMutationResult {
+                playlist_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid playlist item reference"),
+                item_refs: request.item_refs.clone(),
+                kind: request.kind,
+                action,
+                snapshot_id: Some("snapshot-items".to_owned()),
+                cloud_track_count: Some(request.item_refs.len() as u64),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn reorder_playlist_tracks(
+            &self,
+            id: &str,
+            request: &PlaylistTrackOrderRequest,
+        ) -> Result<PlaylistTrackOrderResult> {
+            Ok(PlaylistTrackOrderResult {
+                playlist_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid playlist track order reference"),
+                track_refs: request.track_refs.clone(),
+                snapshot_id: Some("snapshot-order".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn reorder_account_playlists(
+            &self,
+            request: &PlaylistOrderRequest,
+        ) -> Result<PlaylistOrderResult> {
+            Ok(PlaylistOrderResult {
+                playlist_refs: request.playlist_refs.clone(),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn update_playlist_cover(
+            &self,
+            id: &str,
+            request: &ImageUploadRequest,
+        ) -> Result<PlaylistCoverUpdateResult> {
+            let mut extensions = Extensions::new();
+            extensions.insert("filename".to_owned(), json!(request.filename));
+            extensions.insert("content_type".to_owned(), json!(request.content_type));
+            extensions.insert("data_len".to_owned(), json!(request.data.len()));
+            extensions.insert("image_size".to_owned(), json!(request.image_size));
+            extensions.insert("crop_x".to_owned(), json!(request.crop_x));
+            extensions.insert("crop_y".to_owned(), json!(request.crop_y));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(PlaylistCoverUpdateResult {
+                playlist_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid playlist cover reference"),
+                image: ImageUploadResult {
+                    url: Some("https://example.test/playlist-cover.jpg".to_owned()),
+                    image_id: Some("109951168000000001".to_owned()),
+                    extensions,
+                },
+                extensions: Extensions::new(),
             })
         }
 
@@ -9600,6 +10464,291 @@ mod tests {
         assert_eq!(json["data"][0]["ref"], "netease:123");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn playlist_create_and_update_preserve_unified_and_reference_fields() {
+        let (status, created) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/playlists",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "name": "跨平台收藏",
+                "privacy": 10,
+                "type": "VIDEO"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["data"]["playlist_ref"], "netease:9001");
+        assert_eq!(created["data"]["action"], "create");
+        assert_eq!(created["data"]["playlist"]["name"], "跨平台收藏");
+        assert_eq!(created["data"]["extensions"]["visibility"], "private");
+        assert_eq!(created["data"]["extensions"]["kind"], "video");
+        assert_eq!(created["meta"]["platform"], "netease");
+        assert_eq!(created["meta"]["account"], "personal");
+
+        let (status, updated) = json_request_from(
+            test_app_with_provider(),
+            Method::PATCH,
+            "/v1/playlists/netease:9001",
+            Some(json!({
+                "account": "personal",
+                "name": "新的名字",
+                "desc": "",
+                "tags": "华语;流行",
+                "variant": "batch"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["data"]["playlist_ref"], "netease:9001");
+        assert_eq!(updated["data"]["action"], "update");
+        assert_eq!(updated["data"]["extensions"]["name"], "新的名字");
+        assert_eq!(updated["data"]["extensions"]["description"], "");
+        assert_eq!(
+            updated["data"]["extensions"]["tags"],
+            json!(["华语", "流行"])
+        );
+        assert_eq!(updated["data"]["extensions"]["variant"], "batch");
+        assert_eq!(updated["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn playlist_delete_supports_single_and_ordered_batch_references() {
+        let (status, deleted) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/playlists/netease:9001?account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["data"]["playlist_refs"], json!(["netease:9001"]));
+        assert_eq!(deleted["meta"]["account"], "personal");
+
+        let (status, deleted) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/playlists",
+            Some(json!({
+                "ids": [9001, "9002,9001"],
+                "platform": "netease",
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            deleted["data"]["playlist_refs"],
+            json!(["netease:9001", "netease:9002", "netease:9001"])
+        );
+        assert_eq!(deleted["data"]["extensions"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn playlist_item_routes_keep_tracks_and_videos_distinct() {
+        let (status, tracks) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/playlists/netease:9001/tracks",
+            Some(json!({
+                "trackIds": [185809, "5268328,185809"],
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"]["kind"], "track");
+        assert_eq!(tracks["data"]["action"], "add");
+        assert_eq!(
+            tracks["data"]["item_refs"],
+            json!(["netease:185809", "netease:5268328", "netease:185809"])
+        );
+        assert_eq!(tracks["data"]["snapshot_id"], "snapshot-items");
+
+        let (status, videos) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/playlists/netease:9001/items",
+            Some(json!({
+                "refs": ["netease:89ADDE33C0AAE8EC14B99F32C116F479"],
+                "type": 3,
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(videos["data"]["kind"], "video");
+        assert_eq!(videos["data"]["action"], "remove");
+        assert_eq!(
+            videos["data"]["item_refs"],
+            json!(["netease:89ADDE33C0AAE8EC14B99F32C116F479"])
+        );
+
+        let (status, videos) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/playlists/netease:9001/videos",
+            Some(json!({ "ids": "opaque-video-id" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(videos["data"]["kind"], "video");
+        assert_eq!(videos["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn playlist_and_account_order_routes_preserve_exact_input_order() {
+        let (status, tracks) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/playlists/netease:9001/tracks/order",
+            Some(json!({
+                "ids": [5268328, 185809, 5268328],
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            tracks["data"]["track_refs"],
+            json!(["netease:5268328", "netease:185809", "netease:5268328"])
+        );
+        assert_eq!(tracks["data"]["snapshot_id"], "snapshot-order");
+
+        let (status, playlists) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/playlists/order",
+            Some(json!({
+                "ids": "9003,9001,9002",
+                "platform": "netease",
+                "account": "personal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            playlists["data"]["playlist_refs"],
+            json!(["netease:9003", "netease:9001", "netease:9002"])
+        );
+        assert_eq!(playlists["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn playlist_cover_accepts_binary_images_and_reference_parameter_aliases() {
+        let (status, cover) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/playlists/netease:9001/cover?account=personal&filename=cover.png&imgSize=600&imgX=2&imgY=3",
+            Some("image/png"),
+            vec![0x89, b'P', b'N', b'G'],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cover["data"]["playlist_ref"], "netease:9001");
+        assert_eq!(
+            cover["data"]["image"]["url"],
+            "https://example.test/playlist-cover.jpg"
+        );
+        assert_eq!(
+            cover["data"]["image"]["extensions"]["filename"],
+            "cover.png"
+        );
+        assert_eq!(
+            cover["data"]["image"]["extensions"]["content_type"],
+            "image/png"
+        );
+        assert_eq!(cover["data"]["image"]["extensions"]["data_len"], 4);
+        assert_eq!(cover["data"]["image"]["extensions"]["image_size"], 600);
+        assert_eq!(cover["data"]["image"]["extensions"]["crop_x"], 2);
+        assert_eq!(cover["data"]["image"]["extensions"]["crop_y"], 3);
+        assert_eq!(cover["meta"]["platform"], "netease");
+        assert_eq!(cover["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms() {
+        let invalid_requests = [
+            (
+                Method::POST,
+                "/v1/playlists",
+                json!({
+                    "name": "冲突",
+                    "visibility": "public",
+                    "privacy": 10
+                }),
+            ),
+            (
+                Method::POST,
+                "/v1/playlists",
+                json!({ "name": "冲突", "kind": "normal", "type": "video" }),
+            ),
+            (
+                Method::POST,
+                "/v1/playlists",
+                json!({ "name": "未知", "unexpected": true }),
+            ),
+            (
+                Method::PATCH,
+                "/v1/playlists/netease:9001",
+                json!({ "description": "a", "desc": "b" }),
+            ),
+            (
+                Method::PATCH,
+                "/v1/playlists/netease:9001",
+                json!({ "name": "a", "variant": "parallel" }),
+            ),
+            (
+                Method::DELETE,
+                "/v1/playlists",
+                json!({
+                    "refs": ["netease:1", "qq:2"]
+                }),
+            ),
+            (
+                Method::DELETE,
+                "/v1/playlists",
+                json!({ "refs": "netease:1", "ids": 2 }),
+            ),
+            (
+                Method::POST,
+                "/v1/playlists/netease:9001/tracks",
+                json!({ "ids": 185809, "kind": "video" }),
+            ),
+            (
+                Method::POST,
+                "/v1/playlists/netease:9001/items",
+                json!({ "kind": "track" }),
+            ),
+            (
+                Method::PUT,
+                "/v1/account/playlists/order",
+                json!({ "refs": "netease:1", "platform": "netease" }),
+            ),
+        ];
+
+        for (method, path, body) in invalid_requests {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), method, path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+
+        let (status, response) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/playlists/netease:9001/cover?unexpected=true",
+            Some("image/jpeg"),
+            vec![0xff, 0xd8, 0xff, 0xd9],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
