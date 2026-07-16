@@ -291,6 +291,108 @@ pub(crate) struct ArtistVideoCreator {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct MvDetailEnvelope {
+    pub data: MvDetailData,
+    pub subed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MvDetailData {
+    pub id: u64,
+    pub name: String,
+    #[serde(rename = "artistId")]
+    pub artist_id: Option<u64>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(default)]
+    pub artists: Vec<VideoCreatorItem>,
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    pub desc: Option<String>,
+    pub cover: Option<String>,
+    pub duration: Option<u64>,
+    #[serde(rename = "publishTime")]
+    pub published_at: Option<String>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    #[serde(default)]
+    pub brs: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloudVideoDetailEnvelope {
+    pub data: CloudVideoDetailData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloudVideoDetailData {
+    pub vid: Value,
+    pub title: String,
+    pub description: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+    #[serde(rename = "publishTime")]
+    pub published_at: Option<u64>,
+    #[serde(rename = "durationms")]
+    pub duration_ms: Option<u64>,
+    #[serde(rename = "playTime")]
+    pub play_count: Option<u64>,
+    pub subed: Option<bool>,
+    pub creator: Option<VideoCreatorItem>,
+    #[serde(default)]
+    pub resolutions: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct VideoCreatorItem {
+    #[serde(rename = "userId", alias = "id")]
+    pub id: Option<Value>,
+    #[serde(rename = "nickname", alias = "name", default)]
+    pub name: String,
+    #[serde(rename = "avatarUrl", alias = "img1v1Url")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct VideoStatsEnvelope {
+    pub liked: Option<bool>,
+    #[serde(rename = "likedCount")]
+    pub liked_count: Option<u64>,
+    #[serde(rename = "commentCount")]
+    pub comment_count: Option<u64>,
+    #[serde(rename = "shareCount")]
+    pub share_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MvUrlEnvelope {
+    pub data: VideoUrlItem,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloudVideoUrlEnvelope {
+    #[serde(default)]
+    pub urls: Vec<VideoUrlItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct VideoUrlItem {
+    pub id: Option<Value>,
+    pub url: Option<String>,
+    pub size: Option<u64>,
+    pub validity: Option<u64>,
+    pub expi: Option<u64>,
+    pub r: Option<u32>,
+    pub resolution: Option<u32>,
+    pub code: Option<i64>,
+    pub fee: Option<i64>,
+    #[serde(rename = "mvFee")]
+    pub mv_fee: Option<i64>,
+    pub msg: Option<String>,
+    pub md5: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistVideoUserProfile {
     #[serde(rename = "userId")]
     pub user_id: Option<Value>,

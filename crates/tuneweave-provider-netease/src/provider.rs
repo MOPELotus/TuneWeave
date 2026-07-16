@@ -46,7 +46,8 @@ use tuneweave_core::{
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -65,14 +66,15 @@ use crate::{
         AudioMatchEnvelope, AudioQuality, BannerEnvelope, BroadcastTaxonomyEnvelope,
         ChartCatalogEnvelope, ChartGroupItem, ChartItem, ChartRankPreviewItem,
         ChartTextPreviewItem, CloudUploadAllocationEnvelope, CloudUploadServersEnvelope,
-        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
-        DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
-        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
+        CloudVideoDetailEnvelope, CloudVideoUrlEnvelope, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, DimensionChartDetailEnvelope, DimensionChartTrackItem,
+        DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope, PlayHistoryEnvelope,
         PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
         RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
         StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -357,6 +359,9 @@ impl MusicProvider for NeteaseProvider {
             Capability::AudioStream,
             Capability::AudioStreamBatch,
             Capability::AudioDownload,
+            Capability::VideoDetail,
+            Capability::VideoStats,
+            Capability::VideoStream,
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
@@ -1165,6 +1170,103 @@ impl MusicProvider for NeteaseProvider {
                 ensure_success(&response.body)?;
                 let response: ArtistVideosEnvelope = parse_body(response.body)?;
                 map_artist_videos_response(response, limit, request.offset)
+            }
+        }
+    }
+
+    async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
+        let id = validated_video_id(id, request.kind)?;
+        let client = self.client_for(request.account.as_deref())?;
+        match request.kind {
+            VideoResourceKind::Mv => {
+                let response = client
+                    .request_weapi("/api/v1/mv/detail", json!({ "id": id }))
+                    .await?;
+                ensure_success(&response.body)?;
+                let raw_response = response.body.clone();
+                let response: MvDetailEnvelope = parse_body(response.body)?;
+                map_mv_detail(response, raw_response)
+            }
+            VideoResourceKind::Video => {
+                let response = client
+                    .request_weapi("/api/cloudvideo/v1/video/detail", json!({ "id": id }))
+                    .await?;
+                ensure_success(&response.body)?;
+                let raw_response = response.body.clone();
+                let response: CloudVideoDetailEnvelope = parse_body(response.body)?;
+                map_cloud_video_detail(response, raw_response)
+            }
+        }
+    }
+
+    async fn video_stats(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoStats> {
+        let id = validated_video_id(id, request.kind)?;
+        let thread_id = match request.kind {
+            VideoResourceKind::Mv => format!("R_MV_5_{id}"),
+            VideoResourceKind::Video => format!("R_VI_62_{id}"),
+        };
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_weapi(
+                "/api/comment/commentthread/info",
+                json!({ "threadid": thread_id, "composeliked": true }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: VideoStatsEnvelope = parse_body(response.body)?;
+        map_video_stats(&id, request.kind, response, raw_response)
+    }
+
+    async fn video_stream(&self, id: &str, request: &VideoStreamRequest) -> Result<VideoStream> {
+        let id = validated_video_id(id, request.kind)?;
+        let resolution = validated_video_resolution(request.resolution)?;
+        let client = self.client_for(request.account.as_deref())?;
+        match request.kind {
+            VideoResourceKind::Mv => {
+                let response = client
+                    .request_weapi(
+                        "/api/song/enhance/play/mv/url",
+                        json!({ "id": id, "r": resolution }),
+                    )
+                    .await?;
+                ensure_success(&response.body)?;
+                let raw_response = response.body.clone();
+                let response: MvUrlEnvelope = parse_body(response.body)?;
+                map_video_stream(&id, request, response.data, raw_response)
+            }
+            VideoResourceKind::Video => {
+                let ids = serde_json::to_string(&[id.as_str()]).map_err(|error| {
+                    TuneWeaveError::new(
+                        ErrorCode::InternalError,
+                        format!("failed to serialize NetEase video ids: {error}"),
+                    )
+                    .with_platform(Platform::Netease)
+                })?;
+                let response = client
+                    .request_weapi(
+                        "/api/cloudvideo/playurl",
+                        json!({ "ids": ids, "resolution": resolution }),
+                    )
+                    .await?;
+                ensure_success(&response.body)?;
+                let raw_response = response.body.clone();
+                let response: CloudVideoUrlEnvelope = parse_body(response.body)?;
+                let item = response.urls.into_iter().next().unwrap_or(VideoUrlItem {
+                    id: Some(Value::String(id.clone())),
+                    url: None,
+                    size: None,
+                    validity: None,
+                    expi: None,
+                    r: None,
+                    resolution: None,
+                    code: None,
+                    fee: None,
+                    mv_fee: None,
+                    msg: None,
+                    md5: None,
+                });
+                map_video_stream(&id, request, item, raw_response)
             }
         }
     }
@@ -6490,6 +6592,256 @@ fn map_artist_video(raw: Value) -> Result<Video> {
     })
 }
 
+fn map_mv_detail(response: MvDetailEnvelope, raw_response: Value) -> Result<VideoDetail> {
+    let data = response.data;
+    let id = data.id.to_string();
+    let resource_ref = video_resource_ref(&id, "MV")?;
+    let fallback_creator = data.artist_id.zip(data.artist_name.clone());
+    let creators = map_video_creators(data.artists, fallback_creator);
+    let resolutions = data
+        .brs
+        .into_iter()
+        .filter_map(map_video_resolution)
+        .collect();
+    let detail_raw = raw_response.get("data").cloned().unwrap_or(Value::Null);
+    let mut video_extensions = Extensions::new();
+    video_extensions.insert("detail".to_owned(), detail_raw);
+    let video = Video {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        title: data.name,
+        creators,
+        description: normalized_string(data.desc)
+            .or_else(|| normalized_string(data.brief_description))
+            .unwrap_or_default(),
+        cover_url: normalized_string(data.cover),
+        duration_ms: data.duration,
+        published_at: normalized_string(data.published_at),
+        play_count: data.play_count,
+        subscribed: response.subed,
+        extensions: video_extensions,
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Mv,
+        video,
+        resolutions,
+        extensions,
+    })
+}
+
+fn map_cloud_video_detail(
+    response: CloudVideoDetailEnvelope,
+    raw_response: Value,
+) -> Result<VideoDetail> {
+    let data = response.data;
+    let id = json_scalar_string(&data.vid).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase video detail is missing a usable video id",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let resource_ref = video_resource_ref(&id, "video")?;
+    let creators = data
+        .creator
+        .into_iter()
+        .filter_map(map_video_creator)
+        .collect();
+    let resolutions = data
+        .resolutions
+        .into_iter()
+        .filter_map(map_video_resolution)
+        .collect();
+    let detail_raw = raw_response.get("data").cloned().unwrap_or(Value::Null);
+    let mut video_extensions = Extensions::new();
+    video_extensions.insert("detail".to_owned(), detail_raw);
+    let video = Video {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        title: data.title,
+        creators,
+        description: data.description.unwrap_or_default(),
+        cover_url: normalized_string(data.cover_url),
+        duration_ms: data.duration_ms,
+        published_at: data
+            .published_at
+            .filter(|milliseconds| *milliseconds > 0)
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        play_count: data.play_count,
+        subscribed: data.subed,
+        extensions: video_extensions,
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Video,
+        video,
+        resolutions,
+        extensions,
+    })
+}
+
+fn map_video_creators(
+    creators: Vec<VideoCreatorItem>,
+    fallback: Option<(u64, String)>,
+) -> Vec<CreatorSummary> {
+    let mut creators = creators
+        .into_iter()
+        .filter_map(map_video_creator)
+        .collect::<Vec<_>>();
+    if creators.is_empty()
+        && let Some((id, name)) = fallback
+        && !name.trim().is_empty()
+    {
+        creators.push(CreatorSummary {
+            resource_ref: ResourceRef::new(Platform::Netease, id.to_string()).ok(),
+            name,
+            avatar_url: None,
+        });
+    }
+    creators
+}
+
+fn map_video_creator(creator: VideoCreatorItem) -> Option<CreatorSummary> {
+    let name = creator.name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(CreatorSummary {
+        resource_ref: creator
+            .id
+            .as_ref()
+            .and_then(json_scalar_string)
+            .and_then(|id| ResourceRef::new(Platform::Netease, id).ok()),
+        name: name.to_owned(),
+        avatar_url: normalized_string(creator.avatar_url),
+    })
+}
+
+fn map_video_resolution(raw: Value) -> Option<VideoResolution> {
+    let resolution = ["br", "resolution", "height"]
+        .into_iter()
+        .find_map(|key| raw.get(key).and_then(scalar_u64))
+        .and_then(|value| u32::try_from(value).ok())?;
+    let format = ["format", "container", "type"]
+        .into_iter()
+        .find_map(|key| raw.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let mut extensions = Extensions::new();
+    extensions.insert("resolution".to_owned(), raw.clone());
+    Some(VideoResolution {
+        resolution,
+        width: raw
+            .get("width")
+            .and_then(scalar_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        height: raw
+            .get("height")
+            .and_then(scalar_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        size: raw.get("size").and_then(scalar_u64),
+        format,
+        extensions,
+    })
+}
+
+fn map_video_stats(
+    id: &str,
+    kind: VideoResourceKind,
+    response: VideoStatsEnvelope,
+    raw_response: Value,
+) -> Result<VideoStats> {
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(VideoStats {
+        video_ref: video_resource_ref(id, "video stats")?,
+        kind,
+        liked: response.liked,
+        like_count: response.liked_count,
+        comment_count: response.comment_count,
+        share_count: response.share_count,
+        extensions,
+    })
+}
+
+fn map_video_stream(
+    id: &str,
+    request: &VideoStreamRequest,
+    item: VideoUrlItem,
+    raw_response: Value,
+) -> Result<VideoStream> {
+    if let Some(response_id) = item.id.as_ref().and_then(json_scalar_string)
+        && response_id != id
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned a video stream for a different id",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "requested_id": id, "response_id": response_id })));
+    }
+    let url = normalized_string(item.url);
+    let platform_code = item
+        .code
+        .or_else(|| raw_response.get("code").and_then(Value::as_i64));
+    let available = url.is_some() && platform_code.is_none_or(|code| code == 200);
+    let actual_resolution = item.r.or(item.resolution);
+    let format = url.as_deref().and_then(video_url_format);
+    let mut extensions = Extensions::new();
+    extensions.insert("kind".to_owned(), json!(request.kind));
+    insert_extension(&mut extensions, "md5", normalized_string(item.md5));
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(VideoStream {
+        video_ref: video_resource_ref(id, "video stream")?,
+        platform: Platform::Netease,
+        available,
+        url,
+        backup_urls: Vec::new(),
+        headers: BTreeMap::new(),
+        expires_at: item
+            .expi
+            .or(item.validity)
+            .filter(|seconds| *seconds > 0)
+            .and_then(expiration_rfc3339),
+        format,
+        codec: None,
+        width: None,
+        height: actual_resolution,
+        size: item.size,
+        duration_ms: None,
+        requested_resolution: request.resolution,
+        actual_resolution,
+        platform_code,
+        fee: item.fee.or(item.mv_fee),
+        message: normalized_string(item.msg),
+        extensions,
+    })
+}
+
+fn video_resource_ref(id: &str, kind: &str) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Netease, id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid {kind} id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+fn video_url_format(url: &str) -> Option<String> {
+    let path = Url::parse(url).ok()?.path().to_ascii_lowercase();
+    ["mp4", "m3u8", "flv", "webm"]
+        .into_iter()
+        .find(|format| path.ends_with(&format!(".{format}")))
+        .map(str::to_owned)
+}
+
 fn map_artist_new_videos_response(
     response: ArtistNewVideosEnvelope,
     raw_response: Value,
@@ -7601,6 +7953,18 @@ fn scalar_f64(value: &Value) -> Option<f64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
+fn scalar_u64(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .or_else(|| {
+                let value = value.as_f64()?;
+                (value.is_finite() && value >= 0.0 && value.fract() == 0.0).then_some(value as u64)
+            })
+    })
+}
+
 fn map_album_subscription_result(
     id: u64,
     subscribed: bool,
@@ -7808,6 +8172,32 @@ fn parse_numeric_id(resource: &str, id: &str) -> Result<u64> {
         .with_platform(Platform::Netease)
         .with_details(json!({ "resource": resource, "id": id }))
     })
+}
+
+fn validated_video_id(id: &str, kind: VideoResourceKind) -> Result<String> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase video id must be between 1 and 256 visible characters",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": id, "kind": kind })));
+    }
+    match kind {
+        VideoResourceKind::Mv => parse_numeric_id("MV", id).map(|id| id.to_string()),
+        VideoResourceKind::Video => Ok(id.to_owned()),
+    }
+}
+
+fn validated_video_resolution(resolution: u32) -> Result<u32> {
+    if (1..=4_320).contains(&resolution) {
+        return Ok(resolution);
+    }
+    Err(
+        TuneWeaveError::invalid_request("video resolution must be between 1 and 4320")
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "resolution": resolution })),
+    )
 }
 
 const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
@@ -11904,6 +12294,207 @@ mod tests {
     }
 
     #[test]
+    fn maps_mv_detail_stats_resolutions_and_stream_without_losing_responses() {
+        let detail_raw = json!({
+            "code": 200,
+            "subed": false,
+            "data": {
+                "id": 22695250,
+                "name": "任性 (5525 Live版)",
+                "artistId": 6452,
+                "artistName": "周杰伦",
+                "artists": [
+                    {"id": 6452, "name": "周杰伦", "followed": false},
+                    {"id": 13193, "name": "五月天", "followed": false}
+                ],
+                "briefDesc": "",
+                "desc": "回到那一天",
+                "cover": "https://example.test/mv.jpg",
+                "duration": 266000,
+                "publishTime": "2025-02-23",
+                "playCount": 100751,
+                "brs": [
+                    {"br": 240, "size": 17851236},
+                    {"br": 480, "size": 28558850},
+                    {"br": 720, "size": 44613276},
+                    {"br": 1080, "size": 177950112, "future": true}
+                ],
+                "videoGroup": [{"id": 58100, "name": "现场"}]
+            }
+        });
+        let detail: MvDetailEnvelope = parse_body(detail_raw.clone()).expect("MV detail fixture");
+        let detail = map_mv_detail(detail, detail_raw).expect("map MV detail");
+        assert_eq!(detail.kind, VideoResourceKind::Mv);
+        assert_eq!(detail.video.resource_ref.to_string(), "netease:22695250");
+        assert_eq!(detail.video.title, "任性 (5525 Live版)");
+        assert_eq!(detail.video.creators.len(), 2);
+        assert_eq!(
+            detail.video.creators[1]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:13193")
+        );
+        assert_eq!(detail.video.duration_ms, Some(266_000));
+        assert_eq!(detail.video.subscribed, Some(false));
+        assert_eq!(detail.resolutions.len(), 4);
+        assert_eq!(detail.resolutions[3].resolution, 1080);
+        assert_eq!(detail.resolutions[3].size, Some(177_950_112));
+        assert_eq!(
+            detail.resolutions[3].extensions["resolution"]["future"],
+            true
+        );
+        assert_eq!(
+            detail.extensions["response"]["data"]["videoGroup"][0]["id"],
+            58100
+        );
+
+        let stats_raw = json!({
+            "code": 200,
+            "liked": false,
+            "likedCount": 4662,
+            "commentCount": 675,
+            "shareCount": 1399
+        });
+        let stats: VideoStatsEnvelope = parse_body(stats_raw.clone()).expect("MV stats fixture");
+        let stats = map_video_stats("22695250", VideoResourceKind::Mv, stats, stats_raw)
+            .expect("map MV stats");
+        assert_eq!(stats.video_ref.to_string(), "netease:22695250");
+        assert_eq!(stats.like_count, Some(4_662));
+        assert_eq!(stats.comment_count, Some(675));
+        assert_eq!(stats.share_count, Some(1_399));
+
+        let stream_raw = json!({
+            "code": 200,
+            "data": {
+                "code": 200,
+                "expi": 3600,
+                "fee": 0,
+                "id": 22695250,
+                "md5": "abcdef",
+                "msg": "",
+                "mvFee": 0,
+                "r": 1080,
+                "size": 177950120,
+                "url": "https://example.test/live.mv.mp4?token=secret"
+            }
+        });
+        let stream: MvUrlEnvelope = parse_body(stream_raw.clone()).expect("MV stream fixture");
+        let request = VideoStreamRequest::new(VideoResourceKind::Mv, 1080);
+        let stream =
+            map_video_stream("22695250", &request, stream.data, stream_raw).expect("map MV stream");
+        assert!(stream.available);
+        assert_eq!(stream.format.as_deref(), Some("mp4"));
+        assert_eq!(stream.actual_resolution, Some(1080));
+        assert_eq!(stream.size, Some(177_950_120));
+        assert_eq!(stream.platform_code, Some(200));
+        assert_eq!(stream.extensions["md5"], "abcdef");
+        assert!(stream.expires_at.is_some());
+    }
+
+    #[test]
+    fn maps_cloud_video_detail_and_stream_and_validates_resource_boundaries() {
+        let id = "D1C2B3A40987654321ABCDEF12345678";
+        let detail_raw = json!({
+            "code": 200,
+            "data": {
+                "vid": id,
+                "title": "云村视频",
+                "description": "视频简介",
+                "coverUrl": "https://example.test/video.jpg",
+                "publishTime": 1_720_000_000_000_u64,
+                "durationms": 123456,
+                "playTime": 9876,
+                "subed": true,
+                "creator": {
+                    "userId": 32953014,
+                    "nickname": "Lotus",
+                    "avatarUrl": "https://example.test/avatar.jpg"
+                },
+                "resolutions": [
+                    {"resolution": 480, "size": 1234567},
+                    {"resolution": 1080, "width": 1920, "height": 1080, "size": 7654321}
+                ],
+                "videoGroup": [{"id": 1101, "name": "舞蹈"}]
+            }
+        });
+        let detail: CloudVideoDetailEnvelope =
+            parse_body(detail_raw.clone()).expect("cloud video detail fixture");
+        let detail = map_cloud_video_detail(detail, detail_raw).expect("map cloud video detail");
+        assert_eq!(detail.kind, VideoResourceKind::Video);
+        assert_eq!(
+            detail.video.resource_ref.to_string(),
+            format!("netease:{id}")
+        );
+        assert_eq!(detail.video.creators[0].name, "Lotus");
+        assert_eq!(
+            detail.video.creators[0]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:32953014")
+        );
+        assert_eq!(detail.video.duration_ms, Some(123_456));
+        assert_eq!(detail.resolutions[1].width, Some(1920));
+        assert_eq!(detail.resolutions[1].height, Some(1080));
+        assert_eq!(
+            detail.extensions["response"]["data"]["videoGroup"][0]["name"],
+            "舞蹈"
+        );
+
+        let stream_raw = json!({
+            "code": 200,
+            "urls": [{
+                "id": id,
+                "url": "https://example.test/video.m3u8",
+                "size": 7654321,
+                "validity": 1200,
+                "resolution": 1080,
+                "code": 200,
+                "needPay": false
+            }]
+        });
+        let stream: CloudVideoUrlEnvelope =
+            parse_body(stream_raw.clone()).expect("cloud video stream fixture");
+        let request = VideoStreamRequest::new(VideoResourceKind::Video, 1080);
+        let stream = map_video_stream(
+            id,
+            &request,
+            stream.urls.into_iter().next().expect("one stream"),
+            stream_raw,
+        )
+        .expect("map cloud video stream");
+        assert!(stream.available);
+        assert_eq!(stream.format.as_deref(), Some("m3u8"));
+        assert_eq!(stream.actual_resolution, Some(1080));
+
+        assert_eq!(
+            validated_video_id("22695250", VideoResourceKind::Mv).expect("valid MV"),
+            "22695250"
+        );
+        assert_eq!(
+            validated_video_id(id, VideoResourceKind::Video).expect("valid video"),
+            id
+        );
+        assert_eq!(
+            validated_video_id(id, VideoResourceKind::Mv)
+                .expect_err("opaque MV id")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        for resolution in [0, 4_321] {
+            assert_eq!(
+                validated_video_resolution(resolution)
+                    .expect_err("invalid resolution")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
     fn maps_followed_artist_new_videos_and_timestamp_cursor() {
         let raw = json!({
             "code": 200,
@@ -15687,6 +16278,62 @@ mod tests {
         assert!(page.items.iter().all(|video| !video.creators.is_empty()));
         assert_eq!(page.pagination.next_offset, Some(2));
         assert!(page.pagination.has_more);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_mv_detail_stats_and_every_advertised_resolution() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let detail_request = VideoDetailRequest::new(VideoResourceKind::Mv);
+        let detail = MusicProvider::video(&provider, "22695250", &detail_request)
+            .await
+            .expect("live MV detail");
+        assert_eq!(detail.video.resource_ref.to_string(), "netease:22695250");
+        assert!(!detail.video.title.is_empty());
+        assert!(!detail.video.creators.is_empty());
+        assert!(
+            detail
+                .video
+                .duration_ms
+                .is_some_and(|duration| duration > 0)
+        );
+        assert!(!detail.resolutions.is_empty());
+        assert_eq!(detail.extensions["response"]["code"], 200);
+
+        let stats = MusicProvider::video_stats(&provider, "22695250", &detail_request)
+            .await
+            .expect("live MV stats");
+        assert_eq!(stats.video_ref.to_string(), "netease:22695250");
+        assert!(stats.like_count.is_some());
+        assert!(stats.comment_count.is_some());
+        assert!(stats.share_count.is_some());
+        assert_eq!(stats.extensions["response"]["code"], 200);
+
+        for resolution in detail
+            .resolutions
+            .iter()
+            .map(|resolution| resolution.resolution)
+        {
+            let stream = MusicProvider::video_stream(
+                &provider,
+                "22695250",
+                &VideoStreamRequest::new(VideoResourceKind::Mv, resolution),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {resolution}p MV stream failed: {error}"));
+            assert!(stream.available, "{resolution}p");
+            assert!(
+                stream
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| url.starts_with("http")),
+                "{resolution}p"
+            );
+            assert_eq!(stream.requested_resolution, resolution, "{resolution}p");
+            assert_eq!(stream.actual_resolution, Some(resolution), "{resolution}p");
+            assert_eq!(stream.platform_code, Some(200), "{resolution}p");
+            assert_eq!(stream.extensions["response"]["code"], 200, "{resolution}p");
+        }
     }
 
     #[tokio::test]
