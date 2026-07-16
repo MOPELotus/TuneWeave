@@ -158,6 +158,7 @@
 {
   "artist_ref": "netease:6452",
   "followed": false,
+  "follower_count": 18717745,
   "video_counts": [
     { "category": "0", "count": 9, "extensions": {} },
     { "category": "1", "count": 9, "extensions": {} }
@@ -167,7 +168,7 @@
 }
 ```
 
-歌手动态统计与静态 `Artist` 分开，避免关注态随账户变化时污染可缓存详情。`video_counts.category` 是平台提供的类别标识；当平台没有公开类别名称时，TuneWeave 保留原始值而不猜测语义。演出对象、推荐资源及完整平台响应放在 `extensions.response`。
+歌手动态统计与静态 `Artist` 分开，避免关注态随账户变化时污染可缓存详情。`follower_count` 是公开粉丝总数；`video_counts.category` 是平台提供的类别标识，当平台没有公开类别名称时，TuneWeave 保留原始值而不猜测语义。演出对象、推荐资源及完整动态响应放在 `extensions.response`，粉丝统计的日增量等平台字段放在 `extensions.follow_count_response`。
 
 ### Playlist
 
