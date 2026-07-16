@@ -25,16 +25,18 @@ use tuneweave_core::{
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
     AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    BannerListRequest, Capability, ChallengeMethod, CloudUploadCompleteRequest, CloudUploadRequest,
+    CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream,
+    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult,
+    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -241,6 +243,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/avatar",
             put(account_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD_BYTES)),
+        )
+        .route("/account/cloud/uploads/ticket", post(cloud_upload_ticket))
+        .route(
+            "/account/cloud/uploads/complete",
+            post(cloud_upload_complete),
         )
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
@@ -2060,6 +2067,107 @@ async fn account_avatar(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudAccountQuery {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudUploadTicketBody {
+    md5: String,
+    #[serde(alias = "fileSize")]
+    file_size: u64,
+    filename: String,
+    bitrate: Option<u64>,
+    #[serde(alias = "contentType")]
+    content_type: Option<String>,
+}
+
+async fn cloud_upload_ticket(
+    State(state): State<AppState>,
+    Query(params): Query<CloudAccountQuery>,
+    payload: Result<Json<CloudUploadTicketBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CloudUploadTicket>>, ApiError> {
+    let body = json_body(payload)?;
+    let bitrate = body.bitrate.unwrap_or(CloudUploadRequest::DEFAULT_BITRATE);
+    if bitrate == 0 {
+        return Err(TuneWeaveError::invalid_request("bitrate must be greater than zero").into());
+    }
+    if body.file_size == 0 {
+        return Err(TuneWeaveError::invalid_request("file_size must be greater than zero").into());
+    }
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let ticket = provider
+        .cloud_upload_ticket(&CloudUploadTicketRequest {
+            md5: body.md5,
+            file_size: body.file_size,
+            filename: body.filename,
+            bitrate,
+            content_type: optional_trimmed(body.content_type),
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(ticket)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudUploadCompleteBody {
+    #[serde(alias = "songId")]
+    provisional_track_id: String,
+    #[serde(alias = "resourceId")]
+    resource_id: String,
+    md5: String,
+    filename: String,
+    #[serde(alias = "song")]
+    song_name: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    bitrate: Option<u64>,
+}
+
+async fn cloud_upload_complete(
+    State(state): State<AppState>,
+    Query(params): Query<CloudAccountQuery>,
+    payload: Result<Json<CloudUploadCompleteBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CloudUploadResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let bitrate = body.bitrate.unwrap_or(CloudUploadRequest::DEFAULT_BITRATE);
+    if bitrate == 0 {
+        return Err(TuneWeaveError::invalid_request("bitrate must be greater than zero").into());
+    }
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .complete_cloud_upload(&CloudUploadCompleteRequest {
+            provisional_track_id: body.provisional_track_id,
+            resource_id: body.resource_id,
+            md5: body.md5,
+            filename: body.filename,
+            song_name: optional_trimmed(body.song_name),
+            artist: optional_trimmed(body.artist),
+            album: optional_trimmed(body.album),
+            bitrate,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn account_profile(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -3049,6 +3157,7 @@ mod tests {
                 Capability::AccountArtistNewWorks,
                 Capability::AccountArtistNewTracksPlayAll,
                 Capability::AccountAvatarWrite,
+                Capability::AccountCloudDirectUpload,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -4080,6 +4189,63 @@ mod tests {
             Ok(ImageUploadResult {
                 url: Some("https://example.test/avatar.png".to_owned()),
                 image_id: Some("109951168000000000".to_owned()),
+                extensions,
+            })
+        }
+
+        async fn cloud_upload_ticket(
+            &self,
+            request: &CloudUploadTicketRequest,
+        ) -> Result<CloudUploadTicket> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("md5".to_owned(), json!(request.md5));
+            extensions.insert("file_size".to_owned(), json!(request.file_size));
+            extensions.insert("filename".to_owned(), json!(request.filename));
+            extensions.insert("bitrate".to_owned(), json!(request.bitrate));
+            extensions.insert("content_type".to_owned(), json!(request.content_type));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CloudUploadTicket {
+                upload_required: true,
+                provisional_track_id: Some("123".to_owned()),
+                resource_id: "resource-456".to_owned(),
+                upload_method: "POST".to_owned(),
+                upload_url:
+                    "https://nosup-jd1.127.net/bucket/object?offset=0&complete=true&version=1.0"
+                        .to_owned(),
+                upload_headers: BTreeMap::from([
+                    ("Content-Length".to_owned(), request.file_size.to_string()),
+                    ("Content-MD5".to_owned(), request.md5.to_ascii_lowercase()),
+                    ("x-nos-token".to_owned(), "upload-secret".to_owned()),
+                ]),
+                extensions,
+            })
+        }
+
+        async fn complete_cloud_upload(
+            &self,
+            request: &CloudUploadCompleteRequest,
+        ) -> Result<CloudUploadResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "provisional_track_id".to_owned(),
+                json!(request.provisional_track_id),
+            );
+            extensions.insert("resource_id".to_owned(), json!(request.resource_id));
+            extensions.insert("md5".to_owned(), json!(request.md5));
+            extensions.insert("filename".to_owned(), json!(request.filename));
+            extensions.insert("song_name".to_owned(), json!(request.song_name));
+            extensions.insert("artist".to_owned(), json!(request.artist));
+            extensions.insert("album".to_owned(), json!(request.album));
+            extensions.insert("bitrate".to_owned(), json!(request.bitrate));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CloudUploadResult {
+                track_ref: Some(
+                    ResourceRef::new(Platform::Netease, &request.provisional_track_id)
+                        .expect("valid cloud track reference"),
+                ),
+                upload_required: None,
+                uploaded: None,
+                published: true,
                 extensions,
             })
         }
@@ -5665,6 +5831,122 @@ mod tests {
             json["error"]["details"]["max_bytes"],
             MAX_AVATAR_UPLOAD_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_upload_ticket_uses_platform_account_and_reference_aliases() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/uploads/ticket?platform=netease&account=locker",
+            Some(json!({
+                "md5": "0123456789ABCDEF0123456789ABCDEF",
+                "fileSize": 42,
+                "filename": "反方向的钟.flac",
+                "bitrate": 999000,
+                "contentType": "audio/flac"
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["upload_required"], true);
+        assert_eq!(json["data"]["provisional_track_id"], "123");
+        assert_eq!(json["data"]["resource_id"], "resource-456");
+        assert_eq!(json["data"]["upload_method"], "POST");
+        assert_eq!(json["data"]["upload_headers"]["Content-Length"], "42");
+        assert_eq!(
+            json["data"]["upload_headers"]["Content-MD5"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            json["data"]["upload_headers"]["x-nos-token"],
+            "upload-secret"
+        );
+        assert_eq!(json["data"]["extensions"]["filename"], "反方向的钟.flac");
+        assert_eq!(json["data"]["extensions"]["bitrate"], 999_000);
+        assert_eq!(json["data"]["extensions"]["content_type"], "audio/flac");
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_upload_completion_uses_reference_aliases_and_default_bitrate() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/uploads/complete?platform=netease&account=locker",
+            Some(json!({
+                "songId": "123",
+                "resourceId": "resource-456",
+                "md5": "0123456789abcdef0123456789abcdef",
+                "filename": "反方向的钟.flac",
+                "song": "反方向的钟",
+                "artist": "周杰伦",
+                "album": "Jay"
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "netease:123");
+        assert_eq!(json["data"]["published"], true);
+        assert_eq!(json["data"]["extensions"]["resource_id"], "resource-456");
+        assert_eq!(json["data"]["extensions"]["song_name"], "反方向的钟");
+        assert_eq!(json["data"]["extensions"]["artist"], "周杰伦");
+        assert_eq!(json["data"]["extensions"]["album"], "Jay");
+        assert_eq!(json["data"]["extensions"]["bitrate"], 999_000);
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_upload_routes_reject_invalid_json_and_zero_numeric_fields() {
+        for (path, body) in [
+            (
+                "/v1/account/cloud/uploads/ticket",
+                json!({
+                    "md5": "0123456789abcdef0123456789abcdef",
+                    "file_size": 0,
+                    "filename": "song.mp3"
+                }),
+            ),
+            (
+                "/v1/account/cloud/uploads/ticket",
+                json!({
+                    "md5": "0123456789abcdef0123456789abcdef",
+                    "file_size": 1,
+                    "filename": "song.mp3",
+                    "bitrate": 0
+                }),
+            ),
+            (
+                "/v1/account/cloud/uploads/complete",
+                json!({
+                    "provisional_track_id": "123",
+                    "resource_id": "resource-456",
+                    "md5": "0123456789abcdef0123456789abcdef",
+                    "filename": "song.mp3",
+                    "bitrate": 0
+                }),
+            ),
+            (
+                "/v1/account/cloud/uploads/ticket",
+                json!({
+                    "md5": "0123456789abcdef0123456789abcdef",
+                    "file_size": 1,
+                    "filename": "song.mp3",
+                    "unexpected": true
+                }),
+            ),
+        ] {
+            let (status, json) =
+                json_request_from(test_app_with_provider(), Method::POST, path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
