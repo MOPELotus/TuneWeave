@@ -474,7 +474,7 @@ impl MusicProvider for NeteaseProvider {
             .request_eapi("/api/voice/broadcast/channel/list", payload)
             .await?;
         ensure_success(&response.body)?;
-        map_radio_station_list_response(response.body, request.limit.max(1))
+        map_radio_station_list_response(response.body, request)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1970,7 +1970,10 @@ fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Resu
     }))
 }
 
-fn map_radio_station_list_response(body: Value, limit: u32) -> Result<Page<RadioStation>> {
+fn map_radio_station_list_response(
+    body: Value,
+    request: &RadioStationListRequest,
+) -> Result<Page<RadioStation>> {
     let data = body
         .get("data")
         .filter(|value| value.is_object())
@@ -2033,11 +2036,13 @@ fn map_radio_station_list_response(body: Value, limit: u32) -> Result<Page<Radio
     if let Some(cursor) = &next_cursor {
         extensions.insert("next_cursor".to_owned(), json!(cursor));
     }
+    extensions.insert("requested_offset".to_owned(), json!(request.offset));
+    extensions.insert("offset_applied".to_owned(), json!(false));
     extensions.insert("response".to_owned(), body);
     Ok(Page {
         items,
         pagination: PageMeta {
-            limit,
+            limit: request.limit.max(1),
             offset: 0,
             total,
             next_offset: None,
@@ -4761,6 +4766,7 @@ mod tests {
     fn maps_filtered_broadcast_station_catalog_and_cursor() {
         let request = RadioStationListRequest {
             limit: 20,
+            offset: 100,
             category_id: Some("1".to_owned()),
             region_id: Some("407".to_owned()),
             cursor: Some(RadioStationCursor {
@@ -4807,7 +4813,7 @@ mod tests {
                     ]
                 }
             }),
-            20,
+            &request,
         )
         .expect("map broadcast station catalog");
 
@@ -4822,6 +4828,8 @@ mod tests {
         assert!(page.pagination.has_more);
         assert_eq!(page.pagination.extensions["next_cursor"]["id"], "14");
         assert_eq!(page.pagination.extensions["next_cursor"]["score"], 1472);
+        assert_eq!(page.pagination.extensions["requested_offset"], 100);
+        assert_eq!(page.pagination.extensions["offset_applied"], false);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
 
         let error = map_radio_station_list_response(
@@ -4832,7 +4840,7 @@ mod tests {
                     "list": [{ "id": 14, "name": "缺少游标分值" }]
                 }
             }),
-            20,
+            &request,
         )
         .expect_err("missing cursor score");
         assert_eq!(error.code, ErrorCode::UpstreamError);
