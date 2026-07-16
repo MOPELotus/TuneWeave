@@ -28,7 +28,7 @@ pub use model::{
     ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, Page,
     PageMeta, PageRequest, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality,
-    RadioCatalogOption, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    RadioCatalogOption, RadioStation, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
     ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
     SubscriptionResult, Track, TrackEntitlement, TrialWindow, User, Video, VideoKind,
 };

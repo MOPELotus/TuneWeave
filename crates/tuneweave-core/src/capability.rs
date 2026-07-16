@@ -42,6 +42,7 @@ pub enum Capability {
     AccountProfile,
     AccountPlaylists,
     AccountAlbums,
+    AccountRadioStations,
     AccountFollowingArtists,
     AccountArtistNewVideos,
     AccountArtistNewTracks,

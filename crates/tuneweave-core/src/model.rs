@@ -226,6 +226,43 @@ pub struct RadioTaxonomyRequest {
     pub account: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioStation {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub category: Option<String>,
+    pub region: Option<String>,
+    pub stream_url: Option<String>,
+    pub current_program: Option<String>,
+    pub subscribed: Option<bool>,
+    pub extensions: Extensions,
+}
+
+impl RadioStation {
+    #[must_use]
+    pub fn new(resource_ref: ResourceRef, name: impl Into<String>) -> Self {
+        Self {
+            platform: resource_ref.platform(),
+            id: resource_ref.id().to_owned(),
+            resource_ref,
+            name: name.into(),
+            description: String::new(),
+            cover_url: None,
+            category: None,
+            region: None,
+            stream_url: None,
+            current_program: None,
+            subscribed: None,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -1004,6 +1041,20 @@ mod tests {
         let value = serde_json::to_value(taxonomy).expect("serialize radio taxonomy");
         assert_eq!(value["categories"][0]["id"], "1");
         assert_eq!(value["regions"][0]["id"], "407");
+    }
+
+    #[test]
+    fn radio_station_constructor_keeps_reference_fields_consistent() {
+        let reference = ResourceRef::new(Platform::Netease, "362").expect("valid reference");
+        let mut station = RadioStation::new(reference.clone(), "金山区广播电视台综合广播");
+        station.region = Some("上海".to_owned());
+        station.subscribed = Some(false);
+
+        assert_eq!(station.resource_ref, reference);
+        assert_eq!(station.platform, Platform::Netease);
+        assert_eq!(station.id, "362");
+        assert_eq!(station.region.as_deref(), Some("上海"));
+        assert_eq!(station.subscribed, Some(false));
     }
 
     #[test]
