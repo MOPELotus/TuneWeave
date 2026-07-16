@@ -3,7 +3,7 @@ mod response;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -261,6 +261,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
+        .route("/extensions/netease/calendar", get(netease_calendar))
         .route("/extensions/netease/api", post(netease_extension_api))
         .route(
             "/extensions/netease/batch",
@@ -2168,6 +2169,45 @@ async fn account_history(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeteaseCalendarQuery {
+    #[serde(alias = "startTime")]
+    start_time: Option<String>,
+    #[serde(alias = "endTime")]
+    end_time: Option<String>,
+    account: Option<String>,
+}
+
+async fn netease_calendar(
+    State(state): State<AppState>,
+    Query(params): Query<NeteaseCalendarQuery>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let now = unix_time_millis()?;
+    let start_time =
+        parse_optional_u64_parameter("start_time", params.start_time.as_deref())?.unwrap_or(now);
+    let end_time =
+        parse_optional_u64_parameter("end_time", params.end_time.as_deref())?.unwrap_or(now);
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(Platform::Netease)?;
+    let data = provider
+        .platform_api(&PlatformApiRequest {
+            uri: "/api/mcalendar/detail".to_owned(),
+            data: json!({
+                "startTime": start_time,
+                "endTime": end_time,
+            }),
+            protocol: Some("weapi".to_owned()),
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NeteaseExtensionApiBody {
@@ -2663,6 +2703,21 @@ fn parse_optional_u64_parameter(
             })
         })
         .transpose()
+}
+
+fn unix_time_millis() -> Result<u64, TuneWeaveError> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+        TuneWeaveError::new(
+            tuneweave_core::ErrorCode::InternalError,
+            "system clock is before the Unix epoch",
+        )
+    })?;
+    u64::try_from(duration.as_millis()).map_err(|_| {
+        TuneWeaveError::new(
+            tuneweave_core::ErrorCode::InternalError,
+            "system time exceeds the supported millisecond range",
+        )
+    })
 }
 
 fn parse_optional_i64_parameter(
@@ -5225,6 +5280,65 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn netease_calendar_accepts_reference_and_unified_parameter_names() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/calendar?startTime=1606752000000&endTime=1609430399999&account=calendar-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["uri"], "/api/mcalendar/detail");
+        assert_eq!(json["data"]["data"]["startTime"], 1_606_752_000_000_u64);
+        assert_eq!(json["data"]["data"]["endTime"], 1_609_430_399_999_u64);
+        assert_eq!(json["data"]["crypto"], "weapi");
+        assert_eq!(json["data"]["account"], "calendar-user");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "calendar-user");
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/calendar?start_time=1606752000001&end_time=1609430399998",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["data"]["startTime"], 1_606_752_000_001_u64);
+        assert_eq!(json["data"]["data"]["endTime"], 1_609_430_399_998_u64);
+        assert!(json["data"]["account"].is_null());
+        assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn netease_calendar_defaults_both_runtime_timestamps_to_the_same_current_time() {
+        let before = unix_time_millis().expect("current time before request");
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/extensions/netease/calendar").await;
+        let after = unix_time_millis().expect("current time after request");
+        assert_eq!(status, StatusCode::OK);
+        let start_time = json["data"]["data"]["startTime"]
+            .as_u64()
+            .expect("numeric startTime");
+        let end_time = json["data"]["data"]["endTime"]
+            .as_u64()
+            .expect("numeric endTime");
+        assert_eq!(start_time, end_time);
+        assert!((before..=after).contains(&start_time));
+    }
+
+    #[tokio::test]
+    async fn netease_calendar_rejects_invalid_timestamps_before_provider_dispatch() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/calendar?startTime=tomorrow&endTime=-1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+        assert_eq!(json["error"]["details"]["parameter"], "start_time");
+        assert_eq!(json["error"]["details"]["value"], "tomorrow");
     }
 
     #[tokio::test]
