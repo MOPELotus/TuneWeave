@@ -9,15 +9,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist,
-    ArtistBiographySection, ArtistSummary, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
-    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError,
+    ArtistBiographySection, ArtistContentCount, ArtistStats, ArtistSummary, AuthChallengeRequest,
+    AuthState, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, Money,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -26,12 +26,13 @@ use crate::{
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
-        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        ArtistDynamicEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -274,6 +275,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
             Capability::ArtistDetail,
+            Capability::ArtistStats,
             Capability::ArtistAlbums,
             Capability::PlaylistRead,
             Capability::Lyrics,
@@ -602,6 +604,18 @@ impl MusicProvider for NeteaseProvider {
         let description: ArtistDescriptionEnvelope = parse_body(description_raw.clone())?;
 
         map_artist(detail, description, detail_raw, description_raw)
+    }
+
+    async fn artist_stats(&self, id: &str, account: Option<&str>) -> Result<ArtistStats> {
+        let id = parse_numeric_id("artist", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_eapi("/api/artist/detail/dynamic", json!({ "id": id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let raw = response.body;
+        let response: ArtistDynamicEnvelope = parse_body(raw.clone())?;
+        map_artist_stats(id, response, raw)
     }
 
     async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -1984,6 +1998,34 @@ fn map_artist(
     })
 }
 
+fn map_artist_stats(id: u64, stats: ArtistDynamicEnvelope, raw: Value) -> Result<ArtistStats> {
+    let artist_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid artist id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let video_counts = stats
+        .video_counts
+        .into_iter()
+        .map(|count| ArtistContentCount {
+            category: Some(count.cat.to_string()),
+            count: count.num,
+            extensions: Extensions::new(),
+        })
+        .collect();
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw);
+    Ok(ArtistStats {
+        artist_ref,
+        followed: stats.followed,
+        video_counts,
+        online_concert_count: stats.concert.and_then(|concert| concert.online_count),
+        extensions,
+    })
+}
+
 fn map_artist_album_item(raw: Value) -> Result<Album> {
     let album: AlbumDetail = parse_body(raw.clone())?;
     let mut album = map_album(album)?;
@@ -2684,6 +2726,43 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_dynamic_stats_and_keeps_the_raw_response() {
+        let raw = json!({
+            "code": 200,
+            "followed": false,
+            "concert": {
+                "onlineCount": 2,
+                "simpleConcert": {"id": 42, "name": "线上演出"},
+                "view": true
+            },
+            "videoNum": [
+                {"cat": 0, "num": 9},
+                {"cat": 1, "num": 8}
+            ],
+            "rcmdResource": {"resourceId": 123}
+        });
+        let response: ArtistDynamicEnvelope =
+            serde_json::from_value(raw.clone()).expect("artist dynamic fixture");
+
+        let stats = map_artist_stats(6452, response, raw).expect("map artist stats");
+
+        assert_eq!(stats.artist_ref.to_string(), "netease:6452");
+        assert_eq!(stats.followed, Some(false));
+        assert_eq!(stats.video_counts.len(), 2);
+        assert_eq!(stats.video_counts[0].category.as_deref(), Some("0"));
+        assert_eq!(stats.video_counts[0].count, 9);
+        assert_eq!(stats.online_concert_count, Some(2));
+        assert_eq!(
+            stats.extensions["response"]["concert"]["simpleConcert"]["id"],
+            42
+        );
+        assert_eq!(
+            stats.extensions["response"]["rcmdResource"]["resourceId"],
+            123
+        );
+    }
+
+    #[test]
     fn maps_netease_album_dynamic_stats_to_the_unified_model() {
         let stats: AlbumStatsEnvelope = serde_json::from_value(json!({
             "commentCount": 1989,
@@ -2983,6 +3062,10 @@ mod tests {
             .await
             .expect_err("invalid artist detail id");
         assert_eq!(artist_detail_error.code, ErrorCode::InvalidRequest);
+        let artist_stats_error = MusicProvider::artist_stats(&provider, "invalid", None)
+            .await
+            .expect_err("invalid artist stats id");
+        assert_eq!(artist_stats_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -3689,6 +3772,19 @@ mod tests {
         assert!(artist.track_count.is_some_and(|count| count > 0));
         assert!(artist.extensions.contains_key("detail_response"));
         assert!(artist.extensions.contains_key("description_response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_dynamic_stats() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let stats = MusicProvider::artist_stats(&provider, "6452", None)
+            .await
+            .expect("live artist stats");
+        assert_eq!(stats.artist_ref.to_string(), "netease:6452");
+        assert!(stats.followed.is_some());
+        assert!(!stats.video_counts.is_empty());
+        assert!(stats.extensions.contains_key("response"));
     }
 
     #[tokio::test]

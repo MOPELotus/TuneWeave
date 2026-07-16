@@ -96,6 +96,26 @@ pub(crate) struct ArtistIntroduction {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistDynamicEnvelope {
+    pub followed: Option<bool>,
+    pub concert: Option<ArtistConcert>,
+    #[serde(rename = "videoNum", default)]
+    pub video_counts: Vec<ArtistVideoCount>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistConcert {
+    #[serde(rename = "onlineCount")]
+    pub online_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoCount {
+    pub cat: i64,
+    pub num: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SubscribedAlbumsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,
