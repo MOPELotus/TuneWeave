@@ -32,19 +32,19 @@ use tuneweave_core::{
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
     ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult,
-    LyricContributor, Lyrics, MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant, SubscriptionResult,
-    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow,
-    TuneWeaveError, User, Video, VideoKind,
+    LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider,
+    Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
+    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
+    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 use url::Url;
 
@@ -350,6 +350,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::Lyrics,
             Capability::AudioStream,
             Capability::AudioStreamBatch,
+            Capability::AudioDownload,
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
@@ -1509,6 +1510,21 @@ impl MusicProvider for NeteaseProvider {
         }
         let client = self.client_for(request.account.as_deref())?;
         request_netease_streams(&client, tracks, request).await
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        let id = validate_netease_stream_track(track)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let (variant, path, payload, requested_level) = netease_download_request(id, request);
+        let response = client.request_eapi(path, payload).await?;
+        map_netease_download(
+            track,
+            request,
+            variant,
+            path,
+            requested_level,
+            response.body,
+        )
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -5291,6 +5307,122 @@ fn netease_stream_request(
             )
         }
     }
+}
+
+fn netease_download_request(
+    id: u64,
+    request: &StreamRequest,
+) -> (StreamVariant, &'static str, Value, Option<&'static str>) {
+    match request.variant {
+        StreamVariant::Legacy => (
+            StreamVariant::Legacy,
+            "/api/song/enhance/download/url",
+            json!({
+                "id": id.to_string(),
+                "br": request
+                    .bitrate
+                    .unwrap_or_else(|| requested_bitrate(request.quality))
+            }),
+            None,
+        ),
+        StreamVariant::Default | StreamVariant::Modern => {
+            let level = netease_stream_level(request.quality);
+            (
+                StreamVariant::Modern,
+                "/api/song/enhance/download/url/v1",
+                json!({
+                    "id": id.to_string(),
+                    "immerseType": "c51",
+                    "level": level
+                }),
+                Some(level),
+            )
+        }
+    }
+}
+
+fn map_netease_download(
+    track: &Track,
+    request: &StreamRequest,
+    variant: StreamVariant,
+    path: &str,
+    requested_level: Option<&str>,
+    response: Value,
+) -> Result<MediaDownload> {
+    ensure_success(&response)?;
+    let id = validate_netease_stream_track(track)?;
+    let raw_response = response.clone();
+    let data = response.get("data").ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase download response is missing data",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": response }))
+    })?;
+    let item = if let Some(items) = data.as_array() {
+        items
+            .iter()
+            .find(|item| item.get("id").and_then(json_u64) == Some(id))
+            .cloned()
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase omitted a requested download result",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "id": id, "response": raw_response }))
+            })?
+    } else {
+        data.clone()
+    };
+    let download: StreamData = parse_body(item.clone())?;
+    if download.id != id {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned a download result for the wrong track",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "expected": id, "actual": download.id })));
+    }
+    let url = download
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned);
+    let actual_quality = stream_quality(download.level.as_deref(), download.br);
+    let mut extensions = Extensions::from([
+        ("variant".to_owned(), json!(variant)),
+        ("request_path".to_owned(), json!(path)),
+        ("response_item".to_owned(), item),
+        ("response".to_owned(), raw_response),
+    ]);
+    if let Some(level) = requested_level {
+        extensions.insert("requested_level".to_owned(), json!(level));
+    }
+    Ok(MediaDownload {
+        track_ref: track.resource_ref.clone(),
+        platform: Platform::Netease,
+        available: url.is_some(),
+        url,
+        headers: BTreeMap::new(),
+        expires_at: download
+            .expi
+            .filter(|expires_in_seconds| *expires_in_seconds > 0)
+            .and_then(expiration_rfc3339),
+        format: download.kind.clone(),
+        codec: download.encode_type.or(download.kind),
+        bitrate: download.br,
+        size: download.size,
+        duration_ms: download.time.or(track.duration_ms),
+        requested_quality: request.quality,
+        actual_quality,
+        platform_code: download.code,
+        fee: download.fee,
+        message: download.message,
+        extensions,
+    })
 }
 
 const fn netease_stream_level(quality: Quality) -> &'static str {
@@ -13324,6 +13456,178 @@ mod tests {
             },
         );
         assert_eq!(payload["br"], 320_000);
+    }
+
+    #[test]
+    fn download_requests_cover_legacy_bitrate_and_every_modern_level() {
+        let legacy = StreamRequest {
+            quality: Quality::High,
+            variant: StreamVariant::Legacy,
+            bitrate: Some(192_123),
+            account: None,
+        };
+        let (variant, path, payload, level) = netease_download_request(2_709_812_973, &legacy);
+        assert_eq!(variant, StreamVariant::Legacy);
+        assert_eq!(path, "/api/song/enhance/download/url");
+        assert_eq!(payload["id"], "2709812973");
+        assert_eq!(payload["br"], 192_123);
+        assert_eq!(level, None);
+
+        for (quality, level) in [
+            (Quality::Standard, "standard"),
+            (Quality::Higher, "higher"),
+            (Quality::High, "exhigh"),
+            (Quality::Lossless, "lossless"),
+            (Quality::Hires, "hires"),
+            (Quality::Surround, "jyeffect"),
+            (Quality::Spatial, "sky"),
+            (Quality::Dolby, "dolby"),
+            (Quality::Master, "jymaster"),
+        ] {
+            let request = StreamRequest {
+                quality,
+                variant: StreamVariant::Modern,
+                bitrate: Some(1),
+                account: None,
+            };
+            let (variant, path, payload, mapped_level) =
+                netease_download_request(2_709_812_973, &request);
+            assert_eq!(variant, StreamVariant::Modern, "{quality:?}");
+            assert_eq!(path, "/api/song/enhance/download/url/v1", "{quality:?}");
+            assert_eq!(payload["id"], "2709812973", "{quality:?}");
+            assert_eq!(payload["immerseType"], "c51", "{quality:?}");
+            assert_eq!(payload["level"], level, "{quality:?}");
+            assert!(payload.get("br").is_none(), "{quality:?}");
+            assert_eq!(mapped_level, Some(level), "{quality:?}");
+        }
+    }
+
+    #[test]
+    fn download_mapping_preserves_success_unavailable_and_full_responses() {
+        let mut track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "测试歌曲",
+        );
+        track.duration_ms = Some(238_378);
+        let request = StreamRequest {
+            quality: Quality::Higher,
+            variant: StreamVariant::Legacy,
+            bitrate: Some(192_123),
+            account: None,
+        };
+        let download = map_netease_download(
+            &track,
+            &request,
+            StreamVariant::Legacy,
+            "/api/song/enhance/download/url",
+            None,
+            json!({
+                "code": 200,
+                "data": {
+                    "id": 2709812973_u64,
+                    "url": " https://example.test/audio.mp3 ",
+                    "br": 192000,
+                    "size": 5722605,
+                    "code": 200,
+                    "expi": 1200,
+                    "type": "mp3",
+                    "level": "higher",
+                    "encodeType": "mp3",
+                    "time": 238378,
+                    "fee": 0,
+                    "message": null,
+                    "freeTrialInfo": null
+                }
+            }),
+        )
+        .expect("map available download");
+        assert!(download.available);
+        assert_eq!(
+            download.url.as_deref(),
+            Some("https://example.test/audio.mp3")
+        );
+        assert_eq!(download.requested_quality, Quality::Higher);
+        assert_eq!(download.actual_quality, Quality::Higher);
+        assert_eq!(download.bitrate, Some(192_000));
+        assert_eq!(download.platform_code, Some(200));
+        assert_eq!(download.extensions["variant"], "legacy");
+        assert_eq!(download.extensions["response"]["code"], 200);
+
+        let unavailable = map_netease_download(
+            &track,
+            &StreamRequest {
+                quality: Quality::Spatial,
+                variant: StreamVariant::Modern,
+                bitrate: None,
+                account: None,
+            },
+            StreamVariant::Modern,
+            "/api/song/enhance/download/url/v1",
+            Some("sky"),
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 2709812973_u64,
+                    "url": null,
+                    "br": 0,
+                    "size": 0,
+                    "code": -110,
+                    "expi": 1200,
+                    "type": null,
+                    "level": null,
+                    "encodeType": null,
+                    "time": 0,
+                    "fee": 0,
+                    "message": "quality unavailable",
+                    "freeTrialInfo": null
+                }]
+            }),
+        )
+        .expect("map unavailable download");
+        assert!(!unavailable.available);
+        assert_eq!(unavailable.url, None);
+        assert_eq!(unavailable.actual_quality, Quality::Auto);
+        assert_eq!(unavailable.platform_code, Some(-110));
+        assert_eq!(unavailable.message.as_deref(), Some("quality unavailable"));
+        assert_eq!(unavailable.extensions["requested_level"], "sky");
+    }
+
+    #[test]
+    fn download_mapping_rejects_missing_data_and_wrong_track_ids() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "测试歌曲",
+        );
+        let request = StreamRequest::default();
+        for response in [
+            json!({ "code": 200 }),
+            json!({
+                "code": 200,
+                "data": {
+                    "id": 1,
+                    "url": null,
+                    "br": 0,
+                    "size": 0,
+                    "code": -110,
+                    "type": null,
+                    "level": null,
+                    "encodeType": null,
+                    "fee": 0,
+                    "freeTrialInfo": null
+                }
+            }),
+        ] {
+            let error = map_netease_download(
+                &track,
+                &request,
+                StreamVariant::Modern,
+                "/api/song/enhance/download/url/v1",
+                Some("exhigh"),
+                response,
+            )
+            .expect_err("invalid download response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
     }
 
     #[test]

@@ -888,6 +888,7 @@ pub(crate) struct StreamData {
     pub encode_type: Option<String>,
     pub time: Option<u64>,
     pub fee: Option<i64>,
+    pub message: Option<String>,
     #[serde(rename = "freeTrialInfo")]
     pub free_trial_info: Option<FreeTrialInfo>,
 }
