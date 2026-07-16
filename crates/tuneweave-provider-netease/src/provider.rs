@@ -37,17 +37,20 @@ use tuneweave_core::{
     LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider,
     Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
     Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
-    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationAction, PlaylistMutationResult, PlaylistUpdateRequest, PlaylistVisibility,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -1362,6 +1365,62 @@ impl MusicProvider for NeteaseProvider {
                 has_more,
                 extensions: Default::default(),
             },
+        })
+    }
+
+    async fn create_playlist(
+        &self,
+        request: &PlaylistCreateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        let payload = netease_playlist_create_payload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist creation")?;
+        let response = client
+            .request_weapi("/api/playlist/create", payload)
+            .await?;
+        ensure_account_access(&client, &response.body, "playlist creation")?;
+        map_netease_playlist_create_result(response.body)
+    }
+
+    async fn update_playlist(
+        &self,
+        id: &str,
+        request: &PlaylistUpdateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        let id = parse_numeric_id("playlist", id)?;
+        let calls = netease_playlist_update_calls(id, request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist update")?;
+        let mut responses = Vec::with_capacity(calls.len());
+        for (path, payload) in calls {
+            let response = client.request_api(path, payload).await?;
+            ensure_account_access(&client, &response.body, "playlist update")?;
+            responses.push(json!({ "path": path, "body": response.body }));
+        }
+        map_netease_playlist_mutation_result(
+            id,
+            PlaylistMutationAction::Update,
+            json!({ "responses": responses }),
+        )
+    }
+
+    async fn delete_playlists(
+        &self,
+        request: &PlaylistDeleteRequest,
+    ) -> Result<PlaylistDeleteResult> {
+        let ids = netease_playlist_ids("playlist deletion", &request.playlist_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist deletion")?;
+        let response = client
+            .request_weapi(
+                "/api/playlist/remove",
+                json!({ "ids": format!("[{}]", join_numeric_ids(&ids)) }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "playlist deletion")?;
+        Ok(PlaylistDeleteResult {
+            playlist_refs: request.playlist_refs.clone(),
+            extensions: Extensions::from([("response".to_owned(), response.body)]),
         })
     }
 
@@ -5221,6 +5280,153 @@ fn netease_artist_subscription_request(id: u64, subscribed: bool) -> (&'static s
     )
 }
 
+fn netease_playlist_create_payload(request: &PlaylistCreateRequest) -> Result<Value> {
+    let name = validate_playlist_name(&request.name)?;
+    let privacy = match request.visibility {
+        PlaylistVisibility::Public => "0",
+        PlaylistVisibility::Private => "10",
+    };
+    let kind = match request.kind {
+        PlaylistKind::Normal => "NORMAL",
+        PlaylistKind::Video => "VIDEO",
+        PlaylistKind::Shared => "SHARED",
+    };
+    Ok(json!({
+        "name": name,
+        "privacy": privacy,
+        "type": kind
+    }))
+}
+
+fn netease_playlist_update_calls(
+    id: u64,
+    request: &PlaylistUpdateRequest,
+) -> Result<Vec<(&'static str, Value)>> {
+    let name = request
+        .name
+        .as_deref()
+        .map(validate_playlist_name)
+        .transpose()?;
+    let description = request.description.clone();
+    let tags = request
+        .tags
+        .as_deref()
+        .map(normalize_playlist_tags)
+        .transpose()?;
+    if name.is_none() && description.is_none() && tags.is_none() {
+        return Err(TuneWeaveError::invalid_request(
+            "playlist update requires name, description, or tags",
+        )
+        .with_platform(Platform::Netease));
+    }
+
+    let variant = match request.variant {
+        PlaylistMetadataUpdateVariant::Default
+            if name.is_some() && description.is_some() && tags.is_some() =>
+        {
+            PlaylistMetadataUpdateVariant::Batch
+        }
+        PlaylistMetadataUpdateVariant::Default => PlaylistMetadataUpdateVariant::Individual,
+        variant => variant,
+    };
+    if variant == PlaylistMetadataUpdateVariant::Batch {
+        let (Some(name), Some(description), Some(tags)) = (name, description, tags) else {
+            return Err(TuneWeaveError::invalid_request(
+                "batch playlist update requires name, description, and tags",
+            )
+            .with_platform(Platform::Netease));
+        };
+        return Ok(vec![(
+            "/api/batch",
+            json!({
+                "/api/playlist/desc/update": json!({ "id": id, "desc": description }).to_string(),
+                "/api/playlist/tags/update": json!({ "id": id, "tags": tags }).to_string(),
+                "/api/playlist/update/name": json!({ "id": id, "name": name }).to_string()
+            }),
+        )]);
+    }
+
+    let mut calls = Vec::with_capacity(3);
+    if let Some(name) = name {
+        calls.push((
+            "/api/playlist/update/name",
+            json!({ "id": id, "name": name }),
+        ));
+    }
+    if let Some(description) = description {
+        calls.push((
+            "/api/playlist/desc/update",
+            json!({ "id": id, "desc": description }),
+        ));
+    }
+    if let Some(tags) = tags {
+        calls.push((
+            "/api/playlist/tags/update",
+            json!({ "id": id, "tags": tags }),
+        ));
+    }
+    Ok(calls)
+}
+
+fn validate_playlist_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("playlist name cannot be empty")
+                .with_platform(Platform::Netease),
+        );
+    }
+    if name.len() > 255 || name.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "playlist name must be at most 255 bytes and contain no control characters",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(name.to_owned())
+}
+
+fn normalize_playlist_tags(tags: &[String]) -> Result<String> {
+    let mut normalized = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.contains(';') || tag.chars().any(char::is_control) {
+            return Err(TuneWeaveError::invalid_request(
+                "playlist tags must be non-empty visible values without semicolons",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "tag": tag })));
+        }
+        normalized.push(tag);
+    }
+    Ok(normalized.join(";"))
+}
+
+fn netease_playlist_ids(resource: &str, references: &[ResourceRef]) -> Result<Vec<u64>> {
+    if references.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "NetEase {resource} requires at least one playlist reference"
+        ))
+        .with_platform(Platform::Netease));
+    }
+    references
+        .iter()
+        .map(|reference| {
+            if reference.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "NetEase {resource} only accepts netease playlist references"
+                ))
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "ref": reference })));
+            }
+            parse_numeric_id("playlist", reference.id())
+        })
+        .collect()
+}
+
+fn join_numeric_ids(ids: &[u64]) -> String {
+    ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+}
+
 fn netease_digital_album_chart_request(
     request: &DigitalAlbumChartRequest,
 ) -> Result<(String, Value)> {
@@ -6015,6 +6221,62 @@ fn map_playlist(playlist: PlaylistDetail) -> Result<Playlist> {
         created_at: None,
         updated_at: None,
         extensions,
+    })
+}
+
+fn map_netease_playlist_create_result(response: Value) -> Result<PlaylistMutationResult> {
+    let id = ["/playlist/id", "/data/id", "/id"]
+        .into_iter()
+        .find_map(|pointer| response.pointer(pointer).and_then(json_u64))
+        .filter(|id| *id > 0)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase playlist creation response is missing the new playlist id",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let playlist = response
+        .get("playlist")
+        .cloned()
+        .and_then(|playlist| serde_json::from_value::<PlaylistDetail>(playlist).ok())
+        .map(map_playlist)
+        .transpose()?;
+    if playlist
+        .as_ref()
+        .is_some_and(|playlist| playlist.id != id.to_string())
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase playlist creation response contains conflicting playlist ids",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": response, "id": id })));
+    }
+    let mut result =
+        map_netease_playlist_mutation_result(id, PlaylistMutationAction::Create, response)?;
+    result.playlist = playlist;
+    Ok(result)
+}
+
+fn map_netease_playlist_mutation_result(
+    id: u64,
+    action: PlaylistMutationAction,
+    response: Value,
+) -> Result<PlaylistMutationResult> {
+    let playlist_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid playlist id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok(PlaylistMutationResult {
+        playlist_ref,
+        action,
+        playlist: None,
+        extensions: Extensions::from([("response".to_owned(), response)]),
     })
 }
 
@@ -13107,6 +13369,143 @@ mod tests {
         assert_eq!(result.resource_ref.to_string(), "netease:6452");
         assert!(result.subscribed);
         assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn playlist_create_update_and_delete_requests_cover_every_reference_branch() {
+        let mut create = PlaylistCreateRequest::new("  测试歌单  ");
+        create.visibility = PlaylistVisibility::Private;
+        create.kind = PlaylistKind::Video;
+        let payload = netease_playlist_create_payload(&create).expect("create playlist payload");
+        assert_eq!(payload["name"], "测试歌单");
+        assert_eq!(payload["privacy"], "10");
+        assert_eq!(payload["type"], "VIDEO");
+
+        let batch = PlaylistUpdateRequest {
+            name: Some("新歌单".to_owned()),
+            description: Some("描述".to_owned()),
+            tags: Some(vec!["欧美".to_owned(), "现场".to_owned()]),
+            variant: PlaylistMetadataUpdateVariant::Default,
+            account: None,
+        };
+        let calls = netease_playlist_update_calls(24_381_616, &batch)
+            .expect("batch playlist update payload");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "/api/batch");
+        let name: Value = serde_json::from_str(
+            calls[0].1["/api/playlist/update/name"]
+                .as_str()
+                .expect("batch name payload"),
+        )
+        .expect("parse batch name payload");
+        let tags: Value = serde_json::from_str(
+            calls[0].1["/api/playlist/tags/update"]
+                .as_str()
+                .expect("batch tags payload"),
+        )
+        .expect("parse batch tags payload");
+        assert_eq!(name, json!({ "id": 24_381_616, "name": "新歌单" }));
+        assert_eq!(tags["tags"], "欧美;现场");
+
+        let individual = PlaylistUpdateRequest {
+            name: None,
+            description: Some(String::new()),
+            tags: Some(Vec::new()),
+            variant: PlaylistMetadataUpdateVariant::Individual,
+            account: None,
+        };
+        let calls = netease_playlist_update_calls(24_381_616, &individual)
+            .expect("individual playlist update payloads");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "/api/playlist/desc/update");
+        assert_eq!(calls[0].1["desc"], "");
+        assert_eq!(calls[1].0, "/api/playlist/tags/update");
+        assert_eq!(calls[1].1["tags"], "");
+
+        let missing_batch_fields = PlaylistUpdateRequest {
+            name: Some("新歌单".to_owned()),
+            description: None,
+            tags: None,
+            variant: PlaylistMetadataUpdateVariant::Batch,
+            account: None,
+        };
+        let error = netease_playlist_update_calls(24_381_616, &missing_batch_fields)
+            .expect_err("incomplete batch update");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let references = vec![
+            ResourceRef::new(Platform::Netease, "2947311456").expect("playlist reference"),
+            ResourceRef::new(Platform::Netease, "2947311456")
+                .expect("duplicate playlist reference"),
+        ];
+        let ids =
+            netease_playlist_ids("playlist deletion", &references).expect("playlist deletion ids");
+        assert_eq!(ids, vec![2_947_311_456, 2_947_311_456]);
+        assert_eq!(join_numeric_ids(&ids), "2947311456,2947311456");
+    }
+
+    #[test]
+    fn playlist_mutation_mapping_preserves_created_playlist_and_raw_responses() {
+        let response = json!({
+            "code": 200,
+            "playlist": {
+                "id": 2947311456_u64,
+                "name": "测试歌单",
+                "description": null,
+                "coverImgUrl": "https://example.test/playlist.jpg",
+                "trackCount": 0,
+                "tags": [],
+                "trackIds": []
+            }
+        });
+        let result =
+            map_netease_playlist_create_result(response).expect("map playlist creation response");
+        assert_eq!(result.playlist_ref.to_string(), "netease:2947311456");
+        assert_eq!(result.action, PlaylistMutationAction::Create);
+        assert_eq!(result.playlist.expect("created playlist").name, "测试歌单");
+        assert_eq!(result.extensions["response"]["code"], 200);
+
+        let missing_id = map_netease_playlist_create_result(json!({ "code": 200 }))
+            .expect_err("creation response without id");
+        assert_eq!(missing_id.code, ErrorCode::UpstreamError);
+    }
+
+    #[tokio::test]
+    async fn playlist_metadata_writes_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let create =
+            MusicProvider::create_playlist(&provider, &PlaylistCreateRequest::new("测试歌单"))
+                .await
+                .expect_err("anonymous playlist creation");
+        assert_eq!(create.code, ErrorCode::AuthenticationRequired);
+
+        let update = MusicProvider::update_playlist(
+            &provider,
+            "2947311456",
+            &PlaylistUpdateRequest {
+                name: Some("新歌单".to_owned()),
+                description: None,
+                tags: None,
+                variant: PlaylistMetadataUpdateVariant::Individual,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous playlist update");
+        assert_eq!(update.code, ErrorCode::AuthenticationRequired);
+
+        let delete = MusicProvider::delete_playlists(
+            &provider,
+            &PlaylistDeleteRequest {
+                playlist_refs: vec![
+                    ResourceRef::new(Platform::Netease, "2947311456").expect("playlist reference"),
+                ],
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous playlist deletion");
+        assert_eq!(delete.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]

@@ -1928,7 +1928,6 @@ impl Default for PlaylistUpdateRequest {
 pub enum PlaylistMutationAction {
     Create,
     Update,
-    Delete,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1936,6 +1935,18 @@ pub struct PlaylistMutationResult {
     pub playlist_ref: ResourceRef,
     pub action: PlaylistMutationAction,
     pub playlist: Option<Playlist>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistDeleteRequest {
+    pub playlist_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistDeleteResult {
+    pub playlist_refs: Vec<ResourceRef>,
     pub extensions: Extensions,
 }
 
@@ -3009,6 +3020,20 @@ mod tests {
         };
         let value = serde_json::to_value(order).expect("serialize playlist order request");
         assert_eq!(value["playlist_refs"][0], "netease:987654");
+
+        let delete = PlaylistDeleteRequest {
+            playlist_refs: vec![
+                ResourceRef::new(Platform::Netease, "987654").expect("valid playlist reference"),
+                ResourceRef::new(Platform::Netease, "987654")
+                    .expect("duplicate playlist reference"),
+            ],
+            account: Some("personal".to_owned()),
+        };
+        let value = serde_json::to_value(delete).expect("serialize playlist delete request");
+        assert_eq!(
+            value["playlist_refs"],
+            serde_json::json!(["netease:987654", "netease:987654"])
+        );
     }
 
     #[test]
