@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=299`、`partial=5`、`implemented=35`、`verified=68`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=293`、`partial=5`、`implemented=37`、`verified=72`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -189,13 +189,13 @@
 | `musician_tasks_new` | `/musician/tasks/new` | `pending` | — |
 | `musician_vip_tasks` | `/musician/vip/tasks` | `pending` | — |
 | `mv_all` | `/mv/all` | `pending` | — |
-| `mv_detail` | `/mv/detail` | `pending` | — |
-| `mv_detail_info` | `/mv/detail/info` | `pending` | — |
+| `mv_detail` | `/mv/detail` | `verified` | `GET /v1/videos/netease:22695250`：数值引用推断 MV，真实返回标题、创作者及 240/480/720/1080 四档资源信息 |
+| `mv_detail_info` | `/mv/detail/info` | `verified` | `GET /v1/videos/netease:22695250/stats`：真实返回点赞态及点赞、评论、分享计数 |
 | `mv_exclusive_rcmd` | `/mv/exclusive/rcmd` | `pending` | — |
 | `mv_first` | `/mv/first` | `pending` | — |
 | `mv_sub` | `/mv/sub` | `pending` | — |
 | `mv_sublist` | `/mv/sublist` | `pending` | — |
-| `mv_url` | `/mv/url` | `pending` | — |
+| `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收 |
 | `nickname_check` | `/nickname/check` | `pending` | — |
 | `personal_fm` | `/personal_fm` | `pending` | — |
 | `personal_fm_mode` | `/personal/fm/mode` | `pending` | — |
@@ -377,14 +377,14 @@
 | `verify_getQr` | `/verify/getQr` | `pending` | — |
 | `verify_qrcodestatus` | `/verify/qrcodestatus` | `pending` | — |
 | `video_category_list` | `/video/category/list` | `pending` | — |
-| `video_detail` | `/video/detail` | `pending` | — |
-| `video_detail_info` | `/video/detail/info` | `pending` | — |
+| `video_detail` | `/video/detail` | `implemented` | `GET /v1/videos/{ref}?kind=video` 与离线成功夹具已覆盖；上游文档旧样本真实返回 404，待补当前有效视频 ID 成功态 |
+| `video_detail_info` | `/video/detail/info` | `verified` | `GET /v1/videos/{ref}/stats?kind=video`：旧样本仍真实返回点赞、评论和分享统计，映射已验收 |
 | `video_group` | `/video/group` | `pending` | — |
 | `video_group_list` | `/video/group/list` | `pending` | — |
 | `video_sub` | `/video/sub` | `pending` | — |
 | `video_timeline_all` | `/video/timeline/all` | `pending` | — |
 | `video_timeline_recommend` | `/video/timeline/recommend` | `pending` | — |
-| `video_url` | `/video/url` | `pending` | — |
+| `video_url` | `/video/url` | `implemented` | `GET /v1/videos/{ref}/stream?kind=video&resolution=1080`：离线成功夹具及真实空 URL 业务态已覆盖，待有效视频 ID 可播放成功态 |
 | `vip_growthpoint` | `/vip/growthpoint` | `pending` | — |
 | `vip_growthpoint_details` | `/vip/growthpoint/details` | `pending` | — |
 | `vip_growthpoint_get` | `/vip/growthpoint/get` | `pending` | — |

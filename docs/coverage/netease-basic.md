@@ -4,10 +4,10 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=11`、`partial=7`、`implemented=16`、`verified=30`。
+当前共 64 个验收单元：`pending=9`、`partial=7`、`implemented=18`、`verified=30`。
 
-- 完整实现率：`(implemented + verified) / 64 = 46 / 64 = 71.88%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 53 / 64 = 82.81%`。
+- 完整实现率：`(implemented + verified) / 64 = 48 / 64 = 75.00%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 55 / 64 = 85.94%`。
 - 完整联网验收率：`verified / 64 = 30 / 64 = 46.88%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
@@ -31,7 +31,7 @@
 | C05 | 内容展示 | 歌单详情及完整曲目列表 | `verified` | `playlist_detail/playlist_track_all` 已验收 |
 | C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收 |
 | C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成，独立目录/收藏列表仍缺 |
-| C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `pending` | `mv_detail/mv_detail_info/video_detail/video_detail_info` 等未接入 |
+| C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收 |
 | C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `pending` | `dj_*`、`program_*` 常规目录未接入 |
 | C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `pending` | `voice_*`、`voicelist_*` 未接入 |
@@ -44,7 +44,7 @@
 | P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收 |
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `partial` | `vip_info` 已验证，`vip_info_v2` 及完整权益仍缺 |
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `pending` | `ad_get/ad_listening_rights_gain` 等未接入 |
-| P09 | 播放与权益 | MV/视频播放地址与清晰度 | `pending` | `mv_url/video_url` 未接入 |
+| P09 | 播放与权益 | MV/视频播放地址与清晰度 | `implemented` | MV 四档真实播放地址和 302 已验收；站内视频离线成功与真实空 URL 业务态已覆盖，待当前有效视频 ID 的可播放成功态 |
 | P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `pending` | DJ/voice 音频播放链未接入 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
