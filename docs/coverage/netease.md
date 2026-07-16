@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=344`、`partial=7`、`implemented=20`、`verified=33`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=343`、`partial=7`、`implemented=20`、`verified=34`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -51,7 +51,7 @@
 | `batch` | `/batch` | `verified` | `GET/POST /v1/extensions/netease/batch`（完整保留任意 `/api/...` 子请求及逐项原始响应，支持参考 GET 查询键、POST 顶层动态键和 `requests` 结构化容器；对象值自动序列化为上游真实要求的 JSON 文本，预序列化字符串原样保留；完整支持 `eapi/weapi/api/linuxapi/xeapi`、`crypto/protocol`、`e_r/encrypted_response` 与 `account`，逐路径限制固定网易云域名并拒绝 Cookie、域名、代理、请求头和 IP 等传输注入；2026-07-16 适配器及统一 HTTP 对五种协议均联网实测顶层/子请求 `code=200`，每种取得 7 条横幅，参考 GET 形态加 `e_r=true` 亦成功解密并返回 7 条，不存在的账户别名实测为 401） |
 | `broadcast_category_region_get` | `/broadcast/category/region/get` | `verified` | `GET /v1/radio/taxonomy`（统一为 `RadioTaxonomy`，分类与地区 ID 均保持平台不透明字符串，单项及完整响应原文保留在扩展中，可直接供后续广播电台列表筛选；支持 `platform/account` 选择且公开响应无需登录；2026-07-16 适配器与统一 HTTP 均联网实测成功，返回 12 个分类和 32 个地区，首项分别为 `1`“音乐台”与 `407`“网络台”，原始上游 `code=200`） |
 | `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `implemented` | `GET /v1/account/library/radio-stations`（以 `platform/account` 选择登录态，完整提交参考实现的 `contentType/timeReverseOrder/startDate/limit`，并补齐参考接口声明的 `offset` 分页；统一为 `RadioStation[]`，兼容对象及 JSON 字符串嵌套条目，收藏项、频道原文和完整分页响应分别保留在扩展中；离线成功态映射、缺失列表错误、账户别名隔离、端点与分页契约测试已完成；2026-07-16 匿名 provider 及统一 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，匿名注册接口另实测业务码 400、未取得可用 Cookie，待真实账户验证收藏内容成功态） |
-| `broadcast_channel_currentinfo` | `/broadcast/channel/currentinfo` | `pending` | — |
+| `broadcast_channel_currentinfo` | `/broadcast/channel/currentinfo` | `verified` | `GET /v1/radio/stations/{ref}`（以资源引用选择平台、`account` 选择可选登录态，统一为 `RadioStation`；名称、封面、地区、当前节目与直播音频地址进入稳定字段，第三方频道/节目 ID、时间窗口及完整响应保留在扩展中，公开响应未给收藏态时严格保持 `null`；无符号整数 ID 在网络请求前校验；2026-07-16 provider 与统一 HTTP 均联网实测 `netease:362` 成功，返回“金山区广播电视台综合广播”、地区“上海”、可用的 `https://lhttp.qtfm.cn/live/4022/64k.mp3...` 音频地址及上游 `code=200`） |
 | `broadcast_channel_list` | `/broadcast/channel/list` | `pending` | — |
 | `broadcast_sub` | `/broadcast/sub` | `pending` | — |
 | `calendar` | `/calendar` | `pending` | — |
