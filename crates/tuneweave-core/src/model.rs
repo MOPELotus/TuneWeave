@@ -168,6 +168,33 @@ pub struct Album {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Money {
+    pub amount: f64,
+    pub currency: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DigitalAlbum {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub artists: Vec<ArtistSummary>,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub published_at: Option<String>,
+    pub price: Option<Money>,
+    pub is_free: Option<bool>,
+    pub purchasable: Option<bool>,
+    pub purchased: Option<bool>,
+    pub sale_count: Option<u64>,
+    pub track_count: Option<u64>,
+    pub tags: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     #[serde(rename = "ref")]
     pub resource_ref: ResourceRef,
@@ -346,5 +373,17 @@ mod tests {
         assert_eq!(track.resource_ref, reference);
         assert_eq!(track.platform, Platform::Netease);
         assert_eq!(track.id, "123");
+    }
+
+    #[test]
+    fn money_keeps_decimal_amount_and_currency() {
+        let money = Money {
+            amount: 22.0,
+            currency: "CNY".to_owned(),
+        };
+
+        let value = serde_json::to_value(money).expect("serialize money");
+        assert_eq!(value["amount"], 22.0);
+        assert_eq!(value["currency"], "CNY");
     }
 }
