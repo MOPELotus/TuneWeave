@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,6 +72,39 @@ pub struct AudioRecognition {
     pub matches: Vec<AudioRecognitionMatch>,
     pub query_id: Option<String>,
     pub no_match_reason: Option<i64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ImageUploadRequest {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+    pub image_size: Option<u32>,
+    pub crop_x: Option<u32>,
+    pub crop_y: Option<u32>,
+    pub account: Option<String>,
+}
+
+impl fmt::Debug for ImageUploadRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageUploadRequest")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("data_len", &self.data.len())
+            .field("image_size", &self.image_size)
+            .field("crop_x", &self.crop_x)
+            .field("crop_y", &self.crop_y)
+            .field("account", &self.account)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageUploadResult {
+    pub url: Option<String>,
+    pub image_id: Option<String>,
     pub extensions: Extensions,
 }
 
@@ -865,6 +898,31 @@ mod tests {
         assert_eq!(value["matches"][0]["track"]["ref"], "netease:185809");
         assert_eq!(value["matches"][0]["start_time_ms"], 1_500);
         assert_eq!(value["query_id"], "query-1");
+    }
+
+    #[test]
+    fn image_upload_request_redacts_binary_data_and_result_is_stable() {
+        let request = ImageUploadRequest {
+            filename: "avatar.png".to_owned(),
+            content_type: "image/png".to_owned(),
+            data: b"private-image-data".to_vec(),
+            image_size: Some(300),
+            crop_x: Some(0),
+            crop_y: Some(0),
+            account: Some("default".to_owned()),
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("data_len: 18"));
+        assert!(!debug.contains("private-image-data"));
+
+        let result = ImageUploadResult {
+            url: Some("https://example.test/avatar.png".to_owned()),
+            image_id: Some("109951168000000000".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize image upload result");
+        assert_eq!(value["url"], "https://example.test/avatar.png");
+        assert_eq!(value["image_id"], "109951168000000000");
     }
 
     #[test]

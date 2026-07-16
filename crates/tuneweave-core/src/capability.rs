@@ -45,6 +45,7 @@ pub enum Capability {
     AccountArtistNewTracks,
     AccountArtistNewWorks,
     AccountArtistNewTracksPlayAll,
+    AccountAvatarWrite,
     PlaylistWrite,
     Favorites,
     ListeningHistory,

@@ -7,11 +7,11 @@ use crate::{
     ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest,
     ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
     AuthChallengeRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TuneWeaveError, User, Video,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult,
+    Track, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -426,6 +426,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SessionManagement,
+        ))
+    }
+
+    async fn upload_account_avatar(
+        &self,
+        _request: &ImageUploadRequest,
+    ) -> Result<ImageUploadResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountAvatarWrite,
         ))
     }
 
