@@ -169,6 +169,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
+        .route("/artists/{reference}/albums", get(artist_albums))
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -799,6 +800,39 @@ async fn playlist_tracks(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+async fn artist_albums(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .artist_albums(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -1648,6 +1682,7 @@ mod tests {
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
+                Capability::ArtistAlbums,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1818,6 +1853,22 @@ mod tests {
                     limit: request.limit,
                     offset: request.offset,
                     total: Some(20),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
+            let mut album = sample_album("18915");
+            album.extensions.insert("artist_id".to_owned(), json!(id));
+            Ok(Page {
+                items: vec![album],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Default::default(),
@@ -2336,6 +2387,24 @@ mod tests {
         assert_eq!(tracks["data"][0]["ref"], "netease:185809");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 5);
         assert_eq!(tracks["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn artist_albums_use_reference_platform_account_and_pagination() {
+        let (status, albums) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/albums?limit=5&offset=10&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(albums["data"][0]["ref"], "netease:18915");
+        assert_eq!(albums["data"][0]["extensions"]["artist_id"], "6452");
+        assert_eq!(albums["meta"]["platform"], "netease");
+        assert_eq!(albums["meta"]["account"], "collector");
+        assert_eq!(albums["meta"]["pagination"]["limit"], 5);
+        assert_eq!(albums["meta"]["pagination"]["offset"], 10);
+        assert_eq!(albums["meta"]["pagination"]["next_offset"], 11);
+        assert_eq!(albums["meta"]["pagination"]["has_more"], true);
     }
 
     #[tokio::test]
