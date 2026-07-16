@@ -28,11 +28,12 @@ use crate::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
-        ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope, AudioQuality,
-        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope, ArtistVideoCreator,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -692,34 +693,56 @@ impl MusicProvider for NeteaseProvider {
         request: &ArtistVideoListRequest,
     ) -> Result<Page<Video>> {
         let id = parse_numeric_id("artist", id)?;
-        if request.kind != VideoKind::Mv {
-            return Err(TuneWeaveError::invalid_request(
-                "NetEase artist video catalog currently requires type=mv",
-            )
-            .with_platform(Platform::Netease));
-        }
-        if request.cursor.is_some() || request.order.is_some() {
-            return Err(TuneWeaveError::invalid_request(
-                "cursor and order are not supported for the NetEase MV catalog",
-            )
-            .with_platform(Platform::Netease));
-        }
         let limit = request.limit.clamp(1, 100);
         let client = self.client_for(request.account.as_deref())?;
-        let response = client
-            .request_weapi(
-                "/api/artist/mvs",
-                json!({
-                    "artistId": id,
-                    "limit": limit,
-                    "offset": request.offset,
-                    "total": true
-                }),
-            )
-            .await?;
-        ensure_success(&response.body)?;
-        let response: ArtistMvsEnvelope = parse_body(response.body)?;
-        map_artist_mvs_response(response, limit, request.offset)
+        match request.kind {
+            VideoKind::Mv => {
+                if request.cursor.is_some() || request.order.is_some() {
+                    return Err(TuneWeaveError::invalid_request(
+                        "cursor and order are not supported for the NetEase MV catalog",
+                    )
+                    .with_platform(Platform::Netease));
+                }
+                let response = client
+                    .request_weapi(
+                        "/api/artist/mvs",
+                        json!({
+                            "artistId": id,
+                            "limit": limit,
+                            "offset": request.offset,
+                            "total": true
+                        }),
+                    )
+                    .await?;
+                ensure_success(&response.body)?;
+                let response: ArtistMvsEnvelope = parse_body(response.body)?;
+                map_artist_mvs_response(response, limit, request.offset)
+            }
+            VideoKind::All => {
+                let cursor = request
+                    .cursor
+                    .as_deref()
+                    .map_or_else(|| json!(request.offset), |cursor| json!(cursor));
+                let order = request
+                    .order
+                    .as_deref()
+                    .map_or_else(|| json!(0), |order| json!(order));
+                let response = client
+                    .request_weapi(
+                        "/api/mlog/artist/video",
+                        json!({
+                            "artistId": id,
+                            "page": json!({ "size": limit, "cursor": cursor }).to_string(),
+                            "tab": 0,
+                            "order": order
+                        }),
+                    )
+                    .await?;
+                ensure_success(&response.body)?;
+                let response: ArtistVideosEnvelope = parse_body(response.body)?;
+                map_artist_videos_response(response, limit, request.offset)
+            }
+        }
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -2263,6 +2286,153 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
     })
 }
 
+fn map_artist_videos_response(
+    response: ArtistVideosEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Video>> {
+    let page = response.data.page;
+    let items = response
+        .data
+        .records
+        .into_iter()
+        .map(map_artist_video)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = page.more.unwrap_or(consumed == limit);
+    let mut extensions = Extensions::new();
+    insert_extension(
+        &mut extensions,
+        "next_cursor",
+        page.cursor.as_ref().and_then(json_scalar_string),
+    );
+    insert_extension(&mut extensions, "page_size", page.size);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: None,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_artist_video(raw: Value) -> Result<Video> {
+    let item: ArtistVideoRecord = parse_body(raw.clone())?;
+    let id = item
+        .id
+        .as_ref()
+        .and_then(json_scalar_string)
+        .or_else(|| item.resource.base.id.as_ref().and_then(json_scalar_string))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase artist video item is missing a usable id",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let resource_ref = ResourceRef::new(Platform::Netease, id.clone()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid artist video id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let base = item.resource.base;
+    let extension = item.resource.extension;
+    let mut creators = extension
+        .as_ref()
+        .map(|extension| {
+            extension
+                .artists
+                .iter()
+                .filter_map(map_artist_video_creator)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if creators.is_empty()
+        && let Some(user) = item.resource.user_profile.as_ref()
+        && !user.nickname.trim().is_empty()
+    {
+        creators.push(CreatorSummary {
+            resource_ref: user
+                .user_id
+                .as_ref()
+                .and_then(json_scalar_string)
+                .and_then(|id| ResourceRef::new(Platform::Netease, id).ok()),
+            name: user.nickname.clone(),
+            avatar_url: user.avatar_url.clone(),
+        });
+    }
+    if creators.is_empty()
+        && let Some(name) = extension
+            .as_ref()
+            .and_then(|extension| extension.artist_name.as_deref())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    {
+        creators.push(CreatorSummary {
+            resource_ref: None,
+            name: name.to_owned(),
+            avatar_url: None,
+        });
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert("artist_video".to_owned(), raw);
+    Ok(Video {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        title: base
+            .text
+            .filter(|title| !title.trim().is_empty())
+            .or(base.original_title)
+            .unwrap_or_default(),
+        creators,
+        description: base.desc.unwrap_or_default(),
+        cover_url: base.cover_url,
+        duration_ms: base.duration,
+        published_at: base
+            .published_at_ms
+            .filter(|milliseconds| *milliseconds > 0)
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        play_count: extension.and_then(|extension| extension.play_count),
+        subscribed: None,
+        extensions,
+    })
+}
+
+fn map_artist_video_creator(creator: &ArtistVideoCreator) -> Option<CreatorSummary> {
+    let name = creator.name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(CreatorSummary {
+        resource_ref: creator
+            .id
+            .as_ref()
+            .and_then(json_scalar_string)
+            .and_then(|id| ResourceRef::new(Platform::Netease, id).ok()),
+        name: name.to_owned(),
+        avatar_url: creator.avatar_url.clone(),
+    })
+}
+
+fn json_scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 fn map_artist(
     detail: ArtistDetailEnvelope,
     description: ArtistDescriptionEnvelope,
@@ -3082,6 +3252,71 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_videos_and_cursor_to_the_unified_video_model() {
+        let response: ArtistVideosEnvelope = serde_json::from_value(json!({
+            "data": {
+                "page": { "cursor": "2", "more": true, "size": 1 },
+                "records": [
+                    {
+                        "id": "22695250",
+                        "type": 1,
+                        "resource": {
+                            "mlogBaseData": {
+                                "id": "22695250",
+                                "text": "任性 (5525 Live版)",
+                                "desc": "现场版",
+                                "coverUrl": "https://example.test/video.jpg",
+                                "duration": 266000,
+                                "pubTime": 1740377057300_u64
+                            },
+                            "mlogExtVO": {
+                                "artistName": "周杰伦",
+                                "artists": [
+                                    {
+                                        "id": 6452,
+                                        "name": "周杰伦",
+                                        "img1v1Url": "https://example.test/artist.jpg"
+                                    }
+                                ],
+                                "playCount": 100726
+                            },
+                            "userProfile": null
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("artist videos fixture");
+
+        let page = map_artist_videos_response(response, 1, 0).expect("map artist videos");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:22695250");
+        assert_eq!(page.items[0].title, "任性 (5525 Live版)");
+        assert_eq!(page.items[0].description, "现场版");
+        assert_eq!(
+            page.items[0].creators[0]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:6452")
+        );
+        assert_eq!(page.items[0].duration_ms, Some(266_000));
+        assert!(
+            page.items[0]
+                .published_at
+                .as_deref()
+                .is_some_and(|published_at| published_at.starts_with("2025-02-24T"))
+        );
+        assert_eq!(page.items[0].play_count, Some(100_726));
+        assert_eq!(page.items[0].extensions["artist_video"]["type"], 1);
+        assert_eq!(page.pagination.extensions["next_cursor"], "2");
+        assert_eq!(page.pagination.extensions["page_size"], 1);
+        assert_eq!(page.pagination.next_offset, Some(1));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_albums_and_cursor_metadata() {
         let response: ArtistAlbumsEnvelope = serde_json::from_value(json!({
             "artist": { "id": 6452, "name": "周杰伦", "albumSize": 42 },
@@ -3614,12 +3849,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artist_mv_catalog_rejects_non_mv_filters_before_network_access() {
+    async fn artist_mv_catalog_rejects_cursor_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
-        let request = ArtistVideoListRequest::new(20, 0);
+        let mut request = ArtistVideoListRequest::new(20, 0);
+        request.kind = VideoKind::Mv;
+        request.cursor = Some("next".to_owned());
         let error = MusicProvider::artist_videos(&provider, "6452", &request)
             .await
-            .expect_err("unsupported artist video type");
+            .expect_err("unsupported MV cursor");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
@@ -4343,6 +4580,25 @@ mod tests {
         assert!(page.items.iter().all(|video| !video.title.is_empty()));
         assert!(page.items.iter().all(|video| !video.creators.is_empty()));
         assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_videos() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = ArtistVideoListRequest::new(2, 0);
+        let page = MusicProvider::artist_videos(&provider, "2116", &request)
+            .await
+            .expect("live artist videos");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|video| !video.title.is_empty()));
+        assert!(page.items.iter().all(|video| !video.creators.is_empty()));
+        assert!(
+            page.pagination.extensions["next_cursor"]
+                .as_str()
+                .is_some_and(|cursor| !cursor.is_empty())
+        );
         assert!(page.pagination.has_more);
     }
 

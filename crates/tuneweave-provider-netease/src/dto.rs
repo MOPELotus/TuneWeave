@@ -109,6 +109,84 @@ pub(crate) struct ArtistMvCreator {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideosEnvelope {
+    pub data: ArtistVideosData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideosData {
+    pub page: ArtistVideosPage,
+    #[serde(default)]
+    pub records: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideosPage {
+    pub cursor: Option<Value>,
+    pub more: Option<bool>,
+    pub size: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoRecord {
+    pub id: Option<Value>,
+    pub resource: ArtistVideoResource,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoResource {
+    #[serde(rename = "mlogBaseData")]
+    pub base: ArtistVideoBaseData,
+    #[serde(rename = "mlogExtVO")]
+    pub extension: Option<ArtistVideoExtension>,
+    #[serde(rename = "userProfile")]
+    pub user_profile: Option<ArtistVideoUserProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoBaseData {
+    pub id: Option<Value>,
+    pub text: Option<String>,
+    #[serde(rename = "originalTitle")]
+    pub original_title: Option<String>,
+    pub desc: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+    pub duration: Option<u64>,
+    #[serde(rename = "pubTime")]
+    pub published_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoExtension {
+    #[serde(default)]
+    pub artists: Vec<ArtistVideoCreator>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoCreator {
+    pub id: Option<Value>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "img1v1Url")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistVideoUserProfile {
+    #[serde(rename = "userId")]
+    pub user_id: Option<Value>,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(rename = "avatarUrl")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistDetailEnvelope {
     pub data: ArtistDetailData,
 }
