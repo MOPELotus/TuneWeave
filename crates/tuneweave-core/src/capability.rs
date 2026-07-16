@@ -75,6 +75,7 @@ pub enum Capability {
     CommentWrite,
     CommentsRead,
     CommentReactionsRead,
+    CommentReactionsWrite,
     CommentThreadStats,
     PlatformApi,
     PlatformBatch,
@@ -128,6 +129,11 @@ mod tests {
             serde_json::to_value(Capability::CommentReactionsRead)
                 .expect("serialize comment reactions capability"),
             serde_json::json!("comment_reactions_read")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::CommentReactionsWrite)
+                .expect("serialize comment reaction write capability"),
+            serde_json::json!("comment_reactions_write")
         );
         assert_eq!(
             serde_json::to_value(Capability::CommentThreadStats)

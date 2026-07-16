@@ -720,6 +720,26 @@ pub struct CommentReactionPage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentReactionMutationRequest {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub kind: CommentReactionKind,
+    pub active: bool,
+    pub target_user_ref: Option<ResourceRef>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentReactionMutationResult {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub kind: CommentReactionKind,
+    pub active: bool,
+    pub target_user_ref: Option<ResourceRef>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommentThreadStatsRequest {
     pub kind: CommentTargetKind,
     pub resource_refs: Vec<ResourceRef>,
@@ -2335,5 +2355,38 @@ mod tests {
             "netease:89ADDE33C0AAE8EC14B99F6750DB954D"
         );
         assert_eq!(value["stats"][0]["comment_count"], 1_123);
+    }
+
+    #[test]
+    fn comment_reaction_mutations_keep_action_target_and_optional_user_explicit() {
+        let request = CommentReactionMutationRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "12840183".to_owned(),
+            kind: CommentReactionKind::Like,
+            active: true,
+            target_user_ref: None,
+            account: Some("personal".to_owned()),
+        };
+        let result = CommentReactionMutationResult {
+            target: request.target.clone(),
+            comment_id: request.comment_id.clone(),
+            kind: request.kind,
+            active: request.active,
+            target_user_ref: request.target_user_ref.clone(),
+            extensions: Extensions::new(),
+        };
+        let request = serde_json::to_value(request).expect("serialize reaction mutation request");
+        assert_eq!(request["target"]["ref"], "netease:185809");
+        assert_eq!(request["comment_id"], "12840183");
+        assert_eq!(request["kind"], "like");
+        assert_eq!(request["active"], true);
+        assert!(request["target_user_ref"].is_null());
+
+        let result = serde_json::to_value(result).expect("serialize reaction mutation result");
+        assert_eq!(result["kind"], "like");
+        assert_eq!(result["active"], true);
     }
 }
