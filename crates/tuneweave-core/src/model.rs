@@ -269,6 +269,13 @@ pub struct AlbumStats {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionResult {
+    pub resource_ref: ResourceRef,
+    pub subscribed: bool,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackEntitlement {
     pub track_ref: ResourceRef,
     pub playable: Option<bool>,
@@ -528,5 +535,19 @@ mod tests {
             serde_json::to_value(request.kind).expect("serialize kind"),
             "album"
         );
+    }
+
+    #[test]
+    fn subscription_result_serializes_the_resource_reference() {
+        let result = SubscriptionResult {
+            resource_ref: ResourceRef::new(Platform::Netease, "32311")
+                .expect("valid album reference"),
+            subscribed: true,
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(result).expect("serialize subscription result");
+        assert_eq!(value["resource_ref"], "netease:32311");
+        assert_eq!(value["subscribed"], true);
     }
 }

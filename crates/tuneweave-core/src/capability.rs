@@ -14,6 +14,7 @@ pub enum Capability {
     AlbumList,
     AlbumStats,
     AlbumTrackEntitlements,
+    AlbumSubscriptionWrite,
     DigitalAlbumDetail,
     DigitalAlbumList,
     DigitalAlbumCharts,
