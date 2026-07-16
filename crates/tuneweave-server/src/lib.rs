@@ -1605,6 +1605,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1626,6 +1627,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1648,6 +1650,7 @@ mod tests {
                     total: Some(500),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1669,6 +1672,7 @@ mod tests {
                     total: Some(10),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1719,6 +1723,7 @@ mod tests {
                     total: None,
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1746,6 +1751,7 @@ mod tests {
                     total: Some(20),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1763,6 +1769,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1776,6 +1783,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1789,6 +1797,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1806,6 +1815,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1822,6 +1832,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1839,6 +1850,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1856,6 +1868,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -1872,6 +1885,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }

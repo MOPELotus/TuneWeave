@@ -342,6 +342,7 @@ mod tests {
                     total: Some(self.search_results.len() as u64),
                     next_offset: None,
                     has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }

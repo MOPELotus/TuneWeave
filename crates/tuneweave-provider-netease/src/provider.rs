@@ -332,6 +332,7 @@ impl MusicProvider for NeteaseProvider {
                 total: Some(response.result.song_count),
                 next_offset: has_more.then_some(next_offset),
                 has_more,
+                extensions: Default::default(),
             },
         })
     }
@@ -437,6 +438,7 @@ impl MusicProvider for NeteaseProvider {
                 total: response.total,
                 next_offset: has_more.then_some(next_offset),
                 has_more,
+                extensions: Default::default(),
             },
         })
     }
@@ -548,6 +550,7 @@ impl MusicProvider for NeteaseProvider {
                 total: None,
                 next_offset: has_more.then_some(request.offset.saturating_add(consumed)),
                 has_more,
+                extensions: Default::default(),
             },
         })
     }
@@ -608,6 +611,7 @@ impl MusicProvider for NeteaseProvider {
                 total: Some(total),
                 next_offset: has_more.then_some(next_offset),
                 has_more,
+                extensions: Default::default(),
             },
         })
     }
@@ -1113,6 +1117,7 @@ fn select_page<T>(items: Vec<T>, limit: u32, offset: u32) -> (Vec<T>, PageMeta) 
             total: Some(total),
             next_offset: has_more.then_some(next_offset),
             has_more,
+            extensions: Default::default(),
         },
     )
 }
@@ -1145,6 +1150,7 @@ fn map_user_playlists(
             total: None,
             next_offset: response.more.then_some(next_offset),
             has_more: response.more,
+            extensions: Default::default(),
         },
     })
 }

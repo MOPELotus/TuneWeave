@@ -60,6 +60,8 @@ pub struct PageMeta {
     pub total: Option<u64>,
     pub next_offset: Option<u32>,
     pub has_more: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -549,5 +551,25 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize subscription result");
         assert_eq!(value["resource_ref"], "netease:32311");
         assert_eq!(value["subscribed"], true);
+    }
+
+    #[test]
+    fn page_metadata_only_serializes_extensions_when_present() {
+        let mut metadata = PageMeta {
+            limit: 25,
+            offset: 0,
+            total: Some(2),
+            next_offset: None,
+            has_more: false,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(&metadata).expect("serialize empty metadata");
+        assert!(value.get("extensions").is_none());
+
+        metadata
+            .extensions
+            .insert("paid_count".to_owned(), Value::from(1));
+        let value = serde_json::to_value(metadata).expect("serialize extended metadata");
+        assert_eq!(value["extensions"]["paid_count"], 1);
     }
 }
