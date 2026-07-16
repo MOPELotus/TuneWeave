@@ -22,7 +22,7 @@ use tuneweave_core::{
     PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
+    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -173,6 +173,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
+        .route("/artists/{reference}/fans", get(artist_fans))
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -864,6 +865,39 @@ async fn artist_albums(
     let provider = state.registry.require(platform)?;
     let page = provider
         .artist_albums(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn artist_fans(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<User>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .artist_fans(
             reference.id(),
             &PageRequest {
                 limit,
@@ -1730,6 +1764,7 @@ mod tests {
                 Capability::ArtistDetail,
                 Capability::ArtistStats,
                 Capability::ArtistAlbums,
+                Capability::ArtistFans,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1920,6 +1955,22 @@ mod tests {
             album.extensions.insert("artist_id".to_owned(), json!(id));
             Ok(Page {
                 items: vec![album],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn artist_fans(&self, id: &str, request: &PageRequest) -> Result<Page<User>> {
+            let mut user = sample_user("6298206519");
+            user.extensions.insert("artist_id".to_owned(), json!(id));
+            Ok(Page {
+                items: vec![user],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -2285,6 +2336,20 @@ mod tests {
         }
     }
 
+    fn sample_user(id: &str) -> User {
+        User {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            name: "轻手揍人丸".to_owned(),
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+            signature: Some("111".to_owned()),
+            followed: Some(false),
+            mutual: Some(false),
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_album_stats(id: &str) -> AlbumStats {
         AlbumStats {
             album_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -2498,6 +2563,25 @@ mod tests {
         assert_eq!(albums["meta"]["pagination"]["offset"], 10);
         assert_eq!(albums["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(albums["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_fans_use_reference_platform_account_and_pagination() {
+        let (status, fans) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:2116/fans?limit=2&offset=10&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fans["data"][0]["ref"], "netease:6298206519");
+        assert_eq!(fans["data"][0]["name"], "轻手揍人丸");
+        assert_eq!(fans["data"][0]["extensions"]["artist_id"], "2116");
+        assert_eq!(fans["meta"]["platform"], "netease");
+        assert_eq!(fans["meta"]["account"], "collector");
+        assert_eq!(fans["meta"]["pagination"]["limit"], 2);
+        assert_eq!(fans["meta"]["pagination"]["offset"], 10);
+        assert_eq!(fans["meta"]["pagination"]["next_offset"], 11);
+        assert_eq!(fans["meta"]["pagination"]["has_more"], true);
     }
 
     #[tokio::test]
