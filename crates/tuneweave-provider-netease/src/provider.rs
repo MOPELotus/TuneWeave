@@ -11,16 +11,16 @@ use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
     ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest,
-    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
-    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
-    Video, VideoKind,
+    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
+    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -34,11 +34,11 @@ use crate::{
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
         ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
         ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
-        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
-        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality,
+        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
+        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
+        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -273,6 +273,7 @@ impl MusicProvider for NeteaseProvider {
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
             Capability::SearchTracks,
+            Capability::AudioRecognition,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -363,6 +364,36 @@ impl MusicProvider for NeteaseProvider {
                 extensions: Default::default(),
             },
         })
+    }
+
+    async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
+        let fingerprint = request.fingerprint.trim();
+        if fingerprint.is_empty() {
+            return Err(
+                TuneWeaveError::invalid_request("audio fingerprint cannot be empty")
+                    .with_platform(Platform::Netease),
+            );
+        }
+        if fingerprint.len() > 131_072 {
+            return Err(TuneWeaveError::invalid_request(
+                "audio fingerprint cannot exceed 131072 bytes",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if !(1..=300).contains(&request.duration_seconds) {
+            return Err(TuneWeaveError::invalid_request(
+                "audio fingerprint duration must be between 1 and 300 seconds",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .match_audio(fingerprint, request.duration_seconds)
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: AudioMatchEnvelope = parse_body(response.body)?;
+        map_audio_recognition(response, raw_response)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1561,6 +1592,59 @@ fn map_recommended_playlists(
     let limit = limit.clamp(1, 100);
     let (items, pagination) = select_page(playlists, limit, offset);
     Ok(Page { items, pagination })
+}
+
+fn map_audio_recognition(
+    response: AudioMatchEnvelope,
+    raw_response: Value,
+) -> Result<AudioRecognition> {
+    let query_id = response.data.query_id.as_ref().and_then(json_scalar_string);
+    let matches = response
+        .data
+        .result
+        .unwrap_or_default()
+        .into_iter()
+        .map(|raw| {
+            let song_raw = raw.get("song").cloned().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase audio match result is missing song",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            let song: Song = parse_body(song_raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track
+                .extensions
+                .insert("audio_recognition_song".to_owned(), song_raw);
+            let start_time_ms = raw
+                .get("startTime")
+                .or_else(|| raw.get("start_time"))
+                .and_then(|value| {
+                    value
+                        .as_u64()
+                        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+                });
+            let mut extensions = Extensions::new();
+            extensions.insert("match".to_owned(), raw);
+            Ok(AudioRecognitionMatch {
+                track,
+                start_time_ms,
+                extensions,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "type", response.data.kind);
+    insert_extension(&mut extensions, "mv", response.data.mv);
+    insert_extension(&mut extensions, "module_list", response.data.module_list);
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(AudioRecognition {
+        matches,
+        query_id,
+        no_match_reason: response.data.no_match_reason,
+        extensions,
+    })
 }
 
 fn ensure_account_access(client: &NeteaseClient, body: &Value, operation: &str) -> Result<()> {
@@ -3795,6 +3879,62 @@ mod tests {
     }
 
     #[test]
+    fn maps_audio_recognition_results_and_preserves_match_metadata() {
+        let raw = json!({
+            "code": 200,
+            "data": {
+                "type": 0,
+                "queryId": "query-1",
+                "noMatchReason": 10,
+                "result": [
+                    {
+                        "song": {
+                            "id": 185809,
+                            "name": "晴天",
+                            "artists": [{"id": 6452, "name": "周杰伦"}],
+                            "album": {
+                                "id": 18905,
+                                "name": "叶惠美",
+                                "picUrl": "https://example.test/cover.jpg"
+                            },
+                            "duration": 269000,
+                            "mvid": 186001,
+                            "status": 0
+                        },
+                        "startTime": 1500,
+                        "score": 0.97
+                    }
+                ],
+                "mv": {"id": 186001},
+                "moduleList": ["song"]
+            }
+        });
+        let response: AudioMatchEnvelope =
+            serde_json::from_value(raw.clone()).expect("audio match fixture");
+
+        let recognition =
+            map_audio_recognition(response, raw).expect("map audio recognition result");
+
+        assert_eq!(recognition.query_id.as_deref(), Some("query-1"));
+        assert_eq!(recognition.no_match_reason, Some(10));
+        assert_eq!(recognition.matches.len(), 1);
+        assert_eq!(
+            recognition.matches[0].track.resource_ref.to_string(),
+            "netease:185809"
+        );
+        assert_eq!(recognition.matches[0].track.artists[0].name, "周杰伦");
+        assert_eq!(recognition.matches[0].start_time_ms, Some(1500));
+        assert_eq!(recognition.matches[0].extensions["match"]["score"], 0.97);
+        assert_eq!(
+            recognition.matches[0].track.extensions["audio_recognition_song"]["mvid"],
+            186001
+        );
+        assert_eq!(recognition.extensions["type"], 0);
+        assert_eq!(recognition.extensions["module_list"][0], "song");
+        assert_eq!(recognition.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_playlist_to_unified_model() {
         let playlist: PlaylistDetail = serde_json::from_value(json!({
             "id": 3778678,
@@ -5079,6 +5219,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_recognition_validates_fingerprint_boundaries_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let empty = MusicProvider::recognize_audio(
+            &provider,
+            &AudioRecognitionRequest {
+                fingerprint: "   ".to_owned(),
+                duration_seconds: 6,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("empty fingerprint");
+        assert_eq!(empty.code, ErrorCode::InvalidRequest);
+
+        let duration = MusicProvider::recognize_audio(
+            &provider,
+            &AudioRecognitionRequest {
+                fingerprint: "fingerprint".to_owned(),
+                duration_seconds: 0,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("invalid fingerprint duration");
+        assert_eq!(duration.code, ErrorCode::InvalidRequest);
+
+        let oversized = MusicProvider::recognize_audio(
+            &provider,
+            &AudioRecognitionRequest {
+                fingerprint: "x".repeat(131_073),
+                duration_seconds: 6,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("oversized fingerprint");
+        assert_eq!(oversized.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
     async fn artist_mv_catalog_rejects_cursor_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let mut request = ArtistVideoListRequest::new(20, 0);
@@ -5751,6 +5931,25 @@ mod tests {
         assert!(!page.pagination.has_more);
         assert_eq!(page.pagination.extensions["response"]["paidCount"], 0);
         assert!(page.pagination.extensions["response"].get("data").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_audio_recognition_no_match_path() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let recognition = MusicProvider::recognize_audio(
+            &provider,
+            &AudioRecognitionRequest {
+                fingerprint: "invalid-fingerprint".to_owned(),
+                duration_seconds: 6,
+                account: None,
+            },
+        )
+        .await
+        .expect("live audio recognition no-match response");
+        assert!(recognition.matches.is_empty());
+        assert!(recognition.no_match_reason.is_some());
+        assert!(recognition.extensions.contains_key("response"));
     }
 
     #[tokio::test]

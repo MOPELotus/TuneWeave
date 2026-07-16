@@ -352,6 +352,26 @@ impl NeteaseClient {
         parse_response(response).await
     }
 
+    pub async fn match_audio(
+        &self,
+        fingerprint: &str,
+        duration_seconds: u32,
+    ) -> Result<NeteaseResponse> {
+        let duration = duration_seconds.to_string();
+        let fingerprint = utf8_percent_encode(fingerprint, NON_ALPHANUMERIC);
+        let endpoint = format!(
+            "{}/api/music/audio/match?sessionId=0123456789abcdef&algorithmCode=shazam_v2&duration={duration}&rawdata={fingerprint}&times=1&decrypt=1",
+            self.base_url
+        );
+        let response = self
+            .http
+            .get(endpoint)
+            .send()
+            .await
+            .map_err(request_error)?;
+        parse_response(response).await
+    }
+
     pub async fn request_linuxapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
         validate_api_path(path, "LinuxAPI")?;
         let mut payload = payload_object(payload)?;

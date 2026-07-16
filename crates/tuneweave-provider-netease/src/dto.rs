@@ -15,6 +15,25 @@ pub(crate) struct SearchResult {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AudioMatchEnvelope {
+    pub data: AudioMatchData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AudioMatchData {
+    #[serde(rename = "queryId")]
+    pub query_id: Option<Value>,
+    #[serde(rename = "noMatchReason")]
+    pub no_match_reason: Option<i64>,
+    pub result: Option<Vec<Value>>,
+    #[serde(rename = "type")]
+    pub kind: Option<Value>,
+    pub mv: Option<Value>,
+    #[serde(rename = "moduleList")]
+    pub module_list: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct TrackEnvelope {
     #[serde(default)]
     pub songs: Vec<Song>,
