@@ -2274,7 +2274,7 @@ mod tests {
         ArtistStats {
             artist_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
             followed: Some(false),
-            follower_count: None,
+            follower_count: Some(13_704_928),
             video_counts: vec![tuneweave_core::ArtistContentCount {
                 category: Some("0".to_owned()),
                 count: 9,
@@ -2527,6 +2527,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(stats["data"]["artist_ref"], "netease:6452");
         assert_eq!(stats["data"]["followed"], false);
+        assert_eq!(stats["data"]["follower_count"], 13_704_928);
         assert_eq!(stats["data"]["video_counts"][0]["category"], "0");
         assert_eq!(stats["data"]["video_counts"][0]["count"], 9);
         assert_eq!(stats["meta"]["platform"], "netease");
