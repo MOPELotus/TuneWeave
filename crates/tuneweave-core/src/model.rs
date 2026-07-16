@@ -256,6 +256,32 @@ pub struct ArtistSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistBiographySection {
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Artist {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub description: String,
+    pub biography_sections: Vec<ArtistBiographySection>,
+    pub avatar_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub album_count: Option<u64>,
+    pub track_count: Option<u64>,
+    pub mv_count: Option<u64>,
+    pub video_count: Option<u64>,
+    pub identities: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     #[serde(rename = "ref")]
     pub resource_ref: Option<ResourceRef>,
@@ -588,6 +614,37 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize subscription result");
         assert_eq!(value["resource_ref"], "netease:32311");
         assert_eq!(value["subscribed"], true);
+    }
+
+    #[test]
+    fn artist_serializes_stable_identity_and_biography_fields() {
+        let artist = Artist {
+            resource_ref: ResourceRef::new(Platform::Netease, "6452")
+                .expect("valid artist reference"),
+            platform: Platform::Netease,
+            id: "6452".to_owned(),
+            name: "周杰伦".to_owned(),
+            aliases: vec!["Jay Chou".to_owned(), "周董".to_owned()],
+            description: "歌手、词曲作者与制作人。".to_owned(),
+            biography_sections: vec![ArtistBiographySection {
+                title: "人物简介".to_owned(),
+                text: "跨平台统一歌手传记。".to_owned(),
+            }],
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+            cover_url: Some("https://example.test/cover.jpg".to_owned()),
+            album_count: Some(44),
+            track_count: Some(568),
+            mv_count: Some(9),
+            video_count: Some(8),
+            identities: vec!["作曲".to_owned()],
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(artist).expect("serialize artist");
+        assert_eq!(value["ref"], "netease:6452");
+        assert_eq!(value["platform"], "netease");
+        assert_eq!(value["biography_sections"][0]["title"], "人物简介");
+        assert_eq!(value["track_count"], 568);
     }
 
     #[test]
