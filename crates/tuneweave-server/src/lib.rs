@@ -199,6 +199,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
         .route("/account/playlists", get(account_playlists))
+        .route("/account/library/albums", get(account_albums))
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history));
 
@@ -1262,6 +1263,33 @@ async fn account_playlists(
     ))
 }
 
+async fn account_albums(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_albums(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_favorite_tracks(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -1590,6 +1618,7 @@ mod tests {
                 Capability::SessionManagement,
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
+                Capability::AccountAlbums,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -1816,6 +1845,30 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn account_albums(&self, request: &PageRequest) -> Result<Page<Album>> {
+            let mut album = sample_album("32311");
+            album.extensions.insert(
+                "subscription_item".to_owned(),
+                json!({ "subTime": 1704067200000_u64 }),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "response".to_owned(),
+                json!({ "code": 200, "paidCount": 1 }),
+            );
+            Ok(Page {
+                items: vec![album],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions,
                 },
             })
         }
@@ -2610,6 +2663,27 @@ mod tests {
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn account_albums_preserve_subscription_and_page_metadata() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/library/albums?platform=netease&account=personal&limit=25&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:32311");
+        assert_eq!(
+            json["data"][0]["extensions"]["subscription_item"]["subTime"],
+            1704067200000_u64
+        );
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 25);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["response"]["paidCount"],
+            1
+        );
     }
 
     #[tokio::test]
