@@ -18,14 +18,14 @@ use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoKind,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -161,6 +161,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
+        .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
         .route("/albums", get(albums))
         .route("/albums/{reference}", get(album))
@@ -361,6 +362,53 @@ async fn search(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioRecognizeBody {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "audio_fp", alias = "audioFP")]
+    fingerprint: String,
+    #[serde(alias = "duration")]
+    duration_seconds: u32,
+}
+
+async fn audio_recognize(
+    State(state): State<AppState>,
+    payload: Result<Json<AudioRecognizeBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AudioRecognition>>, ApiError> {
+    let body = json_body(payload)?;
+    let fingerprint = body.fingerprint.trim();
+    if fingerprint.is_empty() {
+        return Err(TuneWeaveError::invalid_request("fingerprint must not be empty").into());
+    }
+    if fingerprint.len() > 131_072 {
+        return Err(
+            TuneWeaveError::invalid_request("fingerprint cannot exceed 131072 bytes").into(),
+        );
+    }
+    if !(1..=300).contains(&body.duration_seconds) {
+        return Err(
+            TuneWeaveError::invalid_request("duration_seconds must be between 1 and 300").into(),
+        );
+    }
+    let platform = account_platform(&state, body.platform.as_deref())?;
+    let account = optional_trimmed(body.account);
+    let provider = state.registry.require(platform)?;
+    let recognition = provider
+        .recognize_audio(&AudioRecognitionRequest {
+            fingerprint: fingerprint.to_owned(),
+            duration_seconds: body.duration_seconds,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(recognition).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -2151,8 +2199,9 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistBiographySection, ArtistSummary, ArtistWorkKind, CreatorSummary, MusicProvider, Page,
-        PageMeta, ProviderQrStart, Result, SearchQuery, StreamRequest,
+        ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
+        CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result, SearchQuery,
+        StreamRequest,
     };
 
     use super::*;
@@ -2176,6 +2225,7 @@ mod tests {
         fn capabilities(&self) -> BTreeSet<Capability> {
             BTreeSet::from([
                 Capability::SearchTracks,
+                Capability::AudioRecognition,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
@@ -2228,6 +2278,33 @@ mod tests {
                     has_more: false,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn recognize_audio(
+            &self,
+            request: &AudioRecognitionRequest,
+        ) -> Result<AudioRecognition> {
+            let mut track = sample_track("185809");
+            track
+                .extensions
+                .insert("fingerprint".to_owned(), json!(request.fingerprint));
+            let mut match_extensions = tuneweave_core::Extensions::new();
+            match_extensions.insert("score".to_owned(), json!(0.97));
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "duration_seconds".to_owned(),
+                json!(request.duration_seconds),
+            );
+            Ok(AudioRecognition {
+                matches: vec![AudioRecognitionMatch {
+                    track,
+                    start_time_ms: Some(1_500),
+                    extensions: match_extensions,
+                }],
+                query_id: Some("query-1".to_owned()),
+                no_match_reason: None,
+                extensions,
             })
         }
 
@@ -3211,6 +3288,73 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn audio_recognition_uses_unified_input_and_response_metadata() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/audio/recognize",
+            Some(json!({
+                "platform": "netease",
+                "account": "green-vip",
+                "fingerprint": "  shazam-v2-fingerprint  ",
+                "duration_seconds": 6
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["matches"][0]["track"]["ref"], "netease:185809");
+        assert_eq!(
+            json["data"]["matches"][0]["track"]["extensions"]["fingerprint"],
+            "shazam-v2-fingerprint"
+        );
+        assert_eq!(json["data"]["matches"][0]["start_time_ms"], 1_500);
+        assert_eq!(json["data"]["matches"][0]["extensions"]["score"], 0.97);
+        assert_eq!(json["data"]["query_id"], "query-1");
+        assert_eq!(json["data"]["extensions"]["duration_seconds"], 6);
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn audio_recognition_accepts_source_compatible_field_aliases() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/audio/recognize",
+            Some(json!({
+                "audioFP": "shazam-v2-fingerprint",
+                "duration": 6
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["duration_seconds"], 6);
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn audio_recognition_rejects_invalid_fingerprint_boundaries() {
+        for body in [
+            json!({"fingerprint": "   ", "duration_seconds": 6}),
+            json!({"fingerprint": "fingerprint", "duration_seconds": 0}),
+            json!({"fingerprint": "x".repeat(131_073), "duration_seconds": 6}),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/audio/recognize",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
+        }
     }
 
     #[tokio::test]
