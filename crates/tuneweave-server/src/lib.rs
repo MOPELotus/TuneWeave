@@ -29,9 +29,10 @@ use tuneweave_core::{
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
     Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
-    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -169,6 +170,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
         .route("/banners", get(banners))
+        .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
         .route("/albums", get(albums))
@@ -400,6 +402,31 @@ async fn banners(
     request.account.clone_from(&account);
     let banners = provider.banners(&request).await?;
     let mut response = ApiResponse::new(banners).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RadioTaxonomyParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn radio_taxonomy(
+    State(state): State<AppState>,
+    Query(params): Query<RadioTaxonomyParams>,
+) -> Result<Json<ApiResponse<RadioTaxonomy>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let taxonomy = provider
+        .radio_taxonomy(&RadioTaxonomyRequest {
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(taxonomy).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -2515,8 +2542,8 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result,
-        SearchQuery, StreamRequest,
+        BannerTargetKind, CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart,
+        RadioCatalogOption, Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -2542,6 +2569,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::AudioRecognition,
                 Capability::Banners,
+                Capability::RadioTaxonomy,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
@@ -2642,6 +2670,24 @@ mod tests {
                 exclusive: Some(false),
                 extensions,
             }])
+        }
+
+        async fn radio_taxonomy(&self, request: &RadioTaxonomyRequest) -> Result<RadioTaxonomy> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(RadioTaxonomy {
+                categories: vec![RadioCatalogOption {
+                    id: "1".to_owned(),
+                    name: "音乐台".to_owned(),
+                    extensions: Default::default(),
+                }],
+                regions: vec![RadioCatalogOption {
+                    id: "407".to_owned(),
+                    name: "网络台".to_owned(),
+                    extensions: Default::default(),
+                }],
+                extensions,
+            })
         }
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
@@ -3716,6 +3762,23 @@ mod tests {
             json_response_from(test_app_with_provider(), "/v1/banners?client=windows-phone").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn radio_taxonomy_uses_platform_account_and_stable_string_ids() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/radio/taxonomy?platform=netease&account=radio-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["categories"][0]["id"], "1");
+        assert_eq!(json["data"]["categories"][0]["name"], "音乐台");
+        assert_eq!(json["data"]["regions"][0]["id"], "407");
+        assert_eq!(json["data"]["regions"][0]["name"], "网络台");
+        assert_eq!(json["data"]["extensions"]["account"], "radio-user");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "radio-user");
     }
 
     #[tokio::test]
