@@ -38,7 +38,8 @@ use tuneweave_core::{
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
     ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
     User, Video, VideoKind,
@@ -312,6 +313,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchVoices,
             Capability::SearchDefault,
             Capability::SearchTrending,
+            Capability::SearchSuggestions,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -476,6 +478,28 @@ impl MusicProvider for NeteaseProvider {
         };
         ensure_success(&response.body)?;
         map_netease_trending_searches(request.detail, response.body)
+    }
+
+    async fn search_suggestions(
+        &self,
+        request: &SearchSuggestionRequest,
+    ) -> Result<SearchSuggestionList> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(
+                TuneWeaveError::invalid_request("search suggestion query cannot be empty")
+                    .with_platform(Platform::Netease),
+            );
+        }
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload, use_weapi) = netease_search_suggestion_request(request.client, query);
+        let response = if use_weapi {
+            client.request_weapi(path, payload).await?
+        } else {
+            client.request_eapi(path, payload).await?
+        };
+        ensure_success(&response.body)?;
+        map_netease_search_suggestions(request.client, query, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7288,6 +7312,231 @@ fn search_trending_url(raw: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn netease_search_suggestion_request(
+    client: SearchSuggestionClient,
+    query: &str,
+) -> (&'static str, Value, bool) {
+    match client {
+        SearchSuggestionClient::Web => ("/api/search/suggest/web", json!({ "s": query }), true),
+        SearchSuggestionClient::Mobile => {
+            ("/api/search/suggest/keyword", json!({ "s": query }), true)
+        }
+        SearchSuggestionClient::Pc => (
+            "/api/search/pc/suggest/keyword/get",
+            json!({ "keyword": query }),
+            false,
+        ),
+    }
+}
+
+fn map_netease_search_suggestions(
+    client: SearchSuggestionClient,
+    query: &str,
+    response: Value,
+) -> Result<SearchSuggestionList> {
+    let (suggestions, recommendations) = match client {
+        SearchSuggestionClient::Web => {
+            let result = search_suggestion_container(&response, "result", client)?;
+            (map_netease_web_search_suggestions(result)?, Vec::new())
+        }
+        SearchSuggestionClient::Mobile => {
+            let result = search_suggestion_container(&response, "result", client)?;
+            let suggestions = optional_search_suggestion_array(result, "allMatch", client)?
+                .into_iter()
+                .map(|raw| map_netease_keyword_suggestion(raw, None))
+                .collect::<Result<Vec<_>>>()?;
+            (suggestions, Vec::new())
+        }
+        SearchSuggestionClient::Pc => {
+            let data = search_suggestion_container(&response, "data", client)?;
+            let suggestions = optional_search_suggestion_array(data, "suggests", client)?
+                .into_iter()
+                .map(|raw| map_netease_keyword_suggestion(raw, None))
+                .collect::<Result<Vec<_>>>()?;
+            let recommendations = optional_search_suggestion_array(data, "recs", client)?
+                .into_iter()
+                .map(|raw| map_netease_keyword_suggestion(raw, None))
+                .collect::<Result<Vec<_>>>()?;
+            (suggestions, recommendations)
+        }
+    };
+    Ok(SearchSuggestionList {
+        query: query.to_owned(),
+        client,
+        suggestions,
+        recommendations,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+fn search_suggestion_container<'a>(
+    response: &'a Value,
+    field: &str,
+    client: SearchSuggestionClient,
+) -> Result<&'a Value> {
+    response
+        .get(field)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase {client:?} search suggestions are missing {field}"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })
+}
+
+fn optional_search_suggestion_array(
+    container: &Value,
+    field: &str,
+    client: SearchSuggestionClient,
+) -> Result<Vec<Value>> {
+    match container.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => Ok(values.clone()),
+        Some(value) => Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase {client:?} search suggestion {field} is not an array"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "value": value }))),
+    }
+}
+
+fn map_netease_web_search_suggestions(result: &Value) -> Result<Vec<SearchSuggestion>> {
+    let mut sections = result
+        .get("order")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(web_search_suggestion_section)
+        .collect::<Vec<_>>();
+    for section in [
+        ("songs", SearchKind::Track),
+        ("albums", SearchKind::Album),
+        ("artists", SearchKind::Artist),
+        ("playlists", SearchKind::Playlist),
+        ("userprofiles", SearchKind::User),
+        ("mvs", SearchKind::Mv),
+        ("djRadios", SearchKind::RadioStation),
+        ("videos", SearchKind::Video),
+    ] {
+        if result.get(section.0).is_some() && !sections.contains(&section) {
+            sections.push(section);
+        }
+    }
+    let mut suggestions = Vec::new();
+    for (field, kind) in sections {
+        for raw in optional_search_suggestion_array(result, field, SearchSuggestionClient::Web)? {
+            let resource = map_cloud_search_item(kind, raw.clone());
+            let keyword = search_suggestion_keyword(&raw)
+                .or_else(|| search_item_keyword(&resource))
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase web search suggestion is missing a display keyword",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "section": field, "entry": raw }))
+                })?;
+            suggestions.push(SearchSuggestion {
+                keyword,
+                kind: Some(kind),
+                display_text: None,
+                icon_url: None,
+                resource: Some(resource),
+                extensions: Extensions::from([
+                    ("section".to_owned(), json!(field)),
+                    ("response".to_owned(), raw),
+                ]),
+            });
+        }
+    }
+    Ok(suggestions)
+}
+
+fn web_search_suggestion_section(value: &str) -> Option<(&'static str, SearchKind)> {
+    match value {
+        "song" | "songs" => Some(("songs", SearchKind::Track)),
+        "album" | "albums" => Some(("albums", SearchKind::Album)),
+        "artist" | "artists" => Some(("artists", SearchKind::Artist)),
+        "playlist" | "playlists" => Some(("playlists", SearchKind::Playlist)),
+        "user" | "users" | "userprofiles" => Some(("userprofiles", SearchKind::User)),
+        "mv" | "mvs" => Some(("mvs", SearchKind::Mv)),
+        "radio" | "djRadio" | "djRadios" => Some(("djRadios", SearchKind::RadioStation)),
+        "video" | "videos" => Some(("videos", SearchKind::Video)),
+        _ => None,
+    }
+}
+
+fn map_netease_keyword_suggestion(
+    raw: Value,
+    resource: Option<SearchItem>,
+) -> Result<SearchSuggestion> {
+    let keyword = search_suggestion_keyword(&raw).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase keyword search suggestion is missing its keyword",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "entry": raw }))
+    })?;
+    let kind = ["type", "resourceType"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(json_u64))
+        .and_then(netease_search_kind_from_type);
+    let display_text = ["showText", "feature"].into_iter().find_map(|field| {
+        raw.get(field)
+            .and_then(json_scalar_string)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    });
+    let icon_url = search_trending_url(&raw, "iconUrl");
+    Ok(SearchSuggestion {
+        keyword,
+        kind,
+        display_text,
+        icon_url,
+        resource,
+        extensions: Extensions::from([("response".to_owned(), raw)]),
+    })
+}
+
+fn search_suggestion_keyword(raw: &Value) -> Option<String> {
+    [
+        "keyword",
+        "searchWord",
+        "query",
+        "name",
+        "nickname",
+        "title",
+    ]
+    .into_iter()
+    .find_map(|field| {
+        raw.get(field)
+            .and_then(json_scalar_string)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn search_item_keyword(item: &SearchItem) -> Option<String> {
+    let value = match item {
+        SearchItem::Track(track) => Some(track.name.as_str()),
+        SearchItem::Album(album) => Some(album.name.as_str()),
+        SearchItem::Artist(artist) => Some(artist.name.as_str()),
+        SearchItem::Playlist(playlist) => Some(playlist.name.as_str()),
+        SearchItem::User(user) => Some(user.name.as_str()),
+        SearchItem::Video(video) => Some(video.title.as_str()),
+        SearchItem::RadioStation(station) => Some(station.name.as_str()),
+        SearchItem::Opaque(item) => item.title.as_deref(),
+    }?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -7832,6 +8081,133 @@ mod tests {
     }
 
     #[test]
+    fn search_suggestion_clients_match_all_reference_protocol_branches() {
+        for (client, path, payload, use_weapi) in [
+            (
+                SearchSuggestionClient::Web,
+                "/api/search/suggest/web",
+                json!({"s": "海阔天空"}),
+                true,
+            ),
+            (
+                SearchSuggestionClient::Mobile,
+                "/api/search/suggest/keyword",
+                json!({"s": "海阔天空"}),
+                true,
+            ),
+            (
+                SearchSuggestionClient::Pc,
+                "/api/search/pc/suggest/keyword/get",
+                json!({"keyword": "海阔天空"}),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                netease_search_suggestion_request(client, "海阔天空"),
+                (path, payload, use_weapi),
+                "{client:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_web_mobile_and_pc_search_suggestion_shapes_without_losing_resources() {
+        let web = map_netease_search_suggestions(
+            SearchSuggestionClient::Web,
+            "海阔天空",
+            json!({
+                "code": 200,
+                "result": {
+                    "order": ["albums"],
+                    "albums": [{
+                        "id": 34209,
+                        "name": "海阔天空",
+                        "artists": [{"id": 11127, "name": "Beyond"}],
+                        "picUrl": "https://example.test/album.jpg",
+                        "size": 10
+                    }]
+                }
+            }),
+        )
+        .expect("map web suggestions");
+        assert_eq!(web.client, SearchSuggestionClient::Web);
+        assert_eq!(web.query, "海阔天空");
+        assert_eq!(web.suggestions.len(), 1);
+        assert_eq!(web.suggestions[0].keyword, "海阔天空");
+        assert_eq!(web.suggestions[0].kind, Some(SearchKind::Album));
+        assert!(matches!(
+            web.suggestions[0].resource.as_ref(),
+            Some(SearchItem::Album(_))
+        ));
+        assert!(web.recommendations.is_empty());
+
+        let mobile = map_netease_search_suggestions(
+            SearchSuggestionClient::Mobile,
+            "海阔天空",
+            json!({
+                "code": 200,
+                "result": {"allMatch": [
+                    {"keyword": "海阔天空", "type": 1, "feature": ""},
+                    {"keyword": "海阔天空尾奏", "type": 1}
+                ]}
+            }),
+        )
+        .expect("map mobile suggestions");
+        assert_eq!(mobile.suggestions.len(), 2);
+        assert_eq!(mobile.suggestions[0].kind, Some(SearchKind::Track));
+        assert!(mobile.suggestions[0].resource.is_none());
+
+        let pc = map_netease_search_suggestions(
+            SearchSuggestionClient::Pc,
+            "海阔天空",
+            json!({
+                "code": 200,
+                "data": {
+                    "suggests": [{
+                        "keyword": "海阔天空",
+                        "showText": "歌曲",
+                        "iconUrl": "https://example.test/icon.png"
+                    }],
+                    "recs": [{"keyword": "海阔天空 Beyond"}],
+                    "recTitle": "相关搜索"
+                }
+            }),
+        )
+        .expect("map PC suggestions");
+        assert_eq!(pc.suggestions.len(), 1);
+        assert_eq!(pc.recommendations.len(), 1);
+        assert_eq!(pc.suggestions[0].display_text.as_deref(), Some("歌曲"));
+        assert_eq!(
+            pc.suggestions[0].icon_url.as_deref(),
+            Some("https://example.test/icon.png")
+        );
+        assert_eq!(pc.recommendations[0].keyword, "海阔天空 Beyond");
+        assert_eq!(pc.extensions["response"]["data"]["recTitle"], "相关搜索");
+    }
+
+    #[test]
+    fn search_suggestions_reject_missing_containers_wrong_arrays_and_keywords() {
+        for (client, response) in [
+            (SearchSuggestionClient::Web, json!({"code": 200})),
+            (
+                SearchSuggestionClient::Mobile,
+                json!({"code": 200, "result": {"allMatch": {}}}),
+            ),
+            (
+                SearchSuggestionClient::Pc,
+                json!({"code": 200, "data": {"suggests": [{}]}}),
+            ),
+        ] {
+            assert_eq!(
+                map_netease_search_suggestions(client, "海阔天空", response)
+                    .expect_err("malformed search suggestions")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -8159,6 +8535,7 @@ mod tests {
         }
         assert!(capabilities.contains(&Capability::SearchDefault));
         assert!(capabilities.contains(&Capability::SearchTrending));
+        assert!(capabilities.contains(&Capability::SearchSuggestions));
     }
 
     #[test]
@@ -13033,6 +13410,47 @@ mod tests {
             assert_eq!(list.extensions["response"]["code"], 200);
             if detail == SearchTrendingDetail::Full {
                 assert!(list.entries.iter().any(|entry| entry.score.is_some()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_search_suggestions_cover_web_mobile_and_pc_protocols() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for client in [
+            SearchSuggestionClient::Web,
+            SearchSuggestionClient::Mobile,
+            SearchSuggestionClient::Pc,
+        ] {
+            let list = MusicProvider::search_suggestions(
+                &provider,
+                &SearchSuggestionRequest {
+                    query: "海阔天空".to_owned(),
+                    client,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {client:?} suggestions failed: {error}"));
+            assert_eq!(list.client, client);
+            assert_eq!(list.query, "海阔天空");
+            assert!(
+                !list.suggestions.is_empty(),
+                "live {client:?} suggestions empty"
+            );
+            assert!(
+                list.suggestions
+                    .iter()
+                    .all(|suggestion| !suggestion.keyword.is_empty())
+            );
+            assert_eq!(list.extensions["response"]["code"], 200);
+            if client == SearchSuggestionClient::Web {
+                assert!(
+                    list.suggestions
+                        .iter()
+                        .any(|suggestion| suggestion.resource.is_some())
+                );
             }
         }
     }
