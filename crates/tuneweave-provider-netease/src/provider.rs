@@ -21,7 +21,8 @@ use tuneweave_core::{
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
     BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog,
     ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
+    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
@@ -70,16 +71,17 @@ use crate::{
         ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
         AudioMatchEnvelope, AudioQuality, BannerEnvelope, BroadcastTaxonomyEnvelope,
         ChartCatalogEnvelope, ChartGroupItem, ChartItem, ChartRankPreviewItem,
-        ChartTextPreviewItem, CloudUploadAllocationEnvelope, CloudUploadServersEnvelope,
-        CloudVideoDetailEnvelope, CloudVideoUrlEnvelope, DigitalAlbumChartEnvelope,
-        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, DimensionChartDetailEnvelope, DimensionChartTrackItem,
-        DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope, PlayHistoryEnvelope,
-        PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
+        ChartTextPreviewItem, CloudTracksEnvelope, CloudUploadAllocationEnvelope,
+        CloudUploadServersEnvelope, CloudVideoDetailEnvelope, CloudVideoUrlEnvelope,
+        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
+        DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
+        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope, VideoCreatorItem,
+        VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -414,6 +416,9 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountCloudImport,
             Capability::AccountCloudLyrics,
             Capability::AccountCloudMatch,
+            Capability::AccountCloudRead,
+            Capability::AccountCloudDelete,
+            Capability::AccountCloudDownload,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -2455,6 +2460,58 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "cloud track matching")?;
         map_cloud_match_result(&cloud_track_id, &target_track_id, &user_id, response.body)
+    }
+
+    async fn cloud_tracks(&self, request: &PageRequest) -> Result<Page<CloudTrack>> {
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "cloud library")?;
+        let (path, payload) = netease_cloud_tracks_request(limit, request.offset);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "cloud library")?;
+        map_netease_cloud_tracks(limit, request.offset, response.body)
+    }
+
+    async fn cloud_track_details(
+        &self,
+        request: &CloudTrackDetailRequest,
+    ) -> Result<Vec<CloudTrack>> {
+        let ids = validate_cloud_track_refs(&request.track_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "cloud track details")?;
+        let (path, payload) = netease_cloud_track_details_request(&ids);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "cloud track details")?;
+        map_netease_cloud_track_details(response.body)
+    }
+
+    async fn delete_cloud_tracks(
+        &self,
+        request: &CloudTrackDeleteRequest,
+    ) -> Result<CloudTrackDeleteResult> {
+        let ids = validate_cloud_track_refs(&request.track_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "cloud track deletion")?;
+        let (path, payload) = netease_cloud_track_delete_request(&ids);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "cloud track deletion")?;
+        let mut extensions = Extensions::new();
+        extensions.insert("response".to_owned(), response.body);
+        Ok(CloudTrackDeleteResult {
+            track_refs: request.track_refs.clone(),
+            deleted: true,
+            extensions,
+        })
+    }
+
+    async fn download_cloud_track(&self, id: &str, account: Option<&str>) -> Result<MediaDownload> {
+        let id = required_cloud_value("track_id", id)?;
+        let client = self.client_for(account)?;
+        require_authenticated_client(&client, "cloud track download")?;
+        let (path, payload) = netease_cloud_track_download_request(&id);
+        let response = client.request_eapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "cloud track download")?;
+        map_netease_cloud_track_download(&id, path, response.body)
     }
 
     async fn post_comment(&self, request: &CommentWriteRequest) -> Result<CommentMutationResult> {
@@ -4746,6 +4803,366 @@ fn cloud_match_payload(user_id: &str, cloud_track_id: &str, target_track_id: &st
         "songId": cloud_track_id,
         "adjustSongId": target_track_id
     })
+}
+
+fn netease_cloud_tracks_request(limit: u32, offset: u32) -> (&'static str, Value) {
+    (
+        "/api/v1/cloud/get",
+        json!({
+            "limit": limit,
+            "offset": offset
+        }),
+    )
+}
+
+fn netease_cloud_track_details_request(ids: &[String]) -> (&'static str, Value) {
+    ("/api/v1/cloud/get/byids", json!({ "songIds": ids }))
+}
+
+fn netease_cloud_track_delete_request(ids: &[String]) -> (&'static str, Value) {
+    ("/api/cloud/del", json!({ "songIds": [ids.join(",")] }))
+}
+
+fn netease_cloud_track_download_request(id: &str) -> (&'static str, Value) {
+    ("/api/cloud/dowonload", json!({ "songId": id }))
+}
+
+fn validate_cloud_track_refs(track_refs: &[ResourceRef]) -> Result<Vec<String>> {
+    if track_refs.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud track_refs must contain at least one reference",
+        )
+        .with_platform(Platform::Netease));
+    }
+    track_refs
+        .iter()
+        .map(|track_ref| {
+            if track_ref.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase cloud operations only accept NetEase track references",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "track_ref": track_ref })));
+            }
+            required_cloud_value("track_id", track_ref.id())
+        })
+        .collect()
+}
+
+fn map_netease_cloud_tracks(limit: u32, offset: u32, response: Value) -> Result<Page<CloudTrack>> {
+    ensure_success(&response)?;
+    let raw_response = response.clone();
+    let CloudTracksEnvelope {
+        data,
+        count,
+        has_more,
+        size,
+        max_size,
+        upgrade_sign,
+    } = parse_body(response)?;
+    let data = data.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud library response is missing its data array",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": raw_response }))
+    })?;
+    let items = data
+        .into_iter()
+        .map(map_netease_cloud_track)
+        .collect::<Result<Vec<_>>>()?;
+    let total = count.as_ref().and_then(json_u64);
+    let consumed = items.len() as u32;
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = has_more
+        .as_ref()
+        .and_then(json_bool)
+        .unwrap_or_else(|| total.is_some_and(|total| u64::from(next_offset) < total));
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "storage_size", size);
+    insert_extension(&mut extensions, "storage_max_size", max_size);
+    insert_extension(&mut extensions, "upgrade_sign", upgrade_sign);
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_netease_cloud_track_details(response: Value) -> Result<Vec<CloudTrack>> {
+    ensure_success(&response)?;
+    let raw_response = response.clone();
+    let envelope: CloudTracksEnvelope = parse_body(response)?;
+    envelope
+        .data
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase cloud track details response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": raw_response }))
+        })?
+        .into_iter()
+        .map(map_netease_cloud_track)
+        .collect()
+}
+
+fn map_netease_cloud_track(raw: Value) -> Result<CloudTrack> {
+    let song_value = raw
+        .get("simpleSong")
+        .or_else(|| raw.get("song"))
+        .filter(|song| song.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase cloud track is missing its song metadata",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "item": raw }))
+        })?;
+    let song: Song = parse_body(song_value.clone())?;
+    let original_track_id = song.id.to_string();
+    let mut track = map_song(song, None)?;
+    let cloud_track_id = raw
+        .get("songId")
+        .and_then(json_scalar_string)
+        .unwrap_or_else(|| original_track_id.clone());
+    let cloud_track_ref =
+        ResourceRef::new(Platform::Netease, cloud_track_id.clone()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid cloud track id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "item": raw }))
+        })?;
+    let matched_track_id = [
+        raw.get("matchedId"),
+        raw.get("matchId"),
+        raw.get("asId"),
+        song_value.get("s_id"),
+        song_value.get("matchedId"),
+        song_value.get("matchId"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(json_scalar_string)
+    .filter(|id| id != "0" && id != &cloud_track_id)
+    .or_else(|| (original_track_id != cloud_track_id).then_some(original_track_id));
+    let matched_track_ref = matched_track_id
+        .map(|id| ResourceRef::new(Platform::Netease, id))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid matched cloud track id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+
+    if track.name.trim().is_empty()
+        && let Some(name) = cloud_text_field(&raw, &["songName", "name"])
+    {
+        track.name = name;
+    }
+    if track.artists.is_empty()
+        && let Some(artist) = cloud_text_field(&raw, &["artist", "artistName"])
+    {
+        track.artists.push(ArtistSummary {
+            resource_ref: None,
+            name: artist,
+        });
+    }
+    let cover_url = cloud_text_field(&raw, &["cover", "coverUrl", "picUrl"]);
+    if let Some(album) = track.album.as_mut() {
+        if album.cover_url.is_none() {
+            album.cover_url.clone_from(&cover_url);
+        }
+    } else if let Some(album_name) = cloud_text_field(&raw, &["album", "albumName"]) {
+        track.album = Some(AlbumSummary {
+            resource_ref: None,
+            name: album_name,
+            cover_url: cover_url.clone(),
+        });
+    }
+    track.resource_ref = cloud_track_ref.clone();
+    track.platform = Platform::Netease;
+    track.id.clone_from(&cloud_track_id);
+
+    let filename = cloud_text_field(&raw, &["fileName", "filename"]);
+    let file_type = cloud_text_field(&raw, &["fileType", "type"])
+        .and_then(normalize_cloud_file_type)
+        .or_else(|| filename.as_deref().and_then(cloud_file_type_from_name));
+    let added_at = raw
+        .get("addTime")
+        .and_then(json_u64)
+        .filter(|timestamp| *timestamp > 0)
+        .and_then(|timestamp| unix_rfc3339(timestamp / 1_000));
+    let mut extensions = Extensions::new();
+    extensions.insert("cloud_item".to_owned(), raw.clone());
+    Ok(CloudTrack {
+        cloud_track_ref,
+        track,
+        filename,
+        file_size: cloud_u64_field(&raw, &["fileSize", "size"]),
+        file_type,
+        bitrate: cloud_u64_field(&raw, &["bitrate", "br"]),
+        md5: cloud_text_field(&raw, &["md5"]),
+        added_at,
+        matched_track_ref,
+        extensions,
+    })
+}
+
+fn map_netease_cloud_track_download(
+    id: &str,
+    path: &str,
+    response: Value,
+) -> Result<MediaDownload> {
+    ensure_success(&response)?;
+    let raw_response = response.clone();
+    let data = response.get("data").ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud download response is missing data",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": response }))
+    })?;
+    let item = if let Some(items) = data.as_array() {
+        items
+            .iter()
+            .find(|item| cloud_download_item_id(item).as_deref() == Some(id))
+            .or_else(|| (items.len() == 1).then(|| items.first()).flatten())
+            .cloned()
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase omitted the requested cloud download result",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "id": id, "response": raw_response }))
+            })?
+    } else if data.is_object() {
+        data.clone()
+    } else {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud download data has an unsupported shape",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": id, "response": raw_response })));
+    };
+    if let Some(returned_id) = cloud_download_item_id(&item)
+        && returned_id != id
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned a cloud download result for the wrong track",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "expected": id, "actual": returned_id })));
+    }
+    let track_ref = ResourceRef::new(Platform::Netease, id.to_owned()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid cloud download track id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let url = cloud_text_field(&item, &["url", "downloadUrl"]);
+    let bitrate = cloud_u64_field(&item, &["br", "bitrate"]);
+    let format = cloud_text_field(&item, &["fileType", "type"])
+        .and_then(normalize_cloud_file_type)
+        .or_else(|| {
+            cloud_text_field(&item, &["fileName", "filename"])
+                .as_deref()
+                .and_then(cloud_file_type_from_name)
+        });
+    let codec = cloud_text_field(&item, &["encodeType", "codec"]).or_else(|| format.clone());
+    let expires_at = cloud_u64_field(&item, &["expi"])
+        .filter(|expires_in_seconds| *expires_in_seconds > 0)
+        .and_then(expiration_rfc3339);
+    let platform_code =
+        cloud_i64_field(&item, &["code"]).or_else(|| raw_response.get("code").and_then(json_i64));
+    let message = cloud_text_field(&item, &["message", "msg"])
+        .or_else(|| cloud_text_field(&raw_response, &["message", "msg"]));
+    let mut extensions = Extensions::new();
+    extensions.insert("request_path".to_owned(), json!(path));
+    extensions.insert("response_item".to_owned(), item.clone());
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(MediaDownload {
+        track_ref,
+        platform: Platform::Netease,
+        available: url.is_some(),
+        url,
+        headers: BTreeMap::new(),
+        expires_at,
+        format,
+        codec,
+        bitrate,
+        size: cloud_u64_field(&item, &["size", "fileSize"]),
+        duration_ms: cloud_u64_field(&item, &["time", "duration"]),
+        requested_quality: Quality::Auto,
+        actual_quality: stream_quality(cloud_text_field(&item, &["level"]).as_deref(), bitrate),
+        platform_code,
+        fee: cloud_i64_field(&item, &["fee"]),
+        message,
+        extensions,
+    })
+}
+
+fn cloud_download_item_id(item: &Value) -> Option<String> {
+    ["songId", "id"]
+        .into_iter()
+        .find_map(|field| item.get(field).and_then(json_scalar_string))
+}
+
+fn cloud_text_field(raw: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        raw.get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn cloud_u64_field(raw: &Value, fields: &[&str]) -> Option<u64> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_u64))
+}
+
+fn cloud_i64_field(raw: &Value, fields: &[&str]) -> Option<i64> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_i64))
+}
+
+fn normalize_cloud_file_type(file_type: String) -> Option<String> {
+    let file_type = file_type
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    (!file_type.is_empty()).then_some(file_type)
+}
+
+fn cloud_file_type_from_name(filename: &str) -> Option<String> {
+    filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_owned())
+        .and_then(normalize_cloud_file_type)
 }
 
 fn cloud_upload_descriptor(
@@ -9877,6 +10294,32 @@ mod tests {
             "hr": null
         }))
         .expect("valid fixture")
+    }
+
+    fn fixture_cloud_item(cloud_id: &str, source_id: u64) -> Value {
+        json!({
+            "songId": cloud_id,
+            "songName": "反方向的钟（云盘）",
+            "artist": "周杰伦",
+            "album": "Jay",
+            "cover": "https://example.test/cloud-cover.jpg",
+            "fileName": "反方向的钟.flac",
+            "fileSize": "50412168",
+            "fileType": ".FLAC",
+            "bitrate": "999000",
+            "md5": "d02b8ab79d91c01167ba31e349fe5275",
+            "addTime": 1704067200000_u64,
+            "simpleSong": {
+                "id": source_id,
+                "name": "反方向的钟",
+                "ar": [],
+                "al": null,
+                "dt": 258000,
+                "st": 0,
+                "sq": {"br": 999000}
+            },
+            "futureField": {"kept": true}
+        })
     }
 
     #[test]
@@ -15162,6 +15605,220 @@ mod tests {
         assert!(canceled.target_track_ref.is_none());
     }
 
+    #[test]
+    fn cloud_library_requests_match_all_reference_protocol_payloads() {
+        let (path, payload) = netease_cloud_tracks_request(30, 60);
+        assert_eq!(path, "/api/v1/cloud/get");
+        assert_eq!(payload, json!({ "limit": 30, "offset": 60 }));
+
+        let ids = vec!["5374627".to_owned(), "9001".to_owned()];
+        let (path, payload) = netease_cloud_track_details_request(&ids);
+        assert_eq!(path, "/api/v1/cloud/get/byids");
+        assert_eq!(payload, json!({ "songIds": ["5374627", "9001"] }));
+
+        let (path, payload) = netease_cloud_track_delete_request(&ids);
+        assert_eq!(path, "/api/cloud/del");
+        assert_eq!(payload, json!({ "songIds": ["5374627,9001"] }));
+
+        let (path, payload) = netease_cloud_track_download_request("5374627");
+        assert_eq!(path, "/api/cloud/dowonload");
+        assert_eq!(payload, json!({ "songId": "5374627" }));
+    }
+
+    #[test]
+    fn maps_cloud_library_tracks_storage_and_matched_metadata() {
+        let page = map_netease_cloud_tracks(
+            10,
+            10,
+            json!({
+                "code": 200,
+                "data": [fixture_cloud_item("9001", 185809)],
+                "count": "12",
+                "hasMore": true,
+                "size": "50412168",
+                "maxSize": 1073741824_u64,
+                "upgradeSign": 7
+            }),
+        )
+        .expect("map cloud library");
+        assert_eq!(page.items.len(), 1);
+        let cloud = &page.items[0];
+        assert_eq!(cloud.cloud_track_ref.to_string(), "netease:9001");
+        assert_eq!(cloud.track.resource_ref, cloud.cloud_track_ref);
+        assert_eq!(cloud.track.id, "9001");
+        assert_eq!(cloud.track.name, "反方向的钟");
+        assert_eq!(cloud.track.artists[0].name, "周杰伦");
+        assert_eq!(
+            cloud.track.album.as_ref().map(|album| album.name.as_str()),
+            Some("Jay")
+        );
+        assert_eq!(
+            cloud
+                .track
+                .album
+                .as_ref()
+                .and_then(|album| album.cover_url.as_deref()),
+            Some("https://example.test/cloud-cover.jpg")
+        );
+        assert_eq!(cloud.filename.as_deref(), Some("反方向的钟.flac"));
+        assert_eq!(cloud.file_size, Some(50_412_168));
+        assert_eq!(cloud.file_type.as_deref(), Some("flac"));
+        assert_eq!(cloud.bitrate, Some(999_000));
+        assert_eq!(
+            cloud.md5.as_deref(),
+            Some("d02b8ab79d91c01167ba31e349fe5275")
+        );
+        assert_eq!(cloud.added_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(
+            cloud
+                .matched_track_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:185809")
+        );
+        assert_eq!(cloud.extensions["cloud_item"]["futureField"]["kept"], true);
+        assert_eq!(page.pagination.total, Some(12));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(11));
+        assert_eq!(page.pagination.extensions["storage_size"], "50412168");
+        assert_eq!(
+            page.pagination.extensions["storage_max_size"],
+            1073741824_u64
+        );
+        assert_eq!(page.pagination.extensions["upgrade_sign"], 7);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn cloud_detail_mapping_preserves_upstream_order_and_rejects_missing_song_data() {
+        let tracks = map_netease_cloud_track_details(json!({
+            "code": 200,
+            "data": [
+                fixture_cloud_item("9002", 185810),
+                fixture_cloud_item("9001", 185809)
+            ]
+        }))
+        .expect("map cloud detail batch");
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.cloud_track_ref.id())
+                .collect::<Vec<_>>(),
+            vec!["9002", "9001"]
+        );
+
+        for response in [json!({"code": 200}), json!({"code": 200, "data": [{}]})] {
+            assert_eq!(
+                map_netease_cloud_track_details(response)
+                    .expect_err("malformed cloud detail response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_cloud_download_available_unavailable_and_array_responses() {
+        let available = map_netease_cloud_track_download(
+            "9001",
+            "/api/cloud/dowonload",
+            json!({
+                "code": 200,
+                "data": {
+                    "songId": "9001",
+                    "url": "https://example.test/cloud.flac",
+                    "fileType": ".FLAC",
+                    "encodeType": "flac",
+                    "br": "999000",
+                    "fileSize": "50412168",
+                    "time": 258000,
+                    "level": "lossless",
+                    "expi": 1200,
+                    "fee": 1,
+                    "code": 200,
+                    "futureField": true
+                }
+            }),
+        )
+        .expect("map available cloud download");
+        assert!(available.available);
+        assert_eq!(
+            available.url.as_deref(),
+            Some("https://example.test/cloud.flac")
+        );
+        assert_eq!(available.track_ref.to_string(), "netease:9001");
+        assert_eq!(available.format.as_deref(), Some("flac"));
+        assert_eq!(available.codec.as_deref(), Some("flac"));
+        assert_eq!(available.bitrate, Some(999_000));
+        assert_eq!(available.size, Some(50_412_168));
+        assert_eq!(available.duration_ms, Some(258_000));
+        assert_eq!(available.actual_quality, Quality::Lossless);
+        assert!(available.expires_at.is_some());
+        assert_eq!(available.extensions["response_item"]["futureField"], true);
+        assert_eq!(available.extensions["request_path"], "/api/cloud/dowonload");
+
+        let unavailable = map_netease_cloud_track_download(
+            "9001",
+            "/api/cloud/dowonload",
+            json!({
+                "code": 200,
+                "data": [{"songId": "9002", "url": "https://example.test/wrong.mp3"}, {
+                    "songId": "9001",
+                    "url": null,
+                    "message": "unavailable"
+                }]
+            }),
+        )
+        .expect("select matching unavailable cloud download");
+        assert!(!unavailable.available);
+        assert!(unavailable.url.is_none());
+        assert_eq!(unavailable.message.as_deref(), Some("unavailable"));
+    }
+
+    #[test]
+    fn cloud_download_mapping_rejects_missing_data_and_wrong_track_ids() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": null}),
+            json!({"code": 200, "data": {"songId": "9002", "url": "https://example.test/a.mp3"}}),
+            json!({"code": 200, "data": [{"songId": "9002"}, {"songId": "9003"}]}),
+        ] {
+            assert_eq!(
+                map_netease_cloud_track_download("9001", "/api/cloud/dowonload", response)
+                    .expect_err("malformed cloud download response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_track_references_preserve_order_duplicates_and_reject_foreign_platforms() {
+        let refs = vec![
+            ResourceRef::new(Platform::Netease, "9002").expect("cloud ref"),
+            ResourceRef::new(Platform::Netease, "9001").expect("cloud ref"),
+            ResourceRef::new(Platform::Netease, "9002").expect("duplicate cloud ref"),
+        ];
+        assert_eq!(
+            validate_cloud_track_refs(&refs).expect("valid cloud refs"),
+            vec!["9002", "9001", "9002"]
+        );
+        assert_eq!(
+            validate_cloud_track_refs(&[])
+                .expect_err("empty cloud refs")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let foreign = [ResourceRef::new(Platform::Qq, "9001").expect("foreign ref")];
+        assert_eq!(
+            validate_cloud_track_refs(&foreign)
+                .expect_err("foreign cloud ref")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
     #[tokio::test]
     async fn cloud_account_operations_require_authentication_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
@@ -15205,6 +15862,33 @@ mod tests {
         .await
         .expect_err("anonymous cloud match cancellation");
         assert_eq!(match_error.code, ErrorCode::AuthenticationRequired);
+
+        let list_error = MusicProvider::cloud_tracks(&provider, &PageRequest::new(30, 0))
+            .await
+            .expect_err("anonymous cloud library");
+        assert_eq!(list_error.code, ErrorCode::AuthenticationRequired);
+
+        let cloud_ref = ResourceRef::new(Platform::Netease, "9001").expect("cloud ref");
+        let detail_error = MusicProvider::cloud_track_details(
+            &provider,
+            &CloudTrackDetailRequest::new(vec![cloud_ref.clone()]),
+        )
+        .await
+        .expect_err("anonymous cloud details");
+        assert_eq!(detail_error.code, ErrorCode::AuthenticationRequired);
+
+        let delete_error = MusicProvider::delete_cloud_tracks(
+            &provider,
+            &CloudTrackDeleteRequest::new(vec![cloud_ref]),
+        )
+        .await
+        .expect_err("anonymous cloud deletion");
+        assert_eq!(delete_error.code, ErrorCode::AuthenticationRequired);
+
+        let download_error = MusicProvider::download_cloud_track(&provider, "9001", None)
+            .await
+            .expect_err("anonymous cloud download");
+        assert_eq!(download_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -15907,6 +16591,9 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountCloudImport));
         assert!(capabilities.contains(&Capability::AccountCloudLyrics));
         assert!(capabilities.contains(&Capability::AccountCloudMatch));
+        assert!(capabilities.contains(&Capability::AccountCloudRead));
+        assert!(capabilities.contains(&Capability::AccountCloudDelete));
+        assert!(capabilities.contains(&Capability::AccountCloudDownload));
         assert!(capabilities.contains(&Capability::PlaylistWrite));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));

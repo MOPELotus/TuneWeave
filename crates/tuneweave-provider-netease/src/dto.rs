@@ -70,6 +70,19 @@ pub(crate) struct CloudUploadServersEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct CloudTracksEnvelope {
+    pub data: Option<Vec<Value>>,
+    pub count: Option<Value>,
+    #[serde(rename = "hasMore")]
+    pub has_more: Option<Value>,
+    pub size: Option<Value>,
+    #[serde(rename = "maxSize")]
+    pub max_size: Option<Value>,
+    #[serde(rename = "upgradeSign")]
+    pub upgrade_sign: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct BannerEnvelope {
     #[serde(default)]
     pub banners: Vec<Value>,
