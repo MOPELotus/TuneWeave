@@ -792,6 +792,41 @@ pub struct TrackEntitlement {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackAvailabilityRequest {
+    pub bitrate: u64,
+    pub account: Option<String>,
+}
+
+impl TrackAvailabilityRequest {
+    pub const DEFAULT_BITRATE: u64 = 999_000;
+
+    #[must_use]
+    pub fn new(bitrate: u64) -> Self {
+        Self {
+            bitrate,
+            account: None,
+        }
+    }
+}
+
+impl Default for TrackAvailabilityRequest {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_BITRATE)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackAvailability {
+    pub track_ref: ResourceRef,
+    pub playable: bool,
+    pub requested_bitrate: u64,
+    pub actual_bitrate: Option<u64>,
+    pub platform_code: Option<i64>,
+    pub message: String,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Money {
     pub amount: f64,
@@ -1330,6 +1365,28 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize subscription result");
         assert_eq!(value["resource_ref"], "netease:32311");
         assert_eq!(value["subscribed"], true);
+    }
+
+    #[test]
+    fn track_availability_separates_requested_and_actual_bitrate() {
+        let request = TrackAvailabilityRequest::default();
+        assert_eq!(request.bitrate, 999_000);
+
+        let availability = TrackAvailability {
+            track_ref: ResourceRef::new(Platform::Netease, "1969519579")
+                .expect("valid track reference"),
+            playable: true,
+            requested_bitrate: request.bitrate,
+            actual_bitrate: Some(320_000),
+            platform_code: Some(200),
+            message: "ok".to_owned(),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(availability).expect("serialize track availability");
+        assert_eq!(value["track_ref"], "netease:1969519579");
+        assert_eq!(value["playable"], true);
+        assert_eq!(value["requested_bitrate"], 999_000);
+        assert_eq!(value["actual_bitrate"], 320_000);
     }
 
     #[test]

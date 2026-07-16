@@ -14,7 +14,7 @@ use crate::{
     PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
     ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TuneWeaveError, User, Video,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -102,6 +102,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackDetail,
+        ))
+    }
+
+    async fn track_availability(
+        &self,
+        _id: &str,
+        _request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::TrackAvailability,
         ))
     }
 

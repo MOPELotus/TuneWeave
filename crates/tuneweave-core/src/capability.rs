@@ -16,6 +16,7 @@ pub enum Capability {
     RadioStationList,
     RadioStationSubscriptionWrite,
     TrackDetail,
+    TrackAvailability,
     AlbumDetail,
     AlbumList,
     AlbumStats,

@@ -33,7 +33,8 @@ pub use model::{
     RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
     ResolveRequest, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, User, Video, VideoKind,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video,
+    VideoKind,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
