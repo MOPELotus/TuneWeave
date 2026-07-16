@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=293`、`partial=5`、`implemented=37`、`verified=72`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=277`、`partial=5`、`implemented=53`、`verified=72`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -288,7 +288,7 @@
 | `simi_song` | `/simi/song` | `pending` | — |
 | `simi_user` | `/simi/user` | `pending` | — |
 | `song_chorus` | `/song/chorus` | `pending` | — |
-| `song_cloud_download` | `/song/cloud/download` | `pending` | — |
+| `song_cloud_download` | `/song/cloud/download` | `implemented` | `GET /v1/account/cloud/tracks/{ref}/download`、`GET /v1/account/cloud/tracks/{ref}/download/redirect`（以完整网易云云盘引用和隔离账户取源文件；严格复刻上游 EAPI 路径中的既有拼写 `/api/cloud/dowonload` 及 `songId` 载荷，统一映射 URL、文件大小、MD5、过期时间和码率；重定向在专用源文件 URL 缺失时只回退到同平台同账户普通取流，不跨账户；对象/数组响应、不可用地址、错误 ID、账户传播和 302 分支均有离线测试，待真实账户云盘文件验证） |
 | `song_copyright_rcmd` | `/song/copyright/rcmd` | `pending` | — |
 | `song_creators` | `/song/creators` | `pending` | — |
 | `song_detail` | `/song/detail` | `verified` | `GET /v1/tracks/{ref}` |
@@ -349,9 +349,9 @@
 | `user_audio` | `/user/audio` | `pending` | — |
 | `user_binding` | `/user/binding` | `pending` | — |
 | `user_bindingcellphone` | `/user/bindingcellphone` | `pending` | — |
-| `user_cloud` | `/user/cloud` | `pending` | — |
-| `user_cloud_del` | `/user/cloud/del` | `pending` | — |
-| `user_cloud_detail` | `/user/cloud/detail` | `pending` | — |
+| `user_cloud` | `/user/cloud` | `implemented` | `GET /v1/account/cloud/tracks`（以 `platform/account/limit/offset` 选择隔离会话，WeAPI `/api/v1/cloud/get`；统一返回 `CloudTrack` 分页，稳定保留云盘引用、内嵌歌曲、文件名/大小/类型、码率、MD5、加入时间、匹配歌曲引用和存储统计，完整原始条目及响应保留在扩展；分页、缺失字段、引用与认证前置均有离线测试，待真实账户内容验证） |
+| `user_cloud_del` | `/user/cloud/del` | `implemented` | `DELETE /v1/account/cloud/tracks`（JSON `refs` 或 `ids`，支持 `platform/account`、完整引用推断、保序与重复项；WeAPI `/api/cloud/del` 严格保留参考实现的单元素数组载荷 `songIds: [ids.join(",")]`，拒绝跨平台混合和引用冲突；协议、选择器、认证前置及结果映射均有离线测试，待真实账户删除后回滚验证） |
+| `user_cloud_detail` | `/user/cloud/detail` | `implemented` | `GET/POST /v1/account/cloud/tracks/details`（`refs` 或 `ids`，完整引用可推断平台，原始 ID 使用显式或默认平台；WeAPI `/api/v1/cloud/get/byids` 按 `songIds` 数组请求，统一结果保持输入顺序和重复项，并复用完整 `CloudTrack` 映射；查询/JSON 两种输入、冲突与混合平台拒绝、缺失条目和认证前置均有离线测试，待真实账户详情验证） |
 | `user_comment_history` | `/user/comment/history` | `pending` | — |
 | `user_detail` | `/user/detail` | `pending` | — |
 | `user_detail_new` | `/user/detail/new` | `pending` | — |

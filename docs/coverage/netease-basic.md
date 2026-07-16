@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=8`、`partial=7`、`implemented=19`、`verified=30`。
+当前共 64 个验收单元：`pending=7`、`partial=7`、`implemented=20`、`verified=30`。
 
-- 完整实现率：`(implemented + verified) / 64 = 49 / 64 = 76.56%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 56 / 64 = 87.50%`。
+- 完整实现率：`(implemented + verified) / 64 = 50 / 64 = 78.13%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 57 / 64 = 89.06%`。
 - 完整联网验收率：`verified / 64 = 30 / 64 = 46.88%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：歌单维护小块收口后，先完成 L12 云盘列表、详情、删除、源文件下载与直接播放，并补齐 L11 的真实账户事务验收；随后才进入 C10/C11/P10 播客、电台节目与声音内容链路。
+当前剩余功能排序以完整播放体验为准：L11/L12 云盘读写、源文件下载和直接播放代码链已经收口，真实账户事务验收仍排队等待凭据；主线进入 C10/C11/P10 播客、电台节目与声音内容链路，不因暂缺凭据阻塞其余 Basic 实现。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -70,7 +70,7 @@
 | L09 | 个人音乐库 | 每日推荐歌单 | `implemented` | `recommend_resource` 已实现，待真实账户内容 |
 | L10 | 个人音乐库 | 私人 FM、跳过/不喜欢反馈和模式 | `pending` | `personal_fm/personal_fm_mode/recommend_songs_dislike` 未接入 |
 | L11 | 个人音乐库 | 云盘上传、直传事务、导入、匹配和歌词 | `implemented` | 完整代码及认证前置已覆盖，待真实账户字节写入与回滚 |
-| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `pending` | `user_cloud/user_cloud_detail/user_cloud_del` 及云盘播放未接入 |
+| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `implemented` | `user_cloud/user_cloud_detail/user_cloud_del/song_cloud_download` 已接入统一列表、详情、删除、专用下载和重定向；保留分页、存储、文件、匹配引用与原始条目，普通播放/下载也会把选定账户传入元数据和取流；认证前置与协议分支已离线覆盖，待真实账户验证内容、删除回滚、源文件下载和播放 |
 | F01 | 平台基础协议 | EAPI 请求、响应解密与错误映射 | `verified` | 通用 API 与真实搜索已验收 |
 | F02 | 平台基础协议 | WeAPI 双层 AES/RSA 请求 | `verified` | 通用 API 与真实搜索已验收 |
 | F03 | 平台基础协议 | 未加密 API 请求 | `verified` | 通用 API 与真实搜索已验收 |
