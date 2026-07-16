@@ -187,6 +187,50 @@ pub(crate) struct ArtistVideoUserProfile {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewVideosEnvelope {
+    pub data: ArtistNewVideosData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewVideosData {
+    #[serde(rename = "hasMore")]
+    pub has_more: Option<bool>,
+    #[serde(rename = "newWorks", default)]
+    pub new_works: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewVideoItem {
+    pub id: Option<Value>,
+    pub name: Option<String>,
+    pub cover: Option<String>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    pub desc: Option<String>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(rename = "artistImgUrl")]
+    pub artist_image_url: Option<String>,
+    #[serde(rename = "artistId")]
+    pub artist_id: Option<Value>,
+    #[serde(rename = "mvId")]
+    pub mv_id: Option<Value>,
+    #[serde(rename = "mvName")]
+    pub mv_name: Option<String>,
+    #[serde(rename = "mvCoverUrl")]
+    pub mv_cover_url: Option<String>,
+    pub duration: Option<u64>,
+    #[serde(rename = "publishTime")]
+    pub published_at: Option<Value>,
+    #[serde(rename = "publishDate")]
+    pub published_date: Option<String>,
+    #[serde(default)]
+    pub artists: Vec<ArtistVideoCreator>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistDetailEnvelope {
     pub data: ArtistDetailData,
 }
