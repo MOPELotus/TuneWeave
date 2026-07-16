@@ -210,6 +210,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account", get(account_profile))
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
+        .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
             put(artist_subscribe).delete(artist_unsubscribe),
@@ -1579,6 +1580,33 @@ async fn account_albums(
     ))
 }
 
+async fn account_following_artists(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_following_artists(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 #[derive(Default, Deserialize)]
 struct ArtistUpdatesParams {
     platform: Option<String>,
@@ -2132,6 +2160,7 @@ mod tests {
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
+                Capability::AccountFollowingArtists,
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
                 Capability::AccountArtistNewWorks,
@@ -2517,6 +2546,25 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions,
+                },
+            })
+        }
+
+        async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
+            let mut artist = sample_artist("6452");
+            artist.extensions.insert(
+                "following_item".to_owned(),
+                json!({ "subTime": 1_720_000_000_000_u64 }),
+            );
+            Ok(Page {
+                items: vec![artist],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(8),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -3711,6 +3759,29 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["paidCount"],
             1
         );
+    }
+
+    #[tokio::test]
+    async fn account_following_artists_use_unified_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists?platform=netease&account=personal&limit=2&offset=4",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:6452");
+        assert_eq!(json["data"][0]["name"], "周杰伦");
+        assert_eq!(
+            json["data"][0]["extensions"]["following_item"]["subTime"],
+            1_720_000_000_000_u64
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["offset"], 4);
+        assert_eq!(json["meta"]["pagination"]["total"], 8);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 5);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
     }
 
     #[tokio::test]
