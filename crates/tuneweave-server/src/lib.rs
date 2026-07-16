@@ -15,13 +15,14 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistStats, AuthChallengeRequest,
+    AuthState, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
+    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -170,6 +171,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
         .route("/artists/{reference}", get(artist))
+        .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
         .route(
             "/account/library/albums/{reference}",
@@ -819,6 +821,27 @@ async fn artist(
     let provider = state.registry.require(platform)?;
     let artist = provider.artist(reference.id(), account).await?;
     let mut response = ApiResponse::new(artist).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn artist_stats(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<ArtistStats>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let stats = provider.artist_stats(reference.id(), account).await?;
+    let mut response = ApiResponse::new(stats).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -1705,6 +1728,7 @@ mod tests {
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
                 Capability::ArtistDetail,
+                Capability::ArtistStats,
                 Capability::ArtistAlbums,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
@@ -1885,6 +1909,10 @@ mod tests {
 
         async fn artist(&self, id: &str, _account: Option<&str>) -> Result<Artist> {
             Ok(sample_artist(id))
+        }
+
+        async fn artist_stats(&self, id: &str, _account: Option<&str>) -> Result<ArtistStats> {
+            Ok(sample_artist_stats(id))
         }
 
         async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -2242,6 +2270,20 @@ mod tests {
         }
     }
 
+    fn sample_artist_stats(id: &str) -> ArtistStats {
+        ArtistStats {
+            artist_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            followed: Some(false),
+            video_counts: vec![tuneweave_core::ArtistContentCount {
+                category: Some("0".to_owned()),
+                count: 9,
+                extensions: Default::default(),
+            }],
+            online_concert_count: Some(0),
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_album_stats(id: &str) -> AlbumStats {
         AlbumStats {
             album_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -2472,6 +2514,22 @@ mod tests {
         assert_eq!(artist["data"]["track_count"], 568);
         assert_eq!(artist["meta"]["platform"], "netease");
         assert_eq!(artist["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn artist_stats_use_reference_platform_and_account() {
+        let (status, stats) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/stats?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["data"]["artist_ref"], "netease:6452");
+        assert_eq!(stats["data"]["followed"], false);
+        assert_eq!(stats["data"]["video_counts"][0]["category"], "0");
+        assert_eq!(stats["data"]["video_counts"][0]["count"], 9);
+        assert_eq!(stats["meta"]["platform"], "netease");
+        assert_eq!(stats["meta"]["account"], "collector");
     }
 
     #[tokio::test]
