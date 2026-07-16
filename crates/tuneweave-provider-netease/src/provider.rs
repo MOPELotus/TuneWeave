@@ -24,8 +24,9 @@ use tuneweave_core::{
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
     CommentReactionKind, CommentReactionListRequest, CommentReactionPage, CommentReplyReference,
-    CommentSort, CommentTarget, CommentTargetKind, CommentWriteRequest, CreatorSummary,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
+    CommentThreadStatsRequest, CommentWriteRequest, CreatorSummary, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
     ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
@@ -362,6 +363,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::CommentWrite,
             Capability::CommentsRead,
             Capability::CommentReactionsRead,
+            Capability::CommentThreadStats,
             Capability::PlatformApi,
             Capability::PlatformBatch,
         ])
@@ -2030,6 +2032,17 @@ impl MusicProvider for NeteaseProvider {
         map_netease_comment_reaction_page(request, response.body)
     }
 
+    async fn comment_thread_stats(
+        &self,
+        request: &CommentThreadStatsRequest,
+    ) -> Result<CommentThreadStatsBatch> {
+        let (path, payload) = netease_comment_thread_stats_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_comment_thread_stats(request, response.body)
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -2207,6 +2220,45 @@ fn comment_reaction_cursor(field: &str, value: Option<&str>) -> Result<String> {
         || Ok("-1".to_owned()),
         |value| required_comment_id(field, value),
     )
+}
+
+fn netease_comment_thread_stats_request(
+    request: &CommentThreadStatsRequest,
+) -> Result<(&'static str, Value)> {
+    for reference in &request.resource_refs {
+        if reference.platform() != Platform::Netease {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase comment stats resources must use netease references",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "ref": reference })));
+        }
+    }
+    let resource_ids = request
+        .resource_refs
+        .iter()
+        .map(ResourceRef::id)
+        .collect::<Vec<_>>();
+    Ok((
+        "/api/resource/commentInfo/list",
+        json!({
+            "resourceType": netease_comment_resource_type(request.kind),
+            "resourceIds": json!(resource_ids).to_string()
+        }),
+    ))
+}
+
+fn netease_comment_resource_type(kind: CommentTargetKind) -> &'static str {
+    match kind {
+        CommentTargetKind::Track => "4",
+        CommentTargetKind::Mv => "5",
+        CommentTargetKind::Playlist => "0",
+        CommentTargetKind::Album => "3",
+        CommentTargetKind::RadioEpisode => "1",
+        CommentTargetKind::Video => "62",
+        CommentTargetKind::Event => "2",
+        CommentTargetKind::RadioStation => "14",
+    }
 }
 
 fn map_comment_mutation_result(
@@ -2844,6 +2896,162 @@ fn map_netease_comment_hug(raw: Value) -> Result<CommentReaction> {
         content,
         extensions,
     })
+}
+
+fn map_netease_comment_thread_stats(
+    request: &CommentThreadStatsRequest,
+    response: Value,
+) -> Result<CommentThreadStatsBatch> {
+    let raw_stats = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase comment stats response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let stats = raw_stats
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, raw)| {
+            map_netease_comment_thread_stat(
+                request.kind,
+                request.resource_refs.get(index).cloned(),
+                raw,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert(
+        "resource_type".to_owned(),
+        json!(netease_comment_resource_type(request.kind)),
+    );
+    extensions.insert("returned_count".to_owned(), json!(stats.len()));
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentThreadStatsBatch {
+        kind: request.kind,
+        requested_refs: request.resource_refs.clone(),
+        stats,
+        extensions,
+    })
+}
+
+fn map_netease_comment_thread_stat(
+    kind: CommentTargetKind,
+    requested_ref: Option<ResourceRef>,
+    raw: Value,
+) -> Result<CommentThreadStats> {
+    let target = netease_comment_stats_target(kind, &raw)?;
+    let latest_liked_users = map_comment_stats_users(&raw)?;
+    let comments = map_comment_array(&raw, "comments")?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw.clone());
+    Ok(CommentThreadStats {
+        target,
+        requested_ref,
+        liked: raw.get("liked").and_then(json_bool),
+        like_count: raw.get("likedCount").and_then(json_u64),
+        comment_count: raw.get("commentCount").and_then(json_u64),
+        comment_count_text: raw
+            .get("commentCountDesc")
+            .and_then(json_scalar_string)
+            .filter(|value| !value.trim().is_empty()),
+        share_count: raw.get("shareCount").and_then(json_u64),
+        comment_upgraded: raw.get("commentUpgraded").and_then(json_bool),
+        musician_comment_count: raw.get("musicianSaidCount").and_then(json_u64),
+        latest_liked_users,
+        comments,
+        extensions,
+    })
+}
+
+fn netease_comment_stats_target(kind: CommentTargetKind, raw: &Value) -> Result<CommentTarget> {
+    let thread_id = raw
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase comment stats item is missing threadId",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "stats": raw }))
+        })?;
+    let prefix = match kind {
+        CommentTargetKind::Track => "R_SO_4_",
+        CommentTargetKind::Mv => "R_MV_5_",
+        CommentTargetKind::Playlist => "A_PL_0_",
+        CommentTargetKind::Album => "R_AL_3_",
+        CommentTargetKind::RadioEpisode => "A_DJ_1_",
+        CommentTargetKind::Video => "R_VI_62_",
+        CommentTargetKind::Event => "A_EV_2_",
+        CommentTargetKind::RadioStation => "A_DR_14_",
+    };
+    let suffix = thread_id.strip_prefix(prefix).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase comment stats returned a mismatched thread type",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "kind": kind, "thread_id": thread_id }))
+    })?;
+    if suffix.is_empty() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase comment stats returned an empty thread resource id",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let id = if kind == CommentTargetKind::Event {
+        thread_id
+    } else {
+        suffix
+    };
+    let resource_ref = ResourceRef::new(Platform::Netease, id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase comment stats returned an invalid resource id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "thread_id": thread_id }))
+    })?;
+    Ok(CommentTarget::new(resource_ref, kind))
+}
+
+fn map_comment_stats_users(raw: &Value) -> Result<Vec<User>> {
+    let Some(value) = raw.get("latestLikedUsers") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let users = value.as_array().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase comment stats latestLikedUsers is not an array",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "stats": raw }))
+    })?;
+    users
+        .iter()
+        .map(|user| {
+            map_netease_comment_user(user).ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase comment stats contains an invalid liked user",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "user": user }))
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7724,6 +7932,215 @@ mod tests {
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn comment_thread_stats_requests_cover_all_internal_types_and_empty_batches() {
+        let cases = [
+            (CommentTargetKind::Track, "185809", "4"),
+            (CommentTargetKind::Mv, "5436712", "5"),
+            (CommentTargetKind::Playlist, "705123491", "0"),
+            (CommentTargetKind::Album, "32311", "3"),
+            (CommentTargetKind::RadioEpisode, "794062371", "1"),
+            (
+                CommentTargetKind::Video,
+                "89ADDE33C0AAE8EC14B99F6750DB954D",
+                "62",
+            ),
+            (CommentTargetKind::Event, "6559519868", "2"),
+            (CommentTargetKind::RadioStation, "362", "14"),
+        ];
+        for (kind, id, resource_type) in cases {
+            let request = CommentThreadStatsRequest {
+                kind,
+                resource_refs: vec![
+                    ResourceRef::new(Platform::Netease, id).expect("valid stats resource"),
+                ],
+                account: Some("personal".to_owned()),
+            };
+            let (path, payload) = netease_comment_thread_stats_request(&request)
+                .expect("build comment stats request");
+            assert_eq!(path, "/api/resource/commentInfo/list", "{kind:?}");
+            assert_eq!(payload["resourceType"], resource_type, "{kind:?}");
+            assert_eq!(payload["resourceIds"], format!("[\"{id}\"]"), "{kind:?}");
+        }
+
+        let empty = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Track,
+            resource_refs: Vec::new(),
+            account: None,
+        };
+        let (_, payload) =
+            netease_comment_thread_stats_request(&empty).expect("build empty stats request");
+        assert_eq!(payload["resourceIds"], "[]");
+
+        let foreign = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Track,
+            resource_refs: vec![
+                ResourceRef::new(Platform::Qq, "185809").expect("valid foreign resource"),
+            ],
+            account: None,
+        };
+        assert_eq!(
+            netease_comment_thread_stats_request(&foreign)
+                .expect_err("foreign stats request")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn maps_comment_thread_stats_counts_users_comments_and_canonical_video_ids() {
+        let requested = ResourceRef::new(Platform::Netease, "89ADDE33C0AAE8EC14B99F6750DB954D")
+            .expect("valid requested video");
+        let request = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Video,
+            resource_refs: vec![requested.clone()],
+            account: None,
+        };
+        let batch = map_netease_comment_thread_stats(
+            &request,
+            json!({
+                "code": 200,
+                "data": [{
+                    "latestLikedUsers": [{
+                        "userId": 2121989064_u64,
+                        "nickname": "清梦初仄",
+                        "avatarUrl": "https://example.test/avatar.jpg",
+                        "followed": false
+                    }],
+                    "liked": false,
+                    "comments": [fixture_comment(3160990055, "最近评论")],
+                    "resourceType": 62,
+                    "resourceId": 2335163,
+                    "commentUpgraded": false,
+                    "musicianSaidCount": 1,
+                    "commentCountDesc": "1000+",
+                    "likedCount": 36,
+                    "commentCount": 1123,
+                    "shareCount": 27153,
+                    "threadId": "R_VI_62_2335163",
+                    "futureField": {"kept": true}
+                }]
+            }),
+        )
+        .expect("map comment stats");
+        assert_eq!(batch.kind, CommentTargetKind::Video);
+        assert_eq!(batch.requested_refs, vec![requested.clone()]);
+        assert_eq!(batch.stats.len(), 1);
+        let stats = &batch.stats[0];
+        assert_eq!(stats.requested_ref.as_ref(), Some(&requested));
+        assert_eq!(stats.target.resource_ref.to_string(), "netease:2335163");
+        assert_eq!(stats.target.kind, CommentTargetKind::Video);
+        assert_eq!(stats.liked, Some(false));
+        assert_eq!(stats.like_count, Some(36));
+        assert_eq!(stats.comment_count, Some(1123));
+        assert_eq!(stats.comment_count_text.as_deref(), Some("1000+"));
+        assert_eq!(stats.share_count, Some(27153));
+        assert_eq!(stats.comment_upgraded, Some(false));
+        assert_eq!(stats.musician_comment_count, Some(1));
+        assert_eq!(stats.latest_liked_users[0].id, "2121989064");
+        assert_eq!(stats.comments[0].id, "3160990055");
+        assert_eq!(stats.extensions["response"]["futureField"]["kept"], true);
+        assert_eq!(batch.extensions["resource_type"], "62");
+        assert_eq!(batch.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn maps_event_stats_to_complete_threads_and_preserves_empty_batches() {
+        let request = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Event,
+            resource_refs: vec![
+                ResourceRef::new(Platform::Netease, "6559519868").expect("valid event resource"),
+            ],
+            account: None,
+        };
+        let batch = map_netease_comment_thread_stats(
+            &request,
+            json!({
+                "code": 200,
+                "data": [{
+                    "resourceType": 2,
+                    "resourceId": 6559519868_u64,
+                    "commentCount": 0,
+                    "threadId": "A_EV_2_6559519868_0"
+                }]
+            }),
+        )
+        .expect("map event stats");
+        assert_eq!(
+            batch.stats[0].target.resource_ref.to_string(),
+            "netease:A_EV_2_6559519868_0"
+        );
+        assert_eq!(batch.stats[0].comment_count, Some(0));
+
+        let empty_request = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Track,
+            resource_refs: Vec::new(),
+            account: None,
+        };
+        let empty =
+            map_netease_comment_thread_stats(&empty_request, json!({"code": 200, "data": []}))
+                .expect("map empty stats");
+        assert!(empty.stats.is_empty());
+        assert!(empty.requested_refs.is_empty());
+    }
+
+    #[test]
+    fn comment_thread_stats_reject_malformed_arrays_threads_and_users() {
+        let request = CommentThreadStatsRequest {
+            kind: CommentTargetKind::Track,
+            resource_refs: vec![
+                ResourceRef::new(Platform::Netease, "185809").expect("valid resource"),
+            ],
+            account: None,
+        };
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": [{"threadId": "R_MV_5_185809"}]}),
+            json!({
+                "code": 200,
+                "data": [{"threadId": "R_SO_4_185809", "latestLikedUsers": [{}]}]
+            }),
+        ] {
+            assert_eq!(
+                map_netease_comment_thread_stats(&request, response)
+                    .expect_err("malformed stats response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_comment_thread_stats_cover_every_reference_resource_type() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let cases = [
+            (CommentTargetKind::Track, "185809"),
+            (CommentTargetKind::Mv, "5436712"),
+            (CommentTargetKind::Playlist, "705123491"),
+            (CommentTargetKind::Album, "32311"),
+            (CommentTargetKind::RadioEpisode, "794062371"),
+            (CommentTargetKind::Video, "89ADDE33C0AAE8EC14B99F6750DB954D"),
+            (CommentTargetKind::Event, "6559519868"),
+            (CommentTargetKind::RadioStation, "362"),
+        ];
+        for (kind, id) in cases {
+            let request = CommentThreadStatsRequest {
+                kind,
+                resource_refs: vec![
+                    ResourceRef::new(Platform::Netease, id).expect("valid live resource"),
+                ],
+                account: None,
+            };
+            let batch = MusicProvider::comment_thread_stats(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{kind:?} stats failed: {error}"));
+            assert_eq!(batch.extensions["response"]["code"], 200, "{kind:?}");
+            assert_eq!(batch.stats.len(), 1, "{kind:?}");
+            assert_eq!(batch.stats[0].target.kind, kind, "{kind:?}");
+        }
+    }
+
     fn fixture_comment(id: u64, content: &str) -> Value {
         json!({
             "commentId": id,
@@ -10932,6 +11349,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::CommentWrite));
         assert!(capabilities.contains(&Capability::CommentsRead));
         assert!(capabilities.contains(&Capability::CommentReactionsRead));
+        assert!(capabilities.contains(&Capability::CommentThreadStats));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
