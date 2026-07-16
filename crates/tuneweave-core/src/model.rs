@@ -191,6 +191,7 @@ impl PlatformApiRequest {
 pub struct PlatformBatchRequest {
     pub requests: BTreeMap<String, Value>,
     pub protocol: Option<String>,
+    pub encrypted_response: bool,
     pub account: Option<String>,
 }
 
@@ -200,6 +201,7 @@ impl PlatformBatchRequest {
         Self {
             requests,
             protocol: None,
+            encrypted_response: false,
             account: None,
         }
     }
@@ -954,11 +956,13 @@ mod tests {
         );
         let mut request = PlatformBatchRequest::new(requests);
         request.protocol = Some("eapi".to_owned());
+        request.encrypted_response = true;
         request.account = Some("default".to_owned());
 
         assert_eq!(request.requests.len(), 1);
         assert_eq!(request.requests["/api/v2/banner/get"]["clientType"], "pc");
         assert_eq!(request.protocol.as_deref(), Some("eapi"));
+        assert!(request.encrypted_response);
         assert_eq!(request.account.as_deref(), Some("default"));
     }
 
