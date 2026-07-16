@@ -5266,7 +5266,7 @@ fn netease_stream_request(
             json!({
                 "ids": Value::Array(ids.iter().map(|id| json!(id.to_string())).collect())
                     .to_string(),
-                "br": requested_bitrate(request.quality)
+                "br": request.bitrate.unwrap_or_else(|| requested_bitrate(request.quality))
             }),
             None,
         ),
@@ -13220,6 +13220,7 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::High,
             variant: StreamVariant::Modern,
+            bitrate: None,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -13266,6 +13267,7 @@ mod tests {
             let request = StreamRequest {
                 quality,
                 variant: StreamVariant::Modern,
+                bitrate: None,
                 account: None,
             };
             let (variant, path, payload, mapped_level) =
@@ -13286,11 +13288,13 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::Auto,
             variant: StreamVariant::Default,
+            bitrate: Some(192_123),
             account: None,
         };
         let (variant, _, payload, level) = netease_stream_request(&[123], &request);
         assert_eq!(variant, StreamVariant::Modern);
         assert_eq!(payload["level"], "exhigh");
+        assert!(payload.get("br").is_none());
         assert_eq!(level, Some("exhigh"));
     }
 
@@ -13299,6 +13303,7 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::High,
             variant: StreamVariant::Legacy,
+            bitrate: Some(192_123),
             account: Some("legacy-user".to_owned()),
         };
         let (variant, path, payload, level) =
@@ -13306,8 +13311,19 @@ mod tests {
         assert_eq!(variant, StreamVariant::Legacy);
         assert_eq!(path, "/api/song/enhance/player/url");
         assert_eq!(payload["ids"], r#"["1969519579","33894312"]"#);
-        assert_eq!(payload["br"], 320_000);
+        assert_eq!(payload["br"], 192_123);
         assert_eq!(level, None);
+
+        let (_, _, payload, _) = netease_stream_request(
+            &[1_969_519_579],
+            &StreamRequest {
+                quality: Quality::High,
+                variant: StreamVariant::Legacy,
+                bitrate: None,
+                account: None,
+            },
+        );
+        assert_eq!(payload["br"], 320_000);
     }
 
     #[test]
@@ -13323,6 +13339,7 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::High,
             variant: StreamVariant::Modern,
+            bitrate: None,
             account: None,
         };
         let response = json!({
@@ -13406,6 +13423,7 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::High,
             variant: StreamVariant::Modern,
+            bitrate: None,
             account: None,
         };
         let batch = map_netease_stream_batch(
@@ -13522,6 +13540,7 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::Lossless,
             variant: StreamVariant::Modern,
+            bitrate: None,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -15437,6 +15456,7 @@ mod tests {
                 &StreamRequest {
                     quality: Quality::High,
                     variant: StreamVariant::Modern,
+                    bitrate: None,
                     account: None,
                 },
             )
@@ -15472,6 +15492,7 @@ mod tests {
                 &StreamRequest {
                     quality,
                     variant: StreamVariant::Modern,
+                    bitrate: None,
                     account: None,
                 },
             )
@@ -15503,6 +15524,7 @@ mod tests {
             &StreamRequest {
                 quality: Quality::High,
                 variant: StreamVariant::Modern,
+                bitrate: None,
                 account: None,
             },
         )
@@ -15539,6 +15561,7 @@ mod tests {
             &StreamRequest {
                 quality: Quality::High,
                 variant: StreamVariant::Legacy,
+                bitrate: None,
                 account: None,
             },
         )

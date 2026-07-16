@@ -1661,7 +1661,20 @@ pub struct StreamRequest {
     pub quality: Quality,
     #[serde(default)]
     pub variant: StreamVariant,
+    #[serde(default)]
+    pub bitrate: Option<u64>,
     pub account: Option<String>,
+}
+
+impl Default for StreamRequest {
+    fn default() -> Self {
+        Self {
+            quality: Quality::Auto,
+            variant: StreamVariant::Default,
+            bitrate: None,
+            account: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1669,6 +1682,8 @@ pub struct ResolveRequest {
     pub quality: Quality,
     #[serde(default)]
     pub variant: StreamVariant,
+    #[serde(default)]
+    pub bitrate: Option<u64>,
     pub playback_platforms: Vec<Platform>,
     pub fallback: bool,
     pub accounts: BTreeMap<Platform, String>,
@@ -1680,6 +1695,7 @@ impl Default for ResolveRequest {
         Self {
             quality: Quality::Auto,
             variant: StreamVariant::Default,
+            bitrate: None,
             playback_platforms: Vec::new(),
             fallback: true,
             accounts: BTreeMap::new(),
@@ -2010,11 +2026,13 @@ mod tests {
         let request = StreamRequest {
             quality: Quality::Spatial,
             variant: StreamVariant::Modern,
+            bitrate: Some(999_000),
             account: Some("vip".to_owned()),
         };
         let value = serde_json::to_value(request).expect("serialize stream request");
         assert_eq!(value["quality"], "spatial");
         assert_eq!(value["variant"], "modern");
+        assert_eq!(value["bitrate"], 999_000);
 
         let resolve = ResolveRequest {
             variant: StreamVariant::Legacy,

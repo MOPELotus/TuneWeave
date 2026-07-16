@@ -1418,6 +1418,8 @@ struct StreamParams {
     quality: Option<String>,
     #[serde(alias = "backend")]
     variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
@@ -1430,6 +1432,7 @@ struct StreamParams {
 struct StreamControlInput<'a> {
     quality: Option<&'a str>,
     variant: Option<&'a str>,
+    bitrate: Option<&'a str>,
     playback_platform: Option<&'a str>,
     fallback: Option<&'a str>,
     fallback_platforms: Option<&'a str>,
@@ -1442,6 +1445,7 @@ struct StreamControlInput<'a> {
 struct StreamControls {
     quality: Quality,
     variant: StreamVariant,
+    bitrate: Option<u64>,
     routing: StreamRouting,
     account: Option<String>,
 }
@@ -1499,6 +1503,7 @@ impl StreamControls {
         let mut request = ResolveRequest {
             quality: self.quality,
             variant: self.variant,
+            bitrate: self.bitrate,
             playback_platforms,
             fallback,
             ..ResolveRequest::default()
@@ -1535,6 +1540,7 @@ impl StreamControls {
         StreamRequest {
             quality: self.quality,
             variant: self.variant,
+            bitrate: self.bitrate,
             account: (account_platform == platform)
                 .then(|| self.account.clone())
                 .flatten(),
@@ -1545,6 +1551,7 @@ impl StreamControls {
 fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls, TuneWeaveError> {
     let quality = parse_quality(input.quality)?;
     let variant = parse_stream_variant(input.variant)?;
+    let bitrate = parse_optional_u64_parameter("bitrate", input.bitrate)?;
     let unblock = parse_bool_parameter("unblock", input.unblock, false)?;
     let fallback = parse_bool_parameter("fallback", input.fallback, true)?;
     let routing = if unblock {
@@ -1572,6 +1579,7 @@ fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls
     Ok(StreamControls {
         quality,
         variant,
+        bitrate,
         routing,
         account: input
             .account
@@ -1591,6 +1599,7 @@ async fn track_stream(
     let controls = parse_stream_controls(StreamControlInput {
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
+        bitrate: params.bitrate.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -1623,6 +1632,8 @@ struct StreamBatchParams {
     quality: Option<String>,
     #[serde(alias = "backend")]
     variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
@@ -1644,6 +1655,22 @@ enum StreamBooleanInput {
     Boolean(bool),
     String(String),
     Integer(i64),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StreamUnsignedInput {
+    String(String),
+    Integer(u64),
+}
+
+impl StreamUnsignedInput {
+    fn into_parameter(self) -> String {
+        match self {
+            Self::String(value) => value,
+            Self::Integer(value) => value.to_string(),
+        }
+    }
 }
 
 impl StreamBooleanInput {
@@ -1676,6 +1703,8 @@ struct StreamBatchBody {
     quality: Option<String>,
     #[serde(alias = "backend")]
     variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<StreamUnsignedInput>,
     playback_platform: Option<String>,
     fallback: Option<StreamBooleanInput>,
     fallback_platforms: Option<String>,
@@ -1698,6 +1727,7 @@ async fn track_streams_get(
     let controls = parse_stream_controls(StreamControlInput {
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
+        bitrate: params.bitrate.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -1723,9 +1753,11 @@ async fn track_streams_post(
     )?;
     let fallback = body.fallback.map(StreamBooleanInput::into_parameter);
     let unblock = body.unblock.map(StreamBooleanInput::into_parameter);
+    let bitrate = body.bitrate.map(StreamUnsignedInput::into_parameter);
     let controls = parse_stream_controls(StreamControlInput {
         quality: body.quality.as_deref(),
         variant: body.variant.as_deref(),
+        bitrate: bitrate.as_deref(),
         playback_platform: body.playback_platform.as_deref(),
         fallback: fallback.as_deref(),
         fallback_platforms: body.fallback_platforms.as_deref(),
@@ -1929,6 +1961,7 @@ async fn resolve_stream_batch(
             ("provider_batches".to_owned(), json!(provider_batches)),
             ("quality".to_owned(), json!(controls.quality)),
             ("variant".to_owned(), json!(controls.variant)),
+            ("bitrate".to_owned(), json!(controls.bitrate)),
             ("fallback".to_owned(), json!(controls.fallback_enabled())),
         ]),
     }
@@ -6226,7 +6259,7 @@ mod tests {
                 expires_at: None,
                 format: Some("mp3".to_owned()),
                 codec: Some("mp3".to_owned()),
-                bitrate: Some(320_000),
+                bitrate: request.bitrate.or(Some(320_000)),
                 size: Some(1024),
                 duration_ms: track.duration_ms,
                 requested_quality: request.quality,
@@ -8938,11 +8971,12 @@ mod tests {
     async fn track_stream_accepts_netease_level_and_backend_aliases() {
         let (status, json) = json_response_from(
             test_app_with_provider(),
-            "/v1/tracks/netease:2709812973/stream?level=jyeffect&backend=v1&fallback=false",
+            "/v1/tracks/netease:2709812973/stream?level=jyeffect&backend=v1&br=192123&fallback=false",
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["requested_quality"], "surround");
+        assert_eq!(json["data"]["bitrate"], 192_123);
         assert_eq!(json["data"]["headers"]["x-test-stream-variant"], "modern");
         assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
     }
@@ -8969,7 +9003,7 @@ mod tests {
     async fn track_stream_batch_get_preserves_order_duplicates_and_netease_aliases() {
         let (status, json) = json_response_from(
             test_app_with_provider(),
-            "/v1/tracks/streams?id=2709812973,1969519579,2709812973&platform=netease&level=jyeffect&backend=v1&fallback=false",
+            "/v1/tracks/streams?id=2709812973,1969519579,2709812973&platform=netease&level=jyeffect&backend=v1&br=192123&fallback=false",
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -8989,6 +9023,7 @@ mod tests {
         for outcome in json["data"]["outcomes"].as_array().expect("outcomes") {
             assert_eq!(outcome["status"], "success");
             assert_eq!(outcome["stream"]["requested_quality"], "surround");
+            assert_eq!(outcome["stream"]["bitrate"], 192_123);
             assert_eq!(
                 outcome["stream"]["headers"]["x-test-stream-variant"],
                 "modern"
@@ -9000,6 +9035,7 @@ mod tests {
         }
         assert_eq!(json["data"]["extensions"]["quality"], "surround");
         assert_eq!(json["data"]["extensions"]["variant"], "modern");
+        assert_eq!(json["data"]["extensions"]["bitrate"], 192_123);
         assert_eq!(json["meta"]["platform"], "netease");
     }
 
@@ -9007,9 +9043,10 @@ mod tests {
     async fn track_stream_batch_post_supports_mixed_refs_and_per_item_errors() {
         let body = json!({
             "refs": ["netease:1", "qq:2", "netease:1"],
-            "quality": "high",
-            "variant": "legacy",
-            "fallback": false
+                "quality": "high",
+                "variant": "legacy",
+                "bitrate": 128001,
+                "fallback": false
         });
         serde_json::from_value::<StreamBatchBody>(body.clone()).expect("parse stream batch body");
         let (status, json) = json_request_from(
@@ -9022,6 +9059,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["data"]["outcomes"].as_array().map(Vec::len), Some(3));
         assert_eq!(json["data"]["outcomes"][0]["status"], "success");
+        assert_eq!(json["data"]["outcomes"][0]["stream"]["bitrate"], 128_001);
         assert_eq!(json["data"]["outcomes"][1]["track_ref"], "qq:2");
         assert_eq!(json["data"]["outcomes"][1]["status"], "unavailable");
         assert_eq!(
@@ -9064,6 +9102,7 @@ mod tests {
             "/v1/tracks/streams?refs=netease:1,,netease:2",
             "/v1/tracks/streams?refs=invalid",
             "/v1/tracks/streams?ids=1&platform=unknown",
+            "/v1/tracks/streams?ids=1&br=invalid",
             "/v1/tracks/streams?ids=1&unblock=true&playback_platform=qq",
             "/v1/tracks/streams?ids=1&unknown=true",
         ] {
@@ -9080,6 +9119,7 @@ mod tests {
             json!({ "refs": ["netease:1"], "ids": ["1"] }),
             json!({ "refs": [] }),
             json!({ "ids": ["1"], "platform": "unknown" }),
+            json!({ "ids": ["1"], "bitrate": -1 }),
             json!({ "ids": ["1"], "unknown": true }),
         ] {
             let (status, json) = json_request_from(

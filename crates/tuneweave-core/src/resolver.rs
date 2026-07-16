@@ -164,6 +164,7 @@ impl StreamResolver {
             let stream_request = StreamRequest {
                 quality: request.quality,
                 variant: request.variant,
+                bitrate: request.bitrate,
                 account: account.clone(),
             };
             match provider.stream(&candidate, &stream_request).await {
@@ -351,7 +352,7 @@ mod tests {
 
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             match self.stream_behavior {
-                StreamBehavior::Success => Ok(fake_stream(track, request.quality)),
+                StreamBehavior::Success => Ok(fake_stream(track, request)),
                 StreamBehavior::AuthenticationRequired => Err(TuneWeaveError::new(
                     ErrorCode::AuthenticationRequired,
                     "account is required",
@@ -374,7 +375,7 @@ mod tests {
         track
     }
 
-    fn fake_stream(track: &Track, quality: Quality) -> MediaStream {
+    fn fake_stream(track: &Track, request: &StreamRequest) -> MediaStream {
         MediaStream {
             url: format!("https://{}.example.test/{}.flac", track.platform, track.id),
             backup_urls: Vec::new(),
@@ -382,10 +383,10 @@ mod tests {
             expires_at: None,
             format: Some("flac".to_owned()),
             codec: Some("flac".to_owned()),
-            bitrate: Some(999_000),
+            bitrate: request.bitrate.or(Some(999_000)),
             size: None,
             duration_ms: track.duration_ms,
-            requested_quality: quality,
+            requested_quality: request.quality,
             actual_quality: Quality::Lossless,
             trial: None::<TrialWindow>,
             origin_track: Some(track.resource_ref.clone()),
@@ -418,6 +419,7 @@ mod tests {
         let resolver = StreamResolver::new(registry, vec![Platform::Qq]);
         let mut request = ResolveRequest {
             quality: Quality::Lossless,
+            bitrate: Some(192_123),
             ..ResolveRequest::default()
         };
         request
@@ -428,6 +430,7 @@ mod tests {
         assert_eq!(stream.origin_track, Some(origin.resource_ref));
         assert_eq!(stream.resolved_track.to_string(), "qq:0039mid");
         assert_eq!(stream.resolved_platform, Platform::Qq);
+        assert_eq!(stream.bitrate, Some(192_123));
         assert_eq!(stream.attempts.len(), 2);
         assert_eq!(
             stream.attempts[0].status,
