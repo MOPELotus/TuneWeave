@@ -121,7 +121,7 @@ pub trait MusicProvider: Send + Sync {
 
     async fn user_membership(
         &self,
-        _id: &str,
+        _id: Option<&str>,
         _account: Option<&str>,
     ) -> Result<MembershipSummary> {
         Err(TuneWeaveError::unsupported(

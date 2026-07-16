@@ -195,7 +195,7 @@ pub struct LocalTrackMatchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MembershipSummary {
-    pub user_ref: ResourceRef,
+    pub user_ref: Option<ResourceRef>,
     pub level: Option<u32>,
     pub active: Option<bool>,
     pub annual_count: Option<i64>,
@@ -1940,8 +1940,9 @@ mod tests {
     #[test]
     fn membership_summary_keeps_unknown_status_fields_nullable() {
         let summary = MembershipSummary {
-            user_ref: ResourceRef::new(Platform::Netease, "32953014")
-                .expect("valid user reference"),
+            user_ref: Some(
+                ResourceRef::new(Platform::Netease, "32953014").expect("valid user reference"),
+            ),
             level: Some(7),
             active: None,
             annual_count: Some(-1),
