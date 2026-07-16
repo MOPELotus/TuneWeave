@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=315`、`partial=6`、`implemented=32`、`verified=51`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=314`、`partial=6`、`implemented=33`、`verified=51`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -81,7 +81,7 @@
 | `comment_mv` | `/comment/mv` | `verified` | `GET /v1/resources/mv/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:5436712` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `comment_new` | `/comment/new` | `verified` | `GET /v1/resources/{type}/{ref}/comments?sort=recommended|hot|time`（完整支持现代目录三种排序、`page/cursor/include_replies` 及参考 `sortType/pageNo/pageSize/showInner`；2026-07-16 provider 与真实二进制 HTTP 对 `netease:185809` 三种排序均实测上游 `code=200`、`mode=modern`；热门及时间排序请求 2 条均返回 2 条，推荐排序上游固定返回 10 条并正确标记 `limit_applied=false`） |
 | `comment_playlist` | `/comment/playlist` | `verified` | `GET /v1/resources/playlist/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:705123491` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
-| `comment_report` | `/comment/report` | `pending` | — |
+| `comment_report` | `/comment/report` | `implemented` | `POST /v1/resources/track/{ref}/comments/{comment_id}/reports`（统一由资源引用决定内容平台、`account` 选择同平台隔离登录态，JSON `{reason}` 表达参考必填举报理由，稳定返回目标、评论 ID、原样理由和 `submitted=true`；严格保持参考模块的歌曲专用边界，只接受 `type=track`，固定构造 `threadId=R_SO_4_{id}`，以默认 EAPI 调用 `/api/report/reportcomment` 并精确提交 `threadId/commentId/reason`，不虚构其他七类资源支持；空白理由、非歌曲目标、跨平台引用、未知 JSON/query 字段均在上游请求前以统一 400 拒绝，未登录态在网络前以 401 拒绝，完整成功响应保留在扩展；核心序列化、协议字段、歌曲限定、输入拒绝、能力发现、认证前置与统一 HTTP 包络均有离线测试；2026-07-16 无 Cookie 真实二进制 HTTP 验证合法歌曲举报返回 `authentication_required`，歌单目标与空白理由分别返回预期 400，待真实账户验证成功举报） |
 | `comment_video` | `/comment/video` | `verified` | `GET /v1/resources/video/{ref}/comments`（视频 ID 保持不透明字符串；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:89ADDE33C0AAE8EC14B99F6750DB954D` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `countries_code_list` | `/countries/code/list` | `pending` | — |
 | `creator_authinfo_get` | `/creator/authinfo/get` | `pending` | — |
