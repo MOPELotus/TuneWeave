@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=328`、`partial=6`、`implemented=30`、`verified=40`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=318`、`partial=6`、`implemented=30`、`verified=50`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -69,20 +69,20 @@
 | `cloud_upload_token` | `/cloud/upload/token` | `implemented` | `POST /v1/account/cloud/uploads/ticket`（统一接收 `md5/file_size/filename/bitrate/content_type` 并兼容 `fileSize/contentType`；依次执行 EAPI `/api/cloud/upload/check`、WeAPI `/api/nos/token/alloc` 与真实 LBS 服务发现，完整返回 `needUpload/songId/resourceId` 对应字段、受限 NOS 上传 URL、方法及所需请求头；对象键按路径段编码，上传目标严格限制为无凭据、无自定义端口的 `http(s)://*.127.net` 和精确 `offset=0&complete=true&version=1.0` 参数，拒绝外域、重复参数与目标注入；NOS token 只存在于直传所需响应头映射，Debug 和扩展原文均不泄漏；协议构造、文件/MD5/码率边界、域名白名单、token 脱敏、统一 HTTP 字段及错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在申请 token 前稳定返回 401 `authentication_required`，待真实账户验证票据与原始音频直传成功态） |
 | `cloudsearch` | `/cloudsearch` | `verified` | `GET /v1/search`（统一接受 `q/keywords`、平台、账户与分页；完整支持参考项目全部 11 种搜索类型及数字值：歌曲 1、专辑 10、歌手 100、歌单 1000、用户 1002、MV 1004、歌词 1006、广播电台 1009、视频 1014、综合 1018、声音 2000，缺省为歌曲；固定 EAPI `/api/cloudsearch/pc` 并传递 `s/type/limit/offset/total=true`；统一结果使用 `{type,data}` 判别联合，已知结构映射为 `Track/Album/Artist/Playlist/User/Video/RadioStation`，歌词命中仍为歌曲并保留歌词原文，综合/声音及不可稳定映射项用不丢失原文的 `opaque` 表达，完整响应与分页应用状态保留在扩展；类型映射、全部分支、混合已知/未知条目、字段缺失、分页、能力声明、参数别名和 HTTP 错误均有离线测试；2026-07-16 手动运行 11 个显式忽略的 provider 联网测试全部通过，随后匿名真实 HTTP 以 `keywords=周杰伦&limit=2` 验证 11 个类型均返回 200：1/10/100/1000/1002/1004/1006 分别返回 2 项，1009 按上游真实行为返回 10 项并标记 `limit_applied=false`，1014/1018/2000 返回合法空结果） |
 | `comment` | `/comment` | `implemented` | `POST /v1/resources/{type}/{ref}/comments`、`POST /v1/resources/{type}/{ref}/comments/{comment_id}/replies`、`DELETE /v1/resources/{type}/{ref}/comments/{comment_id}`（统一以资源引用决定内容平台、`account` 选择隔离登录态，并以 `CommentMutationResult` 表达目标、`create/reply/delete` 动作及不透明评论 ID；完整支持参考 `t=1/2/0` 三分支和 `type=0..7` 全部资源类型，固定映射歌曲 `R_SO_4_`、MV `R_MV_5_`、歌单 `A_PL_0_`、专辑 `R_AL_3_`、电台节目 `A_DJ_1_`、视频 `R_VI_62_`、动态完整 `A_EV_2_...` thread ID、电台 `A_DR_14_`，分别调用 WeAPI `/api/resource/comments/add|reply|delete`；内容仅以 trim 判空而不改写合法空格，事件 thread、视频和评论 ID 均保持不透明，完整响应保留在扩展；核心序列化、8 种资源×3 动作协议、结果 ID、字段/平台边界、能力声明、统一名称与数字别名、JSON 拒绝及 HTTP 包络均有离线测试；2026-07-16 无 Cookie 真实二进制 HTTP 分别验证创建、回复、删除三条路径均在上游写请求前返回 401 `authentication_required`，待真实账户验证成功创建、回复和删除回滚） |
-| `comment_album` | `/comment/album` | `pending` | — |
-| `comment_dj` | `/comment/dj` | `pending` | — |
-| `comment_event` | `/comment/event` | `pending` | — |
-| `comment_floor` | `/comment/floor` | `pending` | — |
-| `comment_hot` | `/comment/hot` | `pending` | — |
+| `comment_album` | `/comment/album` | `verified` | `GET /v1/resources/album/{ref}/comments`（统一 `Comment[]` 目录；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:32311` 返回上游 `code=200`、普通评论及 `mode=legacy`，请求 `limit=1` 被实际应用） |
+| `comment_dj` | `/comment/dj` | `verified` | `GET /v1/resources/radio_episode/{ref}/comments`（电台节目 ID 保持不透明；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:794062371` 返回上游 `code=200`、普通评论及 `mode=legacy`） |
+| `comment_event` | `/comment/event` | `verified` | `GET /v1/resources/event/{ref}/comments`（要求完整 `A_EV_2_...` thread ID，不重复拼接前缀；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:A_EV_2_6559519868_32953014` 返回上游 `code=200`、普通及热门评论） |
+| `comment_floor` | `/comment/floor` | `verified` | `GET /v1/resources/{type}/{ref}/comments?view=replies&parent_comment_id=...`（完整支持 `limit/before_time_ms`，也兼容 `parentCommentId/time`；父评论 ID 保持不透明，当前父评论与楼层回复分开映射；2026-07-16 provider 与真实二进制 HTTP 实测歌曲评论楼层返回上游 `code=200`、`mode=floor`，空楼层被如实表达为成功空目录） |
+| `comment_hot` | `/comment/hot` | `verified` | `GET /v1/resources/{type}/{ref}/comments?view=hot`（热门评论独立返回在 `hot_comments`；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:185809`、`limit=2` 返回上游 `code=200`、2 条热门评论、`mode=hot` 且页大小已应用） |
 | `comment_hug_list` | `/comment/hug/list` | `pending` | — |
 | `comment_info_list` | `/comment/info/list` | `pending` | — |
 | `comment_like` | `/comment/like` | `pending` | — |
-| `comment_music` | `/comment/music` | `pending` | — |
-| `comment_mv` | `/comment/mv` | `pending` | — |
-| `comment_new` | `/comment/new` | `pending` | — |
-| `comment_playlist` | `/comment/playlist` | `pending` | — |
+| `comment_music` | `/comment/music` | `verified` | `GET /v1/resources/track/{ref}/comments`（统一普通/热门/置顶评论、作者、时间、点赞、回复关系及 IP 地区；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:185809`、`limit=1` 返回上游 `code=200`、普通评论、15 条平台热门评论及 `mode=legacy`） |
+| `comment_mv` | `/comment/mv` | `verified` | `GET /v1/resources/mv/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:5436712` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
+| `comment_new` | `/comment/new` | `verified` | `GET /v1/resources/{type}/{ref}/comments?sort=recommended|hot|time`（完整支持现代目录三种排序、`page/cursor/include_replies` 及参考 `sortType/pageNo/pageSize/showInner`；2026-07-16 provider 与真实二进制 HTTP 对 `netease:185809` 三种排序均实测上游 `code=200`、`mode=modern`；热门及时间排序请求 2 条均返回 2 条，推荐排序上游固定返回 10 条并正确标记 `limit_applied=false`） |
+| `comment_playlist` | `/comment/playlist` | `verified` | `GET /v1/resources/playlist/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:705123491` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `comment_report` | `/comment/report` | `pending` | — |
-| `comment_video` | `/comment/video` | `pending` | — |
+| `comment_video` | `/comment/video` | `verified` | `GET /v1/resources/video/{ref}/comments`（视频 ID 保持不透明字符串；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:89ADDE33C0AAE8EC14B99F6750DB954D` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `countries_code_list` | `/countries/code/list` | `pending` | — |
 | `creator_authinfo_get` | `/creator/authinfo/get` | `pending` | — |
 | `daily_signin` | `/daily_signin` | `pending` | — |
