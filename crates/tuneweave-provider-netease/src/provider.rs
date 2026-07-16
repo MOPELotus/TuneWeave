@@ -15885,6 +15885,76 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
+    async fn live_download_urls_cover_legacy_and_every_modern_level() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "live download track",
+        );
+        let legacy = MusicProvider::download(
+            &provider,
+            &track,
+            &StreamRequest {
+                quality: Quality::Higher,
+                variant: StreamVariant::Legacy,
+                bitrate: Some(192_123),
+                account: None,
+            },
+        )
+        .await
+        .expect("live legacy download");
+        assert!(legacy.available);
+        assert!(
+            legacy
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http"))
+        );
+        assert_eq!(legacy.extensions["variant"], "legacy");
+        assert_eq!(
+            legacy.extensions["request_path"],
+            "/api/song/enhance/download/url"
+        );
+        assert_eq!(legacy.extensions["response"]["code"], 200);
+
+        for (quality, level) in [
+            (Quality::Standard, "standard"),
+            (Quality::Higher, "higher"),
+            (Quality::High, "exhigh"),
+            (Quality::Lossless, "lossless"),
+            (Quality::Hires, "hires"),
+            (Quality::Surround, "jyeffect"),
+            (Quality::Spatial, "sky"),
+            (Quality::Dolby, "dolby"),
+            (Quality::Master, "jymaster"),
+        ] {
+            let download = MusicProvider::download(
+                &provider,
+                &track,
+                &StreamRequest {
+                    quality,
+                    variant: StreamVariant::Modern,
+                    bitrate: None,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {level} download failed: {error}"));
+            assert_eq!(download.requested_quality, quality, "{level}");
+            assert_eq!(download.extensions["variant"], "modern", "{level}");
+            assert_eq!(download.extensions["requested_level"], level, "{level}");
+            assert_eq!(download.extensions["response"]["code"], 200, "{level}");
+            assert_eq!(download.available, download.url.is_some(), "{level}");
+            if let Some(url) = download.url {
+                assert!(url.starts_with("http"), "{level}");
+            } else {
+                assert_ne!(download.platform_code, Some(200), "{level}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
     async fn live_track_availability_covers_playable_and_unavailable_results() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let request = TrackAvailabilityRequest::default();
