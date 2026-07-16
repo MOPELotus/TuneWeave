@@ -55,6 +55,26 @@ pub(crate) struct AlbumDetail {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AlbumStatsEnvelope {
+    #[serde(rename = "isSub")]
+    pub subscribed: Option<bool>,
+    #[serde(rename = "subCount")]
+    pub subscriber_count: Option<u64>,
+    #[serde(rename = "commentCount")]
+    pub comment_count: Option<u64>,
+    #[serde(rename = "shareCount")]
+    pub share_count: Option<u64>,
+    #[serde(rename = "likedCount")]
+    pub like_count: Option<u64>,
+    #[serde(rename = "onSale")]
+    pub on_sale: Option<bool>,
+    #[serde(rename = "subTime")]
+    pub subscribed_at: Option<u64>,
+    #[serde(rename = "albumGameInfo")]
+    pub album_game_info: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct DigitalAlbumEnvelope {
     pub album: Option<DigitalAlbumInfo>,
     pub product: Option<DigitalAlbumProduct>,

@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, DigitalAlbum, ErrorCode, Extensions, LyricContributor, Lyrics,
-    MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
+    AccountProfile, Album, AlbumStats, AlbumSummary, ArtistSummary, AuthChallengeRequest,
+    AuthState, Capability, ChallengeMethod, DigitalAlbum, ErrorCode, Extensions, LyricContributor,
+    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
     PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
     RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
@@ -21,9 +21,9 @@ use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AlbumDetail, AlbumEnvelope, AudioQuality, DigitalAlbumEnvelope, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        AlbumDetail, AlbumEnvelope, AlbumStatsEnvelope, AudioQuality, DigitalAlbumEnvelope,
+        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
+        PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
         RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
         StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -260,6 +260,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::AlbumDetail,
+            Capability::AlbumStats,
             Capability::DigitalAlbumDetail,
             Capability::PlaylistRead,
             Capability::Lyrics,
@@ -371,6 +372,17 @@ impl MusicProvider for NeteaseProvider {
             .map(|song| map_song(song, None))
             .collect::<Result<Vec<_>>>()?;
         Ok(Page { items, pagination })
+    }
+
+    async fn album_stats(&self, id: &str, account: Option<&str>) -> Result<AlbumStats> {
+        let id = parse_numeric_id("album", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_weapi("/api/album/detail/dynamic", json!({ "id": id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let response: AlbumStatsEnvelope = parse_body(response.body)?;
+        map_album_stats(id, response)
     }
 
     async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
@@ -1338,6 +1350,33 @@ fn map_album(album: AlbumDetail) -> Result<Album> {
     })
 }
 
+fn map_album_stats(id: u64, stats: AlbumStatsEnvelope) -> Result<AlbumStats> {
+    let album_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid album id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "subscribed_at_ms", stats.subscribed_at);
+    insert_extension(&mut extensions, "album_game_info", stats.album_game_info);
+    Ok(AlbumStats {
+        album_ref,
+        subscribed: stats.subscribed,
+        subscriber_count: stats.subscriber_count,
+        comment_count: stats.comment_count,
+        share_count: stats.share_count,
+        like_count: stats.like_count,
+        on_sale: stats.on_sale,
+        subscribed_at: stats
+            .subscribed_at
+            .filter(|milliseconds| *milliseconds > 0)
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        extensions,
+    })
+}
+
 fn map_digital_album(
     response: DigitalAlbumEnvelope,
     raw: &Value,
@@ -1748,6 +1787,32 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_album_dynamic_stats_to_the_unified_model() {
+        let stats: AlbumStatsEnvelope = serde_json::from_value(json!({
+            "commentCount": 1989,
+            "isSub": true,
+            "likedCount": 7,
+            "onSale": false,
+            "shareCount": 9306,
+            "subCount": 71671,
+            "subTime": 1704067200000_u64,
+            "albumGameInfo": {"gameId": 42}
+        }))
+        .expect("album stats fixture");
+        let stats = map_album_stats(32311, stats).expect("map album stats");
+
+        assert_eq!(stats.album_ref.to_string(), "netease:32311");
+        assert_eq!(stats.subscribed, Some(true));
+        assert_eq!(stats.subscriber_count, Some(71671));
+        assert_eq!(stats.comment_count, Some(1989));
+        assert_eq!(stats.share_count, Some(9306));
+        assert_eq!(stats.like_count, Some(7));
+        assert_eq!(stats.on_sale, Some(false));
+        assert_eq!(stats.subscribed_at.as_deref(), Some("2024-01-01T00:00:00Z"));
+        assert_eq!(stats.extensions["album_game_info"]["gameId"], 42);
+    }
+
+    #[test]
     fn maps_netease_digital_album_product_to_the_unified_model() {
         let raw = json!({
             "code": 200,
@@ -1814,6 +1879,10 @@ mod tests {
             .await
             .expect_err("invalid digital album id");
         assert_eq!(digital_error.code, ErrorCode::InvalidRequest);
+        let stats_error = MusicProvider::album_stats(&provider, "invalid", None)
+            .await
+            .expect_err("invalid album stats id");
+        assert_eq!(stats_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -1975,6 +2044,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
+        assert!(capabilities.contains(&Capability::AlbumStats));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
     }
 
@@ -2335,6 +2405,19 @@ mod tests {
         assert_eq!(tracks.items.len(), 2);
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
         assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_album_stats() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let stats = MusicProvider::album_stats(&provider, "32311", None)
+            .await
+            .expect("live album stats");
+        assert_eq!(stats.album_ref.to_string(), "netease:32311");
+        assert!(stats.comment_count.is_some());
+        assert!(stats.share_count.is_some());
+        assert!(stats.subscriber_count.is_some());
     }
 
     #[tokio::test]
