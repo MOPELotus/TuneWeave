@@ -9,7 +9,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use tuneweave_core::{
     MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, Track, TrackEntitlement, TuneWeaveError,
+    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -169,6 +169,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
+        .route(
+            "/account/library/albums/{reference}",
+            put(album_subscribe).delete(album_unsubscribe),
+        )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
@@ -609,6 +613,42 @@ async fn digital_album_chart(
         response = response.with_account(account);
     }
     Ok(Json(response))
+}
+
+async fn album_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_album_subscription(state, reference, params, true).await
+}
+
+async fn album_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_album_subscription(state, reference, params, false).await
+}
+
+async fn set_album_subscription(
+    state: AppState,
+    reference: String,
+    params: AccountParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_album_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
 }
 
 async fn track_lyrics(
@@ -1537,6 +1577,7 @@ mod tests {
                 Capability::AlbumList,
                 Capability::AlbumStats,
                 Capability::AlbumTrackEntitlements,
+                Capability::AlbumSubscriptionWrite,
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
@@ -1629,6 +1670,24 @@ mod tests {
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                 },
+            })
+        }
+
+        async fn set_album_subscription(
+            &self,
+            id: &str,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            if let Some(account) = account {
+                extensions.insert("account".to_owned(), json!(account));
+            }
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test reference"),
+                subscribed,
+                extensions,
             })
         }
 
@@ -2191,6 +2250,35 @@ mod tests {
         assert_eq!(entitlements["data"][0]["available_qualities"][3], "hires");
         assert_eq!(entitlements["meta"]["pagination"]["total"], 10);
         assert_eq!(entitlements["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn album_library_put_and_delete_share_the_subscription_result() {
+        let (status, subscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/library/albums/netease:32311?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscribed["data"]["resource_ref"], "netease:32311");
+        assert_eq!(subscribed["data"]["subscribed"], true);
+        assert_eq!(subscribed["data"]["extensions"]["account"], "collector");
+        assert_eq!(subscribed["meta"]["platform"], "netease");
+        assert_eq!(subscribed["meta"]["account"], "collector");
+
+        let (status, unsubscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/library/albums/netease:32311?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unsubscribed["data"]["resource_ref"], "netease:32311");
+        assert_eq!(unsubscribed["data"]["subscribed"], false);
+        assert_eq!(unsubscribed["meta"]["account"], "collector");
     }
 
     #[tokio::test]
