@@ -1,4 +1,6 @@
 use serde::Deserialize;
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
@@ -624,6 +626,67 @@ pub(crate) struct DigitalAlbumChartItem {
     pub rank: Option<u32>,
     #[serde(rename = "rankIncr")]
     pub rank_change: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DimensionChartDetailEnvelope {
+    pub data: DimensionChartDetailData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DimensionChartDetailData {
+    #[serde(rename = "chartCode")]
+    pub chart_code: Option<String>,
+    #[serde(rename = "chartId")]
+    pub chart_id: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+    #[serde(rename = "updateTime")]
+    pub update_time: Option<u64>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    #[serde(rename = "shareCount")]
+    pub share_count: Option<u64>,
+    #[serde(rename = "commentCount")]
+    pub comment_count: Option<u64>,
+    #[serde(rename = "supportComment")]
+    pub support_comment: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DimensionChartTracksEnvelope {
+    pub data: DimensionChartTracksData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DimensionChartTracksData {
+    #[serde(rename = "chartCode")]
+    pub chart_code: Option<String>,
+    #[serde(rename = "chartId")]
+    pub chart_id: Option<String>,
+    #[serde(default)]
+    pub charts: Vec<Value>,
+    #[serde(rename = "groupNameMap", default)]
+    pub group_name_map: BTreeMap<String, Value>,
+    #[serde(rename = "periodUpdateTimeText")]
+    pub period_update_time_text: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DimensionChartTrackItem {
+    pub collect: Option<bool>,
+    #[serde(rename = "lastRank")]
+    pub last_rank: Option<i64>,
+    pub ratio: Option<Value>,
+    pub reason: Option<String>,
+    #[serde(rename = "reasonId")]
+    pub reason_id: Option<Value>,
+    pub score: Option<Value>,
+    #[serde(rename = "songData")]
+    pub song_data: Song,
+    pub privilege: Option<Privilege>,
 }
 
 #[derive(Debug, Deserialize)]

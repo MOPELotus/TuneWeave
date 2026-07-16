@@ -16,15 +16,16 @@ use tuneweave_core::{
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
     BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, ImageUploadRequest,
-    ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
-    Video, VideoKind,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
+    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -41,6 +42,7 @@ use crate::{
         ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality, BannerEnvelope,
         BroadcastTaxonomyEnvelope, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
         DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem,
+        DimensionChartDetailEnvelope, DimensionChartTrackItem, DimensionChartTracksEnvelope,
         ImageUploadAllocationEnvelope, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
         PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
         RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
@@ -293,6 +295,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
+            Capability::DimensionCharts,
             Capability::ArtistDetail,
             Capability::ArtistOverview,
             Capability::ArtistStats,
@@ -738,6 +741,31 @@ impl MusicProvider for NeteaseProvider {
             .collect::<Result<Vec<_>>>()?;
         let (items, pagination) = select_page(items, limit, request.offset);
         Ok(Page { items, pagination })
+    }
+
+    async fn dimension_chart(&self, request: &DimensionChartRequest) -> Result<DimensionChart> {
+        let payload = netease_dimension_chart_payload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_eapi("/api/chart/detail", payload).await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: DimensionChartDetailEnvelope = parse_body(response.body)?;
+        map_dimension_chart(response, request, raw_response)
+    }
+
+    async fn dimension_chart_tracks(
+        &self,
+        request: &DimensionChartRequest,
+    ) -> Result<DimensionChartTrackSnapshot> {
+        let payload = netease_dimension_chart_payload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/chart/song/detail", payload)
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: DimensionChartTracksEnvelope = parse_body(response.body)?;
+        map_dimension_chart_tracks(response, request, raw_response)
     }
 
     async fn artist(&self, id: &str, account: Option<&str>) -> Result<Artist> {
@@ -2761,6 +2789,34 @@ fn netease_digital_album_chart_request(
     ))
 }
 
+fn netease_dimension_chart_payload(request: &DimensionChartRequest) -> Result<Value> {
+    let (chart_code, target_id, target_type) = validated_dimension_chart_parts(request)?;
+    Ok(json!({
+        "chartCode": chart_code,
+        "targetId": target_id,
+        "targetType": target_type
+    }))
+}
+
+fn validated_dimension_chart_parts(request: &DimensionChartRequest) -> Result<(&str, &str, &str)> {
+    Ok((
+        required_dimension_chart_value("chart_code", &request.chart_code)?,
+        required_dimension_chart_value("target_id", &request.target_id)?,
+        required_dimension_chart_value("target_type", &request.target_type)?,
+    ))
+}
+
+fn required_dimension_chart_value<'a>(name: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "dimension chart {name} cannot be empty"
+        ))
+        .with_platform(Platform::Netease));
+    }
+    Ok(value)
+}
+
 fn normalize_account_label(account: Option<&str>) -> Result<&str> {
     let account = account.unwrap_or("default").trim();
     let account = if account.is_empty() {
@@ -4416,6 +4472,138 @@ fn map_digital_album_chart_entry(raw: Value, position: u32) -> Result<DigitalAlb
         product: map_digital_album_list_item(raw)?,
         extensions,
     })
+}
+
+fn map_dimension_chart(
+    response: DimensionChartDetailEnvelope,
+    request: &DimensionChartRequest,
+    raw_response: Value,
+) -> Result<DimensionChart> {
+    let (requested_code, target_id, target_type) = validated_dimension_chart_parts(request)?;
+    let data = response.data;
+    let chart_code = data
+        .chart_code
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| requested_code.to_owned());
+    let (id, resource_ref) =
+        dimension_chart_reference(data.chart_id, &chart_code, target_id, target_type)?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(DimensionChart {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        chart_code,
+        target_id: target_id.to_owned(),
+        target_type: target_type.to_owned(),
+        name: data.name.unwrap_or_default(),
+        description: data.description.unwrap_or_default(),
+        cover_url: data.cover_url,
+        updated_at_ms: data.update_time,
+        play_count: data.play_count,
+        share_count: data.share_count,
+        comment_count: data.comment_count,
+        supports_comments: data.support_comment,
+        extensions,
+    })
+}
+
+fn map_dimension_chart_tracks(
+    response: DimensionChartTracksEnvelope,
+    request: &DimensionChartRequest,
+    raw_response: Value,
+) -> Result<DimensionChartTrackSnapshot> {
+    let (requested_code, target_id, target_type) = validated_dimension_chart_parts(request)?;
+    let data = response.data;
+    let chart_code = data
+        .chart_code
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| requested_code.to_owned());
+    let (_, chart_ref) =
+        dimension_chart_reference(data.chart_id, &chart_code, target_id, target_type)?;
+    let entries = data
+        .charts
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| map_dimension_chart_track_entry(raw, index))
+        .collect::<Result<Vec<_>>>()?;
+    let groups = data
+        .group_name_map
+        .into_iter()
+        .filter_map(|(key, value)| scalar_string(value).map(|value| (key, value)))
+        .collect();
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(DimensionChartTrackSnapshot {
+        chart_ref,
+        chart_code,
+        target_id: target_id.to_owned(),
+        target_type: target_type.to_owned(),
+        entries,
+        period_label: data.period_update_time_text.and_then(scalar_string),
+        groups,
+        extensions,
+    })
+}
+
+fn map_dimension_chart_track_entry(raw: Value, index: usize) -> Result<DimensionChartTrackEntry> {
+    let item: DimensionChartTrackItem = parse_body(raw.clone())?;
+    let rank = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
+    let previous_rank = item
+        .last_rank
+        .and_then(|rank| u32::try_from(rank).ok())
+        .filter(|rank| *rank > 0);
+    let rank_change = previous_rank.map(|previous| i64::from(previous) - i64::from(rank));
+    let track = map_song(item.song_data, item.privilege)?;
+    let mut extensions = Extensions::new();
+    extensions.insert("entry".to_owned(), raw);
+    Ok(DimensionChartTrackEntry {
+        rank,
+        previous_rank,
+        rank_change,
+        track,
+        reason: item.reason.filter(|reason| !reason.trim().is_empty()),
+        reason_id: item.reason_id.and_then(scalar_string),
+        score: item.score.as_ref().and_then(scalar_f64),
+        ratio: item.ratio.as_ref().and_then(scalar_f64),
+        collected: item.collect,
+        extensions,
+    })
+}
+
+fn dimension_chart_reference(
+    chart_id: Option<String>,
+    chart_code: &str,
+    target_id: &str,
+    target_type: &str,
+) -> Result<(String, ResourceRef)> {
+    let id = chart_id
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| format!("{chart_code}#{target_id}@{target_type}#"));
+    let resource_ref = ResourceRef::new(Platform::Netease, id.clone()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid dimension chart id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok((id, resource_ref))
+}
+
+fn scalar_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) => (!value.trim().is_empty()).then_some(value),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn scalar_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
 fn map_album_subscription_result(
@@ -6322,6 +6510,129 @@ mod tests {
     }
 
     #[test]
+    fn builds_netease_dimension_chart_payload_without_inventing_pagination() {
+        let request = DimensionChartRequest::new("CITY_SONG_CHART", "110000", "CITY");
+        let payload = netease_dimension_chart_payload(&request).expect("dimension chart payload");
+        assert_eq!(payload["chartCode"], "CITY_SONG_CHART");
+        assert_eq!(payload["targetId"], "110000");
+        assert_eq!(payload["targetType"], "CITY");
+        assert!(payload.get("limit").is_none());
+        assert!(payload.get("offset").is_none());
+
+        for request in [
+            DimensionChartRequest::new("", "110000", "CITY"),
+            DimensionChartRequest::new("CITY_SONG_CHART", " ", "CITY"),
+            DimensionChartRequest::new("CITY_SONG_CHART", "110000", ""),
+        ] {
+            assert_eq!(
+                netease_dimension_chart_payload(&request)
+                    .expect_err("empty dimension parameter")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn maps_netease_dimension_chart_detail_and_complete_track_snapshot() {
+        let detail_raw = json!({
+            "code": 200,
+            "data": {
+                "chartCode": "CITY_SONG_CHART",
+                "chartId": "CITY_SONG_CHART#110000@CITY#",
+                "commentCount": 9,
+                "coverUrl": "https://example.test/city.png",
+                "description": "当前城市用户一周内收听的歌曲。",
+                "name": "北京榜",
+                "playCount": 120,
+                "shareCount": 3,
+                "supportComment": true,
+                "updateTime": 1784181600000_u64,
+                "commonChartExtInfoVO": {"color": "red"}
+            }
+        });
+        let detail: DimensionChartDetailEnvelope =
+            parse_body(detail_raw.clone()).expect("dimension chart detail fixture");
+        let request = DimensionChartRequest::new("CITY_SONG_CHART", "110000", "CITY");
+        let detail =
+            map_dimension_chart(detail, &request, detail_raw).expect("map dimension chart detail");
+        assert_eq!(
+            detail.resource_ref.to_string(),
+            "netease:CITY_SONG_CHART#110000@CITY#"
+        );
+        assert_eq!(detail.name, "北京榜");
+        assert_eq!(detail.updated_at_ms, Some(1_784_181_600_000));
+        assert_eq!(detail.supports_comments, Some(true));
+        assert_eq!(
+            detail.extensions["response"]["data"]["commonChartExtInfoVO"]["color"],
+            "red"
+        );
+
+        let tracks_raw = json!({
+            "code": 200,
+            "data": {
+                "chartCode": "CITY_STYLE_SONG_CHART",
+                "chartId": "CITY_STYLE_SONG_CHART#110000_1020@CITY_STYLE#",
+                "charts": [{
+                    "collect": false,
+                    "lastRank": 4,
+                    "ratio": "0.98",
+                    "reason": "城市流行热度上升",
+                    "reasonId": 17,
+                    "score": 98.5,
+                    "songData": {
+                        "id": 123,
+                        "name": "反方向的钟",
+                        "alia": ["Clockwise"],
+                        "ar": [{"id": 6452, "name": "周杰伦"}],
+                        "al": {"id": 456, "name": "Jay", "picUrl": "https://example.test/cover.jpg"},
+                        "dt": 258000,
+                        "mv": 0,
+                        "fee": 1,
+                        "st": 0,
+                        "l": {"br": 128000},
+                        "h": {"br": 320000}
+                    },
+                    "privilege": {"id": 123, "st": 0, "fee": 1, "pl": 320000, "maxbr": 999000},
+                    "targetUrl": "https://example.test/reason"
+                }],
+                "groupNameMap": {"CITY": "城市", "1020": "流行"},
+                "periodUpdateTimeText": "每周更新",
+                "uuid": "snapshot-1"
+            }
+        });
+        let tracks: DimensionChartTracksEnvelope =
+            parse_body(tracks_raw.clone()).expect("dimension chart tracks fixture");
+        let request =
+            DimensionChartRequest::new("CITY_STYLE_SONG_CHART", "110000_1020", "CITY_STYLE");
+        let snapshot = map_dimension_chart_tracks(tracks, &request, tracks_raw)
+            .expect("map dimension chart tracks");
+        assert_eq!(
+            snapshot.chart_ref.to_string(),
+            "netease:CITY_STYLE_SONG_CHART#110000_1020@CITY_STYLE#"
+        );
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].rank, 1);
+        assert_eq!(snapshot.entries[0].previous_rank, Some(4));
+        assert_eq!(snapshot.entries[0].rank_change, Some(3));
+        assert_eq!(snapshot.entries[0].track.name, "反方向的钟");
+        assert_eq!(snapshot.entries[0].track.playable, Some(true));
+        assert_eq!(snapshot.entries[0].reason_id.as_deref(), Some("17"));
+        assert_eq!(snapshot.entries[0].score, Some(98.5));
+        assert_eq!(snapshot.entries[0].ratio, Some(0.98));
+        assert_eq!(snapshot.groups["1020"], "流行");
+        assert_eq!(snapshot.period_label.as_deref(), Some("每周更新"));
+        assert_eq!(
+            snapshot.entries[0].extensions["entry"]["targetUrl"],
+            "https://example.test/reason"
+        );
+        assert_eq!(
+            snapshot.extensions["response"]["data"]["uuid"],
+            "snapshot-1"
+        );
+    }
+
+    #[test]
     fn validates_netease_digital_album_areas() {
         assert_eq!(
             normalize_digital_album_area(DigitalAlbumCatalog::Latest, Some("zh"))
@@ -6832,6 +7143,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
+        assert!(capabilities.contains(&Capability::DimensionCharts));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
@@ -8107,6 +8419,31 @@ mod tests {
             assert_eq!(page.items[0].rank, 1);
             assert!(!page.items[0].product.name.is_empty());
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_dimension_chart_detail_and_track_snapshot() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let detail_request = DimensionChartRequest::new("CITY_SONG_CHART", "110000", "CITY");
+        let detail = MusicProvider::dimension_chart(&provider, &detail_request)
+            .await
+            .expect("live dimension chart detail");
+        assert_eq!(detail.chart_code, "CITY_SONG_CHART");
+        assert_eq!(detail.target_id, "110000");
+        assert!(!detail.name.is_empty());
+        assert!(detail.updated_at_ms.is_some());
+
+        let tracks_request =
+            DimensionChartRequest::new("CITY_STYLE_SONG_CHART", "110000_1020", "CITY_STYLE");
+        let snapshot = MusicProvider::dimension_chart_tracks(&provider, &tracks_request)
+            .await
+            .expect("live dimension chart track snapshot");
+        assert_eq!(snapshot.chart_code, "CITY_STYLE_SONG_CHART");
+        assert_eq!(snapshot.target_id, "110000_1020");
+        assert!(!snapshot.entries.is_empty());
+        assert_eq!(snapshot.entries[0].rank, 1);
+        assert!(!snapshot.entries[0].track.name.is_empty());
     }
 
     #[tokio::test]
