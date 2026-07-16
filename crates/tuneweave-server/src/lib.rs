@@ -23,14 +23,15 @@ use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
-    ImageUploadResult, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest,
-    Platform, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
-    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Banner,
+    BannerClient, BannerListRequest, Capability, ChallengeMethod, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderRegistry, Quality, RecommendationRequest, ResolveRequest,
+    ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -167,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
+        .route("/banners", get(banners))
         .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
         .route("/albums", get(albums))
@@ -372,6 +374,31 @@ async fn search(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BannerParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    client: Option<String>,
+}
+
+async fn banners(
+    State(state): State<AppState>,
+    Query(params): Query<BannerParams>,
+) -> Result<Json<ApiResponse<Vec<Banner>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let mut request = BannerListRequest::new(parse_banner_client(params.client.as_deref())?);
+    request.account.clone_from(&account);
+    let banners = provider.banners(&request).await?;
+    let mut response = ApiResponse::new(banners).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -2236,6 +2263,21 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
     }
 }
 
+fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveError> {
+    match value.unwrap_or("pc").trim().to_ascii_lowercase().as_str() {
+        "pc" | "0" => Ok(BannerClient::Pc),
+        "android" | "1" => Ok(BannerClient::Android),
+        "iphone" | "ios" | "2" => Ok(BannerClient::Iphone),
+        "ipad" | "3" => Ok(BannerClient::Ipad),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported banner client: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["pc", "android", "iphone", "ipad", "0", "1", "2", "3"]
+        }))),
+    }
+}
+
 fn parse_u32_parameter(
     name: &str,
     value: Option<&str>,
@@ -2306,8 +2348,8 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result, SearchQuery,
-        StreamRequest,
+        BannerTargetKind, CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result,
+        SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -2332,6 +2374,7 @@ mod tests {
             BTreeSet::from([
                 Capability::SearchTracks,
                 Capability::AudioRecognition,
+                Capability::Banners,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
@@ -2413,6 +2456,24 @@ mod tests {
                 no_match_reason: None,
                 extensions,
             })
+        }
+
+        async fn banners(&self, request: &BannerListRequest) -> Result<Vec<Banner>> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("client".to_owned(), json!(request.client));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(vec![Banner {
+                id: Some("banner-1".to_owned()),
+                title: Some("新歌首发".to_owned()),
+                image_url: "https://example.test/banner.jpg".to_owned(),
+                target_ref: Some(
+                    ResourceRef::new(Platform::Netease, "185809").expect("valid banner target"),
+                ),
+                target_kind: BannerTargetKind::Track,
+                url: Some("https://music.163.com/song?id=185809".to_owned()),
+                exclusive: Some(false),
+                extensions,
+            }])
         }
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
@@ -3436,6 +3497,47 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn banners_use_unified_client_platform_and_account_parameters() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/banners?platform=netease&client=iphone&account=personal",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["id"], "banner-1");
+        assert_eq!(json["data"][0]["target_ref"], "netease:185809");
+        assert_eq!(json["data"][0]["target_kind"], "track");
+        assert_eq!(json["data"][0]["extensions"]["client"], "iphone");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn banners_accept_every_reference_numeric_client_type() {
+        for (kind, expected) in [
+            ("0", "pc"),
+            ("1", "android"),
+            ("2", "iphone"),
+            ("3", "ipad"),
+        ] {
+            let path = format!("/v1/banners?type={kind}");
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["data"][0]["extensions"]["client"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn banners_reject_unknown_clients() {
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/banners?client=windows-phone").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
