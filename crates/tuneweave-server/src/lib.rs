@@ -33,8 +33,8 @@ use tuneweave_core::{
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -177,6 +177,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
+        .route("/tracks/{reference}/availability", get(track_availability))
         .route("/albums", get(albums))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
@@ -603,6 +604,40 @@ async fn track(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TrackAvailabilityParams {
+    account: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<String>,
+}
+
+async fn track_availability(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<TrackAvailabilityParams>,
+) -> Result<Json<ApiResponse<TrackAvailability>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let bitrate = parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?
+        .unwrap_or(TrackAvailabilityRequest::DEFAULT_BITRATE);
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let availability = provider
+        .track_availability(
+            reference.id(),
+            &TrackAvailabilityRequest {
+                bitrate,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(availability).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -2975,6 +3010,7 @@ mod tests {
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
                 Capability::TrackDetail,
+                Capability::TrackAvailability,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
                 Capability::AlbumStats,
@@ -3161,6 +3197,31 @@ mod tests {
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
             Ok(sample_track(id))
+        }
+
+        async fn track_availability(
+            &self,
+            id: &str,
+            request: &TrackAvailabilityRequest,
+        ) -> Result<TrackAvailability> {
+            let playable = id != "1";
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(TrackAvailability {
+                track_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test track reference"),
+                playable,
+                requested_bitrate: request.bitrate,
+                actual_bitrate: playable.then_some(request.bitrate.min(320_000)),
+                platform_code: Some(if playable { 200 } else { 404 }),
+                message: if playable {
+                    "ok"
+                } else {
+                    "亲爱的,暂无版权"
+                }
+                .to_owned(),
+                extensions,
+            })
         }
 
         async fn album(&self, id: &str, _account: Option<&str>) -> Result<Album> {
@@ -4581,6 +4642,55 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["ref"], "netease:185809");
         assert_eq!(json["data"]["artists"][0]["name"], "周杰伦");
+    }
+
+    #[tokio::test]
+    async fn track_availability_supports_default_unified_and_reference_bitrates() {
+        let (status, default) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:1969519579/availability?account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(default["data"]["track_ref"], "netease:1969519579");
+        assert_eq!(default["data"]["playable"], true);
+        assert_eq!(default["data"]["requested_bitrate"], 999_000);
+        assert_eq!(default["data"]["actual_bitrate"], 320_000);
+        assert_eq!(default["data"]["platform_code"], 200);
+        assert_eq!(default["data"]["extensions"]["account"], "vip");
+        assert_eq!(default["meta"]["platform"], "netease");
+        assert_eq!(default["meta"]["account"], "vip");
+
+        let (status, reference) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:1969519579/availability?br=128000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reference["data"]["requested_bitrate"], 128_000);
+        assert_eq!(reference["data"]["actual_bitrate"], 128_000);
+
+        let (status, unified) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:1/availability?bitrate=64000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unified["data"]["playable"], false);
+        assert_eq!(unified["data"]["requested_bitrate"], 64_000);
+        assert_eq!(unified["data"]["actual_bitrate"], Value::Null);
+        assert_eq!(unified["data"]["platform_code"], 404);
+    }
+
+    #[tokio::test]
+    async fn track_availability_rejects_non_numeric_bitrates() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:1969519579/availability?br=lossless",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
