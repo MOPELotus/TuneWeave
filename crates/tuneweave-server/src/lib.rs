@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistListRequest, ArtistStats, ArtistUpdatesRequest, ArtistVideoListRequest,
-    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
+    ArtistListRequest, ArtistStats, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
+    ArtistWorksRequest, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
     PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
@@ -216,6 +216,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/following/artists/new-tracks",
             get(account_artist_new_tracks),
+        )
+        .route(
+            "/account/following/artists/new-works",
+            get(account_artist_new_works),
         )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
@@ -1501,6 +1505,8 @@ struct ArtistUpdatesParams {
     account: Option<String>,
     limit: Option<String>,
     before: Option<String>,
+    source_type: Option<String>,
+    first_request: Option<String>,
 }
 
 async fn account_artist_new_videos(
@@ -1544,6 +1550,38 @@ async fn account_artist_new_tracks(
         .account_artist_new_tracks(&ArtistUpdatesRequest {
             limit,
             before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn account_artist_new_works(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistUpdatesParams>,
+) -> Result<Json<ApiResponse<Vec<ArtistWorkUpdate>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_artist_new_works(&ArtistWorksRequest {
+            limit,
+            before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
+            source_type: parse_u32_parameter("source_type", params.source_type.as_deref(), 1)?,
+            first_request: parse_bool_parameter(
+                "first_request",
+                params.first_request.as_deref(),
+                true,
+            )?,
             account: Some(account.clone()),
         })
         .await?;
@@ -1933,8 +1971,8 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistBiographySection, ArtistSummary, CreatorSummary, MusicProvider, Page, PageMeta,
-        ProviderQrStart, Result, SearchQuery, StreamRequest,
+        ArtistBiographySection, ArtistSummary, ArtistWorkKind, CreatorSummary, MusicProvider, Page,
+        PageMeta, ProviderQrStart, Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -1985,6 +2023,7 @@ mod tests {
                 Capability::AccountAlbums,
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
+                Capability::AccountArtistNewWorks,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -2374,6 +2413,44 @@ mod tests {
                     limit: request.limit,
                     offset: 0,
                     total: Some(3),
+                    next_offset: None,
+                    has_more: true,
+                    extensions,
+                },
+            })
+        }
+
+        async fn account_artist_new_works(
+            &self,
+            request: &ArtistWorksRequest,
+        ) -> Result<Page<ArtistWorkUpdate>> {
+            let mut item_extensions = tuneweave_core::Extensions::new();
+            item_extensions.insert(
+                "account".to_owned(),
+                json!(request.account.as_deref().unwrap_or("default")),
+            );
+            let item = ArtistWorkUpdate {
+                source_type: request.source_type,
+                kind: ArtistWorkKind::Track,
+                published_at: Some("2024-07-03".to_owned()),
+                artist: None,
+                title: Some("新专辑".to_owned()),
+                cover_url: Some("https://example.test/new-album.jpg".to_owned()),
+                tracks: vec![sample_track("2099001")],
+                videos: Vec::new(),
+                extensions: item_extensions,
+            };
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("before_ms".to_owned(), json!(request.before_ms));
+            extensions.insert("next_before_ms".to_owned(), json!(1_720_000_000_000_u64));
+            extensions.insert("source_type".to_owned(), json!(request.source_type));
+            extensions.insert("first_request".to_owned(), json!(request.first_request));
+            Ok(Page {
+                items: vec![item],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: None,
                     next_offset: None,
                     has_more: true,
                     extensions,
@@ -3445,6 +3522,32 @@ mod tests {
         assert_eq!(
             json["meta"]["pagination"]["extensions"]["next_before_ms"],
             1_720_000_000_000_u64
+        );
+    }
+
+    #[tokio::test]
+    async fn account_artist_new_works_keep_type_and_first_request_controls() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists/new-works?platform=netease&account=personal&limit=2&before=1730000000000&source_type=1&first_request=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["kind"], "track");
+        assert_eq!(json["data"][0]["source_type"], 1);
+        assert_eq!(json["data"][0]["tracks"][0]["ref"], "netease:2099001");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["before_ms"],
+            1_730_000_000_000_u64
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["source_type"], 1);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["first_request"],
+            false
         );
     }
 
