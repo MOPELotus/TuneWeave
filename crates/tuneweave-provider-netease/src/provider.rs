@@ -9,9 +9,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    Capability, ChallengeMethod, DigitalAlbum, ErrorCode, Extensions, LyricContributor, Lyrics,
+    MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
+    PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
     RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
     TrialWindow, TuneWeaveError,
@@ -21,10 +21,11 @@ use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AlbumDetail, AlbumEnvelope, AudioQuality, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
+        AlbumDetail, AlbumEnvelope, AudioQuality, DigitalAlbumEnvelope, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -259,6 +260,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::AlbumDetail,
+            Capability::DigitalAlbumDetail,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -369,6 +371,18 @@ impl MusicProvider for NeteaseProvider {
             .map(|song| map_song(song, None))
             .collect::<Result<Vec<_>>>()?;
         Ok(Page { items, pagination })
+    }
+
+    async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
+        let id = parse_numeric_id("digital album", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_weapi("/api/vipmall/albumproduct/detail", json!({ "id": id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let raw = response.body;
+        let response: DigitalAlbumEnvelope = parse_body(raw.clone())?;
+        map_digital_album(response, &raw, id)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1324,6 +1338,100 @@ fn map_album(album: AlbumDetail) -> Result<Album> {
     })
 }
 
+fn map_digital_album(
+    response: DigitalAlbumEnvelope,
+    raw: &Value,
+    requested_id: u64,
+) -> Result<DigitalAlbum> {
+    let album = response.album.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "NetEase digital album was not found",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": requested_id }))
+    })?;
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, album.album_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid digital album id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let artist_name = album.artist_name.or(album.artist_names);
+    let artists = match (album.artist_id, artist_name) {
+        (id, Some(name)) if !name.trim().is_empty() => vec![ArtistSummary {
+            resource_ref: id
+                .map(|id| ResourceRef::new(Platform::Netease, id.to_string()))
+                .transpose()
+                .map_err(|error| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        format!("NetEase returned an invalid digital album artist id: {error}"),
+                    )
+                    .with_platform(Platform::Netease)
+                })?,
+            name,
+        }],
+        _ => Vec::new(),
+    };
+    let product = response.product;
+    let description = product
+        .as_ref()
+        .map(|product| {
+            product
+                .descr
+                .iter()
+                .map(|item| item.resource.trim())
+                .filter(|resource| !resource.is_empty() && *resource != "</br>")
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "bought_count", response.bought_count);
+    for key in [
+        "album",
+        "product",
+        "board",
+        "style",
+        "singleSongProductId",
+        "visitorId",
+    ] {
+        if let Some(value) = raw.get(key) {
+            extensions.insert(key.to_owned(), value.clone());
+        }
+    }
+    Ok(DigitalAlbum {
+        resource_ref,
+        platform: Platform::Netease,
+        id: album.album_id.to_string(),
+        name: album.album_name,
+        artists,
+        description,
+        cover_url: album.cover_url,
+        published_at: product
+            .as_ref()
+            .and_then(|product| product.publish_time)
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        price: product
+            .as_ref()
+            .and_then(|product| product.price)
+            .map(|amount| Money {
+                amount,
+                currency: "CNY".to_owned(),
+            }),
+        is_free: product.as_ref().and_then(|product| product.is_free),
+        purchasable: response.can_buy,
+        purchased: response.has_album,
+        sale_count: product.as_ref().and_then(|product| product.sale_count),
+        track_count: None,
+        tags: product.map_or_else(Vec::new, |product| product.tags),
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -1639,6 +1747,57 @@ mod tests {
         assert!(album.published_at.is_some());
     }
 
+    #[test]
+    fn maps_netease_digital_album_product_to_the_unified_model() {
+        let raw = json!({
+            "code": 200,
+            "album": {
+                "albumId": 120605500,
+                "albumName": "冀西南林路行",
+                "artistId": 13223,
+                "artistName": "万能青年旅店",
+                "artistNames": "万能青年旅店",
+                "coverUrl": "https://example.test/album.jpg"
+            },
+            "product": {
+                "price": 22.0,
+                "isFree": false,
+                "pubTime": 1608566401510_u64,
+                "saleNum": 42,
+                "tags": ["独家", "无损品质收听＆下载"],
+                "descr": [
+                    {"resource": "发端似乎在2013年", "type": 1},
+                    {"resource": "</br>", "type": 1},
+                    {"resource": "西郊有密林 助君出重围", "type": 1}
+                ],
+                "albumType": 0,
+                "albumfee": 4
+            },
+            "canBuy": true,
+            "hasAlbum": false,
+            "boughtCnt": 0,
+            "board": {"hasFansBoard": true},
+            "style": {"color": "#605848"},
+            "singleSongProductId": 5933052,
+            "visitorId": 0
+        });
+        let response: DigitalAlbumEnvelope =
+            serde_json::from_value(raw.clone()).expect("digital album fixture");
+        let album = map_digital_album(response, &raw, 120605500).expect("map digital album");
+
+        assert_eq!(album.resource_ref.to_string(), "netease:120605500");
+        assert_eq!(album.artists[0].name, "万能青年旅店");
+        assert_eq!(album.price.expect("price").amount, 22.0);
+        assert_eq!(album.purchasable, Some(true));
+        assert_eq!(album.purchased, Some(false));
+        assert_eq!(album.sale_count, Some(42));
+        assert_eq!(album.tags.len(), 2);
+        assert!(album.description.contains("西郊有密林"));
+        assert!(!album.description.contains("</br>"));
+        assert_eq!(album.extensions["product"]["albumfee"], 4);
+        assert_eq!(album.extensions["board"]["hasFansBoard"], true);
+    }
+
     #[tokio::test]
     async fn album_ids_are_validated_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
@@ -1651,6 +1810,10 @@ mod tests {
                 .await
                 .expect_err("invalid album tracks id");
         assert_eq!(tracks_error.code, ErrorCode::InvalidRequest);
+        let digital_error = MusicProvider::digital_album(&provider, "invalid", None)
+            .await
+            .expect_err("invalid digital album id");
+        assert_eq!(digital_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -1812,6 +1975,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
+        assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
     }
 
     #[tokio::test]
@@ -2171,6 +2335,19 @@ mod tests {
         assert_eq!(tracks.items.len(), 2);
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
         assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_digital_album_detail() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let album = MusicProvider::digital_album(&provider, "120605500", None)
+            .await
+            .expect("live digital album detail");
+        assert_eq!(album.resource_ref.to_string(), "netease:120605500");
+        assert!(!album.name.is_empty());
+        assert!(!album.artists.is_empty());
+        assert!(album.price.is_some());
     }
 
     #[tokio::test]

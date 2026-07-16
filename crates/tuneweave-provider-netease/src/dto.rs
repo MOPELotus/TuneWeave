@@ -55,6 +55,54 @@ pub(crate) struct AlbumDetail {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumEnvelope {
+    pub album: Option<DigitalAlbumInfo>,
+    pub product: Option<DigitalAlbumProduct>,
+    #[serde(rename = "canBuy")]
+    pub can_buy: Option<bool>,
+    #[serde(rename = "hasAlbum")]
+    pub has_album: Option<bool>,
+    #[serde(rename = "boughtCnt")]
+    pub bought_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumInfo {
+    #[serde(rename = "albumId")]
+    pub album_id: u64,
+    #[serde(rename = "albumName")]
+    pub album_name: String,
+    #[serde(rename = "artistId")]
+    pub artist_id: Option<u64>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(rename = "artistNames")]
+    pub artist_names: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumProduct {
+    pub price: Option<f64>,
+    #[serde(rename = "isFree")]
+    pub is_free: Option<bool>,
+    #[serde(rename = "pubTime")]
+    pub publish_time: Option<u64>,
+    #[serde(rename = "saleNum")]
+    pub sale_count: Option<u64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub descr: Vec<DigitalAlbumDescription>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumDescription {
+    pub resource: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistEnvelope {
     pub playlist: Option<PlaylistDetail>,
 }
