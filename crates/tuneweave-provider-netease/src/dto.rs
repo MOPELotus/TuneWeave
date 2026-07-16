@@ -74,6 +74,41 @@ pub(crate) struct ArtistListItem {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistMvsEnvelope {
+    #[serde(rename = "hasMore")]
+    pub has_more: Option<bool>,
+    #[serde(default)]
+    pub mvs: Vec<Value>,
+    pub time: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistMvItem {
+    pub id: u64,
+    pub name: String,
+    pub artist: Option<ArtistMvCreator>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    pub duration: Option<u64>,
+    pub imgurl: Option<String>,
+    #[serde(rename = "imgurl16v9")]
+    pub image_16x9_url: Option<String>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    #[serde(rename = "publishTime")]
+    pub published_at: Option<String>,
+    pub subed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistMvCreator {
+    pub id: u64,
+    pub name: String,
+    #[serde(rename = "img1v1Url")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistDetailEnvelope {
     pub data: ArtistDetailData,
 }
