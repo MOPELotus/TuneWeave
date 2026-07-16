@@ -35,6 +35,7 @@ pub enum Capability {
     AccountProfile,
     AccountPlaylists,
     AccountAlbums,
+    AccountArtistNewVideos,
     PlaylistWrite,
     Favorites,
     ListeningHistory,

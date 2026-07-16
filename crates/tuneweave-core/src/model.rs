@@ -327,6 +327,24 @@ impl ArtistVideoListRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistUpdatesRequest {
+    pub limit: u32,
+    pub before_ms: Option<u64>,
+    pub account: Option<String>,
+}
+
+impl ArtistUpdatesRequest {
+    #[must_use]
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            before_ms: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
     pub resource_ref: Option<ResourceRef>,
@@ -827,6 +845,18 @@ mod tests {
         assert_eq!(value["creators"][0]["ref"], "netease:6452");
         assert_eq!(value["duration_ms"], 266_000);
         assert_eq!(value["subscribed"], false);
+    }
+
+    #[test]
+    fn artist_updates_request_keeps_account_and_timestamp_cursor_separate() {
+        let mut request = ArtistUpdatesRequest::new(20);
+        request.before_ms = Some(1_720_000_000_000);
+        request.account = Some("personal".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize artist updates request");
+        assert_eq!(value["limit"], 20);
+        assert_eq!(value["before_ms"], 1_720_000_000_000_u64);
+        assert_eq!(value["account"], "personal");
     }
 
     #[test]
