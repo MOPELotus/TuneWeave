@@ -17,7 +17,7 @@ use tuneweave_core::{
     PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
 };
 
 use crate::{
@@ -26,11 +26,11 @@ use crate::{
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
-        ArtistDynamicEnvelope, ArtistFollowCountEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
-        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
+        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
+        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
+        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -277,6 +277,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ArtistDetail,
             Capability::ArtistStats,
             Capability::ArtistAlbums,
+            Capability::ArtistFans,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -641,6 +642,25 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: ArtistAlbumsEnvelope = parse_body(response.body)?;
         map_artist_albums_response(response, limit, request.offset)
+    }
+
+    async fn artist_fans(&self, id: &str, request: &PageRequest) -> Result<Page<User>> {
+        let id = parse_numeric_id("artist", id)?;
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_weapi(
+                "/api/artist/fans/get",
+                json!({
+                    "id": id,
+                    "limit": limit,
+                    "offset": request.offset
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: ArtistFansEnvelope = parse_body(response.body)?;
+        map_artist_fans_response(response, limit, request.offset)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1935,6 +1955,64 @@ fn map_artist_albums_response(
     })
 }
 
+fn map_artist_fans_response(
+    response: ArtistFansEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<User>> {
+    let items = response
+        .data
+        .into_iter()
+        .map(map_artist_fan)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response.has_more.unwrap_or(consumed == limit);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: response.total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::new(),
+        },
+    })
+}
+
+fn map_artist_fan(raw: Value) -> Result<User> {
+    let profile_raw = raw.get("userProfile").cloned().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase artist fan item is missing userProfile",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let profile: ArtistFanProfile = parse_body(profile_raw)?;
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, profile.user_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid fan user id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("fan".to_owned(), raw);
+    Ok(User {
+        resource_ref,
+        platform: Platform::Netease,
+        id: profile.user_id.to_string(),
+        name: profile.nickname,
+        avatar_url: profile.avatar_url,
+        signature: profile.signature,
+        followed: profile.followed,
+        mutual: profile.mutual,
+        extensions,
+    })
+}
+
 fn map_artist(
     detail: ArtistDetailEnvelope,
     description: ArtistDescriptionEnvelope,
@@ -2686,6 +2764,54 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_fans_to_users_and_preserves_profile_metadata() {
+        let response: ArtistFansEnvelope = serde_json::from_value(json!({
+            "code": 200,
+            "data": [
+                {
+                    "userProfile": {
+                        "userId": 6298206519_u64,
+                        "nickname": "轻手揍人丸",
+                        "avatarUrl": "https://example.test/avatar.jpg",
+                        "signature": "111",
+                        "followed": false,
+                        "mutual": true,
+                        "province": 350000,
+                        "city": 350500,
+                        "gender": 2
+                    },
+                    "vipRights": {
+                        "redVipLevel": 0,
+                        "redVipAnnualCount": -1
+                    }
+                }
+            ],
+            "hasMore": true,
+            "count": 13704933
+        }))
+        .expect("artist fans fixture");
+
+        let page = map_artist_fans_response(response, 1, 10).expect("map artist fans");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:6298206519");
+        assert_eq!(page.items[0].name, "轻手揍人丸");
+        assert_eq!(page.items[0].signature.as_deref(), Some("111"));
+        assert_eq!(page.items[0].mutual, Some(true));
+        assert_eq!(
+            page.items[0].extensions["fan"]["userProfile"]["province"],
+            350000
+        );
+        assert_eq!(
+            page.items[0].extensions["fan"]["vipRights"]["redVipLevel"],
+            0
+        );
+        assert_eq!(page.pagination.total, Some(13_704_933));
+        assert_eq!(page.pagination.next_offset, Some(11));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_detail_and_description_without_losing_extensions() {
         let detail_raw = json!({
             "code": 200,
@@ -3104,6 +3230,11 @@ mod tests {
             .await
             .expect_err("invalid artist stats id");
         assert_eq!(artist_stats_error.code, ErrorCode::InvalidRequest);
+        let artist_fans_error =
+            MusicProvider::artist_fans(&provider, "invalid", &PageRequest::new(20, 0))
+                .await
+                .expect_err("invalid artist fans id");
+        assert_eq!(artist_fans_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -3825,6 +3956,20 @@ mod tests {
         assert!(!stats.video_counts.is_empty());
         assert!(stats.extensions.contains_key("response"));
         assert!(stats.extensions.contains_key("follow_count_response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_fans() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page = MusicProvider::artist_fans(&provider, "2116", &PageRequest::new(2, 0))
+            .await
+            .expect("live artist fans");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|user| !user.name.is_empty()));
+        assert!(page.items.iter().all(|user| user.avatar_url.is_some()));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
     }
 
     #[tokio::test]

@@ -130,6 +130,28 @@ pub(crate) struct ArtistFollowCount {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistFansEnvelope {
+    #[serde(default)]
+    pub data: Vec<Value>,
+    #[serde(rename = "hasMore", alias = "more")]
+    pub has_more: Option<bool>,
+    #[serde(alias = "count")]
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistFanProfile {
+    #[serde(rename = "userId")]
+    pub user_id: u64,
+    pub nickname: String,
+    #[serde(rename = "avatarUrl")]
+    pub avatar_url: Option<String>,
+    pub signature: Option<String>,
+    pub followed: Option<bool>,
+    pub mutual: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SubscribedAlbumsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,
