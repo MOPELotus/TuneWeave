@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream,
-    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
+    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
     StreamResolver, Track, TrackEntitlement, TuneWeaveError,
@@ -167,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
+        .route("/charts/digital-albums", get(digital_album_chart))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
@@ -549,6 +551,57 @@ async fn digital_albums(
     request.kind = optional_trimmed(params.kind);
     request.catalog = optional_trimmed(params.catalog);
     let page = provider.digital_albums(&request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DigitalAlbumChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    period: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    year: Option<String>,
+}
+
+async fn digital_album_chart(
+    State(state): State<AppState>,
+    Query(params): Query<DigitalAlbumChartParams>,
+) -> Result<Json<ApiResponse<Vec<DigitalAlbumChartEntry>>>, ApiError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let period = parse_digital_album_chart_period(params.period.as_deref())?;
+    let kind = parse_digital_album_chart_kind(params.kind.as_deref())?;
+    let year = parse_optional_u16_parameter("year", params.year.as_deref())?;
+    if year.is_some() && period != DigitalAlbumChartPeriod::Year {
+        return Err(
+            TuneWeaveError::invalid_request("year is only supported when period=year").into(),
+        );
+    }
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .digital_album_chart(&DigitalAlbumChartRequest {
+            limit,
+            offset,
+            account: account.clone(),
+            period,
+            kind,
+            year,
+        })
+        .await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -1301,6 +1354,44 @@ fn parse_history_period(value: Option<&str>) -> Result<PlaybackHistoryPeriod, Tu
     }
 }
 
+fn parse_digital_album_chart_period(
+    value: Option<&str>,
+) -> Result<DigitalAlbumChartPeriod, TuneWeaveError> {
+    match value
+        .unwrap_or("daily")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "daily" => Ok(DigitalAlbumChartPeriod::Daily),
+        "week" => Ok(DigitalAlbumChartPeriod::Week),
+        "year" => Ok(DigitalAlbumChartPeriod::Year),
+        "total" => Ok(DigitalAlbumChartPeriod::Total),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported digital album chart period: {value}"
+        ))
+        .with_details(json!({ "allowed": ["daily", "week", "year", "total"] }))),
+    }
+}
+
+fn parse_digital_album_chart_kind(
+    value: Option<&str>,
+) -> Result<DigitalAlbumChartKind, TuneWeaveError> {
+    match value
+        .unwrap_or("album")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "album" => Ok(DigitalAlbumChartKind::Album),
+        "single" => Ok(DigitalAlbumChartKind::Single),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported digital album chart type: {value}"
+        ))
+        .with_details(json!({ "allowed": ["album", "single"] }))),
+    }
+}
+
 fn parse_bool_parameter(
     name: &str,
     value: Option<&str>,
@@ -1388,6 +1479,22 @@ fn parse_u32_parameter(
     })
 }
 
+fn parse_optional_u16_parameter(
+    name: &str,
+    value: Option<&str>,
+) -> Result<Option<u16>, TuneWeaveError> {
+    value
+        .map(|value| {
+            value.parse().map_err(|_| {
+                TuneWeaveError::invalid_request(format!(
+                    "{name} must be an unsigned 16-bit integer"
+                ))
+                .with_details(json!({ "parameter": name, "value": value }))
+            })
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1432,6 +1539,7 @@ mod tests {
                 Capability::AlbumTrackEntitlements,
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
+                Capability::DigitalAlbumCharts,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1552,6 +1660,33 @@ mod tests {
                     total: None,
                     next_offset: None,
                     has_more: false,
+                },
+            })
+        }
+
+        async fn digital_album_chart(
+            &self,
+            request: &DigitalAlbumChartRequest,
+        ) -> Result<Page<DigitalAlbumChartEntry>> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("period".to_owned(), json!(request.period));
+            extensions.insert("kind".to_owned(), json!(request.kind));
+            if let Some(year) = request.year {
+                extensions.insert("year".to_owned(), json!(year));
+            }
+            Ok(Page {
+                items: vec![DigitalAlbumChartEntry {
+                    rank: request.offset.saturating_add(1),
+                    rank_change: Some(5),
+                    product: sample_digital_album("156507145"),
+                    extensions,
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(20),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
                 },
             })
         }
@@ -2090,6 +2225,45 @@ mod tests {
         assert_eq!(albums["meta"]["pagination"]["offset"], 10);
         assert_eq!(albums["meta"]["pagination"]["total"], Value::Null);
         assert_eq!(albums["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn digital_album_chart_uses_typed_filters_and_pagination() {
+        let (status, chart) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/digital-albums?platform=netease&account=vip&period=year&type=single&year=2025&limit=2&offset=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(chart["data"][0]["rank"], 4);
+        assert_eq!(chart["data"][0]["rank_change"], 5);
+        assert_eq!(chart["data"][0]["product"]["ref"], "netease:156507145");
+        assert_eq!(chart["data"][0]["extensions"]["period"], "year");
+        assert_eq!(chart["data"][0]["extensions"]["kind"], "single");
+        assert_eq!(chart["data"][0]["extensions"]["year"], 2025);
+        assert_eq!(chart["meta"]["pagination"]["limit"], 2);
+        assert_eq!(chart["meta"]["pagination"]["offset"], 3);
+        assert_eq!(chart["meta"]["pagination"]["total"], 20);
+        assert_eq!(chart["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn digital_album_chart_rejects_invalid_period_and_year_combinations() {
+        let (status, invalid_period) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/digital-albums?period=month",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid_period["error"]["code"], "invalid_request");
+
+        let (status, invalid_year) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/digital-albums?period=daily&year=2025",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid_year["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
