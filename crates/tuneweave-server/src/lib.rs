@@ -1421,6 +1421,129 @@ struct StreamParams {
     account: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamControlInput<'a> {
+    quality: Option<&'a str>,
+    variant: Option<&'a str>,
+    playback_platform: Option<&'a str>,
+    fallback: Option<&'a str>,
+    fallback_platforms: Option<&'a str>,
+    unblock: Option<&'a str>,
+    source: Option<&'a str>,
+    account: Option<&'a str>,
+}
+
+#[derive(Clone, Debug)]
+struct StreamControls {
+    quality: Quality,
+    variant: StreamVariant,
+    routing: StreamRouting,
+    account: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum StreamRouting {
+    Standard {
+        preferred_platform: Option<Platform>,
+        fallback: bool,
+        fallback_platforms: Vec<Platform>,
+    },
+    Unblock {
+        source: Option<Platform>,
+    },
+}
+
+impl StreamControls {
+    fn resolve_request(&self, origin_platform: Platform) -> ResolveRequest {
+        let (playback_platforms, fallback, account_platform) = match &self.routing {
+            StreamRouting::Standard {
+                preferred_platform,
+                fallback,
+                fallback_platforms,
+            } => {
+                let mut platforms = Vec::new();
+                if let Some(platform) = preferred_platform {
+                    platforms.push(*platform);
+                } else if !fallback_platforms.is_empty() {
+                    platforms.push(origin_platform);
+                }
+                platforms.extend(fallback_platforms.iter().copied());
+                (
+                    platforms,
+                    *fallback,
+                    preferred_platform.unwrap_or(origin_platform),
+                )
+            }
+            StreamRouting::Unblock { source } => {
+                let mut platforms = source.map_or_else(
+                    || {
+                        vec![
+                            Platform::Qq,
+                            Platform::Kugou,
+                            Platform::Kuwo,
+                            Platform::Migu,
+                        ]
+                    },
+                    |source| vec![source],
+                );
+                platforms.push(origin_platform);
+                let account_platform = platforms[0];
+                (platforms, true, account_platform)
+            }
+        };
+        let mut request = ResolveRequest {
+            quality: self.quality,
+            variant: self.variant,
+            playback_platforms,
+            fallback,
+            ..ResolveRequest::default()
+        };
+        if let Some(account) = self.account.clone() {
+            request.accounts.insert(account_platform, account);
+        }
+        request
+    }
+}
+
+fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls, TuneWeaveError> {
+    let quality = parse_quality(input.quality)?;
+    let variant = parse_stream_variant(input.variant)?;
+    let unblock = parse_bool_parameter("unblock", input.unblock, false)?;
+    let fallback = parse_bool_parameter("fallback", input.fallback, true)?;
+    let routing = if unblock {
+        if input.playback_platform.is_some() || input.fallback_platforms.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "unblock cannot be combined with playback_platform or fallback_platforms",
+            )
+            .with_details(json!({
+                "conflicts": ["playback_platform", "fallback_platforms"]
+            })));
+        }
+        StreamRouting::Unblock {
+            source: input.source.map(parse_platform_parameter).transpose()?,
+        }
+    } else {
+        StreamRouting::Standard {
+            preferred_platform: input
+                .playback_platform
+                .map(parse_platform_parameter)
+                .transpose()?,
+            fallback,
+            fallback_platforms: parse_platform_list(input.fallback_platforms)?,
+        }
+    };
+    Ok(StreamControls {
+        quality,
+        variant,
+        routing,
+        account: input
+            .account
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .map(str::to_owned),
+    })
+}
+
 async fn track_stream(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -1428,82 +1551,24 @@ async fn track_stream(
 ) -> Result<Json<ApiResponse<MediaStream>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let quality = parse_quality(params.quality.as_deref())?;
-    let variant = parse_stream_variant(params.variant.as_deref())?;
-    let unblock = parse_bool_parameter("unblock", params.unblock.as_deref(), false)?;
-    let requested_fallback = parse_bool_parameter("fallback", params.fallback.as_deref(), true)?;
-    let (fallback, playback_platforms, account_platform) = if unblock {
-        if params.playback_platform.is_some() || params.fallback_platforms.is_some() {
-            return Err(TuneWeaveError::invalid_request(
-                "unblock cannot be combined with playback_platform or fallback_platforms",
-            )
-            .with_details(json!({
-                "conflicts": ["playback_platform", "fallback_platforms"]
-            }))
-            .into());
-        }
-        let source = params
-            .source
-            .as_deref()
-            .map(parse_platform_parameter)
-            .transpose()?;
-        let mut platforms = source.map_or_else(
-            || {
-                vec![
-                    Platform::Qq,
-                    Platform::Kugou,
-                    Platform::Kuwo,
-                    Platform::Migu,
-                ]
-            },
-            |source| vec![source],
-        );
-        platforms.push(reference.platform());
-        let account_platform = platforms[0];
-        (true, platforms, account_platform)
-    } else {
-        let preferred_platform = params
-            .playback_platform
-            .as_deref()
-            .map(parse_platform_parameter)
-            .transpose()?;
-        let fallback_platforms = parse_platform_list(params.fallback_platforms.as_deref())?;
-        let mut platforms = Vec::new();
-        if let Some(platform) = preferred_platform {
-            platforms.push(platform);
-        } else if !fallback_platforms.is_empty() {
-            platforms.push(reference.platform());
-        }
-        platforms.extend(fallback_platforms);
-        (
-            requested_fallback,
-            platforms,
-            preferred_platform.unwrap_or(reference.platform()),
-        )
-    };
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty())
-        .map(str::to_owned);
-    let mut request = ResolveRequest {
-        quality,
-        variant,
-        playback_platforms,
-        fallback,
-        ..ResolveRequest::default()
-    };
-    if let Some(account) = account.clone() {
-        request.accounts.insert(account_platform, account);
-    }
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: params.quality.as_deref(),
+        variant: params.variant.as_deref(),
+        playback_platform: params.playback_platform.as_deref(),
+        fallback: params.fallback.as_deref(),
+        fallback_platforms: params.fallback_platforms.as_deref(),
+        unblock: params.unblock.as_deref(),
+        source: params.source.as_deref(),
+        account: params.account.as_deref(),
+    })?;
+    let request = controls.resolve_request(reference.platform());
 
     let origin_provider = state.registry.require(reference.platform())?;
     let origin = origin_provider.track(reference.id(), None).await?;
     let stream = state.resolver.resolve(&origin, &request).await?;
     let resolved_platform = stream.resolved_platform;
     let mut response = ApiResponse::new(stream).with_platform(resolved_platform);
-    if let Some(account) = account {
+    if let Some(account) = controls.account {
         response = response.with_account(account);
     }
 
