@@ -37,9 +37,10 @@ use tuneweave_core::{
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchVariant,
-    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchOpaqueItem, SearchQuery, SearchVariant, StreamRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
+    User, Video, VideoKind,
 };
 use url::Url;
 
@@ -308,6 +309,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchVideos,
             Capability::SearchMixed,
             Capability::SearchVoices,
+            Capability::SearchDefault,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -446,6 +448,17 @@ impl MusicProvider for NeteaseProvider {
             .extensions
             .insert("request_path".to_owned(), json!(path));
         Ok(page)
+    }
+
+    async fn default_search_keyword(
+        &self,
+        request: &SearchDefaultKeywordRequest,
+    ) -> Result<SearchDefaultKeyword> {
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = netease_default_search_keyword_request();
+        let response = client.request_eapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_default_search_keyword(response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7095,6 +7108,81 @@ const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
     }
 }
 
+fn netease_default_search_keyword_request() -> (&'static str, Value) {
+    ("/api/search/defaultkeyword/get", json!({}))
+}
+
+fn map_netease_default_search_keyword(response: Value) -> Result<SearchDefaultKeyword> {
+    let data = response
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase default search response is missing its data object",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let keyword = data
+        .get("realkeyword")
+        .and_then(json_scalar_string)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase default search response is missing realkeyword",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let display_text = data
+        .get("showKeyword")
+        .and_then(json_scalar_string)
+        .or_else(|| {
+            data.pointer("/styleKeyword/keyWord")
+                .and_then(json_scalar_string)
+        })
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| keyword.clone());
+    let kind = data
+        .get("searchType")
+        .and_then(json_u64)
+        .and_then(netease_search_kind_from_type);
+    let image_url = data
+        .get("imageUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok(SearchDefaultKeyword {
+        keyword,
+        display_text,
+        kind,
+        image_url,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+const fn netease_search_kind_from_type(value: u64) -> Option<SearchKind> {
+    match value {
+        1 => Some(SearchKind::Track),
+        10 => Some(SearchKind::Album),
+        100 => Some(SearchKind::Artist),
+        1_000 => Some(SearchKind::Playlist),
+        1_002 => Some(SearchKind::User),
+        1_004 => Some(SearchKind::Mv),
+        1_006 => Some(SearchKind::Lyric),
+        1_009 => Some(SearchKind::RadioStation),
+        1_014 => Some(SearchKind::Video),
+        1_018 => Some(SearchKind::Mixed),
+        2_000 => Some(SearchKind::Voice),
+        _ => None,
+    }
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -7504,6 +7592,61 @@ mod tests {
     }
 
     #[test]
+    fn default_search_keyword_matches_reference_protocol_and_response_shape() {
+        let (path, payload) = netease_default_search_keyword_request();
+        assert_eq!(path, "/api/search/defaultkeyword/get");
+        assert_eq!(payload, json!({}));
+
+        let prompt = map_netease_default_search_keyword(json!({
+            "code": 200,
+            "data": {
+                "realkeyword": "周旋",
+                "showKeyword": "🔥周旋 最近很火哦",
+                "searchType": 1,
+                "imageUrl": "https://example.test/search.png",
+                "alg": "dq_0"
+            },
+            "message": null
+        }))
+        .expect("map default search keyword");
+        assert_eq!(prompt.keyword, "周旋");
+        assert_eq!(prompt.display_text, "🔥周旋 最近很火哦");
+        assert_eq!(prompt.kind, Some(SearchKind::Track));
+        assert_eq!(
+            prompt.image_url.as_deref(),
+            Some("https://example.test/search.png")
+        );
+        assert_eq!(prompt.extensions["response"]["data"]["alg"], "dq_0");
+
+        let fallback = map_netease_default_search_keyword(json!({
+            "code": 200,
+            "data": {
+                "realkeyword": "未知类型",
+                "searchType": 9999,
+                "styleKeyword": {"keyWord": "展示未知类型"}
+            }
+        }))
+        .expect("map fallback display text");
+        assert_eq!(fallback.display_text, "展示未知类型");
+        assert_eq!(fallback.kind, None);
+    }
+
+    #[test]
+    fn default_search_keyword_rejects_missing_data_and_keyword() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": {"showKeyword": "只有展示词"}}),
+        ] {
+            assert_eq!(
+                map_netease_default_search_keyword(response)
+                    .expect_err("malformed default search keyword")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -7829,6 +7972,7 @@ mod tests {
             assert_eq!(capability_for_search(kind), capability);
             assert!(capabilities.contains(&capability), "{capability:?}");
         }
+        assert!(capabilities.contains(&Capability::SearchDefault));
     }
 
     #[test]
@@ -12663,6 +12807,21 @@ mod tests {
         assert_eq!(detail.id, first.id);
         assert!(!detail.name.is_empty());
         assert!(!detail.artists.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_default_search_keyword_is_public_and_actionable() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let prompt = MusicProvider::default_search_keyword(
+            &provider,
+            &SearchDefaultKeywordRequest { account: None },
+        )
+        .await
+        .expect("live default search keyword");
+        assert!(!prompt.keyword.is_empty());
+        assert!(!prompt.display_text.is_empty());
+        assert_eq!(prompt.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
