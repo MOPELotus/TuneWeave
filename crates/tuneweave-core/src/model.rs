@@ -272,6 +272,7 @@ pub struct RadioStationCursor {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RadioStationListRequest {
     pub limit: u32,
+    pub offset: u32,
     pub category_id: Option<String>,
     pub region_id: Option<String>,
     pub cursor: Option<RadioStationCursor>,
@@ -283,6 +284,7 @@ impl RadioStationListRequest {
     pub fn new(limit: u32) -> Self {
         Self {
             limit,
+            offset: 0,
             category_id: None,
             region_id: None,
             cursor: None,
@@ -1088,6 +1090,7 @@ mod tests {
     #[test]
     fn radio_station_list_request_keeps_filter_and_cursor_ids_opaque() {
         let mut request = RadioStationListRequest::new(20);
+        request.offset = 100;
         request.category_id = Some("music:featured".to_owned());
         request.region_id = Some("region:network".to_owned());
         request.cursor = Some(RadioStationCursor {
@@ -1098,6 +1101,7 @@ mod tests {
 
         let value = serde_json::to_value(request).expect("serialize radio station list request");
         assert_eq!(value["limit"], 20);
+        assert_eq!(value["offset"], 100);
         assert_eq!(value["category_id"], "music:featured");
         assert_eq!(value["region_id"], "region:network");
         assert_eq!(value["cursor"]["id"], "station:172");
