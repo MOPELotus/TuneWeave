@@ -16,13 +16,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistListRequest, ArtistStats, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    ArtistListRequest, ArtistStats, ArtistVideoListRequest, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -175,6 +176,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
         .route("/artists/{reference}/fans", get(artist_fans))
+        .route("/artists/{reference}/videos", get(artist_videos))
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -955,6 +957,46 @@ async fn artist_fans(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ArtistVideoListParams {
+    limit: Option<String>,
+    offset: Option<String>,
+    cursor: Option<String>,
+    account: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    order: Option<String>,
+}
+
+async fn artist_videos(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<ArtistVideoListParams>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let mut request = ArtistVideoListRequest::new(limit, offset);
+    request.account.clone_from(&account);
+    request.cursor = optional_trimmed(params.cursor);
+    request.kind = parse_video_kind(params.kind.as_deref())?;
+    request.order = optional_trimmed(params.order);
+    let page = provider.artist_videos(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 async fn user_favorite_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -1644,6 +1686,17 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
     }
 }
 
+fn parse_video_kind(value: Option<&str>) -> Result<VideoKind, TuneWeaveError> {
+    match value.unwrap_or("mv").trim().to_ascii_lowercase().as_str() {
+        "all" | "video" => Ok(VideoKind::All),
+        "mv" => Ok(VideoKind::Mv),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported video type: {value}"))
+                .with_details(json!({ "allowed": ["all", "mv"] })),
+        ),
+    }
+}
+
 fn parse_digital_album_chart_period(
     value: Option<&str>,
 ) -> Result<DigitalAlbumChartPeriod, TuneWeaveError> {
@@ -1797,8 +1850,8 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistBiographySection, ArtistSummary, MusicProvider, Page, PageMeta, ProviderQrStart,
-        Result, SearchQuery, StreamRequest,
+        ArtistBiographySection, ArtistSummary, CreatorSummary, MusicProvider, Page, PageMeta,
+        ProviderQrStart, Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -1836,6 +1889,7 @@ mod tests {
                 Capability::ArtistList,
                 Capability::ArtistAlbums,
                 Capability::ArtistFans,
+                Capability::ArtistVideos,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -2068,6 +2122,29 @@ mod tests {
             user.extensions.insert("artist_id".to_owned(), json!(id));
             Ok(Page {
                 items: vec![user],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn artist_videos(
+            &self,
+            id: &str,
+            request: &ArtistVideoListRequest,
+        ) -> Result<Page<Video>> {
+            let mut video = sample_video("22695250");
+            video.extensions.insert("artist_id".to_owned(), json!(id));
+            video
+                .extensions
+                .insert("type".to_owned(), json!(request.kind));
+            Ok(Page {
+                items: vec![video],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -2447,6 +2524,29 @@ mod tests {
         }
     }
 
+    fn sample_video(id: &str) -> Video {
+        Video {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            title: "任性 (5525 Live版)".to_owned(),
+            creators: vec![CreatorSummary {
+                resource_ref: Some(
+                    ResourceRef::new(Platform::Netease, "6452").expect("valid creator reference"),
+                ),
+                name: "周杰伦".to_owned(),
+                avatar_url: None,
+            }],
+            description: String::new(),
+            cover_url: Some("https://example.test/cover.jpg".to_owned()),
+            duration_ms: Some(266_000),
+            published_at: Some("2025-02-23".to_owned()),
+            play_count: Some(100_726),
+            subscribed: Some(false),
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_album_stats(id: &str) -> AlbumStats {
         AlbumStats {
             album_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -2679,6 +2779,27 @@ mod tests {
         assert_eq!(fans["meta"]["pagination"]["offset"], 10);
         assert_eq!(fans["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(fans["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_videos_use_reference_platform_type_account_and_pagination() {
+        let (status, videos) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/videos?type=mv&limit=2&offset=10&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(videos["data"][0]["ref"], "netease:22695250");
+        assert_eq!(videos["data"][0]["title"], "任性 (5525 Live版)");
+        assert_eq!(videos["data"][0]["creators"][0]["ref"], "netease:6452");
+        assert_eq!(videos["data"][0]["extensions"]["artist_id"], "6452");
+        assert_eq!(videos["data"][0]["extensions"]["type"], "mv");
+        assert_eq!(videos["meta"]["platform"], "netease");
+        assert_eq!(videos["meta"]["account"], "collector");
+        assert_eq!(videos["meta"]["pagination"]["limit"], 2);
+        assert_eq!(videos["meta"]["pagination"]["offset"], 10);
+        assert_eq!(videos["meta"]["pagination"]["next_offset"], 11);
+        assert_eq!(videos["meta"]["pagination"]["has_more"], true);
     }
 
     #[tokio::test]
