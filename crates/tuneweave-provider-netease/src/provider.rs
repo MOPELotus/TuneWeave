@@ -1484,19 +1484,19 @@ fn validate_platform_batch_request(request: &PlatformBatchRequest) -> Result<()>
 }
 
 fn serialize_netease_batch_requests(request: &PlatformBatchRequest) -> Value {
-    Value::Object(
-        request
-            .requests
-            .iter()
-            .map(|(uri, data)| {
-                let data = match data {
-                    Value::String(data) => data.clone(),
-                    data => data.to_string(),
-                };
-                (uri.clone(), Value::String(data))
-            })
-            .collect(),
-    )
+    let mut data = request
+        .requests
+        .iter()
+        .map(|(uri, data)| {
+            let data = match data {
+                Value::String(data) => data.clone(),
+                data => data.to_string(),
+            };
+            (uri.clone(), Value::String(data))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    data.insert("e_r".to_owned(), Value::Bool(request.encrypted_response));
+    Value::Object(data)
 }
 
 fn validate_netease_api_uri(uri: &str) -> Result<()> {
@@ -6082,6 +6082,7 @@ mod tests {
             serialized["/api/search/get"],
             r#"{"s":"TuneWeave","type":1}"#
         );
+        assert_eq!(serialized["e_r"], false);
 
         assert_eq!(
             validate_platform_batch_request(&PlatformBatchRequest::new(BTreeMap::new()))
@@ -6563,6 +6564,28 @@ mod tests {
             assert!(
                 body["/api/v2/banner/get"].is_object(),
                 "{protocol} batch item"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_platform_batch_decrypts_encrypted_responses() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for protocol in ["eapi", "weapi"] {
+            let mut request = PlatformBatchRequest::new(BTreeMap::from([(
+                "/api/v2/banner/get".to_owned(),
+                json!({ "clientType": "pc" }),
+            )]));
+            request.protocol = Some(protocol.to_owned());
+            request.encrypted_response = true;
+            let body = MusicProvider::platform_batch(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{protocol} encrypted batch failed: {error}"));
+            assert_eq!(body["code"], 200, "{protocol} encrypted response: {body}");
+            assert!(
+                body["/api/v2/banner/get"].is_object(),
+                "{protocol} encrypted batch item"
             );
         }
     }
