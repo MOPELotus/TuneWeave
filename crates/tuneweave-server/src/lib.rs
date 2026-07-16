@@ -29,10 +29,10 @@ use tuneweave_core::{
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
     Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
+    SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -228,6 +228,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
+        .route(
+            "/account/library/radio-stations",
+            get(account_radio_stations),
+        )
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -1821,6 +1825,33 @@ async fn account_albums(
     ))
 }
 
+async fn account_radio_stations(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<RadioStation>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_radio_stations(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_following_artists(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -2599,6 +2630,7 @@ mod tests {
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
+                Capability::AccountRadioStations,
                 Capability::AccountFollowingArtists,
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
@@ -3087,6 +3119,33 @@ mod tests {
             })
         }
 
+        async fn account_radio_stations(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<RadioStation>> {
+            let mut station = sample_radio_station("362");
+            station.extensions.insert(
+                "collection_item".to_owned(),
+                json!({ "collectTime": 1_700_000_000_000_u64 }),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "response".to_owned(),
+                json!({ "code": 200, "source": "QT" }),
+            );
+            Ok(Page {
+                items: vec![station],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(53),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions,
+                },
+            })
+        }
+
         async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
             let mut artist = sample_artist("6452");
             artist.extensions.insert(
@@ -3473,6 +3532,17 @@ mod tests {
             kind: Some("album".to_owned()),
             extensions: Default::default(),
         }
+    }
+
+    fn sample_radio_station(id: &str) -> RadioStation {
+        let mut station = RadioStation::new(
+            ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            "金山区广播电视台综合广播",
+        );
+        station.cover_url = Some("https://example.test/radio-362.jpg".to_owned());
+        station.region = Some("上海".to_owned());
+        station.subscribed = Some(true);
+        station
     }
 
     fn sample_artist(id: &str) -> Artist {
@@ -4589,6 +4659,34 @@ mod tests {
         assert_eq!(
             json["meta"]["pagination"]["extensions"]["response"]["paidCount"],
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn account_radio_stations_preserve_collection_and_page_metadata() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/library/radio-stations?platform=netease&account=personal&limit=25&offset=50",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:362");
+        assert_eq!(json["data"][0]["name"], "金山区广播电视台综合广播");
+        assert_eq!(json["data"][0]["region"], "上海");
+        assert_eq!(json["data"][0]["subscribed"], true);
+        assert_eq!(
+            json["data"][0]["extensions"]["collection_item"]["collectTime"],
+            1_700_000_000_000_u64
+        );
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 25);
+        assert_eq!(json["meta"]["pagination"]["offset"], 50);
+        assert_eq!(json["meta"]["pagination"]["total"], 53);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 51);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["response"]["source"],
+            "QT"
         );
     }
 
