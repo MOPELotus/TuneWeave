@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=369`、`partial=7`、`implemented=11`、`verified=17`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=368`、`partial=7`、`implemented=11`、`verified=18`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -26,7 +26,7 @@
 | `album_songsaleboard` | `/album/songsaleboard` | `verified` | `GET /v1/charts/digital-albums`（完整支持 `daily/week/year/total` 与数字专辑/数字单曲；2026-07-16 HTTP 实测 2025 年数字单曲榜共 10 项，首项 `netease:83848829`《好想爱这个世界啊》，销量 316218） |
 | `album_sub` | `/album/sub` | `implemented` | `PUT/DELETE /v1/account/library/albums/{ref}`（收藏与取消收藏路径均已实现；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证成功写入） |
 | `album_sublist` | `/album/sublist` | `implemented` | `GET /v1/account/library/albums`（分页、收藏时间与 `paidCount` 等元数据已完整映射；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证内容成功态） |
-| `api` | `/api` | `pending` | — |
+| `api` | `/api` | `verified` | `POST /v1/extensions/netease/api`（仅允许固定网易云域名与 `/api/...` 路径，登录态由 `account` 别名选择；完整支持默认 EAPI 及 `weapi/api/linuxapi/xeapi`，拒绝原始 Cookie、域名、代理和请求头覆盖；2026-07-16 五种协议均以搜索请求联网实测成功，另实测 XEAPI 公钥注册/加密响应及 `e_r=true` EAPI 响应解密） |
 | `artist_album` | `/artist/album` | `pending` | — |
 | `artist_desc` | `/artist/desc` | `pending` | — |
 | `artist_detail` | `/artist/detail` | `pending` | — |
