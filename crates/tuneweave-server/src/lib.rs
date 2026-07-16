@@ -468,15 +468,11 @@ async fn digital_albums(
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
     let provider = state.registry.require(platform)?;
-    let page = provider
-        .digital_albums(&DigitalAlbumListRequest {
-            limit,
-            offset,
-            account: account.clone(),
-            area: optional_trimmed(params.area),
-            kind: optional_trimmed(params.kind),
-        })
-        .await?;
+    let mut request = DigitalAlbumListRequest::new(limit, offset);
+    request.account.clone_from(&account);
+    request.area = optional_trimmed(params.area);
+    request.kind = optional_trimmed(params.kind);
+    let page = provider.digital_albums(&request).await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
