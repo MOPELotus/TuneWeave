@@ -13,15 +13,15 @@ use axum::{
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, AuthState,
     Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -201,7 +201,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
         .route("/account/favorites/tracks", get(account_favorite_tracks))
-        .route("/account/history", get(account_history));
+        .route("/account/history", get(account_history))
+        .route("/extensions/netease/api", post(netease_extension_api));
 
     Router::new()
         .route("/healthz", get(health))
@@ -1346,6 +1347,44 @@ async fn account_history(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeteaseExtensionApiBody {
+    uri: String,
+    #[serde(default = "empty_json_object")]
+    data: Value,
+    #[serde(default, alias = "protocol")]
+    crypto: Option<String>,
+    account: Option<String>,
+}
+
+async fn netease_extension_api(
+    State(state): State<AppState>,
+    payload: Result<Json<NeteaseExtensionApiBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let body = json_body(payload)?;
+    let account = optional_trimmed(body.account);
+    let protocol = optional_trimmed(body.crypto);
+    let provider = state.registry.require(Platform::Netease)?;
+    let data = provider
+        .platform_api(&PlatformApiRequest {
+            uri: body.uri,
+            data: body.data,
+            protocol,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn empty_json_object() -> Value {
+    json!({})
+}
+
 fn json_body<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     payload
         .map(|Json(body)| body)
@@ -1622,6 +1661,7 @@ mod tests {
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
+                Capability::PlatformApi,
             ])
         }
 
@@ -2036,6 +2076,16 @@ mod tests {
                 .extensions
                 .insert("refreshed".to_owned(), json!(true));
             Ok(profile)
+        }
+
+        async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
+            Ok(json!({
+                "code": 200,
+                "uri": request.uri,
+                "data": request.data,
+                "crypto": request.protocol,
+                "account": request.account
+            }))
         }
     }
 
@@ -2783,6 +2833,65 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn netease_extension_api_uses_the_standard_envelope_and_account_alias() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/api",
+            Some(json!({
+                "uri": "/api/search/get",
+                "data": { "s": "TuneWeave", "type": 1 },
+                "protocol": "linuxapi",
+                "account": "green-diamond"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["code"], 200);
+        assert_eq!(json["data"]["uri"], "/api/search/get");
+        assert_eq!(json["data"]["data"]["s"], "TuneWeave");
+        assert_eq!(json["data"]["crypto"], "linuxapi");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "green-diamond");
+    }
+
+    #[tokio::test]
+    async fn netease_extension_api_defaults_to_an_empty_data_object() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/api",
+            Some(json!({ "uri": "/api/logout" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["data"], json!({}));
+        assert!(json["data"]["crypto"].is_null());
+        assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn netease_extension_api_rejects_transport_and_credential_overrides() {
+        for field in ["cookie", "domain", "headers", "proxy", "ua"] {
+            let mut body = serde_json::Map::from_iter([(
+                "uri".to_owned(),
+                Value::String("/api/search/get".to_owned()),
+            )]);
+            body.insert(field.to_owned(), Value::String("forbidden".to_owned()));
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/extensions/netease/api",
+                Some(Value::Object(body)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{field}");
+        }
     }
 
     #[tokio::test]
