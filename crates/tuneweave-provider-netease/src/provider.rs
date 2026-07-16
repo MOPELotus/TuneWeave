@@ -37,9 +37,9 @@ use tuneweave_core::{
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchVariant,
+    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 use url::Url;
 
@@ -435,20 +435,17 @@ impl MusicProvider for NeteaseProvider {
         }
         let limit = query.limit.clamp(1, 100);
         let client = self.client_for(query.account.as_deref())?;
-        let response = client
-            .request_eapi(
-                "/api/cloudsearch/pc",
-                json!({
-                    "s": keyword,
-                    "type": netease_cloud_search_type(query.kind),
-                    "limit": limit,
-                    "offset": query.offset,
-                    "total": true
-                }),
-            )
-            .await?;
+        let (path, payload, variant) = netease_catalog_search_request(query, keyword, limit);
+        let response = client.request_eapi(path, payload).await?;
         ensure_success(&response.body)?;
-        map_cloud_search_response(query.kind, limit, query.offset, response.body)
+        let mut page = map_cloud_search_response(query.kind, limit, query.offset, response.body)?;
+        page.pagination
+            .extensions
+            .insert("variant".to_owned(), json!(variant));
+        page.pagination
+            .extensions
+            .insert("request_path".to_owned(), json!(path));
+        Ok(page)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7098,6 +7095,51 @@ const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
     }
 }
 
+fn netease_catalog_search_request(
+    query: &SearchQuery,
+    keyword: &str,
+    limit: u32,
+) -> (&'static str, Value, SearchVariant) {
+    let variant = match query.variant {
+        SearchVariant::Default => SearchVariant::Cloud,
+        variant => variant,
+    };
+    match (variant, query.kind) {
+        (SearchVariant::Legacy, SearchKind::Voice) => (
+            "/api/search/voice/get",
+            json!({
+                "keyword": keyword,
+                "scene": "normal",
+                "limit": limit,
+                "offset": query.offset
+            }),
+            variant,
+        ),
+        (SearchVariant::Legacy, _) => (
+            "/api/search/get",
+            json!({
+                "s": keyword,
+                "type": netease_cloud_search_type(query.kind),
+                "limit": limit,
+                "offset": query.offset
+            }),
+            variant,
+        ),
+        (SearchVariant::Cloud, _) => (
+            "/api/cloudsearch/pc",
+            json!({
+                "s": keyword,
+                "type": netease_cloud_search_type(query.kind),
+                "limit": limit,
+                "offset": query.offset,
+                "total": true
+            }),
+            variant,
+        ),
+        (SearchVariant::Default, _) => unreachable!("default search variant is resolved above"),
+    }
+}
+
 fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&'static str]) {
     match kind {
         SearchKind::Track | SearchKind::Lyric => (&["songs"], &["songCount"]),
@@ -7109,7 +7151,10 @@ fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&
         SearchKind::RadioStation => (&["djRadios"], &["djRadiosCount"]),
         SearchKind::Video => (&["videos"], &["videoCount"]),
         SearchKind::Mixed => (&[], &[]),
-        SearchKind::Voice => (&["resources", "voices"], &["resourceCount", "voiceCount"]),
+        SearchKind::Voice => (
+            &["resources", "voices"],
+            &["resourceCount", "voiceCount", "totalCount"],
+        ),
     }
 }
 
@@ -7119,7 +7164,17 @@ fn map_cloud_search_response(
     offset: u32,
     body: Value,
 ) -> Result<Page<SearchItem>> {
-    let result = body.get("result").cloned().unwrap_or_else(|| json!({}));
+    let result = body
+        .get("result")
+        .or_else(|| {
+            if kind == SearchKind::Voice {
+                body.get("data")
+            } else {
+                None
+            }
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let (item_keys, count_keys) = cloud_search_shape(kind);
     let raw_items = item_keys
         .iter()
@@ -7449,6 +7504,56 @@ mod tests {
     }
 
     #[test]
+    fn catalog_search_variants_match_both_reference_protocols() {
+        let mut query = SearchQuery::tracks("周杰伦", 2, 3);
+        query.variant = SearchVariant::Legacy;
+        for kind in [
+            SearchKind::Track,
+            SearchKind::Album,
+            SearchKind::Artist,
+            SearchKind::Playlist,
+            SearchKind::User,
+            SearchKind::Mv,
+            SearchKind::Lyric,
+            SearchKind::RadioStation,
+            SearchKind::Video,
+            SearchKind::Mixed,
+        ] {
+            query.kind = kind;
+            let (path, payload, variant) = netease_catalog_search_request(&query, "周杰伦", 2);
+            assert_eq!(path, "/api/search/get", "{kind:?}");
+            assert_eq!(payload["s"], "周杰伦", "{kind:?}");
+            assert_eq!(payload["type"], netease_cloud_search_type(kind), "{kind:?}");
+            assert_eq!(payload["limit"], 2, "{kind:?}");
+            assert_eq!(payload["offset"], 3, "{kind:?}");
+            assert!(payload.get("total").is_none(), "{kind:?}");
+            assert_eq!(variant, SearchVariant::Legacy, "{kind:?}");
+        }
+
+        query.kind = SearchKind::Voice;
+        let (path, payload, variant) = netease_catalog_search_request(&query, "周杰伦", 2);
+        assert_eq!(path, "/api/search/voice/get");
+        assert_eq!(payload["keyword"], "周杰伦");
+        assert_eq!(payload["scene"], "normal");
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["offset"], 3);
+        assert!(payload.get("s").is_none());
+        assert!(payload.get("type").is_none());
+        assert_eq!(variant, SearchVariant::Legacy);
+
+        for requested_variant in [SearchVariant::Default, SearchVariant::Cloud] {
+            query.variant = requested_variant;
+            let (path, payload, resolved_variant) =
+                netease_catalog_search_request(&query, "周杰伦", 2);
+            assert_eq!(path, "/api/cloudsearch/pc");
+            assert_eq!(payload["s"], "周杰伦");
+            assert_eq!(payload["type"], 2_000);
+            assert_eq!(payload["total"], true);
+            assert_eq!(resolved_variant, SearchVariant::Cloud);
+        }
+    }
+
+    #[test]
     fn cloudsearch_maps_every_typed_reference_branch() {
         let song = json!({
             "id": 185809,
@@ -7638,6 +7743,27 @@ mod tests {
         assert_eq!(voice_item.id.as_deref(), Some("voice-1"));
         assert_eq!(voice.pagination.total, Some(2));
         assert!(voice.pagination.has_more);
+
+        let legacy_voice = map_cloud_search_response(
+            SearchKind::Voice,
+            1,
+            0,
+            json!({
+                "code": 200,
+                "data": {
+                    "totalCount": 2,
+                    "hasMore": true,
+                    "resources": [{"id": "voice-2", "title": "旧版声音节目"}]
+                }
+            }),
+        )
+        .expect("map legacy voice search");
+        let SearchItem::Opaque(legacy_voice_item) = &legacy_voice.items[0] else {
+            panic!("legacy voice result must remain opaque");
+        };
+        assert_eq!(legacy_voice_item.id.as_deref(), Some("voice-2"));
+        assert_eq!(legacy_voice.pagination.total, Some(2));
+        assert!(legacy_voice.pagination.has_more);
 
         let radio = map_cloud_search_response(
             SearchKind::RadioStation,
@@ -12561,6 +12687,7 @@ mod tests {
                 &SearchQuery {
                     query: "周杰伦".to_owned(),
                     kind,
+                    variant: SearchVariant::Cloud,
                     limit: 2,
                     offset: 0,
                     account: None,
@@ -12577,6 +12704,52 @@ mod tests {
                 kind,
                 SearchKind::Video | SearchKind::Mixed | SearchKind::Voice
             ) {
+                assert!(!page.items.is_empty(), "live {kind:?} search was empty");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_legacy_search_covers_every_reference_type_and_voice_path() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for kind in [
+            SearchKind::Track,
+            SearchKind::Album,
+            SearchKind::Artist,
+            SearchKind::Playlist,
+            SearchKind::User,
+            SearchKind::Mv,
+            SearchKind::Lyric,
+            SearchKind::RadioStation,
+            SearchKind::Video,
+            SearchKind::Mixed,
+            SearchKind::Voice,
+        ] {
+            let page = MusicProvider::search_catalog(
+                &provider,
+                &SearchQuery {
+                    query: "周杰伦".to_owned(),
+                    kind,
+                    variant: SearchVariant::Legacy,
+                    limit: 2,
+                    offset: 0,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {kind:?} legacy search failed: {error}"));
+            assert_eq!(page.pagination.extensions["response"]["code"], 200);
+            assert_eq!(page.pagination.extensions["variant"], "legacy");
+            assert_eq!(
+                page.pagination.extensions["request_path"],
+                if kind == SearchKind::Voice {
+                    "/api/search/voice/get"
+                } else {
+                    "/api/search/get"
+                }
+            );
+            if !matches!(kind, SearchKind::Video | SearchKind::Voice) {
                 assert!(!page.items.is_empty(), "live {kind:?} search was empty");
             }
         }
