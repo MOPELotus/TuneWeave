@@ -7,7 +7,7 @@ future ports can be audited precisely.
 ## NeteaseCloudMusicApiEnhanced/api-enhanced
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
-- Reviewed commit: `6946dc8e14b6fb125191bc43525d4faa8123d8ae`
+- Reviewed commit: `321c25bd7d041711f1a9ab9e4b55997ce661313c`
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.
@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `45cda48aeee995121ff7987a81e52949732a917c`
+- Reviewed commit: `07303dfaa1ebcfe4f24a291de6a536e3403d6043`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.
@@ -55,9 +55,9 @@ independent implementation of observed request and response behavior.
 
 - Source: https://github.com/qyhqiu/kuwoMusicApi
 - Reviewed commit: `e8e720b90b4d7e3052078a3380906f2b3349e388`
-- Repository metadata: the root `LICENSE` contains Apache-2.0 while
-  `package.json` declares ISC. TuneWeave will not port this implementation
-  until the relevant endpoints and applicable license are revalidated.
+- License: Apache License 2.0. The README does not declare an alternative;
+  `package.json` contains stale ISC metadata and is not treated as overriding
+  the root license. Endpoint usability will still be revalidated before porting.
 - Used for: preliminary Kuwo endpoint inventory only.
 
 ## MOPELotus/BBDown

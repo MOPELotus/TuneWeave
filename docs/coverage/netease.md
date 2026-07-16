@@ -1,19 +1,21 @@
 # 网易云 API 全量覆盖账本
 
-上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@6946dc8e14b6fb125191bc43525d4faa8123d8ae`
+上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@321c25bd7d041711f1a9ab9e4b55997ce661313c`
 
-本表由该快照的 `module/*.js` 文件生成，共 404 项。它是完成度验收清单，不是功能推荐列表。状态含义：
+本表由该快照的 `module/*.js` 文件生成，共 407 项。它是完成度验收清单，不是功能推荐列表；实际实施优先级见 [`docs/implementation-plan.md`](../implementation-plan.md)。状态含义：
 
 - `pending`：尚未完成统一映射或平台扩展端点。
 - `partial`：已有一部分统一能力，但仍缺输入、输出、分支或真实验证。
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=314`、`partial=6`、`implemented=33`、`verified=51`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=317`、`partial=6`、`implemented=33`、`verified=51`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
 | `activate_init_profile` | `/activate/init/profile` | `pending` | — |
+| `ad_get` | `/ad/get` | `pending` | 2026-07-17 上游新增；播放权益 Basic，XEAPI 广告目录并提取 `extJson.contextInfo.req_id` |
+| `ad_listening_rights_gain` | `/ad/listening/rights/gain` | `pending` | 2026-07-17 上游新增；播放权益 Basic，可显式提交或经 `/ad/get` 自动取得 `reqUid`，完整参数分支必须保留 |
 | `aidj_content_rcmd` | `/aidj/content/rcmd` | `pending` | — |
 | `album` | `/album` | `verified` | `GET /v1/albums/{ref}`、`GET /v1/albums/{ref}/tracks`（2026-07-16 HTTP 实测 `netease:18915` 返回《范特西》及 10 首曲目） |
 | `album_detail` | `/album/detail` | `verified` | `GET /v1/digital-albums/{ref}`（与 `/digitalAlbum/detail` 共用上游协议；2026-07-16 HTTP 实测 `netease:120605500` 返回《冀西南林路行》及 22 CNY 商品信息） |
@@ -248,6 +250,7 @@
 | `record_recent_voice` | `/record/recent/voice` | `pending` | — |
 | `register_anonimous` | `/register/anonimous` | `pending` | — |
 | `register_cellphone` | `/register/cellphone` | `pending` | — |
+| `register_checktoken` | `/register/checktoken` | `pending` | 2026-07-17 上游新增；底层协议 Basic，支持读取缓存 token、`refresh=1|true` 与 POST 强制刷新，敏感 token 不进入普通日志 |
 | `register_xeapikey` | `/register/xeapikey` | `pending` | — |
 | `related_allvideo` | `/related/allvideo` | `pending` | — |
 | `related_playlist` | `/related/playlist` | `pending` | — |
