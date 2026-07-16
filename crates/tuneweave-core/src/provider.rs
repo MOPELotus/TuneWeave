@@ -21,8 +21,9 @@ use crate::{
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
     RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    SearchKind, SearchQuery, SearchTrendingList, SearchTrendingRequest, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -74,6 +75,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SearchDefault,
+        ))
+    }
+
+    async fn trending_searches(
+        &self,
+        _request: &SearchTrendingRequest,
+    ) -> Result<SearchTrendingList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SearchTrending,
         ))
     }
 

@@ -85,6 +85,39 @@ pub struct SearchDefaultKeyword {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchTrendingDetail {
+    Brief,
+    #[default]
+    Full,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchTrendingRequest {
+    pub detail: SearchTrendingDetail,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchTrendingEntry {
+    pub rank: u32,
+    pub keyword: String,
+    pub description: Option<String>,
+    pub score: Option<u64>,
+    pub icon_type: Option<i64>,
+    pub icon_url: Option<String>,
+    pub target_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchTrendingList {
+    pub detail: SearchTrendingDetail,
+    pub entries: Vec<SearchTrendingEntry>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -2239,6 +2272,30 @@ mod tests {
         assert_eq!(value["display_text"], "🔥周旋 最近很火哦");
         assert_eq!(value["kind"], "track");
         assert!(value["image_url"].is_null());
+    }
+
+    #[test]
+    fn trending_searches_keep_rank_detail_and_optional_rich_fields_explicit() {
+        let list = SearchTrendingList {
+            detail: SearchTrendingDetail::Full,
+            entries: vec![SearchTrendingEntry {
+                rank: 1,
+                keyword: "薛之谦".to_owned(),
+                description: Some("热门搜索".to_owned()),
+                score: Some(107_509),
+                icon_type: Some(4),
+                icon_url: Some("https://example.test/hot.png".to_owned()),
+                target_url: None,
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize trending searches");
+        assert_eq!(value["detail"], "full");
+        assert_eq!(value["entries"][0]["rank"], 1);
+        assert_eq!(value["entries"][0]["keyword"], "薛之谦");
+        assert_eq!(value["entries"][0]["score"], 107_509);
+        assert_eq!(value["entries"][0]["icon_type"], 4);
     }
 
     #[test]

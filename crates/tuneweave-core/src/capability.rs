@@ -16,6 +16,7 @@ pub enum Capability {
     SearchMixed,
     SearchVoices,
     SearchDefault,
+    SearchTrending,
     AudioRecognition,
     Banners,
     RadioTaxonomy,
@@ -94,6 +95,11 @@ mod tests {
             serde_json::to_value(Capability::SearchDefault)
                 .expect("serialize default search capability"),
             serde_json::json!("search_default")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SearchTrending)
+                .expect("serialize trending search capability"),
+            serde_json::json!("search_trending")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
