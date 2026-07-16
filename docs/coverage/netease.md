@@ -208,10 +208,10 @@
 | `pl_count` | `/pl/count` | `pending` | — |
 | `playlist_category_list` | `/playlist/category/list` | `pending` | — |
 | `playlist_catlist` | `/playlist/catlist` | `pending` | — |
-| `playlist_cover_update` | `/playlist/cover/update` | `pending` | — |
-| `playlist_create` | `/playlist/create` | `pending` | — |
-| `playlist_delete` | `/playlist/delete` | `pending` | — |
-| `playlist_desc_update` | `/playlist/desc/update` | `pending` | — |
+| `playlist_cover_update` | `/playlist/cover/update` | `implemented` | `PUT /v1/playlists/{ref}/cover`（统一接收最大 20 MiB 的 `image/*` 原始字节及 `filename/image_size/crop_x/crop_y/account`，兼容 `imgSize/imgX/imgY`；完整执行 NOS 凭据分配、对象上传和 WeAPI `/api/playlist/cover/update`，不泄露 NOS token；协议载荷、图片边界、匿名认证前置和统一 HTTP 包络已离线验证，待真实账户验证封面写入） |
+| `playlist_create` | `/playlist/create` | `implemented` | `POST /v1/playlists`（以 `platform/account` 选择登录态，完整支持 `public/private` 与参考 `privacy=0/10`，以及 `NORMAL/VIDEO/SHARED` 三种歌单类型；统一/参考字段、冲突、认证前置和 HTTP 包络已测试，待真实账户创建并回滚） |
+| `playlist_delete` | `/playlist/delete` | `implemented` | `DELETE /v1/playlists/{ref}`、`DELETE /v1/playlists`（单删及同平台批量删除，`refs/ids/id` 接受数组、单值和逗号列表，严格保序并保留重复项；跨平台批次与冲突字段在请求前拒绝，待真实账户删除回滚） |
+| `playlist_desc_update` | `/playlist/desc/update` | `implemented` | `PATCH /v1/playlists/{ref}`（`description/desc`，支持空字符串清除；`variant=individual` 固定调用 plain API `/api/playlist/desc/update`，认证前置及冲突字段已测试，待真实账户写入） |
 | `playlist_detail` | `/playlist/detail` | `verified` | `GET /v1/playlists/{ref}` |
 | `playlist_detail_dynamic` | `/playlist/detail/dynamic` | `pending` | — |
 | `playlist_detail_rcmd_get` | `/playlist/detail/rcmd/get` | `pending` | — |
@@ -220,17 +220,17 @@
 | `playlist_import_name_task_create` | `/playlist/import/name/task/create` | `pending` | — |
 | `playlist_import_task_status` | `/playlist/import/task/status` | `pending` | — |
 | `playlist_mylike` | `/playlist/mylike` | `pending` | — |
-| `playlist_name_update` | `/playlist/name/update` | `pending` | — |
-| `playlist_order_update` | `/playlist/order/update` | `pending` | — |
+| `playlist_name_update` | `/playlist/name/update` | `implemented` | `PATCH /v1/playlists/{ref}`（`name` 与 `variant=individual` 调用 plain API `/api/playlist/update/name`，名称边界、认证前置与统一响应已测试，待真实账户写入） |
+| `playlist_order_update` | `/playlist/order/update` | `implemented` | `PUT /v1/account/playlists/order`（`refs/ids/id` 接受数组、单值或逗号列表，完整保留账户歌单顺序和重复输入，固定 WeAPI `/api/playlist/order/update`；平台/账户隔离和认证前置已测试，待真实账户写入） |
 | `playlist_privacy` | `/playlist/privacy` | `pending` | — |
 | `playlist_subscribe` | `/playlist/subscribe` | `pending` | — |
 | `playlist_subscribers` | `/playlist/subscribers` | `pending` | — |
-| `playlist_tags_update` | `/playlist/tags/update` | `pending` | — |
-| `playlist_track_add` | `/playlist/track/add` | `pending` | — |
+| `playlist_tags_update` | `/playlist/tags/update` | `implemented` | `PATCH /v1/playlists/{ref}`（`tags` 接受字符串数组或参考分号字符串，空数组/空字符串清除标签；`variant=individual` 调用 plain API `/api/playlist/tags/update`，标签边界及认证前置已测试，待真实账户写入） |
+| `playlist_track_add` | `/playlist/track/add` | `implemented` | `POST /v1/playlists/{ref}/videos` 或 `/items` 的 `kind=video/type=3`（按参考语义操作 VIDEO 歌单而非普通歌曲，ID 保持不透明，固定 WeAPI `/api/playlist/track/add` 并提交 `{type:3,id}`；歌曲/视频分流及认证前置已测试，待真实账户写入） |
 | `playlist_track_all` | `/playlist/track/all` | `verified` | `GET /v1/playlists/{ref}/tracks` |
-| `playlist_track_delete` | `/playlist/track/delete` | `pending` | — |
-| `playlist_tracks` | `/playlist/tracks` | `pending` | — |
-| `playlist_update` | `/playlist/update` | `pending` | — |
+| `playlist_track_delete` | `/playlist/track/delete` | `implemented` | `DELETE /v1/playlists/{ref}/videos` 或 `/items` 的 `kind=video/type=3`（固定 WeAPI `/api/playlist/track/delete`，保持 VIDEO 歌单不透明 ID、顺序与重复项；认证前置和统一响应已测试，待真实账户写入） |
+| `playlist_tracks` | `/playlist/tracks` | `implemented` | `POST/DELETE /v1/playlists/{ref}/tracks` 或 `/items` 的 `kind=track`（普通歌曲固定 plain API `/api/playlist/manipulate/tracks` 的 `op=add/del`，精确提交 JSON 字符串 `trackIds` 与 `imme=true`；仅在业务码 512 时按参考实现复制 ID 列表重试，结果记录初次响应；分支、保序/重复、认证前置和 HTTP 已测试，待真实账户写入/回滚） |
+| `playlist_update` | `/playlist/update` | `implemented` | `PATCH /v1/playlists/{ref}`（`variant=batch` 要求并同时提交 `name/description/tags`，固定 plain API `/api/batch` 且三个子请求值为 JSON 字符串；`default` 在三字段齐全时选择批量，否则选择独立模块；完整分支、清空、冲突和认证前置已测试，待真实账户写入） |
 | `playlist_update_playcount` | `/playlist/update/playcount` | `pending` | — |
 | `playlist_video_recent` | `/playlist/video/recent` | `pending` | — |
 | `playmode_intelligence_list` | `/playmode/intelligence/list` | `pending` | — |
@@ -304,7 +304,7 @@
 | `song_lyrics_mark_user_page` | `/song/lyrics/mark/user/page` | `pending` | — |
 | `song_monthdownlist` | `/song/monthdownlist` | `pending` | — |
 | `song_music_detail` | `/song/music/detail` | `pending` | — |
-| `song_order_update` | `/song/order/update` | `pending` | — |
+| `song_order_update` | `/song/order/update` | `implemented` | `PUT /v1/playlists/{ref}/tracks/order`（`refs/ids/trackIds` 接受单值、数组或逗号列表，完整保序及保留重复项，固定 plain API `/api/playlist/manipulate/tracks` 的 `op=update`；平台/账户和认证前置已测试，待真实账户写入） |
 | `song_purchased` | `/song/purchased` | `pending` | — |
 | `song_red_count` | `/song/red/count` | `pending` | — |
 | `song_singledownlist` | `/song/singledownlist` | `pending` | — |

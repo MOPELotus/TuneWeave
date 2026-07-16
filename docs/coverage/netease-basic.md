@@ -4,10 +4,10 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=9`、`partial=7`、`implemented=18`、`verified=30`。
+当前共 64 个验收单元：`pending=8`、`partial=7`、`implemented=19`、`verified=30`。
 
-- 完整实现率：`(implemented + verified) / 64 = 48 / 64 = 75.00%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 55 / 64 = 85.94%`。
+- 完整实现率：`(implemented + verified) / 64 = 49 / 64 = 76.56%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 56 / 64 = 87.50%`。
 - 完整联网验收率：`verified / 64 = 30 / 64 = 46.88%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
@@ -64,7 +64,7 @@
 | L03 | 个人音乐库 | 收藏/取消收藏广播电台及收藏列表 | `implemented` | `broadcast_sub/broadcast_channel_collect_list` 已实现，待真实账户 |
 | L04 | 个人音乐库 | 关注/取消关注歌手及关注列表 | `implemented` | `artist_sub/artist_sublist` 已实现，待真实账户 |
 | L05 | 个人音乐库 | 当前账户歌单列表 | `implemented` | `user_playlist` 已实现，待真实账户内容 |
-| L06 | 个人音乐库 | 创建、编辑、删除歌单及增删/排序歌曲 | `pending` | `playlist_create/delete/*_update/tracks/order` 等未接入 |
+| L06 | 个人音乐库 | 创建、编辑、删除歌单及增删/排序歌曲 | `implemented` | `playlist_create/delete/update/name/desc/tags/cover`、普通歌曲增删及 512 重试、VIDEO 歌单增删、歌曲顺序和账户歌单顺序均已接入统一 HTTP；离线协议/认证前置完整，待真实账户事务写入与回滚 |
 | L07 | 个人音乐库 | 全部/周播放历史 | `implemented` | `user_record` 已实现，待真实账户内容 |
 | L08 | 个人音乐库 | 每日推荐歌曲 | `verified` | `recommend_songs` 匿名可用真实路径已验收 |
 | L09 | 个人音乐库 | 每日推荐歌单 | `implemented` | `recommend_resource` 已实现，待真实账户内容 |
