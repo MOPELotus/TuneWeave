@@ -38,19 +38,21 @@ use tuneweave_core::{
     Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
     Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistKind, PlaylistMetadataUpdateVariant,
-    PlaylistMutationAction, PlaylistMutationResult, PlaylistUpdateRequest, PlaylistVisibility,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, PrincipalType, ProviderQrPoll, ProviderQrStart,
+    Quality, RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef,
+    Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -1419,6 +1421,105 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "playlist deletion")?;
         Ok(PlaylistDeleteResult {
+            playlist_refs: request.playlist_refs.clone(),
+            extensions: Extensions::from([("response".to_owned(), response.body)]),
+        })
+    }
+
+    async fn mutate_playlist_items(
+        &self,
+        id: &str,
+        action: PlaylistItemMutationAction,
+        request: &PlaylistItemMutationRequest,
+    ) -> Result<PlaylistItemMutationResult> {
+        let playlist_id = parse_numeric_id("playlist", id)?;
+        let item_ids = netease_playlist_item_ids(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist item update")?;
+        match request.kind {
+            PlaylistItemKind::Track => {
+                let payload =
+                    netease_playlist_track_mutation_payload(playlist_id, action, &item_ids);
+                let initial = client
+                    .request_api("/api/playlist/manipulate/tracks", payload)
+                    .await?;
+                if json_i64(&initial.body["code"]) == Some(512) {
+                    let mut duplicated = item_ids.clone();
+                    duplicated.extend(item_ids.iter().cloned());
+                    let retry = client
+                        .request_api(
+                            "/api/playlist/manipulate/tracks",
+                            netease_playlist_track_mutation_payload(
+                                playlist_id,
+                                action,
+                                &duplicated,
+                            ),
+                        )
+                        .await?;
+                    ensure_account_access(&client, &retry.body, "playlist track update")?;
+                    return map_netease_playlist_item_mutation_result(
+                        playlist_id,
+                        action,
+                        request,
+                        retry.body,
+                        Some(initial.body),
+                    );
+                }
+                ensure_account_access(&client, &initial.body, "playlist track update")?;
+                map_netease_playlist_item_mutation_result(
+                    playlist_id,
+                    action,
+                    request,
+                    initial.body,
+                    None,
+                )
+            }
+            PlaylistItemKind::Video => {
+                let (path, payload) =
+                    netease_playlist_video_mutation_request(playlist_id, action, &item_ids);
+                let response = client.request_weapi(path, payload).await?;
+                ensure_account_access(&client, &response.body, "video playlist update")?;
+                map_netease_playlist_item_mutation_result(
+                    playlist_id,
+                    action,
+                    request,
+                    response.body,
+                    None,
+                )
+            }
+        }
+    }
+
+    async fn reorder_playlist_tracks(
+        &self,
+        id: &str,
+        request: &PlaylistTrackOrderRequest,
+    ) -> Result<PlaylistTrackOrderResult> {
+        let playlist_id = parse_numeric_id("playlist", id)?;
+        let track_ids = netease_playlist_track_ids("playlist track order", &request.track_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist track order update")?;
+        let (path, payload) = netease_playlist_track_order_request(playlist_id, &track_ids);
+        let response = client.request_api(path, payload).await?;
+        ensure_account_access(&client, &response.body, "playlist track order update")?;
+        map_netease_playlist_track_order_result(
+            playlist_id,
+            request.track_refs.clone(),
+            response.body,
+        )
+    }
+
+    async fn reorder_account_playlists(
+        &self,
+        request: &PlaylistOrderRequest,
+    ) -> Result<PlaylistOrderResult> {
+        let ids = netease_playlist_ids("playlist order", &request.playlist_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "playlist order update")?;
+        let (path, payload) = netease_account_playlist_order_request(&ids);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "playlist order update")?;
+        Ok(PlaylistOrderResult {
             playlist_refs: request.playlist_refs.clone(),
             extensions: Extensions::from([("response".to_owned(), response.body)]),
         })
@@ -5423,6 +5524,126 @@ fn netease_playlist_ids(resource: &str, references: &[ResourceRef]) -> Result<Ve
         .collect()
 }
 
+fn netease_playlist_track_ids(resource: &str, references: &[ResourceRef]) -> Result<Vec<u64>> {
+    if references.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "NetEase {resource} requires at least one track reference"
+        ))
+        .with_platform(Platform::Netease));
+    }
+    references
+        .iter()
+        .map(|reference| {
+            if reference.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "NetEase {resource} only accepts netease track references"
+                ))
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "ref": reference })));
+            }
+            parse_numeric_id("track", reference.id())
+        })
+        .collect()
+}
+
+fn netease_playlist_item_ids(request: &PlaylistItemMutationRequest) -> Result<Vec<String>> {
+    if request.item_refs.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase playlist item update requires at least one item reference",
+        )
+        .with_platform(Platform::Netease));
+    }
+    request
+        .item_refs
+        .iter()
+        .map(|reference| {
+            if reference.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase playlist items must use netease references",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "ref": reference, "kind": request.kind })));
+            }
+            match request.kind {
+                PlaylistItemKind::Track => {
+                    parse_numeric_id("track", reference.id()).map(|id| id.to_string())
+                }
+                PlaylistItemKind::Video => {
+                    let id = reference.id().trim();
+                    if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+                        return Err(TuneWeaveError::invalid_request(
+                            "NetEase playlist video ids must be between 1 and 256 visible characters",
+                        )
+                        .with_platform(Platform::Netease)
+                        .with_details(json!({ "ref": reference })));
+                    }
+                    Ok(id.to_owned())
+                }
+            }
+        })
+        .collect()
+}
+
+fn netease_playlist_track_mutation_payload(
+    playlist_id: u64,
+    action: PlaylistItemMutationAction,
+    item_ids: &[String],
+) -> Value {
+    let operation = match action {
+        PlaylistItemMutationAction::Add => "add",
+        PlaylistItemMutationAction::Remove => "del",
+    };
+    json!({
+        "op": operation,
+        "pid": playlist_id,
+        "trackIds": json!(item_ids).to_string(),
+        "imme": "true"
+    })
+}
+
+fn netease_playlist_video_mutation_request(
+    playlist_id: u64,
+    action: PlaylistItemMutationAction,
+    item_ids: &[String],
+) -> (&'static str, Value) {
+    let path = match action {
+        PlaylistItemMutationAction::Add => "/api/playlist/track/add",
+        PlaylistItemMutationAction::Remove => "/api/playlist/track/delete",
+    };
+    let tracks = item_ids
+        .iter()
+        .map(|id| json!({ "type": 3, "id": id }))
+        .collect::<Vec<_>>();
+    (
+        path,
+        json!({
+            "id": playlist_id,
+            "tracks": json!(tracks).to_string()
+        }),
+    )
+}
+
+fn netease_playlist_track_order_request(
+    playlist_id: u64,
+    track_ids: &[u64],
+) -> (&'static str, Value) {
+    (
+        "/api/playlist/manipulate/tracks",
+        json!({
+            "pid": playlist_id,
+            "trackIds": format!("[{}]", join_numeric_ids(track_ids)),
+            "op": "update"
+        }),
+    )
+}
+
+fn netease_account_playlist_order_request(ids: &[u64]) -> (&'static str, Value) {
+    (
+        "/api/playlist/order/update",
+        json!({ "ids": format!("[{}]", join_numeric_ids(ids)) }),
+    )
+}
+
 fn join_numeric_ids(ids: &[u64]) -> String {
     ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
 }
@@ -6276,6 +6497,67 @@ fn map_netease_playlist_mutation_result(
         playlist_ref,
         action,
         playlist: None,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+fn map_netease_playlist_item_mutation_result(
+    playlist_id: u64,
+    action: PlaylistItemMutationAction,
+    request: &PlaylistItemMutationRequest,
+    response: Value,
+    initial_response: Option<Value>,
+) -> Result<PlaylistItemMutationResult> {
+    let playlist_ref =
+        ResourceRef::new(Platform::Netease, playlist_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid playlist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let snapshot_id = ["/snapshotId", "/snapshot_id", "/data/snapshotId"]
+        .into_iter()
+        .find_map(|pointer| response.pointer(pointer).and_then(json_scalar_string));
+    let cloud_track_count = ["/cloudCount", "/cloudTrackCount", "/data/cloudCount"]
+        .into_iter()
+        .find_map(|pointer| response.pointer(pointer).and_then(json_u64));
+    let mut extensions = Extensions::from([("response".to_owned(), response)]);
+    if let Some(initial_response) = initial_response {
+        extensions.insert("initial_response".to_owned(), initial_response);
+        extensions.insert("retried_code_512".to_owned(), Value::Bool(true));
+    }
+    Ok(PlaylistItemMutationResult {
+        playlist_ref,
+        item_refs: request.item_refs.clone(),
+        kind: request.kind,
+        action,
+        snapshot_id,
+        cloud_track_count,
+        extensions,
+    })
+}
+
+fn map_netease_playlist_track_order_result(
+    playlist_id: u64,
+    track_refs: Vec<ResourceRef>,
+    response: Value,
+) -> Result<PlaylistTrackOrderResult> {
+    let playlist_ref =
+        ResourceRef::new(Platform::Netease, playlist_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid playlist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let snapshot_id = ["/snapshotId", "/snapshot_id", "/data/snapshotId"]
+        .into_iter()
+        .find_map(|pointer| response.pointer(pointer).and_then(json_scalar_string));
+    Ok(PlaylistTrackOrderResult {
+        playlist_ref,
+        track_refs,
+        snapshot_id,
         extensions: Extensions::from([("response".to_owned(), response)]),
     })
 }
@@ -13445,6 +13727,89 @@ mod tests {
     }
 
     #[test]
+    fn playlist_item_and_order_requests_keep_tracks_videos_and_ordering_distinct() {
+        let track_refs = vec![
+            ResourceRef::new(Platform::Netease, "5268328").expect("track reference"),
+            ResourceRef::new(Platform::Netease, "1219871").expect("track reference"),
+        ];
+        let track_request =
+            PlaylistItemMutationRequest::new(track_refs.clone(), PlaylistItemKind::Track);
+        let track_ids = netease_playlist_item_ids(&track_request).expect("playlist track item ids");
+        let add = netease_playlist_track_mutation_payload(
+            2_039_116_066,
+            PlaylistItemMutationAction::Add,
+            &track_ids,
+        );
+        assert_eq!(add["op"], "add");
+        assert_eq!(add["pid"], 2_039_116_066_u64);
+        assert_eq!(add["trackIds"], r#"["5268328","1219871"]"#);
+        assert_eq!(add["imme"], "true");
+
+        let video_request = PlaylistItemMutationRequest::new(
+            vec![
+                ResourceRef::new(Platform::Netease, "89ADDE33C0AAE8EC14B99F6750DB954D")
+                    .expect("video reference"),
+            ],
+            PlaylistItemKind::Video,
+        );
+        let video_ids = netease_playlist_item_ids(&video_request).expect("playlist video item ids");
+        let (path, payload) = netease_playlist_video_mutation_request(
+            5_271_999_357,
+            PlaylistItemMutationAction::Remove,
+            &video_ids,
+        );
+        assert_eq!(path, "/api/playlist/track/delete");
+        let tracks: Value =
+            serde_json::from_str(payload["tracks"].as_str().expect("video tracks payload"))
+                .expect("parse video tracks payload");
+        assert_eq!(tracks[0]["type"], 3);
+        assert_eq!(tracks[0]["id"], "89ADDE33C0AAE8EC14B99F6750DB954D");
+
+        let numeric_track_ids = netease_playlist_track_ids("playlist track order", &track_refs)
+            .expect("playlist track order ids");
+        let (path, payload) =
+            netease_playlist_track_order_request(2_039_116_066, &numeric_track_ids);
+        assert_eq!(path, "/api/playlist/manipulate/tracks");
+        assert_eq!(payload["op"], "update");
+        assert_eq!(payload["trackIds"], "[5268328,1219871]");
+
+        let (path, payload) = netease_account_playlist_order_request(&[111, 222, 111]);
+        assert_eq!(path, "/api/playlist/order/update");
+        assert_eq!(payload["ids"], "[111,222,111]");
+    }
+
+    #[test]
+    fn playlist_item_mapping_records_code_512_retry_without_rewriting_requested_items() {
+        let request = PlaylistItemMutationRequest::new(
+            vec![ResourceRef::new(Platform::Netease, "5268328").expect("track reference")],
+            PlaylistItemKind::Track,
+        );
+        let result = map_netease_playlist_item_mutation_result(
+            2_039_116_066,
+            PlaylistItemMutationAction::Add,
+            &request,
+            json!({ "code": 200, "snapshotId": "snapshot-2", "cloudCount": 4 }),
+            Some(json!({ "code": 512, "message": "retry" })),
+        )
+        .expect("map retried playlist track update");
+        assert_eq!(result.playlist_ref.to_string(), "netease:2039116066");
+        assert_eq!(result.item_refs, request.item_refs);
+        assert_eq!(result.snapshot_id.as_deref(), Some("snapshot-2"));
+        assert_eq!(result.cloud_track_count, Some(4));
+        assert_eq!(result.extensions["retried_code_512"], true);
+        assert_eq!(result.extensions["initial_response"]["code"], 512);
+
+        let ordered = map_netease_playlist_track_order_result(
+            2_039_116_066,
+            vec![ResourceRef::new(Platform::Netease, "5268328").expect("track reference")],
+            json!({ "code": 200, "snapshotId": "snapshot-3" }),
+        )
+        .expect("map playlist track order");
+        assert_eq!(ordered.snapshot_id.as_deref(), Some("snapshot-3"));
+        assert_eq!(ordered.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn playlist_mutation_mapping_preserves_created_playlist_and_raw_responses() {
         let response = json!({
             "code": 200,
@@ -13471,7 +13836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playlist_metadata_writes_require_authentication_before_network_access() {
+    async fn playlist_writes_require_authentication_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let create =
             MusicProvider::create_playlist(&provider, &PlaylistCreateRequest::new("测试歌单"))
@@ -13506,6 +13871,46 @@ mod tests {
         .await
         .expect_err("anonymous playlist deletion");
         assert_eq!(delete.code, ErrorCode::AuthenticationRequired);
+
+        let item = MusicProvider::mutate_playlist_items(
+            &provider,
+            "2039116066",
+            PlaylistItemMutationAction::Add,
+            &PlaylistItemMutationRequest::new(
+                vec![ResourceRef::new(Platform::Netease, "5268328").expect("track reference")],
+                PlaylistItemKind::Track,
+            ),
+        )
+        .await
+        .expect_err("anonymous playlist item update");
+        assert_eq!(item.code, ErrorCode::AuthenticationRequired);
+
+        let track_order = MusicProvider::reorder_playlist_tracks(
+            &provider,
+            "2039116066",
+            &PlaylistTrackOrderRequest {
+                track_refs: vec![
+                    ResourceRef::new(Platform::Netease, "5268328").expect("track reference"),
+                ],
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous playlist track order");
+        assert_eq!(track_order.code, ErrorCode::AuthenticationRequired);
+
+        let playlist_order = MusicProvider::reorder_account_playlists(
+            &provider,
+            &PlaylistOrderRequest {
+                playlist_refs: vec![
+                    ResourceRef::new(Platform::Netease, "2039116066").expect("playlist reference"),
+                ],
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous playlist order");
+        assert_eq!(playlist_order.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
