@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=339`、`partial=6`、`implemented=23`、`verified=36`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=337`、`partial=6`、`implemented=23`、`verified=38`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -58,8 +58,8 @@
 | `captcha_sent` | `/captcha/sent` | `implemented` | `POST /v1/auth/challenges`（为避免误发短信不做自动联网测试） |
 | `captcha_verify` | `/captcha/verify` | `implemented` | `POST /v1/auth/challenges/validate`（与验证码登录事务明确分离，仅校验而不登录或保存 Cookie；统一支持 `platform/account/method/principal/code/country_code`，并完整兼容参考 `phone/captcha/ctcode`，手机号和区号接受数字或字符串，`method` 默认 SMS、区号缺省或空值默认 `86`；统一返回 `valid/platform_code/message` 并在 `extensions.response` 保留完整上游响应，错误验证码作为 HTTP 200 的 `valid=false` 正常结果，手机号和验证码不回显；core、适配器映射、参考/统一输入、默认值、非法值及敏感数据边界均有离线测试；2026-07-16 provider 与统一 HTTP 以假验证码真实联网验证成功，返回 `valid=false`、平台码 503 和“验证码错误”，待真实验证码验证 `valid=true` 分支） |
 | `cellphone_existence_check` | `/cellphone/existence/check` | `verified` | `POST /v1/auth/principals/status`（统一为不创建会话的 `AuthPrincipalStatus`，网易云限定 `principal_type=phone` 并默认该类型；完整支持统一 `platform/account/principal_type/principal/country_code`、参考 `phone/countrycode`、camelCase `countryCode`，手机号和区号接受数字或字符串，区号缺省或空值默认 `86`；固定 EAPI 调用 `/api/cellphone/existence/check`，严格把已实测 `exist=1/-1` 映射为 `exists=true/false`，统一保留 `has_password/display_name/avatar_url/platform_code` 及 `extensions.response`，不把未知 `exist` 值猜成布尔值，输入请求和 Debug 均脱敏；core、适配器两分支、能力声明、参考/统一输入、默认值、非手机号与非标量拒绝、敏感数据边界均有测试；2026-07-16 provider 与统一 HTTP 真实联网验证已注册 `13800138000` 返回 `exists=true`、`has_password=true`、上游 `exist=1`，未注册输入 `1` 返回 `exists=false`、`has_password=false`、上游 `exist=-1`，两者平台码均 200 且手机号保持上游脱敏） |
-| `chart_detail` | `/chart/detail` | `pending` | — |
-| `chart_song_detail` | `/chart/song/detail` | `pending` | — |
+| `chart_detail` | `/chart/detail` | `verified` | `GET /v1/charts/dimensions/{chart_code}`（完整支持必填 `target_id/target_type`、参考 `targetId/targetType` 别名及 `platform/account`；统一为 `DimensionChart`，映射榜单引用、维度、名称、说明、封面、更新时间、计数和评论支持态，完整响应保留在扩展；2026-07-16 provider 与匿名 HTTP 均真实联网验证 `CITY_SONG_CHART + 110000 + CITY` 成功，返回 `netease:CITY_SONG_CHART#110000@CITY#`“北京榜”、上游 `code=200`） |
+| `chart_song_detail` | `/chart/song/detail` | `verified` | `GET /v1/charts/dimensions/{chart_code}/tracks`（统一为不可分页的 `DimensionChartTrackSnapshot`；列表顺序映射为从 1 开始的当前排名，保留上期排名、升降、理由、理由 ID、分数、比例、收藏态、分组、平台权益与每项/整份原始响应，不伪造 `limit/offset`；2026-07-16 provider 与匿名 HTTP 真实联网验证 `CITY_STYLE_SONG_CHART + 110000_1020 + CITY_STYLE` 返回完整 100 项、无分页元数据，首项 `netease:3399839173`《甲乙丙丁 (你我怎么两清)》当前/上期均第 1、可播放，上游 `code=200`） |
 | `check_music` | `/check/music` | `pending` | — |
 | `cloud` | `/cloud` | `pending` | — |
 | `cloud_import` | `/cloud/import` | `pending` | — |
