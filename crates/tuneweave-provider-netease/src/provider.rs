@@ -8,15 +8,16 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, ArtistSummary,
-    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
-    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist,
+    ArtistBiographySection, ArtistSummary, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
+    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -24,11 +25,11 @@ use crate::{
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
-        AlbumStatsEnvelope, ArtistAlbumsEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
-        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
+        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
+        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
+        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -272,6 +273,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
+            Capability::ArtistDetail,
             Capability::ArtistAlbums,
             Capability::PlaylistRead,
             Capability::Lyrics,
@@ -580,6 +582,26 @@ impl MusicProvider for NeteaseProvider {
             .collect::<Result<Vec<_>>>()?;
         let (items, pagination) = select_page(items, limit, request.offset);
         Ok(Page { items, pagination })
+    }
+
+    async fn artist(&self, id: &str, account: Option<&str>) -> Result<Artist> {
+        let id = parse_numeric_id("artist", id)?;
+        let client = self.client_for(account)?;
+        let detail_response = client
+            .request_eapi("/api/artist/head/info/get", json!({ "id": id }))
+            .await?;
+        ensure_success(&detail_response.body)?;
+        let detail_raw = detail_response.body;
+        let detail: ArtistDetailEnvelope = parse_body(detail_raw.clone())?;
+
+        let description_response = client
+            .request_weapi("/api/artist/introduction", json!({ "id": id }))
+            .await?;
+        ensure_success(&description_response.body)?;
+        let description_raw = description_response.body;
+        let description: ArtistDescriptionEnvelope = parse_body(description_raw.clone())?;
+
+        map_artist(detail, description, detail_raw, description_raw)
     }
 
     async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -1893,6 +1915,75 @@ fn map_artist_albums_response(
     })
 }
 
+fn map_artist(
+    detail: ArtistDetailEnvelope,
+    description: ArtistDescriptionEnvelope,
+    detail_raw: Value,
+    description_raw: Value,
+) -> Result<Artist> {
+    let artist = detail.data.artist;
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, artist.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid artist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut aliases = Vec::new();
+    for alias in artist.alias.into_iter().chain(artist.translated_names) {
+        let alias = alias.trim();
+        if !alias.is_empty() && alias != artist.name && !aliases.iter().any(|item| item == alias) {
+            aliases.push(alias.to_owned());
+        }
+    }
+    let description_text = description
+        .brief_description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            artist
+                .brief_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let biography_sections = description
+        .introduction
+        .into_iter()
+        .filter_map(|section| {
+            let title = section.title.trim().to_owned();
+            let text = section.text.trim().to_owned();
+            (!title.is_empty() || !text.is_empty())
+                .then_some(ArtistBiographySection { title, text })
+        })
+        .collect();
+    let mut extensions = Extensions::new();
+    extensions.insert("detail_response".to_owned(), detail_raw);
+    extensions.insert("description_response".to_owned(), description_raw);
+    Ok(Artist {
+        resource_ref,
+        platform: Platform::Netease,
+        id: artist.id.to_string(),
+        name: artist.name,
+        aliases,
+        description: description_text,
+        biography_sections,
+        avatar_url: artist.avatar,
+        cover_url: artist.cover,
+        album_count: artist.album_count,
+        track_count: artist.track_count,
+        mv_count: artist.mv_count,
+        video_count: detail.data.video_count,
+        identities: artist.identities,
+        extensions,
+    })
+}
+
 fn map_artist_album_item(raw: Value) -> Result<Album> {
     let album: AlbumDetail = parse_body(raw.clone())?;
     let mut album = map_album(album)?;
@@ -2535,6 +2626,64 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_detail_and_description_without_losing_extensions() {
+        let detail_raw = json!({
+            "code": 200,
+            "data": {
+                "artist": {
+                    "id": 6452,
+                    "name": "周杰伦",
+                    "alias": ["Jay Chou", "周董", "Jay Chou"],
+                    "transNames": ["Chou Chieh-lun"],
+                    "briefDesc": "详情简介",
+                    "avatar": "https://example.test/avatar.jpg",
+                    "cover": "https://example.test/cover.jpg",
+                    "albumSize": 44,
+                    "musicSize": 568,
+                    "mvSize": 9,
+                    "identities": ["作曲"]
+                },
+                "videoCount": 8,
+                "identify": {"imageDesc": "歌手、作词、作曲、编曲、制作人、乐手"},
+                "blacklist": true
+            }
+        });
+        let description_raw = json!({
+            "code": 200,
+            "briefDesc": "传记简介",
+            "introduction": [
+                {"ti": "人物简介", "txt": "人物经历"},
+                {"ti": "代表作品", "txt": "范特西"}
+            ],
+            "topicData": [{"mainTitle": "专题原始字段"}]
+        });
+        let detail: ArtistDetailEnvelope =
+            serde_json::from_value(detail_raw.clone()).expect("artist detail fixture");
+        let description: ArtistDescriptionEnvelope =
+            serde_json::from_value(description_raw.clone()).expect("artist description fixture");
+
+        let artist = map_artist(detail, description, detail_raw, description_raw)
+            .expect("map artist detail");
+
+        assert_eq!(artist.resource_ref.to_string(), "netease:6452");
+        assert_eq!(artist.name, "周杰伦");
+        assert_eq!(artist.aliases, ["Jay Chou", "周董", "Chou Chieh-lun"]);
+        assert_eq!(artist.description, "传记简介");
+        assert_eq!(artist.biography_sections.len(), 2);
+        assert_eq!(artist.album_count, Some(44));
+        assert_eq!(artist.track_count, Some(568));
+        assert_eq!(artist.video_count, Some(8));
+        assert_eq!(
+            artist.extensions["detail_response"]["data"]["identify"]["imageDesc"],
+            "歌手、作词、作曲、编曲、制作人、乐手"
+        );
+        assert_eq!(
+            artist.extensions["description_response"]["topicData"][0]["mainTitle"],
+            "专题原始字段"
+        );
+    }
+
+    #[test]
     fn maps_netease_album_dynamic_stats_to_the_unified_model() {
         let stats: AlbumStatsEnvelope = serde_json::from_value(json!({
             "commentCount": 1989,
@@ -2830,6 +2979,10 @@ mod tests {
                 .await
                 .expect_err("invalid artist id");
         assert_eq!(artist_error.code, ErrorCode::InvalidRequest);
+        let artist_detail_error = MusicProvider::artist(&provider, "invalid", None)
+            .await
+            .expect_err("invalid artist detail id");
+        assert_eq!(artist_detail_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -3519,6 +3672,23 @@ mod tests {
         assert!(page.pagination.has_more);
         assert_eq!(page.pagination.next_offset, Some(5));
         assert_eq!(page.pagination.extensions["artist"]["id"], 6452);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_detail_and_description() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let artist = MusicProvider::artist(&provider, "6452", None)
+            .await
+            .expect("live artist detail");
+        assert_eq!(artist.resource_ref.to_string(), "netease:6452");
+        assert_eq!(artist.name, "周杰伦");
+        assert!(artist.aliases.iter().any(|alias| alias == "Jay Chou"));
+        assert!(!artist.description.is_empty());
+        assert!(!artist.biography_sections.is_empty());
+        assert!(artist.track_count.is_some_and(|count| count > 0));
+        assert!(artist.extensions.contains_key("detail_response"));
+        assert!(artist.extensions.contains_key("description_response"));
     }
 
     #[tokio::test]

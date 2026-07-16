@@ -46,6 +46,56 @@ pub(crate) struct ArtistAlbumsEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistDetailEnvelope {
+    pub data: ArtistDetailData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistDetailData {
+    pub artist: ArtistDetail,
+    #[serde(rename = "videoCount")]
+    pub video_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistDetail {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub alias: Vec<String>,
+    #[serde(rename = "transNames", default)]
+    pub translated_names: Vec<String>,
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    pub avatar: Option<String>,
+    pub cover: Option<String>,
+    #[serde(rename = "albumSize")]
+    pub album_count: Option<u64>,
+    #[serde(rename = "musicSize")]
+    pub track_count: Option<u64>,
+    #[serde(rename = "mvSize")]
+    pub mv_count: Option<u64>,
+    #[serde(default)]
+    pub identities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistDescriptionEnvelope {
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    #[serde(default)]
+    pub introduction: Vec<ArtistIntroduction>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistIntroduction {
+    #[serde(rename = "ti")]
+    pub title: String,
+    #[serde(rename = "txt")]
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SubscribedAlbumsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,
