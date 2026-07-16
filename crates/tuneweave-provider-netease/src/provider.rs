@@ -26,13 +26,13 @@ use crate::{
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
-        ArtistDynamicEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        ArtistDynamicEnvelope, ArtistFollowCountEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -615,7 +615,13 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let raw = response.body;
         let response: ArtistDynamicEnvelope = parse_body(raw.clone())?;
-        map_artist_stats(id, response, raw)
+        let follow_count_response = client
+            .request_weapi("/api/artist/follow/count/get", json!({ "id": id }))
+            .await?;
+        ensure_success(&follow_count_response.body)?;
+        let follow_count_raw = follow_count_response.body;
+        let follow_count: ArtistFollowCountEnvelope = parse_body(follow_count_raw.clone())?;
+        map_artist_stats(id, response, raw, follow_count, follow_count_raw)
     }
 
     async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -1998,7 +2004,13 @@ fn map_artist(
     })
 }
 
-fn map_artist_stats(id: u64, stats: ArtistDynamicEnvelope, raw: Value) -> Result<ArtistStats> {
+fn map_artist_stats(
+    id: u64,
+    stats: ArtistDynamicEnvelope,
+    raw: Value,
+    follow_count: ArtistFollowCountEnvelope,
+    follow_count_raw: Value,
+) -> Result<ArtistStats> {
     let artist_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -2017,10 +2029,15 @@ fn map_artist_stats(id: u64, stats: ArtistDynamicEnvelope, raw: Value) -> Result
         .collect();
     let mut extensions = Extensions::new();
     extensions.insert("response".to_owned(), raw);
+    extensions.insert("follow_count_response".to_owned(), follow_count_raw);
     Ok(ArtistStats {
         artist_ref,
-        followed: stats.followed,
-        follower_count: None,
+        followed: follow_count
+            .data
+            .is_following
+            .or(follow_count.data.follow)
+            .or(stats.followed),
+        follower_count: follow_count.data.follower_count,
         video_counts,
         online_concert_count: stats.concert.and_then(|concert| concert.online_count),
         extensions,
@@ -2742,13 +2759,29 @@ mod tests {
             ],
             "rcmdResource": {"resourceId": 123}
         });
+        let follow_count_raw = json!({
+            "code": 200,
+            "data": {
+                "fansCnt": 13704928,
+                "follow": true,
+                "followCnt": 0,
+                "followDay": "",
+                "followDayCnt": 0,
+                "isFollow": true
+            },
+            "message": "success"
+        });
         let response: ArtistDynamicEnvelope =
             serde_json::from_value(raw.clone()).expect("artist dynamic fixture");
+        let follow_count: ArtistFollowCountEnvelope =
+            serde_json::from_value(follow_count_raw.clone()).expect("artist follow count fixture");
 
-        let stats = map_artist_stats(6452, response, raw).expect("map artist stats");
+        let stats = map_artist_stats(6452, response, raw, follow_count, follow_count_raw)
+            .expect("map artist stats");
 
         assert_eq!(stats.artist_ref.to_string(), "netease:6452");
-        assert_eq!(stats.followed, Some(false));
+        assert_eq!(stats.followed, Some(true));
+        assert_eq!(stats.follower_count, Some(13_704_928));
         assert_eq!(stats.video_counts.len(), 2);
         assert_eq!(stats.video_counts[0].category.as_deref(), Some("0"));
         assert_eq!(stats.video_counts[0].count, 9);
@@ -2760,6 +2793,10 @@ mod tests {
         assert_eq!(
             stats.extensions["response"]["rcmdResource"]["resourceId"],
             123
+        );
+        assert_eq!(
+            stats.extensions["follow_count_response"]["data"]["followDayCnt"],
+            0
         );
     }
 
@@ -3784,8 +3821,10 @@ mod tests {
             .expect("live artist stats");
         assert_eq!(stats.artist_ref.to_string(), "netease:6452");
         assert!(stats.followed.is_some());
+        assert!(stats.follower_count.is_some_and(|count| count > 0));
         assert!(!stats.video_counts.is_empty());
         assert!(stats.extensions.contains_key("response"));
+        assert!(stats.extensions.contains_key("follow_count_response"));
     }
 
     #[tokio::test]

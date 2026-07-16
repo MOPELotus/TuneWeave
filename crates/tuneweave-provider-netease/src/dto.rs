@@ -116,6 +116,20 @@ pub(crate) struct ArtistVideoCount {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistFollowCountEnvelope {
+    pub data: ArtistFollowCount,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistFollowCount {
+    #[serde(rename = "fansCnt")]
+    pub follower_count: Option<u64>,
+    pub follow: Option<bool>,
+    #[serde(rename = "isFollow")]
+    pub is_following: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SubscribedAlbumsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,
