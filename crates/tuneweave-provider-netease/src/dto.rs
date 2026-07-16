@@ -54,6 +54,19 @@ pub(crate) struct BannerEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct BroadcastTaxonomyEnvelope {
+    pub data: BroadcastTaxonomyData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BroadcastTaxonomyData {
+    #[serde(rename = "categoryList", default)]
+    pub categories: Vec<Value>,
+    #[serde(rename = "regionList", default)]
+    pub regions: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct TrackEnvelope {
     #[serde(default)]
     pub songs: Vec<Song>,

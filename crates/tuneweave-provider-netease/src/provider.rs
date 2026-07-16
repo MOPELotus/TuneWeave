@@ -20,9 +20,9 @@ use tuneweave_core::{
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoKind,
+    RadioCatalogOption, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResourceRef,
+    Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -37,13 +37,13 @@ use crate::{
         ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
         ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
         ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality, BannerEnvelope,
-        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, ImageUploadAllocationEnvelope,
-        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
-        PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        BroadcastTaxonomyEnvelope, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem,
+        ImageUploadAllocationEnvelope, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -278,6 +278,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTracks,
             Capability::AudioRecognition,
             Capability::Banners,
+            Capability::RadioTaxonomy,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -415,6 +416,35 @@ impl MusicProvider for NeteaseProvider {
             .into_iter()
             .map(|banner| map_banner(banner, request.client))
             .collect()
+    }
+
+    async fn radio_taxonomy(&self, request: &RadioTaxonomyRequest) -> Result<RadioTaxonomy> {
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/voice/broadcast/category/region/get", json!({}))
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: BroadcastTaxonomyEnvelope = parse_body(response.body)?;
+        let categories = response
+            .data
+            .categories
+            .into_iter()
+            .map(|option| map_radio_catalog_option(option, "category"))
+            .collect::<Result<Vec<_>>>()?;
+        let regions = response
+            .data
+            .regions
+            .into_iter()
+            .map(|option| map_radio_catalog_option(option, "region"))
+            .collect::<Result<Vec<_>>>()?;
+        let mut extensions = Extensions::new();
+        extensions.insert("response".to_owned(), raw_response);
+        Ok(RadioTaxonomy {
+            categories,
+            regions,
+            extensions,
+        })
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1831,6 +1861,38 @@ fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
             .filter(|url| !url.is_empty())
             .map(str::to_owned),
         exclusive: raw.get("exclusive").and_then(json_bool),
+        extensions,
+    })
+}
+
+fn map_radio_catalog_option(raw: Value, kind: &str) -> Result<RadioCatalogOption> {
+    let id = raw.get("id").and_then(json_scalar_string).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase broadcast {kind} did not contain an id"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "option": raw.clone() }))
+    })?;
+    let name = raw
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase broadcast {kind} did not contain a name"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "option": raw.clone() }))
+        })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("broadcast_option".to_owned(), raw);
+    Ok(RadioCatalogOption {
+        id,
+        name,
         extensions,
     })
 }
@@ -4292,6 +4354,31 @@ mod tests {
     }
 
     #[test]
+    fn maps_broadcast_categories_and_regions_without_numeric_id_leakage() {
+        let category = map_radio_catalog_option(json!({ "id": 1, "name": "音乐台" }), "category")
+            .expect("map category");
+        assert_eq!(category.id, "1");
+        assert_eq!(category.name, "音乐台");
+        assert_eq!(category.extensions["broadcast_option"]["id"], 1);
+
+        let region = map_radio_catalog_option(
+            json!({ "id": "407", "name": " 网络台 ", "future": true }),
+            "region",
+        )
+        .expect("map region");
+        assert_eq!(region.id, "407");
+        assert_eq!(region.name, "网络台");
+        assert_eq!(region.extensions["broadcast_option"]["future"], true);
+
+        assert_eq!(
+            map_radio_catalog_option(json!({ "id": 1, "name": "" }), "category")
+                .expect_err("missing name")
+                .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[test]
     fn banner_mapping_rejects_items_without_any_image() {
         let error = map_banner(
             json!({"targetId": 185809, "targetType": 1}),
@@ -5991,6 +6078,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
+        assert!(capabilities.contains(&Capability::RadioTaxonomy));
     }
 
     #[test]
@@ -6508,6 +6596,30 @@ mod tests {
                     .all(|banner| banner.extensions["client"] == json!(client))
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_broadcast_category_and_region_taxonomy() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let taxonomy = provider
+            .radio_taxonomy(&RadioTaxonomyRequest { account: None })
+            .await
+            .expect("live broadcast taxonomy");
+        assert_eq!(taxonomy.categories.len(), 12);
+        assert_eq!(taxonomy.regions.len(), 32);
+        assert!(
+            taxonomy
+                .categories
+                .iter()
+                .any(|category| category.id == "1" && category.name == "音乐台")
+        );
+        assert!(
+            taxonomy
+                .regions
+                .iter()
+                .any(|region| region.id == "407" && region.name == "网络台")
+        );
     }
 
     #[tokio::test]
