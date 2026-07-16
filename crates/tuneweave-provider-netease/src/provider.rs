@@ -2639,6 +2639,12 @@ fn validate_cloud_upload_ticket_request(
         )
         .with_platform(Platform::Netease));
     }
+    if request.bitrate == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud audio bitrate must be greater than zero",
+        )
+        .with_platform(Platform::Netease));
+    }
     cloud_upload_descriptor(
         &request.md5,
         &request.filename,
@@ -2649,6 +2655,12 @@ fn validate_cloud_upload_ticket_request(
 fn validate_cloud_upload_complete_request(
     request: &CloudUploadCompleteRequest,
 ) -> Result<CloudUploadCompleteDescriptor> {
+    if request.bitrate == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud audio bitrate must be greater than zero",
+        )
+        .with_platform(Platform::Netease));
+    }
     let provisional_track_id =
         required_cloud_value("provisional_track_id", &request.provisional_track_id)?;
     let resource_id = required_cloud_value("resource_id", &request.resource_id)?;
@@ -7388,8 +7400,17 @@ mod tests {
         let mut bad_content_type =
             CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 1, "song.mp3");
         bad_content_type.content_type = Some("audio/mpeg\r\nx-secret: value".to_owned());
+        let mut bad_bitrate =
+            CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 1, "song.mp3");
+        bad_bitrate.bitrate = 0;
 
-        for request in [zero_size, bad_md5, bad_filename, bad_content_type] {
+        for request in [
+            zero_size,
+            bad_md5,
+            bad_filename,
+            bad_content_type,
+            bad_bitrate,
+        ] {
             let error = validate_cloud_upload_ticket_request(&request)
                 .expect_err("invalid cloud upload ticket");
             assert_eq!(error.code, ErrorCode::InvalidRequest);
@@ -7398,7 +7419,7 @@ mod tests {
 
     #[test]
     fn cloud_upload_completion_uses_reference_metadata_defaults() {
-        let request = CloudUploadCompleteRequest {
+        let mut request = CloudUploadCompleteRequest {
             provisional_track_id: " 123 ".to_owned(),
             resource_id: " resource ".to_owned(),
             md5: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
@@ -7416,6 +7437,11 @@ mod tests {
         assert_eq!(descriptor.song_name, "反方向的钟");
         assert_eq!(descriptor.artist, "未知艺术家");
         assert_eq!(descriptor.album, "未知专辑");
+
+        request.bitrate = 0;
+        let error =
+            validate_cloud_upload_complete_request(&request).expect_err("zero cloud audio bitrate");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
