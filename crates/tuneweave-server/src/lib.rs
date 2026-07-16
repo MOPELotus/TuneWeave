@@ -28,16 +28,17 @@ use tuneweave_core::{
     BannerListRequest, Capability, ChallengeMethod, CloudImportRequest, CloudImportResult,
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream,
-    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    CommentDeleteRequest, CommentMutationResult, CommentTarget, CommentTargetKind,
+    CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
+    DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery,
+    StreamResolver, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -219,6 +220,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
         .route("/playlists/{reference}/tracks", get(playlist_tracks))
+        .route(
+            "/resources/{kind}/{reference}/comments",
+            post(comment_create),
+        )
+        .route(
+            "/resources/{kind}/{reference}/comments/{comment_id}",
+            axum::routing::delete(comment_delete),
+        )
+        .route(
+            "/resources/{kind}/{reference}/comments/{comment_id}/replies",
+            post(comment_reply),
+        )
         .route(
             "/users/{reference}/favorites/tracks",
             get(user_favorite_tracks),
@@ -2391,6 +2404,116 @@ async fn cloud_match(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentAccountQuery {
+    account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentContentBody {
+    content: String,
+}
+
+async fn comment_create(
+    State(state): State<AppState>,
+    Path((kind, reference)): Path<(String, String)>,
+    Query(params): Query<CommentAccountQuery>,
+    payload: Result<Json<CommentContentBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
+    let body = json_body(payload)?;
+    validate_comment_content(&body.content)?;
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .post_comment(&CommentWriteRequest {
+            target,
+            content: body.content,
+            reply_to: None,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn comment_reply(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id)): Path<(String, String, String)>,
+    Query(params): Query<CommentAccountQuery>,
+    payload: Result<Json<CommentContentBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
+    let body = json_body(payload)?;
+    validate_comment_content(&body.content)?;
+    let comment_id = validate_comment_id("comment_id", &comment_id)?;
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .post_comment(&CommentWriteRequest {
+            target,
+            content: body.content,
+            reply_to: Some(comment_id),
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn comment_delete(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id)): Path<(String, String, String)>,
+    Query(params): Query<CommentAccountQuery>,
+) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
+    let comment_id = validate_comment_id("comment_id", &comment_id)?;
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_comment(&CommentDeleteRequest {
+            target,
+            comment_id,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+fn validate_comment_content(content: &str) -> Result<(), TuneWeaveError> {
+    if content.trim().is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "comment content cannot be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_comment_id(field: &str, value: &str) -> Result<String, TuneWeaveError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{field} cannot be empty"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
 async fn account_profile(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -3008,6 +3131,36 @@ fn parse_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
     })
 }
 
+fn parse_comment_target(kind: &str, reference: String) -> Result<CommentTarget, TuneWeaveError> {
+    Ok(CommentTarget::new(
+        parse_reference(reference)?,
+        parse_comment_target_kind(kind)?,
+    ))
+}
+
+fn parse_comment_target_kind(value: &str) -> Result<CommentTargetKind, TuneWeaveError> {
+    let value = value.trim().to_ascii_lowercase().replace('-', "_");
+    match value.as_str() {
+        "track" | "song" | "music" | "0" => Ok(CommentTargetKind::Track),
+        "mv" | "1" => Ok(CommentTargetKind::Mv),
+        "playlist" | "2" => Ok(CommentTargetKind::Playlist),
+        "album" | "3" => Ok(CommentTargetKind::Album),
+        "radio_episode" | "episode" | "program" | "dj" | "4" => Ok(CommentTargetKind::RadioEpisode),
+        "video" | "5" => Ok(CommentTargetKind::Video),
+        "event" | "6" => Ok(CommentTargetKind::Event),
+        "radio_station" | "station" | "7" => Ok(CommentTargetKind::RadioStation),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported comment target type: {value}"
+        ))
+        .with_details(json!({
+            "allowed": [
+                "track", "mv", "playlist", "album", "radio_episode", "video",
+                "event", "radio_station", 0, 1, 2, 3, 4, 5, 6, 7
+            ]
+        }))),
+    }
+}
+
 fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
     match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(Quality::Auto),
@@ -3330,8 +3483,9 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CreatorSummary, DimensionChartTrackEntry, MusicProvider, Page, PageMeta,
-        ProviderQrStart, RadioCatalogOption, Result, SearchQuery, StreamRequest,
+        BannerTargetKind, CommentMutationAction, CreatorSummary, DimensionChartTrackEntry,
+        MusicProvider, Page, PageMeta, ProviderQrStart, RadioCatalogOption, Result, SearchQuery,
+        StreamRequest,
     };
 
     use super::*;
@@ -3419,6 +3573,7 @@ mod tests {
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
+                Capability::CommentWrite,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
             ])
@@ -4635,6 +4790,40 @@ mod tests {
             })
         }
 
+        async fn post_comment(
+            &self,
+            request: &CommentWriteRequest,
+        ) -> Result<CommentMutationResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("content".to_owned(), json!(request.content));
+            extensions.insert("reply_to".to_owned(), json!(request.reply_to));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CommentMutationResult {
+                target: request.target.clone(),
+                comment_id: Some("mock-comment-1".to_owned()),
+                action: if request.reply_to.is_some() {
+                    CommentMutationAction::Reply
+                } else {
+                    CommentMutationAction::Create
+                },
+                extensions,
+            })
+        }
+
+        async fn delete_comment(
+            &self,
+            request: &CommentDeleteRequest,
+        ) -> Result<CommentMutationResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CommentMutationResult {
+                target: request.target.clone(),
+                comment_id: Some(request.comment_id.clone()),
+                action: CommentMutationAction::Delete,
+                extensions,
+            })
+        }
+
         async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
             Ok(json!({
                 "code": 200,
@@ -5044,6 +5233,110 @@ mod tests {
             ("voice", SearchKind::Voice),
         ] {
             assert_eq!(parse_search_kind(Some(value)).expect(value), expected);
+        }
+    }
+
+    #[test]
+    fn comment_target_parser_accepts_unified_names_and_all_reference_types() {
+        for (value, expected) in [
+            ("track", CommentTargetKind::Track),
+            ("music", CommentTargetKind::Track),
+            ("0", CommentTargetKind::Track),
+            ("mv", CommentTargetKind::Mv),
+            ("1", CommentTargetKind::Mv),
+            ("playlist", CommentTargetKind::Playlist),
+            ("2", CommentTargetKind::Playlist),
+            ("album", CommentTargetKind::Album),
+            ("3", CommentTargetKind::Album),
+            ("radio-episode", CommentTargetKind::RadioEpisode),
+            ("dj", CommentTargetKind::RadioEpisode),
+            ("4", CommentTargetKind::RadioEpisode),
+            ("video", CommentTargetKind::Video),
+            ("5", CommentTargetKind::Video),
+            ("event", CommentTargetKind::Event),
+            ("6", CommentTargetKind::Event),
+            ("radio-station", CommentTargetKind::RadioStation),
+            ("7", CommentTargetKind::RadioStation),
+        ] {
+            assert_eq!(parse_comment_target_kind(value).expect(value), expected);
+        }
+        assert_eq!(
+            parse_comment_target_kind("article")
+                .expect_err("unsupported target")
+                .code,
+            tuneweave_core::ErrorCode::InvalidRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_create_reply_and_delete_share_the_unified_resource_endpoint() {
+        let (status, created) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/resources/music/netease:185809/comments?account=personal",
+            Some(json!({"content": "  新评论  "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["data"]["target"]["ref"], "netease:185809");
+        assert_eq!(created["data"]["target"]["kind"], "track");
+        assert_eq!(created["data"]["action"], "create");
+        assert_eq!(created["data"]["comment_id"], "mock-comment-1");
+        assert_eq!(created["data"]["extensions"]["content"], "  新评论  ");
+        assert!(created["data"]["extensions"]["reply_to"].is_null());
+        assert_eq!(created["data"]["extensions"]["account"], "personal");
+        assert_eq!(created["meta"]["platform"], "netease");
+        assert_eq!(created["meta"]["account"], "personal");
+
+        let (status, replied) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/resources/0/netease:185809/comments/1438569889/replies?account=personal",
+            Some(json!({"content": "回复内容"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replied["data"]["action"], "reply");
+        assert_eq!(replied["data"]["extensions"]["reply_to"], "1438569889");
+
+        let (status, deleted) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/resources/track/netease:185809/comments/1535550516319?account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["data"]["action"], "delete");
+        assert_eq!(deleted["data"]["comment_id"], "1535550516319");
+        assert_eq!(deleted["data"]["target"]["ref"], "netease:185809");
+        assert_eq!(deleted["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn comment_endpoints_reject_invalid_targets_content_and_json() {
+        for (path, body) in [
+            (
+                "/v1/resources/article/netease:185809/comments",
+                Some(json!({"content": "test"})),
+            ),
+            (
+                "/v1/resources/track/missing-platform/comments",
+                Some(json!({"content": "test"})),
+            ),
+            (
+                "/v1/resources/track/netease:185809/comments",
+                Some(json!({"content": "  "})),
+            ),
+            (
+                "/v1/resources/track/netease:185809/comments",
+                Some(json!({"content": "test", "unknown": true})),
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::POST, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
     }
 
