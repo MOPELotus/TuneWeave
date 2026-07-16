@@ -50,7 +50,8 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoKind,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -240,6 +241,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/videos", get(artist_videos))
         .route("/artists/{reference}/tracks", get(artist_tracks))
         .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
+        .route("/videos/{reference}", get(video_detail))
+        .route("/videos/{reference}/stats", get(video_stats))
+        .route("/videos/{reference}/stream", get(video_stream))
+        .route(
+            "/videos/{reference}/stream/redirect",
+            get(video_stream_redirect),
+        )
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -2510,6 +2518,123 @@ async fn artist_videos(
         response = response.with_account(account);
     }
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoDetailParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoStreamParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    #[serde(alias = "res")]
+    resolution: Option<String>,
+}
+
+async fn video_detail(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoDetailParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<VideoDetail>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
+    let provider = state.registry.require(reference.platform())?;
+    let mut request = VideoDetailRequest::new(kind);
+    request.account.clone_from(&account);
+    let detail = provider.video(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(detail).with_platform(reference.platform());
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn video_stats(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoDetailParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<VideoStats>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
+    let provider = state.registry.require(reference.platform())?;
+    let mut request = VideoDetailRequest::new(kind);
+    request.account.clone_from(&account);
+    let stats = provider.video_stats(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(stats).with_platform(reference.platform());
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn video_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoStreamParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<VideoStream>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let (account, request) = video_stream_request(&params, reference.id())?;
+    let provider = state.registry.require(reference.platform())?;
+    let stream = provider.video_stream(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(stream).with_platform(reference.platform());
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn video_stream_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoStreamParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let (_, request) = video_stream_request(&params, reference.id())?;
+    let provider = state.registry.require(reference.platform())?;
+    let stream = provider.video_stream(reference.id(), &request).await?;
+    if let Some(url) = stream.url.as_deref() {
+        return Ok(download_redirect_response(url));
+    }
+    Err(
+        TuneWeaveError::new(ErrorCode::ResourceNotFound, "video stream is unavailable")
+            .with_platform(reference.platform())
+            .with_details(json!({ "stream": stream }))
+            .into(),
+    )
+}
+
+fn video_stream_request(
+    params: &VideoStreamParams,
+    id: &str,
+) -> Result<(Option<String>, VideoStreamRequest), TuneWeaveError> {
+    let account = optional_trimmed(params.account.clone());
+    let kind = parse_video_resource_kind(params.kind.as_deref(), id)?;
+    let resolution = parse_u32_parameter(
+        "resolution",
+        params.resolution.as_deref(),
+        VideoStreamRequest::DEFAULT_RESOLUTION,
+    )?;
+    if !(1..=4_320).contains(&resolution) {
+        return Err(TuneWeaveError::invalid_request(
+            "resolution must be between 1 and 4320",
+        ));
+    }
+    let mut request = VideoStreamRequest::new(kind, resolution);
+    request.account.clone_from(&account);
+    Ok((account, request))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4938,6 +5063,27 @@ fn parse_video_kind(value: Option<&str>) -> Result<VideoKind, TuneWeaveError> {
     }
 }
 
+fn parse_video_resource_kind(
+    value: Option<&str>,
+    id: &str,
+) -> Result<VideoResourceKind, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(if id.chars().all(|character| character.is_ascii_digit()) {
+            VideoResourceKind::Mv
+        } else {
+            VideoResourceKind::Video
+        });
+    };
+    match value.to_ascii_lowercase().replace('-', "_").as_str() {
+        "mv" | "music_video" | "0" => Ok(VideoResourceKind::Mv),
+        "video" | "cloud_video" | "1" => Ok(VideoResourceKind::Video),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported video resource type: {value}"
+        ))
+        .with_details(json!({ "allowed": ["mv", "video", 0, 1] }))),
+    }
+}
+
 fn parse_artist_track_order(value: Option<&str>) -> Result<ArtistTrackOrder, TuneWeaveError> {
     match value.unwrap_or("hot").trim().to_ascii_lowercase().as_str() {
         "hot" => Ok(ArtistTrackOrder::Hot),
@@ -5286,7 +5432,7 @@ mod tests {
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
         MusicProvider, Page, PageMeta, ProviderQrStart, RadioCatalogOption, Result, SearchQuery,
-        StreamRequest,
+        StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -5360,6 +5506,9 @@ mod tests {
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
                 Capability::AudioDownload,
+                Capability::VideoDetail,
+                Capability::VideoStats,
+                Capability::VideoStream,
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
@@ -6110,6 +6259,69 @@ mod tests {
                     has_more: true,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
+            let mut video = sample_video(id);
+            video
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            Ok(VideoDetail {
+                kind: request.kind,
+                video,
+                resolutions: vec![VideoResolution {
+                    resolution: 1080,
+                    width: Some(1920),
+                    height: Some(1080),
+                    size: Some(177_950_120),
+                    format: Some("mp4".to_owned()),
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::new(),
+            })
+        }
+
+        async fn video_stats(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoStats> {
+            Ok(VideoStats {
+                video_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test video reference"),
+                kind: request.kind,
+                liked: Some(false),
+                like_count: Some(4_662),
+                comment_count: Some(675),
+                share_count: Some(1_399),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn video_stream(
+            &self,
+            id: &str,
+            request: &VideoStreamRequest,
+        ) -> Result<VideoStream> {
+            let available = id != "unavailable";
+            Ok(VideoStream {
+                video_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test video reference"),
+                platform: Platform::Netease,
+                available,
+                url: available.then(|| format!("https://example.test/video/{id}.mp4")),
+                backup_urls: Vec::new(),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: available.then(|| "mp4".to_owned()),
+                codec: None,
+                width: Some(1920),
+                height: Some(request.resolution),
+                size: Some(177_950_120),
+                duration_ms: Some(266_000),
+                requested_resolution: request.resolution,
+                actual_resolution: available.then_some(request.resolution),
+                platform_code: Some(if available { 200 } else { 404 }),
+                fee: Some(0),
+                message: (!available).then(|| "video unavailable".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -8744,6 +8956,122 @@ mod tests {
         assert_eq!(videos["meta"]["pagination"]["offset"], 10);
         assert_eq!(videos["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(videos["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn video_detail_infers_mv_or_video_and_preserves_explicit_type_and_account() {
+        for (path, expected_kind) in [
+            ("/v1/videos/netease:22695250?account=collector", "mv"),
+            (
+                "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678?account=collector",
+                "video",
+            ),
+            (
+                "/v1/videos/netease:22695250?type=video&account=collector",
+                "video",
+            ),
+        ] {
+            let (status, detail) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(detail["data"]["kind"], expected_kind, "{path}");
+            assert_eq!(detail["data"]["video"]["platform"], "netease", "{path}");
+            assert_eq!(
+                detail["data"]["resolutions"][0]["resolution"], 1080,
+                "{path}"
+            );
+            assert_eq!(
+                detail["data"]["video"]["extensions"]["account"], "collector",
+                "{path}"
+            );
+            assert_eq!(detail["meta"]["account"], "collector", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_stats_and_stream_use_unified_kind_resolution_and_metadata() {
+        let (status, stats) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/netease:22695250/stats?kind=mv&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["data"]["video_ref"], "netease:22695250");
+        assert_eq!(stats["data"]["kind"], "mv");
+        assert_eq!(stats["data"]["like_count"], 4_662);
+        assert_eq!(stats["data"]["comment_count"], 675);
+        assert_eq!(stats["data"]["extensions"]["account"], "collector");
+
+        let (status, stream) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/netease:22695250/stream?type=mv&res=720&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stream["data"]["video_ref"], "netease:22695250");
+        assert_eq!(stream["data"]["available"], true);
+        assert_eq!(stream["data"]["requested_resolution"], 720);
+        assert_eq!(stream["data"]["actual_resolution"], 720);
+        assert_eq!(stream["data"]["extensions"]["account"], "collector");
+        assert_eq!(stream["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn video_stream_redirects_only_when_a_real_url_is_available() {
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/videos/netease:22695250/stream/redirect?kind=mv&resolution=1080")
+                    .body(Body::empty())
+                    .expect("build video redirect request"),
+            )
+            .await
+            .expect("video redirect request succeeds");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://example.test/video/22695250.mp4")
+        );
+
+        let (status, stream) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/netease:unavailable/stream",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stream["data"]["available"], false);
+        assert_eq!(stream["data"]["url"], Value::Null);
+
+        let (status, unavailable) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/netease:unavailable/stream/redirect",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(unavailable["error"]["code"], "resource_not_found");
+        assert_eq!(
+            unavailable["error"]["details"]["stream"]["available"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn video_routes_reject_bad_types_resolutions_and_unknown_parameters() {
+        for path in [
+            "/v1/videos/netease:22695250?kind=future",
+            "/v1/videos/netease:22695250?unknown=true",
+            "/v1/videos/netease:22695250/stats?type=future",
+            "/v1/videos/netease:22695250/stream?resolution=0",
+            "/v1/videos/netease:22695250/stream?res=4321",
+            "/v1/videos/netease:22695250/stream?unknown=true",
+            "/v1/videos/netease:22695250/stream/redirect?unknown=true",
+        ] {
+            let (status, error) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(error["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
