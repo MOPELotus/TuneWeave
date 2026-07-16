@@ -25,6 +25,15 @@ pub enum SearchKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchVariant {
+    #[default]
+    Default,
+    Legacy,
+    Cloud,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
     #[default]
@@ -42,6 +51,8 @@ pub enum Quality {
 pub struct SearchQuery {
     pub query: String,
     pub kind: SearchKind,
+    #[serde(default)]
+    pub variant: SearchVariant,
     pub limit: u32,
     pub offset: u32,
     pub account: Option<String>,
@@ -52,6 +63,7 @@ impl SearchQuery {
         Self {
             query: query.into(),
             kind: SearchKind::Track,
+            variant: SearchVariant::Default,
             limit,
             offset,
             account: None,
@@ -2181,6 +2193,22 @@ mod tests {
                 "voice",
             ]
         );
+    }
+
+    #[test]
+    fn search_variants_keep_default_legacy_and_cloud_backends_explicit() {
+        let values = [
+            SearchVariant::Default,
+            SearchVariant::Legacy,
+            SearchVariant::Cloud,
+        ]
+        .into_iter()
+        .map(|variant| serde_json::to_value(variant).expect("serialize search variant"))
+        .collect::<Vec<_>>();
+        assert_eq!(values, vec!["default", "legacy", "cloud"]);
+
+        let query = SearchQuery::tracks("反方向的钟", 30, 0);
+        assert_eq!(query.variant, SearchVariant::Default);
     }
 
     #[test]

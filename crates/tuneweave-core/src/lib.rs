@@ -41,8 +41,8 @@ pub use model::{
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchItem,
-    SearchKind, SearchOpaqueItem, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video,
+    SearchKind, SearchOpaqueItem, SearchQuery, SearchVariant, StreamRequest, SubscriptionResult,
+    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video,
     VideoKind,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};

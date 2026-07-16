@@ -83,6 +83,7 @@ impl StreamResolver {
                 let search = SearchQuery {
                     query: candidate_search_query(origin),
                     kind: crate::SearchKind::Track,
+                    variant: crate::SearchVariant::Default,
                     limit: self.search_limit,
                     offset: 0,
                     account: account.clone(),
