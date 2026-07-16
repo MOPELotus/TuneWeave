@@ -15,12 +15,12 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AccountProfile, Album, AlbumStats, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
-    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
-    Track, TuneWeaveError,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream,
+    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
+    StreamResolver, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -157,6 +157,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
         .route("/tracks/{reference}", get(track))
+        .route("/albums", get(albums))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
         .route("/albums/{reference}/stats", get(album_stats))
@@ -341,6 +342,42 @@ async fn track(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AlbumListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    area: Option<String>,
+    catalog: Option<String>,
+}
+
+async fn albums(
+    State(state): State<AppState>,
+    Query(params): Query<AlbumListParams>,
+) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let mut request = AlbumListRequest::new(limit, offset);
+    request.account.clone_from(&account);
+    request.area = optional_trimmed(params.area);
+    request.catalog = optional_trimmed(params.catalog);
+    let page = provider.albums(&request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -1353,6 +1390,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
+                Capability::AlbumList,
                 Capability::AlbumStats,
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
@@ -1401,6 +1439,28 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                },
+            })
+        }
+
+        async fn albums(&self, request: &AlbumListRequest) -> Result<Page<Album>> {
+            let mut album = sample_album("387169747");
+            if let Some(area) = &request.area {
+                album.extensions.insert("area".to_owned(), json!(area));
+            }
+            if let Some(catalog) = &request.catalog {
+                album
+                    .extensions
+                    .insert("catalog".to_owned(), json!(catalog));
+            }
+            Ok(Page {
+                items: vec![album],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(500),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
                 },
             })
         }
@@ -1850,6 +1910,23 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["ref"], "netease:185809");
         assert_eq!(json["data"]["artists"][0]["name"], "周杰伦");
+    }
+
+    #[tokio::test]
+    async fn album_list_uses_unified_catalog_filters_and_pagination() {
+        let (status, albums) = json_response_from(
+            test_app_with_provider(),
+            "/v1/albums?platform=netease&account=default&catalog=new&area=KR&limit=5&offset=10",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(albums["data"][0]["ref"], "netease:387169747");
+        assert_eq!(albums["data"][0]["extensions"]["area"], "KR");
+        assert_eq!(albums["data"][0]["extensions"]["catalog"], "new");
+        assert_eq!(albums["meta"]["pagination"]["limit"], 5);
+        assert_eq!(albums["meta"]["pagination"]["offset"], 10);
+        assert_eq!(albums["meta"]["pagination"]["total"], 500);
+        assert_eq!(albums["meta"]["account"], "default");
     }
 
     #[tokio::test]
