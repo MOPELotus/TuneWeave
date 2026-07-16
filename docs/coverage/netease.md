@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=318`、`partial=6`、`implemented=30`、`verified=50`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=317`、`partial=6`、`implemented=31`、`verified=50`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -74,7 +74,7 @@
 | `comment_event` | `/comment/event` | `verified` | `GET /v1/resources/event/{ref}/comments`（要求完整 `A_EV_2_...` thread ID，不重复拼接前缀；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:A_EV_2_6559519868_32953014` 返回上游 `code=200`、普通及热门评论） |
 | `comment_floor` | `/comment/floor` | `verified` | `GET /v1/resources/{type}/{ref}/comments?view=replies&parent_comment_id=...`（完整支持 `limit/before_time_ms`，也兼容 `parentCommentId/time`；父评论 ID 保持不透明，当前父评论与楼层回复分开映射；2026-07-16 provider 与真实二进制 HTTP 实测歌曲评论楼层返回上游 `code=200`、`mode=floor`，空楼层被如实表达为成功空目录） |
 | `comment_hot` | `/comment/hot` | `verified` | `GET /v1/resources/{type}/{ref}/comments?view=hot`（热门评论独立返回在 `hot_comments`；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:185809`、`limit=2` 返回上游 `code=200`、2 条热门评论、`mode=hot` 且页大小已应用） |
-| `comment_hug_list` | `/comment/hug/list` | `pending` | — |
+| `comment_hug_list` | `/comment/hug/list` | `implemented` | `GET /v1/resources/{type}/{ref}/comments/{comment_id}/reactions/hug`（抽象为可扩展统一评论反应目录，`target_user_ref` 指向评论作者，`account` 选择同平台隔离登录态；完整兼容参考 `uid/cid/sid/type/page/cursor/idCursor/pageSize` 语义，其中目标、评论 ID 与资源由统一路径表达，也接受 `target_user_id/targetUserId/uid`、`pageNo/pageSize/idCursor`；固定 EAPI `/api/v2/resource/comments/hug/list`，完整提交 `targetUserId/commentId/threadId/pageNo/pageSize/cursor/idCursor`，8 种资源 thread 前缀及动态完整 thread ID 全部覆盖；统一映射 `hugComments[{user,hugContent}]`、`currentComment/hasMore/hugTotalCounts` 和双游标，嵌套成功响应及未来字段不丢失；核心契约、协议构造、成功态、畸形响应、能力发现、统一/参考查询、跨平台冲突与分页边界均有离线测试；2026-07-16 匿名真实二进制 HTTP 以统一和参考两套输入均在网络请求前返回 401 `authentication_required`，待真实账户验证成功目录及续页） |
 | `comment_info_list` | `/comment/info/list` | `pending` | — |
 | `comment_like` | `/comment/like` | `pending` | — |
 | `comment_music` | `/comment/music` | `verified` | `GET /v1/resources/track/{ref}/comments`（统一普通/热门/置顶评论、作者、时间、点赞、回复关系及 IP 地区；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:185809`、`limit=1` 返回上游 `code=200`、普通评论、15 条平台热门评论及 `mode=legacy`） |
