@@ -41,9 +41,9 @@ use tuneweave_core::{
     PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchItem, SearchKind, SearchQuery, SearchVariant, StreamResolver, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoKind,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchQuery,
+    SearchVariant, StreamResolver, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -181,6 +181,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
+        .route("/search/default", get(search_default))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
@@ -412,6 +413,33 @@ struct SearchParams {
     limit: Option<String>,
     offset: Option<String>,
     account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchDefaultParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn search_default(
+    State(state): State<AppState>,
+    params: Result<Query<SearchDefaultParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SearchDefaultKeyword>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let prompt = provider
+        .default_search_keyword(&SearchDefaultKeywordRequest {
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(prompt)
+            .with_platform(platform)
+            .with_account(account),
+    ))
 }
 
 async fn search(
@@ -4085,6 +4113,7 @@ mod tests {
                 Capability::SearchVideos,
                 Capability::SearchMixed,
                 Capability::SearchVoices,
+                Capability::SearchDefault,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4203,6 +4232,22 @@ mod tests {
                     has_more: false,
                     extensions,
                 },
+            })
+        }
+
+        async fn default_search_keyword(
+            &self,
+            request: &SearchDefaultKeywordRequest,
+        ) -> Result<SearchDefaultKeyword> {
+            Ok(SearchDefaultKeyword {
+                keyword: "周旋".to_owned(),
+                display_text: "🔥周旋 最近很火哦".to_owned(),
+                kind: Some(SearchKind::Track),
+                image_url: None,
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("provider".to_owned(), json!("mock")),
+                ]),
             })
         }
 
@@ -6004,6 +6049,41 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn default_search_keyword_uses_selected_platform_account_and_stable_fields() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search/default?platform=netease&account=search-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["keyword"], "周旋");
+        assert_eq!(response["data"]["display_text"], "🔥周旋 最近很火哦");
+        assert_eq!(response["data"]["kind"], "track");
+        assert!(response["data"]["image_url"].is_null());
+        assert_eq!(response["data"]["extensions"]["account"], "search-user");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "search-user");
+
+        let (status, defaulted) =
+            json_response_from(test_app_with_provider(), "/v1/search/default").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["meta"]["platform"], "netease");
+        assert_eq!(defaulted["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn default_search_keyword_rejects_unknown_platforms_and_query_fields() {
+        for path in [
+            "/v1/search/default?platform=unknown",
+            "/v1/search/default?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[test]
