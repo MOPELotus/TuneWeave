@@ -86,6 +86,28 @@ impl PageRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DigitalAlbumListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub area: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl DigitalAlbumListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            area: None,
+            kind: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackHistoryPeriod {
