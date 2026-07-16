@@ -50,6 +50,7 @@ pub struct NeteaseCaptchaVerification {
     pub code: i64,
     pub valid: bool,
     pub message: Option<String>,
+    pub response: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,17 +150,7 @@ impl NeteaseClient {
                 }),
             )
             .await?;
-        let code = response_code(&response.body).ok_or_else(|| {
-            upstream_error(
-                "verify phone captcha",
-                "response did not contain a status code",
-            )
-        })?;
-        Ok(NeteaseCaptchaVerification {
-            code,
-            valid: code == 200,
-            message: response_message(&response.body),
-        })
+        captcha_verification_from_body(response.body)
     }
 
     pub async fn login_with_email_password(
@@ -251,6 +242,21 @@ impl NeteaseClient {
             .await?;
         login_result(self, response, "phone captcha login")
     }
+}
+
+fn captcha_verification_from_body(body: Value) -> Result<NeteaseCaptchaVerification> {
+    let code = response_code(&body).ok_or_else(|| {
+        upstream_error(
+            "verify phone captcha",
+            "response did not contain a status code",
+        )
+    })?;
+    Ok(NeteaseCaptchaVerification {
+        code,
+        valid: code == 200,
+        message: response_message(&body),
+        response: body,
+    })
 }
 
 fn login_result(
@@ -379,6 +385,31 @@ mod tests {
             password_digest("TuneWeave-password"),
             "bf7d03ccdbea30d8b131e636b9815e58"
         );
+    }
+
+    #[test]
+    fn captcha_verification_preserves_valid_invalid_and_raw_responses() {
+        let valid = captcha_verification_from_body(json!({
+            "code": 200,
+            "data": true
+        }))
+        .expect("valid captcha response");
+        assert!(valid.valid);
+        assert_eq!(valid.code, 200);
+        assert_eq!(valid.response["data"], true);
+
+        let invalid = captcha_verification_from_body(json!({
+            "code": 503,
+            "message": "验证码错误"
+        }))
+        .expect("invalid captcha response is still a result");
+        assert!(!invalid.valid);
+        assert_eq!(invalid.code, 503);
+        assert_eq!(invalid.message.as_deref(), Some("验证码错误"));
+
+        let error = captcha_verification_from_body(json!({ "data": false }))
+            .expect_err("missing business code");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[test]

@@ -12,18 +12,18 @@ use tuneweave_core::{
     ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Banner,
-    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CreatorSummary,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, ImageUploadRequest,
-    ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
-    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
-    Video, VideoKind,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthState, Banner, BannerClient, BannerListRequest, BannerTargetKind, Capability,
+    ChallengeMethod, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode,
+    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
+    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 
 use crate::{
@@ -308,6 +308,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
+            Capability::ChallengeValidation,
             Capability::SessionManagement,
             Capability::AccountProfile,
             Capability::AccountPlaylists,
@@ -1396,6 +1397,33 @@ impl MusicProvider for NeteaseProvider {
                 .await
             }
         }
+    }
+
+    async fn validate_auth_challenge(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+    ) -> Result<AuthChallengeValidation> {
+        let verification = match request.method {
+            ChallengeMethod::Sms => {
+                NeteaseProvider::verify_phone_captcha(
+                    self,
+                    &request.principal,
+                    request.country_code.as_deref().unwrap_or("86"),
+                    code,
+                )
+                .await?
+            }
+        };
+        let mut extensions = Extensions::new();
+        extensions.insert("response".to_owned(), verification.response);
+        Ok(AuthChallengeValidation {
+            method: request.method,
+            valid: verification.valid,
+            platform_code: Some(verification.code.to_string()),
+            message: verification.message,
+            extensions,
+        })
     }
 
     async fn verify_auth_challenge(
@@ -6750,6 +6778,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::QrLogin));
         assert!(capabilities.contains(&Capability::PasswordLogin));
         assert!(capabilities.contains(&Capability::PhoneLogin));
+        assert!(capabilities.contains(&Capability::ChallengeValidation));
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
@@ -7454,6 +7483,27 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{protocol} request failed: {error}"));
             assert_eq!(body["code"], 200, "{protocol} response");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_captcha_validation_preserves_an_invalid_code_as_data() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let result = MusicProvider::validate_auth_challenge(
+            &provider,
+            &AuthChallengeRequest {
+                account: "default".to_owned(),
+                method: ChallengeMethod::Sms,
+                principal: "13800138000".to_owned(),
+                country_code: Some("86".to_owned()),
+            },
+            "0000",
+        )
+        .await
+        .expect("live invalid captcha response");
+        assert!(!result.valid);
+        assert_ne!(result.platform_code.as_deref(), Some("200"));
+        assert!(result.extensions["response"]["code"].is_number());
     }
 
     #[tokio::test]
