@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=357`、`partial=7`、`implemented=13`、`verified=27`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=356`、`partial=7`、`implemented=14`、`verified=27`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -37,7 +37,7 @@
 | `artist_mv` | `/artist/mv` | `verified` | `GET /v1/artists/{ref}/videos?type=mv`（统一为分页 `Video[]`，映射创作者、16:9 封面、时长、发布日期、播放数和收藏态，并保留完整 MV 与响应时间；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 2 项，首项 `netease:22695250`《任性 (5525 Live版)》、266000 ms、100726 播放，`next_offset=2`、`has_more=true`） |
 | `artist_new_mv` | `/artist/new/mv` | `implemented` | `GET /v1/account/following/artists/new-videos`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一映射为 `Video[]` 并保留完整响应；离线成功态映射、端点和登录别名测试已完成；2026-07-16 匿名 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
 | `artist_new_song` | `/artist/new/song` | `implemented` | `GET /v1/account/following/artists/new-tracks`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一为 `Track[]`，保留新曲总数及完整歌曲原文；离线成功态映射、端点和登录别名测试已完成；2026-07-16 匿名 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
-| `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `pending` | — |
+| `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `implemented` | `GET /v1/account/following/artists/new-works`（完整支持 `before/source_type/first_request`，以 `ArtistWorkUpdate` 区分歌曲、MV 和未知来源，未知结构完整保留；离线已验证歌曲分支、未知来源兼容和端点参数；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容及更多 `sourceType` 样本） |
 | `artist_new_song_playall` | `/artist/new/song/playall` | `pending` | — |
 | `artist_songs` | `/artist/songs` | `pending` | — |
 | `artist_sub` | `/artist/sub` | `pending` | — |
