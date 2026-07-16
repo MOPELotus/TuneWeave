@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=341`、`partial=7`、`implemented=21`、`verified=35`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=340`、`partial=7`、`implemented=22`、`verified=35`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -54,7 +54,7 @@
 | `broadcast_channel_currentinfo` | `/broadcast/channel/currentinfo` | `verified` | `GET /v1/radio/stations/{ref}`（以资源引用选择平台、`account` 选择可选登录态，统一为 `RadioStation`；名称、封面、地区、当前节目与直播音频地址进入稳定字段，第三方频道/节目 ID、时间窗口及完整响应保留在扩展中，公开响应未给收藏态时严格保持 `null`；无符号整数 ID 在网络请求前校验；2026-07-16 provider 与统一 HTTP 均联网实测 `netease:362` 成功，返回“金山区广播电视台综合广播”、地区“上海”、可用的 `https://lhttp.qtfm.cn/live/4022/64k.mp3...` 音频地址及上游 `code=200`） |
 | `broadcast_channel_list` | `/broadcast/channel/list` | `verified` | `GET /v1/radio/stations`（完整支持 `categoryId/regionId/limit/lastId/score` 及 snake_case 别名；分类、地区和电台 ID 保持字符串，`lastId+score` 统一为成对游标并在分页扩展返回 `next_cursor`，两字段独立出现时分别补参考默认 `0/-1`；参考类型公开但实现忽略的 `offset` 仍被接收，并明确返回 `requested_offset` 与 `offset_applied=false`；首屏推荐插入导致返回数大于 `limit` 时不截断，完整频道和响应原文保留；2026-07-16 provider 与统一 HTTP 均联网实测：音乐分类 `categoryId=1` 首/二页各 20 项、总数 105、两页零重复，首屏下一游标 `{id:965,score:1139}`；网络台 `regionId=407` 返回 4/4 项且全部地区为“网络台”、`has_more=false`；`offset=100` 实测不改变上游首屏并正确标记未应用，上游均为 `code=200`） |
 | `broadcast_sub` | `/broadcast/sub` | `implemented` | `PUT/DELETE /v1/account/library/radio-stations/{ref}`（参考 `t=1` 的收藏分支完整映射为 `contentType=BROADCAST`、`cancelCollect=false`，其余 `t` 值的取消分支映射为 `cancelCollect=true`；统一端点以 HTTP 方法明确表达两种语义，电台 ID 在网络前校验，`account` 选择隔离登录态，统一返回 `SubscriptionResult` 并保留完整上游响应；离线请求构造、成功响应映射、非法 ID、缺失账户别名、PUT/DELETE 路由与响应契约均已测试；2026-07-16 provider 和统一 HTTP 对收藏/取消两条匿名路径均联网实测为 401 `authentication_required` 与上游码 301，待真实账户验证成功写入） |
-| `calendar` | `/calendar` | `pending` | — |
+| `calendar` | `/calendar` | `implemented` | `GET /v1/extensions/netease/calendar`（固定使用 WeAPI 调用 `/api/mcalendar/detail`；完整支持参考 `startTime/endTime`、统一 `start_time/end_time`、任一或全部时间参数缺省时取当前 Unix 毫秒，以及 `account` 登录态别名；显式值归一化为无符号整数，非法或负数在上游请求前返回标准 400；完整上游 JSON 保留在统一包络中；离线测试已覆盖参考/统一参数名、账户隔离、协议与路径、双缺省和非法值；2026-07-16 匿名统一 HTTP 实测正确映射为 401 `authentication_required` 与上游码 301，待真实账户验证成功内容态） |
 | `captcha_sent` | `/captcha/sent` | `implemented` | `POST /v1/auth/challenges`（为避免误发短信不做自动联网测试） |
 | `captcha_verify` | `/captcha/verify` | `partial` | 适配器已实现；统一挑战验证直接完成验证码登录 |
 | `cellphone_existence_check` | `/cellphone/existence/check` | `pending` | — |
