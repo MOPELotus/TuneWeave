@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AccountProfile, Album, AlbumStats, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, DigitalAlbum, Lyrics, MediaStream, PageRequest, PasswordFormat,
-    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    ChallengeMethod, DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
     RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
     Track, TuneWeaveError,
@@ -160,6 +160,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
         .route("/albums/{reference}/stats", get(album_stats))
+        .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
@@ -438,6 +439,47 @@ async fn digital_album(
     let provider = state.registry.require(platform)?;
     let album = provider.digital_album(reference.id(), account).await?;
     let mut response = ApiResponse::new(album).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DigitalAlbumListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    area: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+async fn digital_albums(
+    State(state): State<AppState>,
+    Query(params): Query<DigitalAlbumListParams>,
+) -> Result<Json<ApiResponse<Vec<DigitalAlbum>>>, ApiError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .digital_albums(&DigitalAlbumListRequest {
+            limit,
+            offset,
+            account: account.clone(),
+            area: optional_trimmed(params.area),
+            kind: optional_trimmed(params.kind),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -1315,6 +1357,7 @@ mod tests {
                 Capability::AlbumDetail,
                 Capability::AlbumStats,
                 Capability::DigitalAlbumDetail,
+                Capability::DigitalAlbumList,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1370,6 +1413,29 @@ mod tests {
 
         async fn digital_album(&self, id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
             Ok(sample_digital_album(id))
+        }
+
+        async fn digital_albums(
+            &self,
+            request: &DigitalAlbumListRequest,
+        ) -> Result<Page<DigitalAlbum>> {
+            let mut album = sample_digital_album("120605500");
+            if let Some(area) = &request.area {
+                album.extensions.insert("area".to_owned(), json!(area));
+            }
+            if let Some(kind) = &request.kind {
+                album.extensions.insert("type".to_owned(), json!(kind));
+            }
+            Ok(Page {
+                items: vec![album],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
         }
 
         async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
@@ -1832,6 +1898,23 @@ mod tests {
         assert_eq!(album["data"]["price"]["currency"], "CNY");
         assert_eq!(album["meta"]["platform"], "netease");
         assert_eq!(album["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn digital_album_list_uses_unified_filters_and_pagination() {
+        let (status, albums) = json_response_from(
+            test_app_with_provider(),
+            "/v1/digital-albums?platform=netease&account=vip&area=KR&type=album&limit=5&offset=10",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(albums["data"][0]["ref"], "netease:120605500");
+        assert_eq!(albums["data"][0]["extensions"]["area"], "KR");
+        assert_eq!(albums["data"][0]["extensions"]["type"], "album");
+        assert_eq!(albums["meta"]["pagination"]["limit"], 5);
+        assert_eq!(albums["meta"]["pagination"]["offset"], 10);
+        assert_eq!(albums["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(albums["meta"]["account"], "vip");
     }
 
     #[tokio::test]
