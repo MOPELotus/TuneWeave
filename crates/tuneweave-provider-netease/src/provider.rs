@@ -15,19 +15,20 @@ use tuneweave_core::{
     PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
     RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
-    TrialWindow, TuneWeaveError,
+    TrackEntitlement, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AlbumDetail, AlbumEnvelope, AlbumListEnvelope, AlbumStatsEnvelope, AudioQuality,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
+        AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
+        AlbumStatsEnvelope, AudioQuality, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -264,6 +265,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AlbumDetail,
             Capability::AlbumList,
             Capability::AlbumStats,
+            Capability::AlbumTrackEntitlements,
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::PlaylistRead,
@@ -445,6 +447,27 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: AlbumStatsEnvelope = parse_body(response.body)?;
         map_album_stats(id, response)
+    }
+
+    async fn album_track_entitlements(
+        &self,
+        id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<TrackEntitlement>> {
+        let id = parse_numeric_id("album", id)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/album/privilege", json!({ "id": id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let response: AlbumEntitlementsEnvelope = parse_body(response.body)?;
+        let limit = request.limit.clamp(1, 100);
+        let (items, pagination) = select_page(response.data, limit, request.offset);
+        let items = items
+            .into_iter()
+            .map(map_track_entitlement)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Page { items, pagination })
     }
 
     async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
@@ -1296,13 +1319,23 @@ fn stream_quality(level: Option<&str>, bitrate: Option<u64>) -> Quality {
         "hires" => Quality::Hires,
         "jyeffect" | "sky" | "dolby" => Quality::Spatial,
         "jymaster" => Quality::Master,
-        _ => match bitrate {
-            None | Some(0) => Quality::Auto,
-            Some(1..=96_000) => Quality::Low,
-            Some(96_001..=192_000) => Quality::Standard,
-            Some(192_001..=500_000) => Quality::High,
-            Some(500_001..) => Quality::Lossless,
-        },
+        _ => bitrate.map_or(Quality::Auto, quality_for_bitrate),
+    }
+}
+
+fn optional_quality(level: Option<&str>, bitrate: Option<u64>) -> Option<Quality> {
+    let quality = stream_quality(level, bitrate);
+    (quality != Quality::Auto).then_some(quality)
+}
+
+fn quality_for_bitrate(bitrate: u64) -> Quality {
+    match bitrate {
+        0 => Quality::Auto,
+        1..=96_000 => Quality::Low,
+        96_001..=192_000 => Quality::Standard,
+        192_001..=500_000 => Quality::High,
+        500_001..=1_500_000 => Quality::Lossless,
+        1_500_001.. => Quality::Hires,
     }
 }
 
@@ -1595,6 +1628,50 @@ fn map_album_stats(id: u64, stats: AlbumStatsEnvelope) -> Result<AlbumStats> {
             .subscribed_at
             .filter(|milliseconds| *milliseconds > 0)
             .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        extensions,
+    })
+}
+
+fn map_track_entitlement(raw: Value) -> Result<TrackEntitlement> {
+    let entitlement: TrackEntitlementData = parse_body(raw.clone())?;
+    let track_ref =
+        ResourceRef::new(Platform::Netease, entitlement.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid track id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut available_qualities = Vec::new();
+    for quality in entitlement
+        .charge_info
+        .iter()
+        .filter_map(|charge| charge.rate)
+        .map(quality_for_bitrate)
+    {
+        if !available_qualities.contains(&quality) {
+            available_qualities.push(quality);
+        }
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert("privilege".to_owned(), raw);
+    Ok(TrackEntitlement {
+        track_ref,
+        playable: entitlement
+            .st
+            .map(|status| status >= 0 && entitlement.pl.unwrap_or(0) > 0),
+        downloadable: entitlement
+            .st
+            .map(|status| status >= 0 && entitlement.dl.unwrap_or(0) > 0),
+        play_bitrate: entitlement.pl,
+        download_bitrate: entitlement.dl,
+        max_play_bitrate: entitlement.play_max_bitrate.or(entitlement.maxbr),
+        max_download_bitrate: entitlement.download_max_bitrate,
+        play_quality: optional_quality(entitlement.play_level.as_deref(), entitlement.pl),
+        download_quality: optional_quality(entitlement.download_level.as_deref(), entitlement.dl),
+        available_qualities,
+        fee: entitlement.fee,
+        paid: entitlement.payed.map(|paid| paid > 0),
         extensions,
     })
 }
@@ -2114,6 +2191,53 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_album_track_entitlements_and_quality_tiers() {
+        let entitlement = map_track_entitlement(json!({
+            "id": 2058263030,
+            "st": 0,
+            "fee": 8,
+            "pl": 320000,
+            "dl": 0,
+            "maxbr": 999000,
+            "playMaxbr": 999000,
+            "downloadMaxbr": 999000,
+            "plLevel": "exhigh",
+            "dlLevel": "none",
+            "payed": 0,
+            "chargeInfoList": [
+                {"chargeType": 0, "rate": 128000},
+                {"chargeType": 0, "rate": 192000},
+                {"chargeType": 0, "rate": 320000},
+                {"chargeType": 1, "rate": 999000},
+                {"chargeType": 1, "rate": 1999000}
+            ],
+            "freeTrialPrivilege": {"resConsumable": false, "userConsumable": false}
+        }))
+        .expect("map track entitlement");
+
+        assert_eq!(entitlement.track_ref.to_string(), "netease:2058263030");
+        assert_eq!(entitlement.playable, Some(true));
+        assert_eq!(entitlement.downloadable, Some(false));
+        assert_eq!(entitlement.play_quality, Some(Quality::High));
+        assert_eq!(entitlement.download_quality, None);
+        assert_eq!(
+            entitlement.available_qualities,
+            vec![
+                Quality::Standard,
+                Quality::High,
+                Quality::Lossless,
+                Quality::Hires
+            ]
+        );
+        assert_eq!(entitlement.fee, Some(8));
+        assert_eq!(entitlement.paid, Some(false));
+        assert_eq!(
+            entitlement.extensions["privilege"]["chargeInfoList"][4]["rate"],
+            1999000
+        );
+    }
+
+    #[test]
     fn maps_netease_digital_album_product_to_the_unified_model() {
         let raw = json!({
             "code": 200,
@@ -2252,6 +2376,11 @@ mod tests {
             .await
             .expect_err("invalid album stats id");
         assert_eq!(stats_error.code, ErrorCode::InvalidRequest);
+        let entitlement_error =
+            MusicProvider::album_track_entitlements(&provider, "invalid", &PageRequest::new(30, 0))
+                .await
+                .expect_err("invalid album entitlement id");
+        assert_eq!(entitlement_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -2415,6 +2544,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AlbumDetail));
         assert!(capabilities.contains(&Capability::AlbumList));
         assert!(capabilities.contains(&Capability::AlbumStats));
+        assert!(capabilities.contains(&Capability::AlbumTrackEntitlements));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
     }
@@ -2818,6 +2948,26 @@ mod tests {
         assert!(stats.comment_count.is_some());
         assert!(stats.share_count.is_some());
         assert!(stats.subscriber_count.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_album_track_entitlements() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page = MusicProvider::album_track_entitlements(
+            &provider,
+            "168223858",
+            &PageRequest::new(2, 0),
+        )
+        .await
+        .expect("live album track entitlements");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.total.is_some_and(|total| total >= 2));
+        assert!(
+            page.items
+                .iter()
+                .all(|entitlement| !entitlement.available_qualities.is_empty())
+        );
     }
 
     #[tokio::test]

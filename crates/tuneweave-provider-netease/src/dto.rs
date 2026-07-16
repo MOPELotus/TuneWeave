@@ -37,6 +37,38 @@ pub(crate) struct AlbumListEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AlbumEntitlementsEnvelope {
+    #[serde(default)]
+    pub data: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TrackEntitlementData {
+    pub id: u64,
+    pub st: Option<i64>,
+    pub fee: Option<i64>,
+    pub pl: Option<u64>,
+    pub dl: Option<u64>,
+    pub maxbr: Option<u64>,
+    #[serde(rename = "playMaxbr")]
+    pub play_max_bitrate: Option<u64>,
+    #[serde(rename = "downloadMaxbr")]
+    pub download_max_bitrate: Option<u64>,
+    #[serde(rename = "plLevel")]
+    pub play_level: Option<String>,
+    #[serde(rename = "dlLevel")]
+    pub download_level: Option<String>,
+    pub payed: Option<i64>,
+    #[serde(rename = "chargeInfoList", default)]
+    pub charge_info: Vec<ChargeInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChargeInfo {
+    pub rate: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AlbumDetail {
     pub id: u64,
     pub name: String,
