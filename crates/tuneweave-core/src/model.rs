@@ -1849,6 +1849,160 @@ pub struct Playlist {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistVisibility {
+    #[default]
+    Public,
+    Private,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistKind {
+    #[default]
+    Normal,
+    Video,
+    Shared,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistCreateRequest {
+    pub name: String,
+    pub visibility: PlaylistVisibility,
+    pub kind: PlaylistKind,
+    pub account: Option<String>,
+}
+
+impl PlaylistCreateRequest {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            visibility: PlaylistVisibility::Public,
+            kind: PlaylistKind::Normal,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistMetadataUpdateVariant {
+    #[default]
+    Default,
+    Batch,
+    Individual,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistUpdateRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub variant: PlaylistMetadataUpdateVariant,
+    pub account: Option<String>,
+}
+
+impl PlaylistUpdateRequest {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            description: None,
+            tags: None,
+            variant: PlaylistMetadataUpdateVariant::Default,
+            account: None,
+        }
+    }
+}
+
+impl Default for PlaylistUpdateRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistMutationAction {
+    Create,
+    Update,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistMutationResult {
+    pub playlist_ref: ResourceRef,
+    pub action: PlaylistMutationAction,
+    pub playlist: Option<Playlist>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistTrackMutationVariant {
+    #[default]
+    Default,
+    Legacy,
+    Modern,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistTrackMutationAction {
+    Add,
+    Remove,
+    Reorder,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistTrackMutationRequest {
+    pub track_refs: Vec<ResourceRef>,
+    pub variant: PlaylistTrackMutationVariant,
+    pub account: Option<String>,
+}
+
+impl PlaylistTrackMutationRequest {
+    #[must_use]
+    pub fn new(track_refs: Vec<ResourceRef>) -> Self {
+        Self {
+            track_refs,
+            variant: PlaylistTrackMutationVariant::Default,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistTrackMutationResult {
+    pub playlist_ref: ResourceRef,
+    pub track_refs: Vec<ResourceRef>,
+    pub action: PlaylistTrackMutationAction,
+    pub snapshot_id: Option<String>,
+    pub cloud_track_count: Option<u64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistOrderRequest {
+    pub playlist_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistOrderResult {
+    pub playlist_refs: Vec<ResourceRef>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistCoverUpdateResult {
+    pub playlist_ref: ResourceRef,
+    pub image: ImageUploadResult,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LyricContributor {
     pub role: String,
@@ -2779,6 +2933,61 @@ mod tests {
         let value = serde_json::to_value(stats).expect("serialize video stats");
         assert_eq!(value["kind"], "mv");
         assert_eq!(value["like_count"], 4_662);
+    }
+
+    #[test]
+    fn playlist_write_contracts_separate_metadata_tracks_and_account_order() {
+        let mut create = PlaylistCreateRequest::new("跨平台收藏");
+        create.visibility = PlaylistVisibility::Private;
+        create.kind = PlaylistKind::Shared;
+        create.account = Some("personal".to_owned());
+        let value = serde_json::to_value(create).expect("serialize playlist create request");
+        assert_eq!(value["name"], "跨平台收藏");
+        assert_eq!(value["visibility"], "private");
+        assert_eq!(value["kind"], "shared");
+
+        let mut update = PlaylistUpdateRequest::new();
+        update.description = Some(String::new());
+        update.tags = Some(vec!["华语".to_owned(), "现场".to_owned()]);
+        update.variant = PlaylistMetadataUpdateVariant::Individual;
+        let value = serde_json::to_value(update).expect("serialize playlist update request");
+        assert_eq!(value["description"], "");
+        assert_eq!(value["tags"], serde_json::json!(["华语", "现场"]));
+        assert_eq!(value["variant"], "individual");
+
+        let playlist_ref =
+            ResourceRef::new(Platform::Netease, "987654").expect("valid playlist reference");
+        let track_refs = vec![
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+            ResourceRef::new(Platform::Netease, "1974443814").expect("valid track reference"),
+        ];
+        let mut tracks = PlaylistTrackMutationRequest::new(track_refs.clone());
+        tracks.variant = PlaylistTrackMutationVariant::Legacy;
+        let value = serde_json::to_value(tracks).expect("serialize playlist track request");
+        assert_eq!(
+            value["track_refs"],
+            serde_json::json!(["netease:185809", "netease:1974443814"])
+        );
+        assert_eq!(value["variant"], "legacy");
+
+        let result = PlaylistTrackMutationResult {
+            playlist_ref: playlist_ref.clone(),
+            track_refs,
+            action: PlaylistTrackMutationAction::Reorder,
+            snapshot_id: Some("snapshot-1".to_owned()),
+            cloud_track_count: Some(0),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize playlist track result");
+        assert_eq!(value["playlist_ref"], "netease:987654");
+        assert_eq!(value["action"], "reorder");
+
+        let order = PlaylistOrderRequest {
+            playlist_refs: vec![playlist_ref],
+            account: Some("personal".to_owned()),
+        };
+        let value = serde_json::to_value(order).expect("serialize playlist order request");
+        assert_eq!(value["playlist_refs"][0], "netease:987654");
     }
 
     #[test]

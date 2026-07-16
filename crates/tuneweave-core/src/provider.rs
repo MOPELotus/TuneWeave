@@ -20,14 +20,17 @@ use crate::{
     ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
     MediaStream, MembershipSummary, Page, PageRequest, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
-    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
-    VideoStream, VideoStreamRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackMutationAction,
+    PlaylistTrackMutationRequest, PlaylistTrackMutationResult, PlaylistUpdateRequest,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats, VideoStream,
+    VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -428,6 +431,71 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PlaylistRead,
+        ))
+    }
+
+    async fn create_playlist(
+        &self,
+        _request: &PlaylistCreateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn update_playlist(
+        &self,
+        _id: &str,
+        _request: &PlaylistUpdateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn delete_playlist(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<PlaylistMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn mutate_playlist_tracks(
+        &self,
+        _id: &str,
+        _action: PlaylistTrackMutationAction,
+        _request: &PlaylistTrackMutationRequest,
+    ) -> Result<PlaylistTrackMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn reorder_account_playlists(
+        &self,
+        _request: &PlaylistOrderRequest,
+    ) -> Result<PlaylistOrderResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn update_playlist_cover(
+        &self,
+        _id: &str,
+        _request: &ImageUploadRequest,
+    ) -> Result<PlaylistCoverUpdateResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
         ))
     }
 
