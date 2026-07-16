@@ -279,6 +279,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
+            Capability::RadioStationDetail,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -446,6 +447,19 @@ impl MusicProvider for NeteaseProvider {
             regions,
             extensions,
         })
+    }
+
+    async fn radio_station(&self, id: &str, account: Option<&str>) -> Result<RadioStation> {
+        let id = parse_numeric_id("broadcast station", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_eapi(
+                "/api/voice/broadcast/channel/currentinfo",
+                json!({ "channelId": id }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        map_radio_station_response(response.body)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1997,47 +2011,79 @@ fn radio_collection_scalar<'a>(body: &'a Value, fields: &[&str]) -> Option<&'a V
 
 fn map_collected_radio_station(raw: Value) -> Result<RadioStation> {
     let station_raw = embedded_radio_station(&raw);
-    let id = radio_scalar_field(&station_raw, &["id", "channelId", "contentId"])
-        .or_else(|| radio_scalar_field(&raw, &["id", "channelId", "contentId"]))
-        .ok_or_else(|| radio_collection_item_error("id", &raw))?;
+    let mut station = map_radio_station_fields(&station_raw, &raw, Some(true))?;
+    station.extensions.insert("collection_item".to_owned(), raw);
+    station
+        .extensions
+        .insert("broadcast_station".to_owned(), station_raw);
+    Ok(station)
+}
+
+fn map_radio_station_response(body: Value) -> Result<RadioStation> {
+    let raw = body
+        .get("data")
+        .filter(|value| value.is_object())
+        .unwrap_or(&body)
+        .clone();
+    let station_raw = embedded_radio_station(&raw);
+    let mut station = map_radio_station_fields(&station_raw, &raw, None)?;
+    station.extensions.insert("current_info".to_owned(), raw);
+    station.extensions.insert("response".to_owned(), body);
+    Ok(station)
+}
+
+fn map_radio_station_fields(
+    station_raw: &Value,
+    fallback_raw: &Value,
+    default_subscribed: Option<bool>,
+) -> Result<RadioStation> {
+    let id = radio_scalar_field(station_raw, &["id", "channelId", "contentId"])
+        .or_else(|| radio_scalar_field(fallback_raw, &["id", "channelId", "contentId"]))
+        .ok_or_else(|| radio_station_item_error("id", fallback_raw))?;
     let name = radio_text_field(
-        &station_raw,
+        station_raw,
         &["name", "channelName", "contentName", "title"],
     )
-    .or_else(|| radio_text_field(&raw, &["name", "channelName", "contentName", "title"]))
-    .ok_or_else(|| radio_collection_item_error("name", &raw))?;
+    .or_else(|| {
+        radio_text_field(
+            fallback_raw,
+            &["name", "channelName", "contentName", "title"],
+        )
+    })
+    .ok_or_else(|| radio_station_item_error("name", fallback_raw))?;
     let reference = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::UpstreamError,
             format!("NetEase returned an invalid broadcast station id: {error}"),
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({ "item": raw.clone() }))
+        .with_details(json!({ "item": fallback_raw }))
     })?;
     let mut station = RadioStation::new(reference, name);
-    station.description = radio_text_field(&station_raw, &["description", "desc"])
-        .or_else(|| radio_text_field(&raw, &["description", "desc"]))
+    station.description = radio_text_field(station_raw, &["description", "desc"])
+        .or_else(|| radio_text_field(fallback_raw, &["description", "desc"]))
         .unwrap_or_default();
     station.cover_url = radio_text_field(
-        &station_raw,
+        station_raw,
         &["coverUrl", "channelCoverUrl", "picUrl", "imageUrl"],
     )
-    .or_else(|| radio_text_field(&raw, &["coverUrl", "channelCoverUrl", "picUrl", "imageUrl"]));
-    station.category = radio_text_field(&station_raw, &["categoryName", "category"])
-        .or_else(|| radio_text_field(&raw, &["categoryName", "category"]));
-    station.region = radio_text_field(&station_raw, &["regionName", "region"])
-        .or_else(|| radio_text_field(&raw, &["regionName", "region"]));
-    station.stream_url = radio_text_field(&station_raw, &["playUrl", "streamUrl"])
-        .or_else(|| radio_text_field(&raw, &["playUrl", "streamUrl"]));
-    station.current_program = radio_text_field(&station_raw, &["programName", "currentProgram"])
-        .or_else(|| radio_text_field(&raw, &["programName", "currentProgram"]));
-    station.subscribed = radio_bool_field(&station_raw, &["subed", "subscribed", "collected"])
-        .or_else(|| radio_bool_field(&raw, &["subed", "subscribed", "collected"]))
-        .or(Some(true));
-    station.extensions.insert("collection_item".to_owned(), raw);
-    station
-        .extensions
-        .insert("broadcast_station".to_owned(), station_raw);
+    .or_else(|| {
+        radio_text_field(
+            fallback_raw,
+            &["coverUrl", "channelCoverUrl", "picUrl", "imageUrl"],
+        )
+    });
+    station.category = radio_text_field(station_raw, &["categoryName", "category"])
+        .or_else(|| radio_text_field(fallback_raw, &["categoryName", "category"]));
+    station.region = radio_text_field(station_raw, &["regionName", "region"])
+        .or_else(|| radio_text_field(fallback_raw, &["regionName", "region"]));
+    station.stream_url = radio_text_field(station_raw, &["playUrl", "streamUrl"])
+        .or_else(|| radio_text_field(fallback_raw, &["playUrl", "streamUrl"]));
+    station.current_program = radio_text_field(station_raw, &["programName", "currentProgram"])
+        .or_else(|| radio_text_field(fallback_raw, &["programName", "currentProgram"]));
+    station.subscribed = radio_bool_field(station_raw, &["subed", "subscribed", "collected"])
+        .or_else(|| radio_bool_field(fallback_raw, &["subed", "subscribed", "collected"]))
+        .or(default_subscribed);
     Ok(station)
 }
 
@@ -2091,10 +2137,10 @@ fn radio_bool_field(raw: &Value, fields: &[&str]) -> Option<bool> {
         .find_map(|field| raw.get(field).and_then(json_bool))
 }
 
-fn radio_collection_item_error(field: &str, raw: &Value) -> TuneWeaveError {
+fn radio_station_item_error(field: &str, raw: &Value) -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::UpstreamError,
-        format!("NetEase broadcast station collection item did not contain a {field}"),
+        format!("NetEase broadcast station item did not contain a {field}"),
     )
     .with_platform(Platform::Netease)
     .with_details(json!({ "item": raw }))
@@ -4650,6 +4696,41 @@ mod tests {
     }
 
     #[test]
+    fn maps_broadcast_station_current_info_without_guessing_subscription() {
+        let station = map_radio_station_response(json!({
+            "code": 200,
+            "data": {
+                "id": 362,
+                "channelName": "金山区广播电视台综合广播",
+                "channelCoverUrl": "https://example.test/362.jpg",
+                "regionName": "上海",
+                "playUrl": "https://lhttp.qtfm.cn/live/362/64k.mp3",
+                "programName": "晚安金山",
+                "programId": 9001,
+                "thirdChannelId": "4022",
+                "duration": 3600
+            }
+        }))
+        .expect("map broadcast station current info");
+
+        assert_eq!(station.resource_ref.to_string(), "netease:362");
+        assert_eq!(station.name, "金山区广播电视台综合广播");
+        assert_eq!(station.region.as_deref(), Some("上海"));
+        assert_eq!(
+            station.stream_url.as_deref(),
+            Some("https://lhttp.qtfm.cn/live/362/64k.mp3")
+        );
+        assert_eq!(station.current_program.as_deref(), Some("晚安金山"));
+        assert_eq!(station.subscribed, None);
+        assert_eq!(station.extensions["current_info"]["thirdChannelId"], "4022");
+        assert_eq!(station.extensions["response"]["code"], 200);
+
+        let error = map_radio_station_response(json!({ "code": 200, "data": {} }))
+            .expect_err("missing broadcast station id");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
     fn banner_mapping_rejects_items_without_any_image() {
         let error = map_banner(
             json!({"targetId": 185809, "targetType": 1}),
@@ -5918,6 +5999,10 @@ mod tests {
     #[tokio::test]
     async fn album_ids_are_validated_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let radio_error = MusicProvider::radio_station(&provider, "invalid", None)
+            .await
+            .expect_err("invalid broadcast station id");
+        assert_eq!(radio_error.code, ErrorCode::InvalidRequest);
         let detail_error = MusicProvider::album(&provider, "invalid", None)
             .await
             .expect_err("invalid album id");
@@ -6351,6 +6436,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
+        assert!(capabilities.contains(&Capability::RadioStationDetail));
     }
 
     #[test]
@@ -6908,6 +6994,25 @@ mod tests {
                 .iter()
                 .any(|region| region.id == "407" && region.name == "网络台")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_broadcast_station_current_info() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let station = MusicProvider::radio_station(&provider, "362", None)
+            .await
+            .expect("live broadcast station current info");
+        assert_eq!(station.resource_ref.to_string(), "netease:362");
+        assert!(!station.name.is_empty());
+        assert!(
+            station
+                .stream_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http"))
+        );
+        assert_eq!(station.subscribed, None);
+        assert_eq!(station.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
