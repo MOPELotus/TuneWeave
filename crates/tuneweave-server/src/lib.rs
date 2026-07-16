@@ -41,11 +41,11 @@ use tuneweave_core::{
     PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchQuery,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver, SubscriptionResult,
-    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamResolver, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -186,6 +186,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search/default", get(search_default))
         .route("/search/trending", get(search_trending))
         .route("/search/suggestions", get(search_suggestions))
+        .route("/search/multimatch", get(search_multi_match))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
@@ -446,6 +447,17 @@ struct SearchSuggestionParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchMultiMatchParams {
+    #[serde(alias = "keywords", alias = "keyword")]
+    q: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
 async fn search_default(
     State(state): State<AppState>,
     params: Result<Query<SearchDefaultParams>, QueryRejection>,
@@ -512,6 +524,35 @@ async fn search_suggestions(
         .await?;
     Ok(Json(
         ApiResponse::new(list)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn search_multi_match(
+    State(state): State<AppState>,
+    params: Result<Query<SearchMultiMatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SearchMultiMatch>>, ApiError> {
+    let params = query_params(params)?;
+    let query = params
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
+    let kind = parse_search_kind(params.kind.as_deref())?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .search_multi_match(&SearchMultiMatchRequest {
+            query: query.to_owned(),
+            kind,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
             .with_platform(platform)
             .with_account(account),
     ))
@@ -4218,6 +4259,7 @@ mod tests {
                 Capability::SearchDefault,
                 Capability::SearchTrending,
                 Capability::SearchSuggestions,
+                Capability::SearchMultiMatch,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4405,6 +4447,26 @@ mod tests {
                     })
                     .into_iter()
                     .collect(),
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            })
+        }
+
+        async fn search_multi_match(
+            &self,
+            request: &SearchMultiMatchRequest,
+        ) -> Result<SearchMultiMatch> {
+            Ok(SearchMultiMatch {
+                query: request.query.clone(),
+                requested_kind: request.kind,
+                sections: vec![tuneweave_core::SearchMultiMatchSection {
+                    section: "artist".to_owned(),
+                    kind: Some(SearchKind::Artist),
+                    items: vec![SearchItem::Artist(sample_artist("11127"))],
+                    extensions: Extensions::from([
+                        ("account".to_owned(), json!(request.account)),
+                        ("order_index".to_owned(), json!(0)),
+                    ]),
+                }],
                 extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
             })
         }
@@ -6364,6 +6426,69 @@ mod tests {
             "/v1/search/suggestions?q=test&client=unknown",
             "/v1/search/suggestions?q=test&platform=unknown",
             "/v1/search/suggestions?q=test&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_match_search_accepts_unified_and_reference_query_names() {
+        for (path, kind) in [
+            (
+                "/v1/search/multimatch?q=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&kind=track&account=search-user",
+                "track",
+            ),
+            (
+                "/v1/search/multimatch?keywords=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&type=100&platform=netease&account=search-user",
+                "artist",
+            ),
+            (
+                "/v1/search/multimatch?keyword=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&type=1014&account=search-user",
+                "video",
+            ),
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"]["query"], "海阔天空", "{path}");
+            assert_eq!(response["data"]["requested_kind"], kind, "{path}");
+            assert_eq!(response["data"]["sections"][0]["section"], "artist");
+            assert_eq!(response["data"]["sections"][0]["kind"], "artist");
+            assert_eq!(
+                response["data"]["sections"][0]["items"][0]["type"],
+                "artist"
+            );
+            assert_eq!(
+                response["data"]["sections"][0]["items"][0]["data"]["ref"],
+                "netease:11127"
+            );
+            assert_eq!(
+                response["data"]["sections"][0]["extensions"]["account"],
+                "search-user"
+            );
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "search-user");
+        }
+
+        let (status, defaulted) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search/multimatch?q=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["data"]["requested_kind"], "track");
+        assert_eq!(defaulted["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn multi_match_search_rejects_missing_query_unknown_kind_platform_and_fields() {
+        for path in [
+            "/v1/search/multimatch",
+            "/v1/search/multimatch?q=%20%20",
+            "/v1/search/multimatch?q=test&kind=unknown",
+            "/v1/search/multimatch?q=test&platform=unknown",
+            "/v1/search/multimatch?q=test&unknown=true",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
