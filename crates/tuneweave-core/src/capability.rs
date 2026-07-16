@@ -73,6 +73,7 @@ pub enum Capability {
     Recommendations,
     MusicPartner,
     CommentWrite,
+    CommentsRead,
     PlatformApi,
     PlatformBatch,
 }
@@ -116,6 +117,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::CommentWrite).expect("serialize comment capability"),
             serde_json::json!("comment_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::CommentsRead).expect("serialize comments capability"),
+            serde_json::json!("comments_read")
         );
     }
 }

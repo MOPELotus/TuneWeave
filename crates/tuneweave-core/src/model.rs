@@ -569,6 +569,93 @@ pub struct CommentMutationResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentListView {
+    #[default]
+    All,
+    Hot,
+    Replies,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentSort {
+    Recommended,
+    Hot,
+    Time,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentListRequest {
+    pub target: CommentTarget,
+    pub view: CommentListView,
+    pub sort: Option<CommentSort>,
+    pub limit: u32,
+    pub offset: u32,
+    pub page: Option<u32>,
+    pub cursor: Option<String>,
+    pub before_time_ms: Option<u64>,
+    pub parent_comment_id: Option<String>,
+    pub include_replies: bool,
+    pub account: Option<String>,
+}
+
+impl CommentListRequest {
+    #[must_use]
+    pub const fn new(target: CommentTarget, limit: u32) -> Self {
+        Self {
+            target,
+            view: CommentListView::All,
+            sort: None,
+            limit,
+            offset: 0,
+            page: None,
+            cursor: None,
+            before_time_ms: None,
+            parent_comment_id: None,
+            include_replies: true,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentReplyReference {
+    pub comment_id: Option<String>,
+    pub content: String,
+    pub author: Option<User>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Comment {
+    pub platform: Platform,
+    pub id: String,
+    pub content: String,
+    pub author: Option<User>,
+    pub created_at_ms: Option<u64>,
+    pub created_at_text: Option<String>,
+    pub liked: Option<bool>,
+    pub like_count: Option<u64>,
+    pub parent_comment_id: Option<String>,
+    pub reply_count: Option<u64>,
+    pub replied_to: Vec<CommentReplyReference>,
+    pub ip_location: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentPage {
+    pub target: CommentTarget,
+    pub comments: Vec<Comment>,
+    pub hot_comments: Vec<Comment>,
+    pub top_comments: Vec<Comment>,
+    pub current_comment: Option<Comment>,
+    pub pagination: PageMeta,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumListRequest {
     pub limit: u32,
@@ -1990,5 +2077,64 @@ mod tests {
         let result = serde_json::to_value(result).expect("serialize comment mutation result");
         assert_eq!(result["action"], "reply");
         assert_eq!(result["comment_id"], "1535550516319");
+    }
+
+    #[test]
+    fn comment_pages_keep_lists_sorting_and_reply_relationships_typed() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+            CommentTargetKind::Track,
+        );
+        let mut request = CommentListRequest::new(target.clone(), 20);
+        request.sort = Some(CommentSort::Time);
+        request.cursor = Some("1582035919432".to_owned());
+        assert_eq!(request.view, CommentListView::All);
+        assert!(request.include_replies);
+
+        let comment = Comment {
+            platform: Platform::Netease,
+            id: "3160990055".to_owned(),
+            content: "看不见你的笑，我怎么睡得着".to_owned(),
+            author: None,
+            created_at_ms: Some(1_582_035_919_432),
+            created_at_text: Some("2020-02-18".to_owned()),
+            liked: Some(false),
+            like_count: Some(5_646),
+            parent_comment_id: None,
+            reply_count: None,
+            replied_to: vec![CommentReplyReference {
+                comment_id: Some("100".to_owned()),
+                content: "原评论".to_owned(),
+                author: None,
+                extensions: Extensions::new(),
+            }],
+            ip_location: Some("上海".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let page = CommentPage {
+            target,
+            comments: vec![comment],
+            hot_comments: Vec::new(),
+            top_comments: Vec::new(),
+            current_comment: None,
+            pagination: PageMeta {
+                limit: 20,
+                offset: 0,
+                total: Some(68_334),
+                next_offset: Some(20),
+                has_more: true,
+                extensions: Extensions::new(),
+            },
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(page).expect("serialize comment page");
+        assert_eq!(value["target"]["ref"], "netease:185809");
+        assert_eq!(value["comments"][0]["id"], "3160990055");
+        assert_eq!(value["comments"][0]["replied_to"][0]["comment_id"], "100");
+        assert_eq!(value["pagination"]["total"], 68_334);
+        assert_eq!(
+            serde_json::to_value(request.sort).expect("serialize comment sort"),
+            serde_json::json!("time")
+        );
     }
 }
