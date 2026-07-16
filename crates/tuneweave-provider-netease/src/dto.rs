@@ -196,9 +196,14 @@ pub(crate) struct ArtistMvItem {
     pub id: u64,
     pub name: String,
     pub artist: Option<ArtistMvCreator>,
+    #[serde(default)]
+    pub artists: Vec<ArtistMvCreator>,
+    #[serde(rename = "artistId")]
+    pub artist_id: Option<u64>,
     #[serde(rename = "artistName")]
     pub artist_name: Option<String>,
     pub duration: Option<u64>,
+    #[serde(alias = "cover")]
     pub imgurl: Option<String>,
     #[serde(rename = "imgurl16v9")]
     pub image_16x9_url: Option<String>,

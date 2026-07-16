@@ -30,9 +30,10 @@ use tuneweave_core::{
     PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
     Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    RecommendationRequest, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoKind,
 };
 use url::Url;
 
@@ -291,6 +292,16 @@ impl MusicProvider for NeteaseProvider {
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
             Capability::SearchTracks,
+            Capability::SearchAlbums,
+            Capability::SearchArtists,
+            Capability::SearchPlaylists,
+            Capability::SearchUsers,
+            Capability::SearchMvs,
+            Capability::SearchLyrics,
+            Capability::SearchRadioStations,
+            Capability::SearchVideos,
+            Capability::SearchMixed,
+            Capability::SearchVoices,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -399,6 +410,32 @@ impl MusicProvider for NeteaseProvider {
                 extensions: Default::default(),
             },
         })
+    }
+
+    async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        let keyword = query.query.trim();
+        if keyword.is_empty() {
+            return Err(
+                TuneWeaveError::invalid_request("search query cannot be empty")
+                    .with_platform(Platform::Netease),
+            );
+        }
+        let limit = query.limit.clamp(1, 100);
+        let client = self.client_for(query.account.as_deref())?;
+        let response = client
+            .request_eapi(
+                "/api/cloudsearch/pc",
+                json!({
+                    "s": keyword,
+                    "type": netease_cloud_search_type(query.kind),
+                    "limit": limit,
+                    "offset": query.offset,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        map_cloud_search_response(query.kind, limit, query.offset, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -2771,6 +2808,12 @@ fn json_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
 fn json_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
@@ -4526,7 +4569,20 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
             )
             .with_platform(Platform::Netease)
         })?;
-    let creators = if let Some(creator) = item.artist {
+    let artist_name = item.artist_name.clone();
+    let creator = item
+        .artist
+        .or_else(|| item.artists.into_iter().next())
+        .or_else(|| {
+            item.artist_id
+                .zip(artist_name.clone())
+                .map(|(id, name)| crate::dto::ArtistMvCreator {
+                    id,
+                    name,
+                    avatar_url: None,
+                })
+        });
+    let creators = if let Some(creator) = creator {
         let creator_ref =
             ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
                 TuneWeaveError::new(
@@ -4541,7 +4597,7 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
             avatar_url: creator.avatar_url,
         }]
     } else {
-        item.artist_name
+        artist_name
             .filter(|name| !name.trim().is_empty())
             .map(|name| {
                 vec![CreatorSummary {
@@ -5778,6 +5834,280 @@ fn parse_numeric_id(resource: &str, id: &str) -> Result<u64> {
     })
 }
 
+const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
+    match kind {
+        SearchKind::Track => 1,
+        SearchKind::Album => 10,
+        SearchKind::Artist => 100,
+        SearchKind::Playlist => 1_000,
+        SearchKind::User => 1_002,
+        SearchKind::Mv => 1_004,
+        SearchKind::Lyric => 1_006,
+        SearchKind::RadioStation => 1_009,
+        SearchKind::Video => 1_014,
+        SearchKind::Mixed => 1_018,
+        SearchKind::Voice => 2_000,
+    }
+}
+
+fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&'static str]) {
+    match kind {
+        SearchKind::Track | SearchKind::Lyric => (&["songs"], &["songCount"]),
+        SearchKind::Album => (&["albums"], &["albumCount"]),
+        SearchKind::Artist => (&["artists"], &["artistCount"]),
+        SearchKind::Playlist => (&["playlists"], &["playlistCount"]),
+        SearchKind::User => (&["userprofiles"], &["userprofileCount"]),
+        SearchKind::Mv => (&["mvs"], &["mvCount"]),
+        SearchKind::RadioStation => (&["djRadios"], &["djRadiosCount"]),
+        SearchKind::Video => (&["videos"], &["videoCount"]),
+        SearchKind::Mixed => (&[], &[]),
+        SearchKind::Voice => (&["resources", "voices"], &["resourceCount", "voiceCount"]),
+    }
+}
+
+fn map_cloud_search_response(
+    kind: SearchKind,
+    limit: u32,
+    offset: u32,
+    body: Value,
+) -> Result<Page<SearchItem>> {
+    let result = body.get("result").cloned().unwrap_or_else(|| json!({}));
+    let (item_keys, count_keys) = cloud_search_shape(kind);
+    let raw_items = item_keys
+        .iter()
+        .find_map(|key| result.get(*key).and_then(Value::as_array))
+        .cloned()
+        .unwrap_or_default();
+    let total = count_keys
+        .iter()
+        .find_map(|key| result.get(*key).and_then(json_u64));
+    let had_item_array = item_keys
+        .iter()
+        .any(|key| result.get(*key).is_some_and(Value::is_array));
+    let mut items = raw_items
+        .iter()
+        .cloned()
+        .map(|raw| map_cloud_search_item(kind, raw))
+        .collect::<Vec<_>>();
+    let opaque_result = items.is_empty()
+        && !had_item_array
+        && result.as_object().is_some_and(|result| !result.is_empty());
+    if opaque_result {
+        items.push(opaque_cloud_search_item(kind, result.clone(), None));
+    }
+
+    let consumed = u32::try_from(raw_items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = if opaque_result {
+        false
+    } else if let Some(total) = total {
+        u64::from(next_offset) < total
+    } else {
+        consumed > 0 && consumed >= limit
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("kind".to_owned(), json!(kind));
+    extensions.insert(
+        "platform_type".to_owned(),
+        json!(netease_cloud_search_type(kind)),
+    );
+    extensions.insert("returned_count".to_owned(), json!(raw_items.len()));
+    extensions.insert(
+        "limit_applied".to_owned(),
+        json!(!had_item_array || raw_items.len() <= limit as usize),
+    );
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_cloud_search_item(kind: SearchKind, raw: Value) -> SearchItem {
+    let mapped = match kind {
+        SearchKind::Track | SearchKind::Lyric => {
+            let song = parse_body::<Song>(raw.clone());
+            song.and_then(|song| map_song(song, None)).map(|mut track| {
+                track
+                    .extensions
+                    .insert("search_item".to_owned(), raw.clone());
+                SearchItem::Track(track)
+            })
+        }
+        SearchKind::Album => map_album_list_item(raw.clone()).map(SearchItem::Album),
+        SearchKind::Artist => map_artist_list_item(raw.clone()).map(SearchItem::Artist),
+        SearchKind::Playlist => parse_body::<PlaylistDetail>(raw.clone())
+            .and_then(map_playlist)
+            .map(|mut playlist| {
+                playlist
+                    .extensions
+                    .insert("search_item".to_owned(), raw.clone());
+                SearchItem::Playlist(playlist)
+            }),
+        SearchKind::User => {
+            map_artist_fan(json!({ "userProfile": raw.clone() })).map(|mut user| {
+                user.extensions
+                    .insert("search_item".to_owned(), raw.clone());
+                SearchItem::User(user)
+            })
+        }
+        SearchKind::Mv => map_artist_mv(raw.clone()).map(SearchItem::Video),
+        SearchKind::RadioStation => {
+            map_radio_station_fields(&raw, &raw, None).map(|mut station| {
+                station
+                    .extensions
+                    .insert("search_item".to_owned(), raw.clone());
+                SearchItem::RadioStation(station)
+            })
+        }
+        SearchKind::Video => map_cloud_search_video(raw.clone()).map(SearchItem::Video),
+        SearchKind::Mixed | SearchKind::Voice => {
+            return opaque_cloud_search_item(kind, raw, None);
+        }
+    };
+    mapped.unwrap_or_else(|error| opaque_cloud_search_item(kind, raw, Some(error.message)))
+}
+
+fn map_cloud_search_video(raw: Value) -> Result<Video> {
+    let source = ["data", "resource", "content"]
+        .into_iter()
+        .find_map(|field| raw.get(field).filter(|value| value.is_object()))
+        .unwrap_or(&raw);
+    let id = ["vid", "id"]
+        .into_iter()
+        .find_map(|field| source.get(field).and_then(json_scalar_string))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase video search item did not contain an id",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let title = radio_text_field(source, &["title", "name"]).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase video search item did not contain a title",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let resource_ref = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid video search id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let creators = ["creator", "creators", "artists"]
+        .into_iter()
+        .find_map(|field| source.get(field).and_then(Value::as_array))
+        .into_iter()
+        .flatten()
+        .filter_map(|creator| {
+            let name = radio_text_field(creator, &["userName", "name", "nickname"])?;
+            let creator_ref = ["userId", "id"]
+                .into_iter()
+                .find_map(|field| creator.get(field).and_then(json_scalar_string))
+                .and_then(|id| ResourceRef::new(Platform::Netease, id).ok());
+            Some(CreatorSummary {
+                resource_ref: creator_ref,
+                name,
+                avatar_url: radio_text_field(creator, &["avatarUrl", "img1v1Url"]),
+            })
+        })
+        .collect();
+    let duration_ms = ["durationms", "durationMs", "duration"]
+        .into_iter()
+        .find_map(|field| source.get(field).and_then(json_u64));
+    let play_count = ["playTime", "playCount"]
+        .into_iter()
+        .find_map(|field| source.get(field).and_then(json_u64));
+    let published_at = source
+        .get("publishTime")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let description = radio_text_field(source, &["description", "desc"]).unwrap_or_default();
+    let cover_url = radio_text_field(source, &["coverUrl", "cover", "picUrl"]);
+    let subscribed = radio_bool_field(source, &["subed", "subscribed"]);
+    let mut extensions = Extensions::new();
+    extensions.insert("search_item".to_owned(), raw);
+    Ok(Video {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        title,
+        creators,
+        description,
+        cover_url,
+        duration_ms,
+        published_at,
+        play_count,
+        subscribed,
+        extensions,
+    })
+}
+
+fn opaque_cloud_search_item(
+    kind: SearchKind,
+    raw: Value,
+    mapping_error: Option<String>,
+) -> SearchItem {
+    let source = ["data", "resource", "content"]
+        .into_iter()
+        .find_map(|field| raw.get(field).filter(|value| value.is_object()))
+        .unwrap_or(&raw);
+    let id = ["id", "vid", "userId", "resourceId", "djId"]
+        .into_iter()
+        .find_map(|field| source.get(field).and_then(json_scalar_string))
+        .or_else(|| {
+            ["id", "vid", "userId", "resourceId", "djId"]
+                .into_iter()
+                .find_map(|field| raw.get(field).and_then(json_scalar_string))
+        });
+    let title = ["name", "title", "nickname"]
+        .into_iter()
+        .find_map(|field| {
+            source
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            ["name", "title", "nickname"].into_iter().find_map(|field| {
+                raw.get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+        });
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw);
+    if let Some(mapping_error) = mapping_error {
+        extensions.insert("mapping_error".to_owned(), json!(mapping_error));
+    }
+    SearchItem::Opaque(SearchOpaqueItem {
+        platform: Platform::Netease,
+        kind: serde_json::to_value(kind)
+            .ok()
+            .and_then(|kind| kind.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned()),
+        id,
+        title,
+        extensions,
+    })
+}
+
 fn capability_for_search(kind: SearchKind) -> Capability {
     match kind {
         SearchKind::Track => Capability::SearchTracks,
@@ -5868,6 +6198,263 @@ mod tests {
         );
         assert_eq!(track.playable, Some(true));
         assert_eq!(track.extensions["fee"], 1);
+    }
+
+    #[test]
+    fn cloudsearch_maps_every_typed_reference_branch() {
+        let song = json!({
+            "id": 185809,
+            "name": "反方向的钟",
+            "artists": [{"id": 6452, "name": "周杰伦"}],
+            "album": {"id": 18915, "name": "Jay", "picUrl": "https://example.test/album.jpg"},
+            "duration": 258000,
+            "status": 0,
+            "lyrics": ["穿梭时间的画面的钟"]
+        });
+        let cases = [
+            (
+                SearchKind::Track,
+                "songs",
+                "songCount",
+                song.clone(),
+                "track",
+                "netease:185809",
+            ),
+            (
+                SearchKind::Album,
+                "albums",
+                "albumCount",
+                json!({
+                    "id": 18915,
+                    "name": "Jay",
+                    "artists": [{"id": 6452, "name": "周杰伦"}],
+                    "picUrl": "https://example.test/album.jpg",
+                    "size": 10
+                }),
+                "album",
+                "netease:18915",
+            ),
+            (
+                SearchKind::Artist,
+                "artists",
+                "artistCount",
+                json!({
+                    "id": 6452,
+                    "name": "周杰伦",
+                    "alias": ["Jay Chou"],
+                    "img1v1Url": "https://example.test/artist.jpg"
+                }),
+                "artist",
+                "netease:6452",
+            ),
+            (
+                SearchKind::Playlist,
+                "playlists",
+                "playlistCount",
+                json!({
+                    "id": 3778678,
+                    "name": "云音乐热歌榜",
+                    "creator": {"userId": 1, "nickname": "网易云音乐"},
+                    "coverImgUrl": "https://example.test/playlist.jpg",
+                    "trackCount": 200
+                }),
+                "playlist",
+                "netease:3778678",
+            ),
+            (
+                SearchKind::User,
+                "userprofiles",
+                "userprofileCount",
+                json!({
+                    "userId": 6298206519_u64,
+                    "nickname": "轻手揍人丸",
+                    "avatarUrl": "https://example.test/avatar.jpg",
+                    "followed": false,
+                    "mutual": false
+                }),
+                "user",
+                "netease:6298206519",
+            ),
+            (
+                SearchKind::Mv,
+                "mvs",
+                "mvCount",
+                json!({
+                    "id": 22695250,
+                    "name": "任性",
+                    "artistName": "周杰伦",
+                    "cover": "https://example.test/mv.jpg",
+                    "duration": 266000,
+                    "playCount": 100726
+                }),
+                "video",
+                "netease:22695250",
+            ),
+            (
+                SearchKind::Lyric,
+                "songs",
+                "songCount",
+                song,
+                "track",
+                "netease:185809",
+            ),
+            (
+                SearchKind::RadioStation,
+                "djRadios",
+                "djRadiosCount",
+                json!({
+                    "id": 362,
+                    "name": "金山区广播电视台综合广播",
+                    "desc": "广播电台",
+                    "picUrl": "https://example.test/radio.jpg",
+                    "category": "音乐"
+                }),
+                "radio_station",
+                "netease:362",
+            ),
+            (
+                SearchKind::Video,
+                "videos",
+                "videoCount",
+                json!({
+                    "vid": "video-1",
+                    "title": "周杰伦现场",
+                    "coverUrl": "https://example.test/video.jpg",
+                    "durationms": 120000,
+                    "playTime": 1000,
+                    "creator": [{"userId": 6452, "userName": "周杰伦"}]
+                }),
+                "video",
+                "netease:video-1",
+            ),
+        ];
+
+        for (kind, item_key, count_key, item, expected_type, expected_ref) in cases {
+            let mut body = json!({"code": 200, "result": {}});
+            body["result"][item_key] = json!([item]);
+            body["result"][count_key] = json!(3);
+            let page =
+                map_cloud_search_response(kind, 1, 0, body).expect("map typed cloud search branch");
+            assert_eq!(page.items.len(), 1, "{kind:?}");
+            let value = serde_json::to_value(&page.items[0]).expect("serialize search item");
+            assert_eq!(value["type"], expected_type, "{kind:?}");
+            assert_eq!(value["data"]["ref"], expected_ref, "{kind:?}");
+            assert_eq!(page.pagination.total, Some(3), "{kind:?}");
+            assert_eq!(page.pagination.next_offset, Some(1), "{kind:?}");
+            assert!(page.pagination.has_more, "{kind:?}");
+            assert_eq!(
+                page.pagination.extensions["platform_type"],
+                netease_cloud_search_type(kind),
+                "{kind:?}"
+            );
+            assert_eq!(page.pagination.extensions["response"]["code"], 200);
+        }
+    }
+
+    #[test]
+    fn cloudsearch_preserves_mixed_voice_fallback_and_platform_pagination_behavior() {
+        let mixed = map_cloud_search_response(
+            SearchKind::Mixed,
+            30,
+            0,
+            json!({
+                "code": 200,
+                "result": {"order": ["song"], "song": {"more": true}}
+            }),
+        )
+        .expect("map mixed cloud search");
+        assert_eq!(mixed.items.len(), 1);
+        let SearchItem::Opaque(mixed) = &mixed.items[0] else {
+            panic!("mixed result must remain opaque");
+        };
+        assert_eq!(mixed.kind, "mixed");
+        assert_eq!(mixed.extensions["response"]["order"][0], "song");
+
+        let voice = map_cloud_search_response(
+            SearchKind::Voice,
+            1,
+            0,
+            json!({
+                "code": 200,
+                "result": {
+                    "resourceCount": 2,
+                    "resources": [{"id": "voice-1", "title": "声音节目"}]
+                }
+            }),
+        )
+        .expect("map voice cloud search");
+        let SearchItem::Opaque(voice_item) = &voice.items[0] else {
+            panic!("voice result must remain opaque");
+        };
+        assert_eq!(voice_item.kind, "voice");
+        assert_eq!(voice_item.id.as_deref(), Some("voice-1"));
+        assert_eq!(voice.pagination.total, Some(2));
+        assert!(voice.pagination.has_more);
+
+        let radio = map_cloud_search_response(
+            SearchKind::RadioStation,
+            2,
+            0,
+            json!({
+                "code": 200,
+                "result": {
+                    "djRadiosCount": 3,
+                    "djRadios": [
+                        {"id": 1, "name": "一台"},
+                        {"id": 2, "name": "二台"},
+                        {"id": 3, "name": "三台"}
+                    ]
+                }
+            }),
+        )
+        .expect("map radio cloud search");
+        assert_eq!(radio.items.len(), 3);
+        assert_eq!(radio.pagination.extensions["limit_applied"], false);
+        assert!(!radio.pagination.has_more);
+
+        let malformed = map_cloud_search_response(
+            SearchKind::Album,
+            1,
+            0,
+            json!({
+                "code": 200,
+                "result": {"albumCount": 1, "albums": [{"unexpected": true}]}
+            }),
+        )
+        .expect("preserve malformed upstream item");
+        let SearchItem::Opaque(malformed) = &malformed.items[0] else {
+            panic!("unmappable item must remain opaque");
+        };
+        assert_eq!(malformed.kind, "album");
+        assert!(malformed.extensions["mapping_error"].is_string());
+    }
+
+    #[test]
+    fn cloudsearch_type_codes_and_capabilities_cover_the_complete_reference_enum() {
+        let cases = [
+            (SearchKind::Track, 1, Capability::SearchTracks),
+            (SearchKind::Album, 10, Capability::SearchAlbums),
+            (SearchKind::Artist, 100, Capability::SearchArtists),
+            (SearchKind::Playlist, 1_000, Capability::SearchPlaylists),
+            (SearchKind::User, 1_002, Capability::SearchUsers),
+            (SearchKind::Mv, 1_004, Capability::SearchMvs),
+            (SearchKind::Lyric, 1_006, Capability::SearchLyrics),
+            (
+                SearchKind::RadioStation,
+                1_009,
+                Capability::SearchRadioStations,
+            ),
+            (SearchKind::Video, 1_014, Capability::SearchVideos),
+            (SearchKind::Mixed, 1_018, Capability::SearchMixed),
+            (SearchKind::Voice, 2_000, Capability::SearchVoices),
+        ];
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let capabilities = provider.capabilities();
+        for (kind, platform_type, capability) in cases {
+            assert_eq!(netease_cloud_search_type(kind), platform_type);
+            assert_eq!(capability_for_search(kind), capability);
+            assert!(capabilities.contains(&capability), "{capability:?}");
+        }
     }
 
     #[test]
@@ -9341,6 +9928,49 @@ mod tests {
         assert_eq!(detail.id, first.id);
         assert!(!detail.name.is_empty());
         assert!(!detail.artists.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_cloudsearch_covers_every_reference_type() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for kind in [
+            SearchKind::Track,
+            SearchKind::Album,
+            SearchKind::Artist,
+            SearchKind::Playlist,
+            SearchKind::User,
+            SearchKind::Mv,
+            SearchKind::Lyric,
+            SearchKind::RadioStation,
+            SearchKind::Video,
+            SearchKind::Mixed,
+            SearchKind::Voice,
+        ] {
+            let page = MusicProvider::search_catalog(
+                &provider,
+                &SearchQuery {
+                    query: "周杰伦".to_owned(),
+                    kind,
+                    limit: 2,
+                    offset: 0,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {kind:?} cloud search failed: {error}"));
+            assert_eq!(page.pagination.extensions["response"]["code"], 200);
+            assert_eq!(
+                page.pagination.extensions["platform_type"],
+                netease_cloud_search_type(kind)
+            );
+            if !matches!(
+                kind,
+                SearchKind::Video | SearchKind::Mixed | SearchKind::Voice
+            ) {
+                assert!(!page.items.is_empty(), "live {kind:?} search was empty");
+            }
+        }
     }
 
     #[tokio::test]
