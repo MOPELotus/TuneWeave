@@ -41,7 +41,7 @@ use tuneweave_core::{
     PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchItem, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
+    SearchItem, SearchKind, SearchQuery, SearchVariant, StreamResolver, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
     VideoKind,
 };
@@ -406,6 +406,8 @@ struct SearchParams {
     q: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
     platform: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
@@ -423,6 +425,7 @@ async fn search(
         .filter(|query| !query.is_empty())
         .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
     let kind = parse_search_kind(params.kind.as_deref())?;
+    let variant = parse_search_variant(params.variant.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
@@ -439,6 +442,7 @@ async fn search(
     let query = SearchQuery {
         query: query_text.to_owned(),
         kind,
+        variant,
         limit,
         offset,
         account: account.clone(),
@@ -3912,6 +3916,25 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
     }
 }
 
+fn parse_search_variant(value: Option<&str>) -> Result<SearchVariant, TuneWeaveError> {
+    match value
+        .unwrap_or("default")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "default" | "auto" => Ok(SearchVariant::Default),
+        "legacy" | "search" => Ok(SearchVariant::Legacy),
+        "cloud" | "cloudsearch" => Ok(SearchVariant::Cloud),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported search variant: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["default", "legacy", "cloud"]
+        }))),
+    }
+}
+
 fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveError> {
     match value.unwrap_or("pc").trim().to_ascii_lowercase().as_str() {
         "pc" | "0" => Ok(BannerClient::Pc),
@@ -4167,6 +4190,7 @@ mod tests {
             };
             let mut extensions = tuneweave_core::Extensions::new();
             extensions.insert("kind".to_owned(), json!(query.kind));
+            extensions.insert("variant".to_owned(), json!(query.variant));
             extensions.insert("query".to_owned(), json!(query.query));
             extensions.insert("account".to_owned(), json!(query.account));
             Ok(Page {
@@ -5890,6 +5914,10 @@ mod tests {
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
         assert_eq!(json["meta"]["pagination"]["extensions"]["kind"], "track");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["variant"],
+            "default"
+        );
         assert_eq!(json["meta"]["pagination"]["extensions"]["query"], "clock");
     }
 
@@ -5940,6 +5968,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn search_exposes_legacy_and_cloud_variants_on_the_same_endpoint() {
+        for (input, expected) in [
+            ("legacy", "legacy"),
+            ("search", "legacy"),
+            ("cloud", "cloud"),
+            ("cloudsearch", "cloud"),
+            ("auto", "default"),
+        ] {
+            let path = format!("/v1/search?q=clock&variant={input}");
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{input}");
+            assert_eq!(
+                response["meta"]["pagination"]["extensions"]["variant"], expected,
+                "{input}"
+            );
+        }
+
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&backend=legacy",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response["meta"]["pagination"]["extensions"]["variant"],
+            "legacy"
+        );
+
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&variant=unknown",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
     #[test]
     fn search_kind_parser_accepts_unified_and_reference_names() {
         for (value, expected) in [
@@ -5958,6 +6024,26 @@ mod tests {
         ] {
             assert_eq!(parse_search_kind(Some(value)).expect(value), expected);
         }
+    }
+
+    #[test]
+    fn search_variant_parser_accepts_unified_and_reference_names() {
+        for (value, expected) in [
+            ("default", SearchVariant::Default),
+            ("auto", SearchVariant::Default),
+            ("legacy", SearchVariant::Legacy),
+            ("search", SearchVariant::Legacy),
+            ("cloud", SearchVariant::Cloud),
+            ("cloudsearch", SearchVariant::Cloud),
+        ] {
+            assert_eq!(parse_search_variant(Some(value)).expect(value), expected);
+        }
+        assert_eq!(
+            parse_search_variant(Some("unknown"))
+                .expect_err("unsupported search variant")
+                .code,
+            tuneweave_core::ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
