@@ -171,6 +171,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
+        .route("/radio/stations/{reference}", get(radio_station))
         .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
         .route("/albums", get(albums))
@@ -431,6 +432,27 @@ async fn radio_taxonomy(
         })
         .await?;
     let mut response = ApiResponse::new(taxonomy).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn radio_station(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<RadioStation>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let station = provider.radio_station(reference.id(), account).await?;
+    let mut response = ApiResponse::new(station).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -2601,6 +2623,7 @@ mod tests {
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
+                Capability::RadioStationDetail,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
@@ -2720,6 +2743,17 @@ mod tests {
                 }],
                 extensions,
             })
+        }
+
+        async fn radio_station(&self, id: &str, account: Option<&str>) -> Result<RadioStation> {
+            let mut station = sample_radio_station(id);
+            station.stream_url = Some("https://example.test/radio-live.mp3".to_owned());
+            station.current_program = Some("晚安金山".to_owned());
+            station.extensions.insert(
+                "current_info".to_owned(),
+                json!({ "thirdChannelId": "4022", "account": account }),
+            );
+            Ok(station)
         }
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
@@ -3849,6 +3883,30 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "radio-user");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-user");
+    }
+
+    #[tokio::test]
+    async fn radio_station_detail_uses_reference_platform_and_account() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/radio/stations/netease:362?account=radio-listener",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:362");
+        assert_eq!(json["data"]["name"], "金山区广播电视台综合广播");
+        assert_eq!(json["data"]["region"], "上海");
+        assert_eq!(
+            json["data"]["stream_url"],
+            "https://example.test/radio-live.mp3"
+        );
+        assert_eq!(json["data"]["current_program"], "晚安金山");
+        assert_eq!(
+            json["data"]["extensions"]["current_info"]["thirdChannelId"],
+            "4022"
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "radio-listener");
     }
 
     #[tokio::test]
