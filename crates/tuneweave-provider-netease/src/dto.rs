@@ -54,6 +54,15 @@ pub(crate) struct ArtistTracksEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistSublistEnvelope {
+    #[serde(default)]
+    pub data: Vec<Value>,
+    pub count: Option<u64>,
+    #[serde(rename = "hasMore")]
+    pub has_more: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistListEnvelope {
     #[serde(default)]
     pub artists: Vec<Value>,
@@ -79,6 +88,8 @@ pub(crate) struct ArtistListItem {
     pub album_count: Option<u64>,
     #[serde(rename = "musicSize")]
     pub track_count: Option<u64>,
+    #[serde(rename = "mvSize")]
+    pub mv_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

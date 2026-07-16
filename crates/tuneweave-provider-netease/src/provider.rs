@@ -32,12 +32,12 @@ use crate::{
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
         ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
-        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
-        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
-        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistSublistEnvelope,
+        ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
+        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
+        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
+        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -299,6 +299,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountProfile,
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
+            Capability::AccountFollowingArtists,
             Capability::AccountArtistNewVideos,
             Capability::AccountArtistNewTracks,
             Capability::AccountArtistNewWorks,
@@ -874,6 +875,25 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_success(&response.body)?;
         map_subscribed_albums_response(response.body, request, limit)
+    }
+
+    async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.clamp(1, 100);
+        let response = client
+            .request_weapi(
+                "/api/artist/sublist",
+                json!({
+                    "limit": limit,
+                    "offset": request.offset,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "followed artist catalog")?;
+        let response: ArtistSublistEnvelope = parse_body(response.body)?;
+        map_artist_sublist_response(response, limit, request.offset)
     }
 
     async fn account_artist_new_videos(
@@ -2298,7 +2318,7 @@ fn map_artist_list_item(raw: Value) -> Result<Artist> {
         cover_url: item.cover_url,
         album_count: item.album_count,
         track_count: item.track_count,
-        mv_count: None,
+        mv_count: item.mv_count,
         video_count: None,
         identities: Vec::new(),
         extensions,
@@ -2353,6 +2373,40 @@ fn map_artist_tracks_response(
     let next_offset = offset.saturating_add(consumed);
     let has_more = response
         .more
+        .unwrap_or_else(|| total.map_or(consumed == limit, |total| u64::from(next_offset) < total));
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::new(),
+        },
+    })
+}
+
+fn map_artist_sublist_response(
+    response: ArtistSublistEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Artist>> {
+    let total = response.count;
+    let items = response
+        .data
+        .into_iter()
+        .map(|raw| {
+            let mut artist = map_artist_list_item(raw.clone())?;
+            artist.extensions.remove("catalog_item");
+            artist.extensions.insert("following_item".to_owned(), raw);
+            Ok(artist)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response
+        .has_more
         .unwrap_or_else(|| total.map_or(consumed == limit, |total| u64::from(next_offset) < total));
     Ok(Page {
         items,
@@ -3843,6 +3897,48 @@ mod tests {
     }
 
     #[test]
+    fn maps_followed_artist_catalog_and_subscription_metadata() {
+        let response: ArtistSublistEnvelope = serde_json::from_value(json!({
+            "data": [
+                {
+                    "id": 6452,
+                    "name": "周杰伦",
+                    "alias": ["Jay Chou"],
+                    "transNames": [],
+                    "briefDesc": "华语男歌手",
+                    "img1v1Url": "https://example.test/avatar.jpg",
+                    "picUrl": "https://example.test/cover.jpg",
+                    "albumSize": 44,
+                    "musicSize": 568,
+                    "mvSize": 9,
+                    "followed": true,
+                    "subTime": 1_720_000_000_000_u64
+                }
+            ],
+            "count": 8,
+            "hasMore": true
+        }))
+        .expect("followed artists fixture");
+
+        let page =
+            map_artist_sublist_response(response, 1, 2).expect("map followed artist catalog");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:6452");
+        assert_eq!(page.items[0].aliases, ["Jay Chou"]);
+        assert_eq!(page.items[0].album_count, Some(44));
+        assert_eq!(page.items[0].track_count, Some(568));
+        assert_eq!(page.items[0].mv_count, Some(9));
+        assert_eq!(
+            page.items[0].extensions["following_item"]["subTime"],
+            1_720_000_000_000_u64
+        );
+        assert!(!page.items[0].extensions.contains_key("catalog_item"));
+        assert_eq!(page.pagination.total, Some(8));
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_tracks_and_pagination() {
         let response: ArtistTracksEnvelope = serde_json::from_value(json!({
             "songs": [
@@ -4798,6 +4894,17 @@ mod tests {
             MusicProvider::set_artist_subscription(&provider, "6452", true, Some("collector"))
                 .await
                 .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn followed_artist_catalog_requires_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = PageRequest::new(25, 0);
+        request.account = Some("collector".to_owned());
+        let error = MusicProvider::account_following_artists(&provider, &request)
+            .await
+            .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -5802,6 +5909,16 @@ mod tests {
         let error = MusicProvider::account_albums(&provider, &PageRequest::new(2, 0))
             .await
             .expect_err("anonymous subscribed albums must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_followed_artist_catalog_requires_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_following_artists(&provider, &PageRequest::new(2, 0))
+            .await
+            .expect_err("anonymous followed artist catalog must fail");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
