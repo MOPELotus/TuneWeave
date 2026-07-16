@@ -23,8 +23,8 @@ use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Banner,
-    BannerClient, BannerListRequest, Capability, ChallengeMethod, DigitalAlbum,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthState, Banner, BannerClient, BannerListRequest, Capability, ChallengeMethod, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
     Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
@@ -218,6 +218,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
         .route("/auth/challenges", post(auth_challenge_start))
+        .route("/auth/challenges/validate", post(auth_challenge_validate))
         .route(
             "/auth/challenges/{transaction_id}/verify",
             post(auth_challenge_verify),
@@ -1686,6 +1687,56 @@ struct AuthChallengeVerifyData {
     profile: AccountProfile,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthChallengeValidationBody {
+    platform: String,
+    account: Option<String>,
+    method: Option<ChallengeMethod>,
+    #[serde(alias = "phone")]
+    principal: Value,
+    #[serde(alias = "captcha")]
+    code: String,
+    #[serde(default, alias = "ctcode", alias = "countrycode")]
+    country_code: Option<Value>,
+}
+
+async fn auth_challenge_validate(
+    State(state): State<AppState>,
+    payload: Result<Json<AuthChallengeValidationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthChallengeValidation>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = account_alias(body.account.as_deref())?;
+    let principal = required_string_or_number("principal", &body.principal)?;
+    let code = body.code.trim();
+    if code.is_empty() {
+        return Err(TuneWeaveError::invalid_request("code must not be empty").into());
+    }
+    let country_code = match body.country_code.as_ref() {
+        None => "86".to_owned(),
+        Some(Value::String(value)) if value.trim().is_empty() => "86".to_owned(),
+        Some(value) => required_string_or_number("country_code", value)?,
+    };
+    let provider = state.registry.require(platform)?;
+    let validation = provider
+        .validate_auth_challenge(
+            &AuthChallengeRequest {
+                account: account.clone(),
+                method: body.method.unwrap_or(ChallengeMethod::Sms),
+                principal,
+                country_code: Some(country_code),
+            },
+            code,
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(validation)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn auth_challenge_verify(
     State(state): State<AppState>,
     Path(transaction_id): Path<String>,
@@ -2440,6 +2491,25 @@ fn optional_trimmed(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn required_string_or_number(name: &str, value: &Value) -> Result<String, TuneWeaveError> {
+    let value = match value {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        _ => {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "{name} must be a string or number"
+            )));
+        }
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{name} must not be empty"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
 fn auth_transaction_not_found() -> TuneWeaveError {
     TuneWeaveError::new(
         tuneweave_core::ErrorCode::ResourceNotFound,
@@ -2819,6 +2889,7 @@ mod tests {
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
+                Capability::ChallengeValidation,
                 Capability::SessionManagement,
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
@@ -3667,6 +3738,30 @@ mod tests {
 
         async fn start_auth_challenge(&self, _request: &AuthChallengeRequest) -> Result<()> {
             Ok(())
+        }
+
+        async fn validate_auth_challenge(
+            &self,
+            request: &AuthChallengeRequest,
+            code: &str,
+        ) -> Result<AuthChallengeValidation> {
+            let valid = request.method == ChallengeMethod::Sms
+                && request.principal == "13800138000"
+                && request.country_code.as_deref() == Some("86")
+                && code == "1234";
+            let platform_code = if valid { "200" } else { "503" };
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert(
+                "response".to_owned(),
+                json!({ "code": platform_code, "data": valid }),
+            );
+            Ok(AuthChallengeValidation {
+                method: request.method,
+                valid,
+                platform_code: Some(platform_code.to_owned()),
+                message: (!valid).then(|| "invalid challenge code".to_owned()),
+                extensions,
+            })
         }
 
         async fn verify_auth_challenge(
@@ -4867,6 +4962,98 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(verified["data"]["state"], "confirmed");
         assert_eq!(verified["data"]["profile"]["account"], "sms-account");
+    }
+
+    #[tokio::test]
+    async fn challenge_validation_accepts_reference_and_unified_sms_fields_without_login() {
+        let (status, reference) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges/validate",
+            Some(json!({
+                "platform": "netease",
+                "account": "validation-account",
+                "phone": 13800138000_u64,
+                "captcha": "1234",
+                "ctcode": 86
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reference["data"]["method"], "sms");
+        assert_eq!(reference["data"]["valid"], true);
+        assert_eq!(reference["data"]["platform_code"], "200");
+        assert_eq!(reference["data"]["extensions"]["response"]["data"], true);
+        assert_eq!(reference["meta"]["platform"], "netease");
+        assert_eq!(reference["meta"]["account"], "validation-account");
+        let serialized = serde_json::to_string(&reference).expect("serialize validation response");
+        assert!(!serialized.contains("13800138000"));
+        assert!(!serialized.contains("1234"));
+
+        let (status, unified) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges/validate",
+            Some(json!({
+                "platform": "netease",
+                "method": "sms",
+                "principal": "13800138000",
+                "code": "1234",
+                "country_code": "86"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unified["data"]["valid"], true);
+        assert_eq!(unified["meta"]["account"], "default");
+
+        let (status, empty_country) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges/validate",
+            Some(json!({
+                "platform": "netease",
+                "phone": "13800138000",
+                "captcha": "1234",
+                "ctcode": ""
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty_country["data"]["valid"], true);
+    }
+
+    #[tokio::test]
+    async fn challenge_validation_rejects_non_scalar_principals_and_empty_codes() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges/validate",
+            Some(json!({
+                "platform": "netease",
+                "principal": { "phone": "private" },
+                "code": "1234"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+        let serialized = serde_json::to_string(&json).expect("serialize invalid response");
+        assert!(!serialized.contains("private"));
+
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges/validate",
+            Some(json!({
+                "platform": "netease",
+                "principal": "13800138000",
+                "code": "   "
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
