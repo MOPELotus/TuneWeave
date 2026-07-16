@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=362`、`partial=7`、`implemented=11`、`verified=24`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=361`、`partial=7`、`implemented=11`、`verified=25`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -33,7 +33,7 @@
 | `artist_detail_dynamic` | `/artist/detail/dynamic` | `verified` | `GET /v1/artists/{ref}/stats`（统一关注态、视频分类计数与在线演出计数，未知平台类别保留原始标识，演出及推荐对象保留完整响应；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 `followed=false`、分类 `0:9/1:9`、在线演出数 0） |
 | `artist_fans` | `/artist/fans` | `verified` | `GET /v1/artists/{ref}/fans`（统一为分页 `User[]`，昵称、头像、签名和关系状态进入稳定字段，地区、认证、VIP 等完整资料保留在单项扩展；2026-07-16 匿名 HTTP 实测 `netease:2116` 返回 2 位粉丝、`next_offset=2`、`has_more=true`，上游无总数故 `total=null`） |
 | `artist_follow_count` | `/artist/follow/count` | `verified` | `GET /v1/artists/{ref}/stats`（统一粉丝总数和账户关注态，日增量等附加字段保留完整响应；2026-07-16 匿名 HTTP 实测 `netease:2116` 返回 `follower_count=13704933`、`followed=false`，统一值与上游 `fansCnt/isFollow` 一致） |
-| `artist_list` | `/artist/list` | `pending` | — |
+| `artist_list` | `/artist/list` | `verified` | `GET /v1/artists`（统一 `type=all/male/female/group`、六类 `area` 与 `initial=a..z/hot/other`，条目映射为 `Artist` 并保留完整目录字段；2026-07-16 匿名 HTTP 实测 `type=male&area=western&initial=b&limit=2` 返回 Bruno Mars 与 bbno$，首项 50 张专辑/959 首歌曲，`next_offset=2`、`has_more=true`） |
 | `artist_mv` | `/artist/mv` | `pending` | — |
 | `artist_new_mv` | `/artist/new/mv` | `pending` | — |
 | `artist_new_song` | `/artist/new/song` | `pending` | — |
