@@ -126,6 +126,10 @@ pub(crate) struct DigitalAlbumDescription {
 pub(crate) struct DigitalAlbumListEnvelope {
     #[serde(default)]
     pub products: Vec<Value>,
+    #[serde(rename = "albumProducts", default)]
+    pub album_products: Vec<Value>,
+    #[serde(rename = "hasNextPage")]
+    pub has_next_page: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,7 +145,7 @@ pub(crate) struct DigitalAlbumListItem {
     pub price: Option<f64>,
     #[serde(rename = "pubTime")]
     pub publish_time: Option<u64>,
-    #[serde(rename = "saleNum")]
+    #[serde(rename = "saleNum", alias = "sales")]
     pub sale_count: Option<u64>,
 }
 

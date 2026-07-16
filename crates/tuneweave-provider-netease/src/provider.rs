@@ -403,7 +403,8 @@ impl MusicProvider for NeteaseProvider {
         request: &DigitalAlbumListRequest,
     ) -> Result<Page<DigitalAlbum>> {
         let limit = request.limit.clamp(1, 100);
-        let area = normalize_digital_album_area(request.area.as_deref())?;
+        let catalog = DigitalAlbumCatalog::parse(request.catalog.as_deref())?;
+        let area = normalize_digital_album_area(catalog, request.area.as_deref())?;
         let client = self.client_for(request.account.as_deref())?;
         let mut payload = json!({
             "limit": limit,
@@ -411,26 +412,33 @@ impl MusicProvider for NeteaseProvider {
             "total": true,
             "area": area
         });
-        if let Some(kind) = request
+        let kind = request
             .kind
             .as_deref()
             .map(str::trim)
-            .filter(|kind| !kind.is_empty())
-        {
+            .filter(|kind| !kind.is_empty());
+        if catalog == DigitalAlbumCatalog::Style && kind.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "type is not supported for the NetEase style catalog",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if let Some(kind) = kind {
             payload["type"] = Value::String(kind.to_owned());
         }
-        let response = client
-            .request_weapi("/api/vipmall/albumproduct/list", payload)
-            .await?;
+        let response = client.request_weapi(catalog.endpoint(), payload).await?;
         ensure_success(&response.body)?;
         let response: DigitalAlbumListEnvelope = parse_body(response.body)?;
-        let items = response
-            .products
+        let products = match catalog {
+            DigitalAlbumCatalog::Latest => response.products,
+            DigitalAlbumCatalog::Style => response.album_products,
+        };
+        let items = products
             .into_iter()
             .map(map_digital_album_list_item)
             .collect::<Result<Vec<_>>>()?;
         let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
-        let has_more = consumed == limit;
+        let has_more = response.has_next_page.unwrap_or(consumed == limit);
         Ok(Page {
             items,
             pagination: PageMeta {
@@ -1023,19 +1031,64 @@ fn map_session_profile(account: &str, status: NeteaseSessionStatus) -> AccountPr
     profile
 }
 
-fn normalize_digital_album_area(area: Option<&str>) -> Result<String> {
-    let area = area.unwrap_or("ALL").trim().to_ascii_uppercase();
-    if matches!(area.as_str(), "ALL" | "ZH" | "EA" | "KR" | "JP") {
-        return Ok(area);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DigitalAlbumCatalog {
+    Latest,
+    Style,
+}
+
+impl DigitalAlbumCatalog {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value
+            .unwrap_or("latest")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "latest" => Ok(Self::Latest),
+            "style" => Ok(Self::Style),
+            value => Err(TuneWeaveError::invalid_request(format!(
+                "unsupported digital album catalog: {value}"
+            ))
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "allowed": ["latest", "style"] }))),
+        }
     }
-    Err(
+
+    const fn endpoint(self) -> &'static str {
+        match self {
+            Self::Latest => "/api/vipmall/albumproduct/list",
+            Self::Style => "/api/vipmall/appalbum/album/style",
+        }
+    }
+}
+
+fn normalize_digital_album_area(
+    catalog: DigitalAlbumCatalog,
+    area: Option<&str>,
+) -> Result<String> {
+    let area = area
+        .unwrap_or(match catalog {
+            DigitalAlbumCatalog::Latest => "ALL",
+            DigitalAlbumCatalog::Style => "Z_H",
+        })
+        .trim()
+        .to_ascii_uppercase();
+    let normalized = match (catalog, area.as_str()) {
+        (DigitalAlbumCatalog::Latest, "ALL") => Some("ALL"),
+        (DigitalAlbumCatalog::Latest, "ZH" | "Z_H") => Some("ZH"),
+        (DigitalAlbumCatalog::Latest, "EA" | "E_A") => Some("EA"),
+        (DigitalAlbumCatalog::Style, "ZH" | "Z_H") => Some("Z_H"),
+        (DigitalAlbumCatalog::Style, "EA" | "E_A") => Some("E_A"),
+        (_, "KR") => Some("KR"),
+        (_, "JP") => Some("JP"),
+        _ => None,
+    };
+    normalized.map(str::to_owned).ok_or_else(|| {
         TuneWeaveError::invalid_request("NetEase digital album area is not supported")
             .with_platform(Platform::Netease)
-            .with_details(json!({
-                "area": area,
-                "allowed": ["ALL", "ZH", "EA", "KR", "JP"]
-            })),
-    )
+            .with_details(json!({ "area": area, "catalog": format!("{catalog:?}") }))
+    })
 }
 
 fn normalize_account_label(account: Option<&str>) -> Result<&str> {
@@ -2002,14 +2055,26 @@ mod tests {
     #[test]
     fn validates_netease_digital_album_areas() {
         assert_eq!(
-            normalize_digital_album_area(Some("zh")).expect("valid area"),
+            normalize_digital_album_area(DigitalAlbumCatalog::Latest, Some("zh"))
+                .expect("valid latest area"),
             "ZH"
         );
         assert_eq!(
-            normalize_digital_album_area(None).expect("default area"),
+            normalize_digital_album_area(DigitalAlbumCatalog::Latest, None)
+                .expect("default latest area"),
             "ALL"
         );
-        let error = normalize_digital_album_area(Some("unknown")).expect_err("invalid area");
+        assert_eq!(
+            normalize_digital_album_area(DigitalAlbumCatalog::Style, Some("zh"))
+                .expect("valid style area"),
+            "Z_H"
+        );
+        assert_eq!(
+            DigitalAlbumCatalog::parse(Some("style")).expect("style catalog"),
+            DigitalAlbumCatalog::Style
+        );
+        let error = normalize_digital_album_area(DigitalAlbumCatalog::Style, Some("unknown"))
+            .expect_err("invalid area");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
@@ -2593,6 +2658,22 @@ mod tests {
             .expect("live digital album list");
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.pagination.total, None);
+        assert!(page.items.iter().all(|album| !album.name.is_empty()));
+        assert!(page.items.iter().all(|album| album.price.is_some()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_digital_album_style_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = DigitalAlbumListRequest::new(2, 0);
+        request.catalog = Some("style".to_owned());
+        request.area = Some("ZH".to_owned());
+        let page = MusicProvider::digital_albums(&provider, &request)
+            .await
+            .expect("live digital album style catalog");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.has_more);
         assert!(page.items.iter().all(|album| !album.name.is_empty()));
         assert!(page.items.iter().all(|album| album.price.is_some()));
     }
