@@ -36,16 +36,17 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    Extensions, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamResolver, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest,
+    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -187,6 +188,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search/trending", get(search_trending))
         .route("/search/suggestions", get(search_suggestions))
         .route("/search/multimatch", get(search_multi_match))
+        .route(
+            "/search/match",
+            get(search_local_track_match_get).post(search_local_track_match_post),
+        )
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
@@ -458,6 +463,48 @@ struct SearchMultiMatchParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalTrackMatchParams {
+    title: Option<String>,
+    album: Option<String>,
+    artist: Option<String>,
+    duration_ms: Option<String>,
+    #[serde(alias = "duration")]
+    duration_seconds: Option<String>,
+    md5: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalTrackMatchBody {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    album: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    duration_ms: Option<Value>,
+    #[serde(default, alias = "duration")]
+    duration_seconds: Option<Value>,
+    md5: String,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+struct LocalTrackMatchInput {
+    title: String,
+    album: String,
+    artist: String,
+    duration_ms: u64,
+    md5: String,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
 async fn search_default(
     State(state): State<AppState>,
     params: Result<Query<SearchDefaultParams>, QueryRejection>,
@@ -548,6 +595,78 @@ async fn search_multi_match(
         .search_multi_match(&SearchMultiMatchRequest {
             query: query.to_owned(),
             kind,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn search_local_track_match_get(
+    State(state): State<AppState>,
+    params: Result<Query<LocalTrackMatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
+    let params = query_params(params)?;
+    let duration_ms = params.duration_ms.map(Value::String);
+    let duration_seconds = params.duration_seconds.map(Value::String);
+    execute_local_track_match(
+        &state,
+        LocalTrackMatchInput {
+            title: params.title.unwrap_or_default(),
+            album: params.album.unwrap_or_default(),
+            artist: params.artist.unwrap_or_default(),
+            duration_ms: parse_local_track_match_duration(
+                duration_ms.as_ref(),
+                duration_seconds.as_ref(),
+            )?,
+            md5: required_trimmed("md5", params.md5)?,
+            platform: params.platform,
+            account: params.account,
+        },
+    )
+    .await
+}
+
+async fn search_local_track_match_post(
+    State(state): State<AppState>,
+    payload: Result<Json<LocalTrackMatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
+    let body = json_body(payload)?;
+    execute_local_track_match(
+        &state,
+        LocalTrackMatchInput {
+            title: body.title,
+            album: body.album,
+            artist: body.artist,
+            duration_ms: parse_local_track_match_duration(
+                body.duration_ms.as_ref(),
+                body.duration_seconds.as_ref(),
+            )?,
+            md5: required_trimmed("md5", Some(body.md5))?,
+            platform: body.platform,
+            account: body.account,
+        },
+    )
+    .await
+}
+
+async fn execute_local_track_match(
+    state: &AppState,
+    input: LocalTrackMatchInput,
+) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
+    let platform = account_platform(state, input.platform.as_deref())?;
+    let account = account_alias(input.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .match_local_track(&LocalTrackMatchRequest {
+            title: input.title,
+            album: input.album,
+            artist: input.artist,
+            duration_ms: input.duration_ms,
+            md5: input.md5,
             account: Some(account.clone()),
         })
         .await?;
@@ -3720,6 +3839,49 @@ fn required_json_u64(name: &str, value: &Value) -> Result<u64, TuneWeaveError> {
     })
 }
 
+fn parse_local_track_match_duration(
+    duration_ms: Option<&Value>,
+    duration_seconds: Option<&Value>,
+) -> Result<u64, TuneWeaveError> {
+    let milliseconds = duration_ms
+        .map(|value| required_json_u64("duration_ms", value))
+        .transpose()?;
+    let seconds = duration_seconds
+        .map(|value| {
+            let raw = required_string_or_number("duration_seconds", value)?;
+            let seconds = raw.parse::<f64>().map_err(|_| {
+                TuneWeaveError::invalid_request("duration_seconds must be a non-negative number")
+                    .with_details(json!({ "parameter": "duration_seconds", "value": raw }))
+            })?;
+            let milliseconds = seconds * 1_000.0;
+            if !seconds.is_finite() || seconds.is_sign_negative() || milliseconds > u64::MAX as f64
+            {
+                return Err(TuneWeaveError::invalid_request(
+                    "duration_seconds must be a finite non-negative number within range",
+                )
+                .with_details(json!({
+                    "parameter": "duration_seconds",
+                    "value": raw
+                })));
+            }
+            Ok(milliseconds.round() as u64)
+        })
+        .transpose()?;
+    match (milliseconds, seconds) {
+        (Some(milliseconds), Some(seconds)) if milliseconds != seconds => {
+            Err(TuneWeaveError::invalid_request(
+                "duration_ms and duration_seconds must describe the same duration",
+            )
+            .with_details(json!({
+                "duration_ms": milliseconds,
+                "duration_seconds_ms": seconds
+            })))
+        }
+        (Some(milliseconds), _) | (_, Some(milliseconds)) => Ok(milliseconds),
+        (None, None) => Ok(0),
+    }
+}
+
 fn auth_transaction_not_found() -> TuneWeaveError {
     TuneWeaveError::new(
         tuneweave_core::ErrorCode::ResourceNotFound,
@@ -4260,6 +4422,7 @@ mod tests {
                 Capability::SearchTrending,
                 Capability::SearchSuggestions,
                 Capability::SearchMultiMatch,
+                Capability::SearchLocalTrackMatch,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4468,6 +4631,24 @@ mod tests {
                     ]),
                 }],
                 extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            })
+        }
+
+        async fn match_local_track(
+            &self,
+            request: &LocalTrackMatchRequest,
+        ) -> Result<LocalTrackMatchResult> {
+            let mut track = sample_track("65766");
+            track.name.clone_from(&request.title);
+            track.duration_ms = Some(request.duration_ms);
+            Ok(LocalTrackMatchResult {
+                md5: request.md5.clone(),
+                matches: vec![track],
+                extensions: Extensions::from([
+                    ("album".to_owned(), json!(request.album)),
+                    ("artist".to_owned(), json!(request.artist)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -6494,6 +6675,129 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn local_track_match_supports_reference_get_and_unified_post_inputs() {
+        let md5 = "bd708d006912a09d827f02e754cf8e56";
+        let reference_path = format!(
+            "/v1/search/match?title=%E5%AF%8C%E5%A3%AB%E5%B1%B1%E4%B8%8B&album=&artist=%E9%99%88%E5%A5%95%E8%BF%85&duration=259.21&md5={md5}&account=local-user"
+        );
+        let (status, response) =
+            json_response_from(test_app_with_provider(), &reference_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["md5"], md5);
+        assert_eq!(response["data"]["matches"][0]["ref"], "netease:65766");
+        assert_eq!(response["data"]["matches"][0]["name"], "富士山下");
+        assert_eq!(response["data"]["matches"][0]["duration_ms"], 259_210);
+        assert_eq!(response["data"]["extensions"]["album"], "");
+        assert_eq!(response["data"]["extensions"]["artist"], "陈奕迅");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "local-user");
+
+        for body in [
+            json!({
+                "title": "富士山下",
+                "album": "",
+                "artist": "陈奕迅",
+                "duration_ms": 259210,
+                "md5": md5,
+                "platform": "netease",
+                "account": "local-user"
+            }),
+            json!({
+                "title": "富士山下",
+                "artist": "陈奕迅",
+                "duration": "259.21",
+                "md5": md5,
+                "account": "local-user"
+            }),
+            json!({
+                "title": "富士山下",
+                "artist": "陈奕迅",
+                "duration_ms": 259210,
+                "duration_seconds": 259.21,
+                "md5": md5,
+                "account": "local-user"
+            }),
+        ] {
+            let (status, response) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/search/match",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["data"]["matches"][0]["duration_ms"], 259_210);
+            assert_eq!(response["meta"]["account"], "local-user");
+        }
+
+        let defaulted = format!("/v1/search/match?md5={md5}");
+        let (status, response) = json_response_from(test_app_with_provider(), &defaulted).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["matches"][0]["name"], "");
+        assert_eq!(response["data"]["matches"][0]["duration_ms"], 0);
+        assert_eq!(response["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn local_track_match_rejects_missing_md5_bad_durations_platform_and_fields() {
+        for path in [
+            "/v1/search/match",
+            "/v1/search/match?md5=%20%20",
+            "/v1/search/match?md5=00000000000000000000000000000000&duration=-1",
+            "/v1/search/match?md5=00000000000000000000000000000000&duration=NaN",
+            "/v1/search/match?md5=00000000000000000000000000000000&duration_ms=1000&duration=2",
+            "/v1/search/match?md5=00000000000000000000000000000000&platform=unknown",
+            "/v1/search/match?md5=00000000000000000000000000000000&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+
+        for body in [
+            json!({"title": "missing checksum"}),
+            json!({"md5": "00000000000000000000000000000000", "duration_ms": -1}),
+            json!({
+                "md5": "00000000000000000000000000000000",
+                "duration_ms": 1000,
+                "duration_seconds": 2
+            }),
+            json!({"md5": "00000000000000000000000000000000", "unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/search/match",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[test]
+    fn local_track_duration_parser_accepts_milliseconds_seconds_and_reference_defaults() {
+        assert_eq!(
+            parse_local_track_match_duration(Some(&json!(259_210)), None).expect("milliseconds"),
+            259_210
+        );
+        assert_eq!(
+            parse_local_track_match_duration(None, Some(&json!("259.21"))).expect("seconds"),
+            259_210
+        );
+        assert_eq!(
+            parse_local_track_match_duration(Some(&json!(259_210)), Some(&json!(259.21)))
+                .expect("matching units"),
+            259_210
+        );
+        assert_eq!(
+            parse_local_track_match_duration(None, None).expect("reference default"),
+            0
+        );
     }
 
     #[test]
