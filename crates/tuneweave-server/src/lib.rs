@@ -42,8 +42,9 @@ use tuneweave_core::{
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
     SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchQuery,
-    SearchVariant, StreamResolver, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -182,6 +183,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
         .route("/search/default", get(search_default))
+        .route("/search/trending", get(search_trending))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
@@ -422,6 +424,15 @@ struct SearchDefaultParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchTrendingParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "mode")]
+    detail: Option<String>,
+}
+
 async fn search_default(
     State(state): State<AppState>,
     params: Result<Query<SearchDefaultParams>, QueryRejection>,
@@ -437,6 +448,28 @@ async fn search_default(
         .await?;
     Ok(Json(
         ApiResponse::new(prompt)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn search_trending(
+    State(state): State<AppState>,
+    params: Result<Query<SearchTrendingParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SearchTrendingList>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let detail = parse_search_trending_detail(params.detail.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .trending_searches(&SearchTrendingRequest {
+            detail,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(list)
             .with_platform(platform)
             .with_account(account),
     ))
@@ -3963,6 +3996,19 @@ fn parse_search_variant(value: Option<&str>) -> Result<SearchVariant, TuneWeaveE
     }
 }
 
+fn parse_search_trending_detail(
+    value: Option<&str>,
+) -> Result<SearchTrendingDetail, TuneWeaveError> {
+    match value.unwrap_or("full").trim().to_ascii_lowercase().as_str() {
+        "brief" | "simple" => Ok(SearchTrendingDetail::Brief),
+        "full" | "detail" | "detailed" => Ok(SearchTrendingDetail::Full),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported trending search detail: {value}"
+        ))
+        .with_details(json!({ "allowed": ["brief", "full"] }))),
+    }
+}
+
 fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveError> {
     match value.unwrap_or("pc").trim().to_ascii_lowercase().as_str() {
         "pc" | "0" => Ok(BannerClient::Pc),
@@ -4114,6 +4160,7 @@ mod tests {
                 Capability::SearchMixed,
                 Capability::SearchVoices,
                 Capability::SearchDefault,
+                Capability::SearchTrending,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4248,6 +4295,27 @@ mod tests {
                     ("account".to_owned(), json!(request.account)),
                     ("provider".to_owned(), json!("mock")),
                 ]),
+            })
+        }
+
+        async fn trending_searches(
+            &self,
+            request: &SearchTrendingRequest,
+        ) -> Result<SearchTrendingList> {
+            Ok(SearchTrendingList {
+                detail: request.detail,
+                entries: vec![tuneweave_core::SearchTrendingEntry {
+                    rank: 1,
+                    keyword: "薛之谦".to_owned(),
+                    description: (request.detail == SearchTrendingDetail::Full)
+                        .then(|| "热门搜索".to_owned()),
+                    score: (request.detail == SearchTrendingDetail::Full).then_some(107_509),
+                    icon_type: Some(4),
+                    icon_url: None,
+                    target_url: None,
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
             })
         }
 
@@ -6086,6 +6154,64 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn trending_searches_share_one_endpoint_for_brief_and_full_catalogs() {
+        for (input, expected, has_rich_fields) in [
+            ("brief", "brief", false),
+            ("simple", "brief", false),
+            ("full", "full", true),
+            ("detail", "full", true),
+            ("detailed", "full", true),
+        ] {
+            let path =
+                format!("/v1/search/trending?detail={input}&platform=netease&account=search-user");
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{input}");
+            assert_eq!(response["data"]["detail"], expected, "{input}");
+            assert_eq!(response["data"]["entries"][0]["rank"], 1, "{input}");
+            assert_eq!(
+                response["data"]["entries"][0]["keyword"], "薛之谦",
+                "{input}"
+            );
+            assert_eq!(
+                response["data"]["entries"][0]["score"].is_number(),
+                has_rich_fields,
+                "{input}"
+            );
+            assert_eq!(
+                response["data"]["entries"][0]["description"].is_string(),
+                has_rich_fields,
+                "{input}"
+            );
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "search-user");
+        }
+
+        let (status, defaulted) =
+            json_response_from(test_app_with_provider(), "/v1/search/trending").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["data"]["detail"], "full");
+        assert_eq!(defaulted["meta"]["account"], "default");
+
+        let (status, aliased) =
+            json_response_from(test_app_with_provider(), "/v1/search/trending?mode=brief").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(aliased["data"]["detail"], "brief");
+    }
+
+    #[tokio::test]
+    async fn trending_searches_reject_unknown_detail_platform_and_query_fields() {
+        for path in [
+            "/v1/search/trending?detail=unknown",
+            "/v1/search/trending?platform=unknown",
+            "/v1/search/trending?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
     #[test]
     fn search_kind_parser_accepts_unified_and_reference_names() {
         for (value, expected) in [
@@ -6121,6 +6247,28 @@ mod tests {
         assert_eq!(
             parse_search_variant(Some("unknown"))
                 .expect_err("unsupported search variant")
+                .code,
+            tuneweave_core::ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn trending_search_detail_parser_accepts_unified_and_reference_names() {
+        for (value, expected) in [
+            ("brief", SearchTrendingDetail::Brief),
+            ("simple", SearchTrendingDetail::Brief),
+            ("full", SearchTrendingDetail::Full),
+            ("detail", SearchTrendingDetail::Full),
+            ("detailed", SearchTrendingDetail::Full),
+        ] {
+            assert_eq!(
+                parse_search_trending_detail(Some(value)).expect(value),
+                expected
+            );
+        }
+        assert_eq!(
+            parse_search_trending_detail(Some("unknown"))
+                .expect_err("unsupported trending detail")
                 .code,
             tuneweave_core::ErrorCode::InvalidRequest
         );
