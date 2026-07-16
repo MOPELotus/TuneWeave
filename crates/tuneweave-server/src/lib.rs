@@ -15,11 +15,12 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AccountProfile, Album, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
-    DigitalAlbum, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, Track, TuneWeaveError,
+    AccountProfile, Album, AlbumStats, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, DigitalAlbum, Lyrics, MediaStream, PageRequest, PasswordFormat,
+    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
+    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
+    Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -158,6 +159,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}", get(track))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
+        .route("/albums/{reference}/stats", get(album_stats))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
@@ -394,6 +396,27 @@ async fn album_tracks(
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn album_stats(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<AlbumStats>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let stats = provider.album_stats(reference.id(), account).await?;
+    let mut response = ApiResponse::new(stats).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -1290,6 +1313,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
+                Capability::AlbumStats,
                 Capability::DigitalAlbumDetail,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
@@ -1338,6 +1362,10 @@ mod tests {
                     has_more: false,
                 },
             })
+        }
+
+        async fn album_stats(&self, id: &str, _account: Option<&str>) -> Result<AlbumStats> {
+            Ok(sample_album_stats(id))
         }
 
         async fn digital_album(&self, id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
@@ -1618,6 +1646,20 @@ mod tests {
         }
     }
 
+    fn sample_album_stats(id: &str) -> AlbumStats {
+        AlbumStats {
+            album_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            subscribed: Some(false),
+            subscriber_count: Some(71_671),
+            comment_count: Some(1_989),
+            share_count: Some(9_306),
+            like_count: Some(0),
+            on_sale: Some(false),
+            subscribed_at: None,
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_digital_album(id: &str) -> DigitalAlbum {
         DigitalAlbum {
             resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -1759,6 +1801,21 @@ mod tests {
         assert_eq!(tracks["data"][0]["ref"], "netease:185809");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 5);
         assert_eq!(tracks["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn album_stats_use_reference_platform_and_account() {
+        let (status, stats) = json_response_from(
+            test_app_with_provider(),
+            "/v1/albums/netease:32311/stats?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["data"]["album_ref"], "netease:32311");
+        assert_eq!(stats["data"]["subscriber_count"], 71_671);
+        assert_eq!(stats["data"]["comment_count"], 1_989);
+        assert_eq!(stats["meta"]["platform"], "netease");
+        assert_eq!(stats["meta"]["account"], "collector");
     }
 
     #[tokio::test]
