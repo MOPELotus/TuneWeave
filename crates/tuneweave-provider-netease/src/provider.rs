@@ -37,10 +37,10 @@ use tuneweave_core::{
     LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider,
     Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
     Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, PrincipalType, ProviderQrPoll, ProviderQrStart,
     Quality, RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest,
@@ -249,6 +249,30 @@ impl NeteaseProvider {
         .with_details(json!({ "account": account })))
     }
 
+    async fn upload_image_blob(
+        &self,
+        request: &ImageUploadRequest,
+        operation: &str,
+    ) -> Result<(NeteaseClient, ImageUploadAllocationEnvelope, Value)> {
+        let (filename, content_type) = validate_image_upload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, operation)?;
+        let allocation_response = client.allocate_image_upload(filename).await?;
+        ensure_account_access(&client, &allocation_response.body, operation)?;
+        let allocation: ImageUploadAllocationEnvelope = parse_body(allocation_response.body)?;
+        validate_image_allocation(&allocation)?;
+        let upload_response = client
+            .upload_image(
+                &allocation.result.object_key,
+                &allocation.result.token,
+                content_type,
+                &request.data,
+            )
+            .await?;
+        ensure_success(&upload_response.body)?;
+        Ok((client, allocation, upload_response.body))
+    }
+
     fn install_session(&self, account: &str, cookie: String) -> Result<()> {
         let account = normalize_account_label(Some(account))?.to_owned();
         if !crate::client::has_authenticated_cookie(Some(cookie.as_str())) {
@@ -360,6 +384,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ArtistTopTracks,
             Capability::ArtistSubscriptionWrite,
             Capability::PlaylistRead,
+            Capability::PlaylistWrite,
             Capability::Lyrics,
             Capability::AudioStream,
             Capability::AudioStreamBatch,
@@ -1525,6 +1550,37 @@ impl MusicProvider for NeteaseProvider {
         })
     }
 
+    async fn update_playlist_cover(
+        &self,
+        id: &str,
+        request: &ImageUploadRequest,
+    ) -> Result<PlaylistCoverUpdateResult> {
+        let id = parse_numeric_id("playlist", id)?;
+        let (client, allocation, upload_response) = self
+            .upload_image_blob(request, "playlist cover update")
+            .await?;
+        let (path, payload) =
+            netease_playlist_cover_update_request(id, &allocation.result.document_id);
+        let update_response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &update_response.body, "playlist cover update")?;
+        let response = update_response.body;
+        let image =
+            map_image_upload_result(request, allocation, upload_response, response.clone())?;
+        let playlist_ref =
+            ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    format!("NetEase returned an invalid playlist id: {error}"),
+                )
+                .with_platform(Platform::Netease)
+            })?;
+        Ok(PlaylistCoverUpdateResult {
+            playlist_ref,
+            image,
+            extensions: Extensions::from([("response".to_owned(), response)]),
+        })
+    }
+
     async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
         let account = request.account.as_deref().unwrap_or("default");
         let client = self.client_for(Some(account))?;
@@ -2059,38 +2115,13 @@ impl MusicProvider for NeteaseProvider {
         &self,
         request: &ImageUploadRequest,
     ) -> Result<ImageUploadResult> {
-        let (filename, content_type) = validate_image_upload(request)?;
-        let client = self.client_for(request.account.as_deref())?;
-        if !client.is_authenticated() {
-            return Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                "NetEase avatar upload requires a logged-in session",
-            )
-            .with_platform(Platform::Netease));
-        }
-        let allocation_response = client.allocate_image_upload(filename).await?;
-        ensure_account_access(&client, &allocation_response.body, "avatar upload")?;
-        let allocation: ImageUploadAllocationEnvelope = parse_body(allocation_response.body)?;
-        validate_image_allocation(&allocation)?;
-        let upload_response = client
-            .upload_image(
-                &allocation.result.object_key,
-                &allocation.result.token,
-                content_type,
-                &request.data,
-            )
-            .await?;
-        ensure_success(&upload_response.body)?;
+        let (client, allocation, upload_response) =
+            self.upload_image_blob(request, "avatar upload").await?;
         let update_response = client
             .update_account_avatar(allocation.result.document_id.clone())
             .await?;
         ensure_account_access(&client, &update_response.body, "avatar upload")?;
-        map_image_upload_result(
-            request,
-            allocation,
-            upload_response.body,
-            update_response.body,
-        )
+        map_image_upload_result(request, allocation, upload_response, update_response.body)
     }
 
     async fn upload_cloud_track(&self, request: &CloudUploadRequest) -> Result<CloudUploadResult> {
@@ -5397,6 +5428,16 @@ fn netease_playlist_create_payload(request: &PlaylistCreateRequest) -> Result<Va
         "privacy": privacy,
         "type": kind
     }))
+}
+
+fn netease_playlist_cover_update_request(id: u64, image_id: &Value) -> (&'static str, Value) {
+    (
+        "/api/playlist/cover/update",
+        json!({
+            "id": id,
+            "coverImgId": image_id
+        }),
+    )
 }
 
 fn netease_playlist_update_calls(
@@ -12426,6 +12467,21 @@ mod tests {
     }
 
     #[test]
+    fn playlist_cover_update_request_matches_reference_protocol() {
+        let (path, payload) =
+            netease_playlist_cover_update_request(2_039_116_066, &json!("109951168000000000"));
+
+        assert_eq!(path, "/api/playlist/cover/update");
+        assert_eq!(
+            payload,
+            json!({
+                "id": 2_039_116_066_u64,
+                "coverImgId": "109951168000000000"
+            })
+        );
+    }
+
+    #[test]
     fn maps_netease_playlist_to_unified_model() {
         let playlist: PlaylistDetail = serde_json::from_value(json!({
             "id": 3778678,
@@ -13911,6 +13967,23 @@ mod tests {
         .await
         .expect_err("anonymous playlist order");
         assert_eq!(playlist_order.code, ErrorCode::AuthenticationRequired);
+
+        let cover = MusicProvider::update_playlist_cover(
+            &provider,
+            "2039116066",
+            &ImageUploadRequest {
+                filename: "cover.jpg".to_owned(),
+                content_type: "image/jpeg".to_owned(),
+                data: vec![0xff, 0xd8, 0xff, 0xd9],
+                image_size: Some(300),
+                crop_x: Some(0),
+                crop_y: Some(0),
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous playlist cover update");
+        assert_eq!(cover.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
@@ -15834,6 +15907,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountCloudImport));
         assert!(capabilities.contains(&Capability::AccountCloudLyrics));
         assert!(capabilities.contains(&Capability::AccountCloudMatch));
+        assert!(capabilities.contains(&Capability::PlaylistWrite));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
