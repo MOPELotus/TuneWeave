@@ -2274,6 +2274,7 @@ mod tests {
         ArtistStats {
             artist_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
             followed: Some(false),
+            follower_count: None,
             video_counts: vec![tuneweave_core::ArtistContentCount {
                 category: Some("0".to_owned()),
                 count: 9,

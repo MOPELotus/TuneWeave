@@ -2020,6 +2020,7 @@ fn map_artist_stats(id: u64, stats: ArtistDynamicEnvelope, raw: Value) -> Result
     Ok(ArtistStats {
         artist_ref,
         followed: stats.followed,
+        follower_count: None,
         video_counts,
         online_concert_count: stats.concert.and_then(|concert| concert.online_count),
         extensions,

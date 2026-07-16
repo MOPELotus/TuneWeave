@@ -292,6 +292,7 @@ pub struct ArtistContentCount {
 pub struct ArtistStats {
     pub artist_ref: ResourceRef,
     pub followed: Option<bool>,
+    pub follower_count: Option<u64>,
     pub video_counts: Vec<ArtistContentCount>,
     pub online_concert_count: Option<u64>,
     pub extensions: Extensions,
@@ -669,6 +670,7 @@ mod tests {
             artist_ref: ResourceRef::new(Platform::Netease, "6452")
                 .expect("valid artist reference"),
             followed: Some(false),
+            follower_count: Some(13_704_928),
             video_counts: vec![ArtistContentCount {
                 category: Some("0".to_owned()),
                 count: 9,
@@ -681,6 +683,7 @@ mod tests {
         let value = serde_json::to_value(stats).expect("serialize artist stats");
         assert_eq!(value["artist_ref"], "netease:6452");
         assert_eq!(value["followed"], false);
+        assert_eq!(value["follower_count"], 13_704_928);
         assert_eq!(value["video_counts"][0]["category"], "0");
         assert_eq!(value["video_counts"][0]["count"], 9);
     }
