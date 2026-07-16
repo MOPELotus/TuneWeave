@@ -345,6 +345,50 @@ impl ArtistUpdatesRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistWorksRequest {
+    pub limit: u32,
+    pub before_ms: Option<u64>,
+    pub source_type: u32,
+    pub first_request: bool,
+    pub account: Option<String>,
+}
+
+impl ArtistWorksRequest {
+    #[must_use]
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            before_ms: None,
+            source_type: 1,
+            first_request: true,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistWorkKind {
+    Track,
+    Video,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistWorkUpdate {
+    pub source_type: u32,
+    pub kind: ArtistWorkKind,
+    pub published_at: Option<String>,
+    pub artist: Option<ArtistSummary>,
+    pub title: Option<String>,
+    pub cover_url: Option<String>,
+    pub tracks: Vec<Track>,
+    pub videos: Vec<Video>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
     pub resource_ref: Option<ResourceRef>,
@@ -857,6 +901,40 @@ mod tests {
         assert_eq!(value["limit"], 20);
         assert_eq!(value["before_ms"], 1_720_000_000_000_u64);
         assert_eq!(value["account"], "personal");
+    }
+
+    #[test]
+    fn artist_works_request_and_update_keep_mixed_resources_typed() {
+        let mut request = ArtistWorksRequest::new(10);
+        request.before_ms = Some(1_720_000_000_000);
+        request.first_request = false;
+        request.account = Some("personal".to_owned());
+        let request_value = serde_json::to_value(request).expect("serialize artist works request");
+        assert_eq!(request_value["source_type"], 1);
+        assert_eq!(request_value["first_request"], false);
+
+        let update = ArtistWorkUpdate {
+            source_type: 1,
+            kind: ArtistWorkKind::Track,
+            published_at: Some("2024-07-03".to_owned()),
+            artist: Some(ArtistSummary {
+                resource_ref: Some(
+                    ResourceRef::new(Platform::Netease, "6452").expect("valid artist reference"),
+                ),
+                name: "周杰伦".to_owned(),
+            }),
+            title: Some("新专辑".to_owned()),
+            cover_url: None,
+            tracks: vec![Track::new(
+                ResourceRef::new(Platform::Netease, "2099001").expect("valid track reference"),
+                "新歌",
+            )],
+            videos: Vec::new(),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(update).expect("serialize artist work update");
+        assert_eq!(value["kind"], "track");
+        assert_eq!(value["tracks"][0]["ref"], "netease:2099001");
     }
 
     #[test]
