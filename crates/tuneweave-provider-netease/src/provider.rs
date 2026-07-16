@@ -21,7 +21,8 @@ use tuneweave_core::{
     BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, CommentDeleteRequest, CommentMutationAction, CommentMutationResult,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationAction, CommentMutationResult, CommentPage, CommentReplyReference, CommentSort,
     CommentTarget, CommentTargetKind, CommentWriteRequest, CreatorSummary, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -358,6 +359,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ListeningHistory,
             Capability::Recommendations,
             Capability::CommentWrite,
+            Capability::CommentsRead,
             Capability::PlatformApi,
             Capability::PlatformBatch,
         ])
@@ -2006,6 +2008,14 @@ impl MusicProvider for NeteaseProvider {
         )
     }
 
+    async fn comments(&self, request: &CommentListRequest) -> Result<CommentPage> {
+        let (path, payload, mode) = netease_comment_list_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(&path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_comment_page(request, mode, response.body)
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -2152,6 +2162,493 @@ fn map_comment_mutation_result(
         target: target.clone(),
         comment_id,
         action,
+        extensions,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NeteaseCommentListMode {
+    Legacy,
+    Modern,
+    Hot,
+    Floor,
+}
+
+fn netease_comment_list_request(
+    request: &CommentListRequest,
+) -> Result<(String, Value, NeteaseCommentListMode)> {
+    if request.limit == 0 {
+        return Err(
+            TuneWeaveError::invalid_request("comment limit must be greater than zero")
+                .with_platform(Platform::Netease),
+        );
+    }
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    match request.view {
+        CommentListView::All => {
+            if request.parent_comment_id.is_some() {
+                return Err(comment_request_conflict(
+                    "parent_comment_id requires view=replies",
+                ));
+            }
+            if let Some(sort) = request.sort {
+                if request.before_time_ms.is_some() {
+                    return Err(comment_request_conflict(
+                        "before_time_ms is not used by sorted comments",
+                    ));
+                }
+                let page_no = comment_page_no(request)?;
+                let page_offset = page_no.saturating_sub(1).saturating_mul(request.limit);
+                let (sort_type, cursor) = match sort {
+                    CommentSort::Recommended => (99, json!(page_offset)),
+                    CommentSort::Hot => (2, json!(format!("normalHot#{page_offset}"))),
+                    CommentSort::Time => (
+                        3,
+                        json!(
+                            request
+                                .cursor
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|cursor| !cursor.is_empty())
+                                .unwrap_or("0")
+                        ),
+                    ),
+                };
+                if sort != CommentSort::Time && request.cursor.is_some() {
+                    return Err(comment_request_conflict(
+                        "cursor is only accepted with sort=time",
+                    ));
+                }
+                return Ok((
+                    "/api/v2/resource/comments".to_owned(),
+                    json!({
+                        "threadId": thread_id,
+                        "pageNo": page_no,
+                        "showInner": request.include_replies,
+                        "pageSize": request.limit,
+                        "cursor": cursor,
+                        "sortType": sort_type
+                    }),
+                    NeteaseCommentListMode::Modern,
+                ));
+            }
+            if request.page.is_some() || request.cursor.is_some() {
+                return Err(comment_request_conflict(
+                    "page and cursor require an explicit comment sort",
+                ));
+            }
+            let mut payload = json!({
+                "limit": request.limit,
+                "offset": request.offset,
+                "beforeTime": request.before_time_ms.unwrap_or(0)
+            });
+            if request.target.kind != CommentTargetKind::Event {
+                payload["rid"] = json!(request.target.resource_ref.id());
+            }
+            Ok((
+                format!("/api/v1/resource/comments/{thread_id}"),
+                payload,
+                NeteaseCommentListMode::Legacy,
+            ))
+        }
+        CommentListView::Hot => {
+            if request.sort.is_some()
+                || request.page.is_some()
+                || request.cursor.is_some()
+                || request.parent_comment_id.is_some()
+            {
+                return Err(comment_request_conflict(
+                    "view=hot does not accept sort, page, cursor, or parent_comment_id",
+                ));
+            }
+            Ok((
+                format!("/api/v1/resource/hotcomments/{thread_id}"),
+                json!({
+                    "rid": request.target.resource_ref.id(),
+                    "limit": request.limit,
+                    "offset": request.offset,
+                    "beforeTime": request.before_time_ms.unwrap_or(0)
+                }),
+                NeteaseCommentListMode::Hot,
+            ))
+        }
+        CommentListView::Replies => {
+            if request.sort.is_some() || request.page.is_some() || request.cursor.is_some() {
+                return Err(comment_request_conflict(
+                    "view=replies does not accept sort, page, or cursor",
+                ));
+            }
+            let parent_comment_id = request
+                .parent_comment_id
+                .as_deref()
+                .ok_or_else(|| {
+                    comment_request_conflict("parent_comment_id is required for view=replies")
+                })
+                .and_then(|id| required_comment_id("parent_comment_id", id))?;
+            let time = request
+                .before_time_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    comment_request_conflict("before_time_ms exceeds the signed platform range")
+                })?
+                .unwrap_or(-1);
+            Ok((
+                "/api/resource/comment/floor/get".to_owned(),
+                json!({
+                    "parentCommentId": parent_comment_id,
+                    "threadId": thread_id,
+                    "time": time,
+                    "limit": request.limit
+                }),
+                NeteaseCommentListMode::Floor,
+            ))
+        }
+    }
+}
+
+fn comment_page_no(request: &CommentListRequest) -> Result<u32> {
+    let page = request
+        .page
+        .unwrap_or_else(|| (request.offset / request.limit).saturating_add(1));
+    if page == 0 {
+        return Err(comment_request_conflict(
+            "comment page must be greater than zero",
+        ));
+    }
+    Ok(page)
+}
+
+fn comment_request_conflict(message: &str) -> TuneWeaveError {
+    TuneWeaveError::invalid_request(message).with_platform(Platform::Netease)
+}
+
+fn map_netease_comment_page(
+    request: &CommentListRequest,
+    mode: NeteaseCommentListMode,
+    response: Value,
+) -> Result<CommentPage> {
+    match mode {
+        NeteaseCommentListMode::Legacy => map_legacy_comment_page(request, response),
+        NeteaseCommentListMode::Modern => map_modern_comment_page(request, response),
+        NeteaseCommentListMode::Hot => map_hot_comment_page(request, response),
+        NeteaseCommentListMode::Floor => map_floor_comment_page(request, response),
+    }
+}
+
+fn map_legacy_comment_page(request: &CommentListRequest, response: Value) -> Result<CommentPage> {
+    let comments = map_comment_array(&response, "comments")?;
+    let hot_comments = map_comment_array(&response, "hotComments")?;
+    let top_comments = map_comment_array(&response, "topComments")?;
+    let total = response.get("total").and_then(json_u64);
+    let consumed = u32::try_from(comments.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let has_more = response
+        .get("more")
+        .and_then(json_bool)
+        .or_else(|| total.map(|total| u64::from(next_offset) < total))
+        .unwrap_or(consumed >= request.limit);
+    let mut pagination_extensions = Extensions::new();
+    pagination_extensions.insert("mode".to_owned(), json!("legacy"));
+    pagination_extensions.insert("returned_count".to_owned(), json!(comments.len()));
+    pagination_extensions.insert(
+        "limit_applied".to_owned(),
+        json!(comments.len() <= request.limit as usize),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "next_before_time_ms",
+        comments.last().and_then(|comment| comment.created_at_ms),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "more_hot",
+        response.get("moreHot").and_then(json_bool),
+    );
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentPage {
+        target: request.target.clone(),
+        comments,
+        hot_comments,
+        top_comments,
+        current_comment: None,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: pagination_extensions,
+        },
+        extensions,
+    })
+}
+
+fn map_modern_comment_page(request: &CommentListRequest, response: Value) -> Result<CommentPage> {
+    let data = response.get("data").unwrap_or(&Value::Null);
+    let comments = map_comment_array(data, "comments")?;
+    let hot_comments = map_comment_array(data, "hotComments")?;
+    let top_comments = map_comment_array(data, "topComments")?;
+    let current_comment = map_optional_comment(data.get("currentComment"))?;
+    let total = data.get("totalCount").and_then(json_u64);
+    let has_more = data.get("hasMore").and_then(json_bool).unwrap_or(false);
+    let page = comment_page_no(request)?;
+    let offset = page.saturating_sub(1).saturating_mul(request.limit);
+    let mut pagination_extensions = Extensions::new();
+    pagination_extensions.insert("mode".to_owned(), json!("modern"));
+    pagination_extensions.insert("page".to_owned(), json!(page));
+    pagination_extensions.insert("requested_offset".to_owned(), json!(request.offset));
+    pagination_extensions.insert("returned_count".to_owned(), json!(comments.len()));
+    pagination_extensions.insert(
+        "limit_applied".to_owned(),
+        json!(comments.len() <= request.limit as usize),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "next_cursor",
+        data.get("cursor").and_then(json_scalar_string),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "platform_sort_type",
+        data.get("sortType").and_then(json_i64),
+    );
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentPage {
+        target: request.target.clone(),
+        comments,
+        hot_comments,
+        top_comments,
+        current_comment,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset,
+            total,
+            next_offset: has_more.then_some(offset.saturating_add(request.limit)),
+            has_more,
+            extensions: pagination_extensions,
+        },
+        extensions,
+    })
+}
+
+fn map_hot_comment_page(request: &CommentListRequest, response: Value) -> Result<CommentPage> {
+    let hot_comments = map_comment_array(&response, "hotComments")?;
+    let top_comments = map_comment_array(&response, "topComments")?;
+    let total = response.get("total").and_then(json_u64);
+    let consumed = u32::try_from(hot_comments.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let has_more = response
+        .get("hasMore")
+        .and_then(json_bool)
+        .or_else(|| total.map(|total| u64::from(next_offset) < total))
+        .unwrap_or(consumed >= request.limit);
+    let mut pagination_extensions = Extensions::new();
+    pagination_extensions.insert("mode".to_owned(), json!("hot"));
+    pagination_extensions.insert("returned_count".to_owned(), json!(hot_comments.len()));
+    pagination_extensions.insert(
+        "limit_applied".to_owned(),
+        json!(hot_comments.len() <= request.limit as usize),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "next_before_time_ms",
+        hot_comments
+            .last()
+            .and_then(|comment| comment.created_at_ms),
+    );
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentPage {
+        target: request.target.clone(),
+        comments: Vec::new(),
+        hot_comments,
+        top_comments,
+        current_comment: None,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: pagination_extensions,
+        },
+        extensions,
+    })
+}
+
+fn map_floor_comment_page(request: &CommentListRequest, response: Value) -> Result<CommentPage> {
+    let data = response.get("data").unwrap_or(&Value::Null);
+    let comments = map_comment_array(data, "comments")?;
+    let top_comments = map_comment_array(data, "bestComments")?;
+    let current_comment = map_optional_comment(data.get("currentComment"))?;
+    let total = data.get("totalCount").and_then(json_u64);
+    let has_more = data.get("hasMore").and_then(json_bool).unwrap_or(false);
+    let mut pagination_extensions = Extensions::new();
+    pagination_extensions.insert("mode".to_owned(), json!("floor"));
+    pagination_extensions.insert("requested_offset".to_owned(), json!(request.offset));
+    pagination_extensions.insert("offset_applied".to_owned(), json!(false));
+    pagination_extensions.insert("returned_count".to_owned(), json!(comments.len()));
+    insert_extension(
+        &mut pagination_extensions,
+        "next_before_time_ms",
+        data.get("time").and_then(json_u64).filter(|time| *time > 0),
+    );
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentPage {
+        target: request.target.clone(),
+        comments,
+        hot_comments: Vec::new(),
+        top_comments,
+        current_comment,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more,
+            extensions: pagination_extensions,
+        },
+        extensions,
+    })
+}
+
+fn map_comment_array(container: &Value, field: &str) -> Result<Vec<Comment>> {
+    container
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|comments| comments.iter().cloned().map(map_netease_comment).collect())
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn map_optional_comment(raw: Option<&Value>) -> Result<Option<Comment>> {
+    raw.filter(|raw| raw.as_object().is_some_and(|object| !object.is_empty()))
+        .cloned()
+        .map(map_netease_comment)
+        .transpose()
+}
+
+fn map_netease_comment(raw: Value) -> Result<Comment> {
+    let id = raw
+        .get("commentId")
+        .or_else(|| raw.get("id"))
+        .and_then(json_scalar_string)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase comment is missing a usable id",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "comment": raw }))
+        })?;
+    let content = raw
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let parent_comment_id = raw
+        .get("parentCommentId")
+        .and_then(json_scalar_string)
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty() && id != "0" && id != "-1");
+    let replied_to = raw
+        .get("beReplied")
+        .and_then(Value::as_array)
+        .map(|replies| {
+            replies
+                .iter()
+                .cloned()
+                .map(map_comment_reply_reference)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let ip_location = raw
+        .pointer("/ipLocation/location")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|location| !location.is_empty())
+        .map(str::to_owned);
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw.clone());
+    Ok(Comment {
+        platform: Platform::Netease,
+        id,
+        content,
+        author: raw.get("user").and_then(map_netease_comment_user),
+        created_at_ms: raw.get("time").and_then(json_u64),
+        created_at_text: raw
+            .get("timeStr")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        liked: raw.get("liked").and_then(json_bool),
+        like_count: raw.get("likedCount").and_then(json_u64),
+        parent_comment_id,
+        reply_count: raw.get("replyCount").and_then(json_u64),
+        replied_to,
+        ip_location,
+        extensions,
+    })
+}
+
+fn map_comment_reply_reference(raw: Value) -> CommentReplyReference {
+    let comment_id = ["beRepliedCommentId", "commentId", "id"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(json_scalar_string))
+        .filter(|id| !id.trim().is_empty());
+    let content = raw
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let author = raw.get("user").and_then(map_netease_comment_user);
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw);
+    CommentReplyReference {
+        comment_id,
+        content,
+        author,
+        extensions,
+    }
+}
+
+fn map_netease_comment_user(raw: &Value) -> Option<User> {
+    let id = raw
+        .get("userId")
+        .or_else(|| raw.get("id"))
+        .and_then(json_scalar_string)
+        .filter(|id| !id.trim().is_empty())?;
+    let resource_ref = ResourceRef::new(Platform::Netease, id.clone()).ok()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw.clone());
+    Some(User {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        name: ["nickname", "userName", "name"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned(),
+        avatar_url: raw
+            .get("avatarUrl")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned),
+        signature: raw
+            .get("signature")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|signature| !signature.is_empty())
+            .map(str::to_owned),
+        followed: raw.get("followed").and_then(json_bool),
+        mutual: raw.get("mutual").and_then(json_bool),
         extensions,
     })
 }
@@ -6778,6 +7275,407 @@ mod tests {
         assert_eq!(delete.code, ErrorCode::AuthenticationRequired);
     }
 
+    fn fixture_comment(id: u64, content: &str) -> Value {
+        json!({
+            "commentId": id,
+            "content": content,
+            "time": 1_582_035_919_432_u64,
+            "timeStr": "2020-02-18",
+            "liked": false,
+            "likedCount": 5_646,
+            "parentCommentId": 0,
+            "replyCount": 2,
+            "ipLocation": {"location": "上海"},
+            "user": {
+                "userId": 278_612_322,
+                "nickname": "阿良0321",
+                "avatarUrl": "https://example.test/avatar.jpg",
+                "followed": false,
+                "mutual": false
+            },
+            "beReplied": [{
+                "beRepliedCommentId": 100,
+                "content": "原评论",
+                "user": {"userId": 200, "nickname": "被回复者"}
+            }],
+            "richContent": "保留平台富文本"
+        })
+    }
+
+    #[test]
+    fn comment_list_requests_cover_every_resource_and_public_view_protocol() {
+        let cases = [
+            (CommentTargetKind::Track, "185809", "R_SO_4_185809", true),
+            (CommentTargetKind::Mv, "5436712", "R_MV_5_5436712", true),
+            (
+                CommentTargetKind::Playlist,
+                "705123491",
+                "A_PL_0_705123491",
+                true,
+            ),
+            (CommentTargetKind::Album, "32311", "R_AL_3_32311", true),
+            (
+                CommentTargetKind::RadioEpisode,
+                "794062371",
+                "A_DJ_1_794062371",
+                true,
+            ),
+            (
+                CommentTargetKind::Video,
+                "89ADDE33C0AAE8EC14B99F6750DB954D",
+                "R_VI_62_89ADDE33C0AAE8EC14B99F6750DB954D",
+                true,
+            ),
+            (
+                CommentTargetKind::Event,
+                "A_EV_2_6559519868_32953014",
+                "A_EV_2_6559519868_32953014",
+                false,
+            ),
+            (CommentTargetKind::RadioStation, "362", "A_DR_14_362", true),
+        ];
+        for (kind, id, thread_id, has_rid) in cases {
+            let target = CommentTarget::new(
+                ResourceRef::new(Platform::Netease, id).expect("valid comment target"),
+                kind,
+            );
+            let mut request = CommentListRequest::new(target, 20);
+            request.offset = 40;
+            request.before_time_ms = Some(1_600_000_000_000);
+            let (path, payload, mode) =
+                netease_comment_list_request(&request).expect("build legacy comments request");
+            assert_eq!(mode, NeteaseCommentListMode::Legacy, "{kind:?}");
+            assert_eq!(
+                path,
+                format!("/api/v1/resource/comments/{thread_id}"),
+                "{kind:?}"
+            );
+            assert_eq!(payload["limit"], 20, "{kind:?}");
+            assert_eq!(payload["offset"], 40, "{kind:?}");
+            assert_eq!(payload["beforeTime"], 1_600_000_000_000_u64, "{kind:?}");
+            assert_eq!(payload.get("rid").is_some(), has_rid, "{kind:?}");
+            if has_rid {
+                assert_eq!(payload["rid"], id, "{kind:?}");
+            }
+        }
+
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
+            CommentTargetKind::Track,
+        );
+        for (sort, expected_type, expected_cursor) in [
+            (CommentSort::Recommended, 99, json!(20)),
+            (CommentSort::Hot, 2, json!("normalHot#20")),
+            (CommentSort::Time, 3, json!("1582035919432")),
+        ] {
+            let mut request = CommentListRequest::new(target.clone(), 20);
+            request.sort = Some(sort);
+            request.page = Some(2);
+            request.include_replies = false;
+            if sort == CommentSort::Time {
+                request.cursor = Some("1582035919432".to_owned());
+            }
+            let (path, payload, mode) =
+                netease_comment_list_request(&request).expect("build modern comments request");
+            assert_eq!(path, "/api/v2/resource/comments");
+            assert_eq!(mode, NeteaseCommentListMode::Modern);
+            assert_eq!(payload["threadId"], "R_SO_4_185809");
+            assert_eq!(payload["pageNo"], 2);
+            assert_eq!(payload["pageSize"], 20);
+            assert_eq!(payload["showInner"], false);
+            assert_eq!(payload["sortType"], expected_type);
+            assert_eq!(payload["cursor"], expected_cursor);
+        }
+
+        let mut hot = CommentListRequest::new(target.clone(), 5);
+        hot.view = CommentListView::Hot;
+        hot.offset = 10;
+        let (path, payload, mode) =
+            netease_comment_list_request(&hot).expect("build hot comments request");
+        assert_eq!(path, "/api/v1/resource/hotcomments/R_SO_4_185809");
+        assert_eq!(payload["rid"], "185809");
+        assert_eq!(mode, NeteaseCommentListMode::Hot);
+
+        let mut replies = CommentListRequest::new(target, 10);
+        replies.view = CommentListView::Replies;
+        replies.parent_comment_id = Some("3160990055".to_owned());
+        replies.before_time_ms = Some(1_582_035_919_432);
+        replies.offset = 20;
+        let (path, payload, mode) =
+            netease_comment_list_request(&replies).expect("build floor comments request");
+        assert_eq!(path, "/api/resource/comment/floor/get");
+        assert_eq!(payload["parentCommentId"], "3160990055");
+        assert_eq!(payload["threadId"], "R_SO_4_185809");
+        assert_eq!(payload["time"], 1_582_035_919_432_i64);
+        assert!(payload.get("offset").is_none());
+        assert_eq!(mode, NeteaseCommentListMode::Floor);
+    }
+
+    #[test]
+    fn comment_list_requests_reject_conflicting_and_missing_fields() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
+            CommentTargetKind::Track,
+        );
+        let mut cases = Vec::new();
+        let mut zero_limit = CommentListRequest::new(target.clone(), 0);
+        zero_limit.view = CommentListView::All;
+        cases.push(zero_limit);
+        let mut missing_parent = CommentListRequest::new(target.clone(), 20);
+        missing_parent.view = CommentListView::Replies;
+        cases.push(missing_parent);
+        let mut cursor_without_sort = CommentListRequest::new(target.clone(), 20);
+        cursor_without_sort.cursor = Some("100".to_owned());
+        cases.push(cursor_without_sort);
+        let mut wrong_cursor_sort = CommentListRequest::new(target.clone(), 20);
+        wrong_cursor_sort.sort = Some(CommentSort::Hot);
+        wrong_cursor_sort.cursor = Some("100".to_owned());
+        cases.push(wrong_cursor_sort);
+        let mut hot_with_sort = CommentListRequest::new(target.clone(), 20);
+        hot_with_sort.view = CommentListView::Hot;
+        hot_with_sort.sort = Some(CommentSort::Recommended);
+        cases.push(hot_with_sort);
+        let mut zero_page = CommentListRequest::new(target, 20);
+        zero_page.sort = Some(CommentSort::Recommended);
+        zero_page.page = Some(0);
+        cases.push(zero_page);
+
+        for request in cases {
+            assert_eq!(
+                netease_comment_list_request(&request)
+                    .expect_err("invalid comment request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn maps_legacy_comment_lists_without_losing_hot_top_or_reply_data() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
+            CommentTargetKind::Track,
+        );
+        let mut request = CommentListRequest::new(target, 2);
+        request.offset = 4;
+        let page = map_netease_comment_page(
+            &request,
+            NeteaseCommentListMode::Legacy,
+            json!({
+                "code": 200,
+                "total": 68_334,
+                "more": true,
+                "moreHot": true,
+                "comments": [fixture_comment(3_160_990_055, "普通评论")],
+                "hotComments": [fixture_comment(200, "热门评论")],
+                "topComments": [fixture_comment(300, "置顶评论")]
+            }),
+        )
+        .expect("map legacy comments");
+        assert_eq!(page.comments.len(), 1);
+        assert_eq!(page.hot_comments.len(), 1);
+        assert_eq!(page.top_comments.len(), 1);
+        let comment = &page.comments[0];
+        assert_eq!(comment.id, "3160990055");
+        assert_eq!(comment.content, "普通评论");
+        assert_eq!(comment.author.as_ref().expect("author").name, "阿良0321");
+        assert_eq!(
+            comment
+                .author
+                .as_ref()
+                .expect("author")
+                .resource_ref
+                .to_string(),
+            "netease:278612322"
+        );
+        assert_eq!(comment.like_count, Some(5_646));
+        assert_eq!(comment.parent_comment_id, None);
+        assert_eq!(comment.reply_count, Some(2));
+        assert_eq!(comment.replied_to[0].comment_id.as_deref(), Some("100"));
+        assert_eq!(
+            comment.replied_to[0]
+                .author
+                .as_ref()
+                .expect("reply author")
+                .name,
+            "被回复者"
+        );
+        assert_eq!(comment.ip_location.as_deref(), Some("上海"));
+        assert_eq!(
+            comment.extensions["response"]["richContent"],
+            "保留平台富文本"
+        );
+        assert_eq!(page.pagination.total, Some(68_334));
+        assert_eq!(page.pagination.next_offset, Some(5));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["mode"], "legacy");
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            page.pagination.extensions["next_before_time_ms"],
+            1_582_035_919_432_u64
+        );
+        assert_eq!(page.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn maps_modern_hot_and_floor_comment_pagination_honestly() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
+            CommentTargetKind::Track,
+        );
+        let mut modern_request = CommentListRequest::new(target.clone(), 2);
+        modern_request.sort = Some(CommentSort::Recommended);
+        modern_request.page = Some(2);
+        let modern = map_netease_comment_page(
+            &modern_request,
+            NeteaseCommentListMode::Modern,
+            json!({
+                "code": 200,
+                "data": {
+                    "comments": [
+                        fixture_comment(1, "一"),
+                        fixture_comment(2, "二"),
+                        fixture_comment(3, "三")
+                    ],
+                    "currentComment": fixture_comment(4, "当前"),
+                    "totalCount": 68_334,
+                    "hasMore": true,
+                    "cursor": 1_581_222_127_578_u64,
+                    "sortType": 99
+                }
+            }),
+        )
+        .expect("map modern comments");
+        assert_eq!(modern.comments.len(), 3);
+        assert_eq!(modern.current_comment.as_ref().expect("current").id, "4");
+        assert_eq!(modern.pagination.offset, 2);
+        assert_eq!(modern.pagination.next_offset, Some(4));
+        assert_eq!(modern.pagination.extensions["next_cursor"], "1581222127578");
+        assert_eq!(modern.pagination.extensions["limit_applied"], false);
+
+        let mut hot_request = CommentListRequest::new(target.clone(), 2);
+        hot_request.view = CommentListView::Hot;
+        let hot = map_netease_comment_page(
+            &hot_request,
+            NeteaseCommentListMode::Hot,
+            json!({
+                "code": 200,
+                "total": 408,
+                "hasMore": true,
+                "hotComments": [fixture_comment(10, "热评")],
+                "topComments": [fixture_comment(11, "置顶")]
+            }),
+        )
+        .expect("map hot comments");
+        assert!(hot.comments.is_empty());
+        assert_eq!(hot.hot_comments[0].id, "10");
+        assert_eq!(hot.pagination.total, Some(408));
+        assert_eq!(hot.pagination.next_offset, Some(1));
+
+        let mut floor_request = CommentListRequest::new(target, 2);
+        floor_request.view = CommentListView::Replies;
+        floor_request.parent_comment_id = Some("3160990055".to_owned());
+        floor_request.offset = 20;
+        let floor = map_netease_comment_page(
+            &floor_request,
+            NeteaseCommentListMode::Floor,
+            json!({
+                "code": 200,
+                "data": {
+                    "comments": [fixture_comment(20, "楼层回复")],
+                    "bestComments": [fixture_comment(21, "最佳回复")],
+                    "currentComment": fixture_comment(22, "当前回复"),
+                    "totalCount": 3,
+                    "hasMore": true,
+                    "time": 1_580_000_000_000_u64
+                }
+            }),
+        )
+        .expect("map floor comments");
+        assert_eq!(floor.comments[0].id, "20");
+        assert_eq!(floor.top_comments[0].id, "21");
+        assert_eq!(floor.current_comment.as_ref().expect("current").id, "22");
+        assert_eq!(floor.pagination.offset, 0);
+        assert_eq!(floor.pagination.extensions["requested_offset"], 20);
+        assert_eq!(floor.pagination.extensions["offset_applied"], false);
+        assert_eq!(
+            floor.pagination.extensions["next_before_time_ms"],
+            1_580_000_000_000_u64
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_comments_cover_reference_resources_views_and_sorts() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let targets = [
+            (CommentTargetKind::Track, "185809"),
+            (CommentTargetKind::Album, "32311"),
+            (CommentTargetKind::Playlist, "705123491"),
+            (CommentTargetKind::Mv, "5436712"),
+            (CommentTargetKind::RadioEpisode, "794062371"),
+            (CommentTargetKind::Video, "89ADDE33C0AAE8EC14B99F6750DB954D"),
+            (CommentTargetKind::Event, "A_EV_2_6559519868_32953014"),
+            (CommentTargetKind::RadioStation, "362"),
+        ];
+        let mut track_page = None;
+        for (kind, id) in targets {
+            let request = CommentListRequest::new(
+                CommentTarget::new(
+                    ResourceRef::new(Platform::Netease, id).expect("valid comment target"),
+                    kind,
+                ),
+                1,
+            );
+            let page = MusicProvider::comments(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{kind:?} comments failed: {error}"));
+            assert_eq!(page.extensions["response"]["code"], 200, "{kind:?}");
+            if kind == CommentTargetKind::Track {
+                track_page = Some(page);
+            }
+        }
+
+        let track_target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
+            CommentTargetKind::Track,
+        );
+        for sort in [
+            CommentSort::Recommended,
+            CommentSort::Hot,
+            CommentSort::Time,
+        ] {
+            let mut request = CommentListRequest::new(track_target.clone(), 2);
+            request.sort = Some(sort);
+            let page = MusicProvider::comments(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{sort:?} comments failed: {error}"));
+            assert_eq!(page.extensions["response"]["code"], 200, "{sort:?}");
+            assert_eq!(page.pagination.extensions["mode"], "modern");
+        }
+
+        let mut hot_request = CommentListRequest::new(track_target.clone(), 2);
+        hot_request.view = CommentListView::Hot;
+        let hot = MusicProvider::comments(&provider, &hot_request)
+            .await
+            .expect("live hot comments");
+        assert_eq!(hot.extensions["response"]["code"], 200);
+        assert_eq!(hot.pagination.extensions["mode"], "hot");
+
+        let parent_comment_id = track_page
+            .and_then(|page| page.comments.into_iter().next())
+            .map(|comment| comment.id)
+            .expect("live track comments include a floor parent");
+        let mut floor_request = CommentListRequest::new(track_target, 2);
+        floor_request.view = CommentListView::Replies;
+        floor_request.parent_comment_id = Some(parent_comment_id);
+        let floor = MusicProvider::comments(&provider, &floor_request)
+            .await
+            .expect("live floor comments");
+        assert_eq!(floor.extensions["response"]["code"], 200);
+        assert_eq!(floor.pagination.extensions["mode"], "floor");
+    }
+
     #[test]
     fn maps_legacy_search_song_shape() {
         let song = serde_json::from_value(json!({
@@ -9583,6 +10481,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
         assert!(capabilities.contains(&Capability::DimensionCharts));
         assert!(capabilities.contains(&Capability::CommentWrite));
+        assert!(capabilities.contains(&Capability::CommentsRead));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
