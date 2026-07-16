@@ -20,17 +20,17 @@ use crate::{
     ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
     MediaStream, MembershipSummary, Page, PageRequest, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistMutationResult,
-    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackMutationAction,
-    PlaylistTrackMutationRequest, PlaylistTrackMutationResult, PlaylistUpdateRequest,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats, VideoStream,
-    VideoStreamRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
+    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -466,12 +466,23 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
-    async fn mutate_playlist_tracks(
+    async fn mutate_playlist_items(
         &self,
         _id: &str,
-        _action: PlaylistTrackMutationAction,
-        _request: &PlaylistTrackMutationRequest,
-    ) -> Result<PlaylistTrackMutationResult> {
+        _action: PlaylistItemMutationAction,
+        _request: &PlaylistItemMutationRequest,
+    ) -> Result<PlaylistItemMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn reorder_playlist_tracks(
+        &self,
+        _id: &str,
+        _request: &PlaylistTrackOrderRequest,
+    ) -> Result<PlaylistTrackOrderResult> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PlaylistWrite,
