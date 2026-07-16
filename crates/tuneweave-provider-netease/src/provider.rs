@@ -16098,6 +16098,53 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
+    async fn live_public_general_and_artist_charts_cover_every_reference_branch() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for view in [
+            ChartCatalogView::Overview,
+            ChartCatalogView::Summary,
+            ChartCatalogView::Modern,
+        ] {
+            let catalog = MusicProvider::chart_catalog(&provider, &ChartCatalogRequest::new(view))
+                .await
+                .unwrap_or_else(|error| panic!("live {view:?} chart catalog failed: {error}"));
+            assert_eq!(catalog.view, view, "{view:?}");
+            assert!(!catalog.groups.is_empty(), "{view:?}");
+            assert!(
+                catalog.groups.iter().any(|group| !group.charts.is_empty()),
+                "{view:?}"
+            );
+            assert!(
+                catalog
+                    .groups
+                    .iter()
+                    .flat_map(|group| &group.charts)
+                    .all(|chart| !chart.name.is_empty()),
+                "{view:?}"
+            );
+            assert_eq!(catalog.extensions["response"]["code"], 200, "{view:?}");
+        }
+
+        for area in [
+            ArtistChartArea::Chinese,
+            ArtistChartArea::Western,
+            ArtistChartArea::Korean,
+            ArtistChartArea::Japanese,
+        ] {
+            let chart = MusicProvider::artist_chart(&provider, &ArtistChartRequest::new(area))
+                .await
+                .unwrap_or_else(|error| panic!("live {area:?} artist chart failed: {error}"));
+            assert_eq!(chart.area, area, "{area:?}");
+            assert!(!chart.entries.is_empty(), "{area:?}");
+            assert!(chart.entries.len() <= 100, "{area:?}");
+            assert_eq!(chart.entries[0].rank, 1, "{area:?}");
+            assert!(!chart.entries[0].artist.name.is_empty(), "{area:?}");
+            assert_eq!(chart.extensions["response"]["code"], 200, "{area:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
     async fn live_public_dimension_chart_detail_and_track_snapshot() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let detail_request = DimensionChartRequest::new("CITY_SONG_CHART", "110000", "CITY");
