@@ -13709,33 +13709,43 @@ mod tests {
     #[ignore = "requires live NetEase access"]
     async fn live_multi_match_search_preserves_ordered_cross_type_resources() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
-        let result = MusicProvider::search_multi_match(
-            &provider,
-            &SearchMultiMatchRequest {
-                query: "海阔天空".to_owned(),
-                kind: SearchKind::Track,
-                account: None,
-            },
-        )
-        .await
-        .expect("live multi-match search");
-        assert_eq!(result.query, "海阔天空");
-        assert_eq!(result.requested_kind, SearchKind::Track);
-        assert!(!result.sections.is_empty());
-        assert!(
-            result.sections.iter().any(
-                |section| section.kind == Some(SearchKind::Artist) && !section.items.is_empty()
+        for (kind, platform_type) in [
+            (SearchKind::Track, 1),
+            (SearchKind::Album, 10),
+            (SearchKind::Artist, 100),
+            (SearchKind::Playlist, 1_000),
+            (SearchKind::User, 1_002),
+            (SearchKind::Mv, 1_004),
+            (SearchKind::Lyric, 1_006),
+            (SearchKind::RadioStation, 1_009),
+            (SearchKind::Video, 1_014),
+            (SearchKind::Mixed, 1_018),
+            (SearchKind::Voice, 2_000),
+        ] {
+            let result = MusicProvider::search_multi_match(
+                &provider,
+                &SearchMultiMatchRequest {
+                    query: "海阔天空".to_owned(),
+                    kind,
+                    account: None,
+                },
             )
-        );
-        assert!(
-            result
-                .sections
-                .iter()
-                .any(|section| section.kind == Some(SearchKind::Playlist)
-                    && !section.items.is_empty())
-        );
-        assert_eq!(result.extensions["platform_type"], 1);
-        assert_eq!(result.extensions["response"]["code"], 200);
+            .await
+            .unwrap_or_else(|error| panic!("live {kind:?} multi-match search failed: {error}"));
+            assert_eq!(result.query, "海阔天空");
+            assert_eq!(result.requested_kind, kind);
+            assert_eq!(result.extensions["platform_type"], platform_type);
+            assert_eq!(result.extensions["response"]["code"], 200);
+            if kind == SearchKind::Track {
+                assert!(!result.sections.is_empty());
+                assert!(result.sections.iter().any(|section| {
+                    section.kind == Some(SearchKind::Artist) && !section.items.is_empty()
+                }));
+                assert!(result.sections.iter().any(|section| {
+                    section.kind == Some(SearchKind::Playlist) && !section.items.is_empty()
+                }));
+            }
+        }
     }
 
     #[tokio::test]
