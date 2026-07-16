@@ -1490,6 +1490,132 @@ pub struct DigitalAlbumChartEntry {
     pub extensions: Extensions,
 }
 
+/// Selects one provider-native presentation of the general music chart catalog.
+///
+/// Providers that expose fewer variants may map every value to their richest catalog while
+/// preserving the requested value and native response in `extensions`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartCatalogView {
+    Overview,
+    #[default]
+    Summary,
+    Modern,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChartCatalogRequest {
+    pub view: ChartCatalogView,
+    pub account: Option<String>,
+}
+
+impl ChartCatalogRequest {
+    #[must_use]
+    pub fn new(view: ChartCatalogView) -> Self {
+        Self {
+            view,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartTrackPreview {
+    pub rank: Option<u32>,
+    pub previous_rank: Option<u32>,
+    pub rank_change: Option<i64>,
+    pub track_ref: Option<ResourceRef>,
+    pub name: String,
+    pub byline: Option<String>,
+    pub cover_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Chart {
+    #[serde(rename = "ref")]
+    pub resource_ref: Option<ResourceRef>,
+    pub platform: Platform,
+    pub id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub update_frequency: Option<String>,
+    pub updated_at_ms: Option<u64>,
+    pub track_count: Option<u64>,
+    pub play_count: Option<u64>,
+    pub subscribed: Option<bool>,
+    pub playable: Option<bool>,
+    pub target_kind: Option<String>,
+    pub target_url: Option<String>,
+    pub previews: Vec<ChartTrackPreview>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartGroup {
+    pub code: Option<String>,
+    pub name: String,
+    pub display_type: Option<String>,
+    pub target_url: Option<String>,
+    pub charts: Vec<Chart>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChartCatalog {
+    pub platform: Platform,
+    pub view: ChartCatalogView,
+    pub groups: Vec<ChartGroup>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistChartArea {
+    #[default]
+    Chinese,
+    Western,
+    Korean,
+    Japanese,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistChartRequest {
+    pub area: ArtistChartArea,
+    pub account: Option<String>,
+}
+
+impl ArtistChartRequest {
+    #[must_use]
+    pub fn new(area: ArtistChartArea) -> Self {
+        Self {
+            area,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistChartEntry {
+    pub rank: u32,
+    pub previous_rank: Option<u32>,
+    pub rank_change: Option<i64>,
+    pub score: Option<u64>,
+    pub artist: Artist,
+    pub extensions: Extensions,
+}
+
+/// A complete provider-native artist chart snapshot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistChart {
+    pub platform: Platform,
+    pub area: ArtistChartArea,
+    pub updated_at_ms: Option<u64>,
+    pub entries: Vec<ArtistChartEntry>,
+    pub extensions: Extensions,
+}
+
 /// Identifies one platform-defined chart dimension, such as a city or style.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DimensionChartRequest {
@@ -2226,6 +2352,114 @@ mod tests {
             serde_json::to_value(request.kind).expect("serialize kind"),
             "album"
         );
+    }
+
+    #[test]
+    fn chart_contract_preserves_catalog_variants_and_rank_snapshots() {
+        let request = ChartCatalogRequest::new(ChartCatalogView::Modern);
+        assert_eq!(request.view, ChartCatalogView::Modern);
+        assert_eq!(request.account, None);
+
+        let chart = Chart {
+            resource_ref: Some(
+                ResourceRef::new(Platform::Netease, "19723756").expect("valid chart reference"),
+            ),
+            platform: Platform::Netease,
+            id: Some("19723756".to_owned()),
+            name: "飙升榜".to_owned(),
+            description: "每天热度上升最快的歌曲".to_owned(),
+            cover_url: Some("https://example.test/chart.jpg".to_owned()),
+            update_frequency: Some("每天更新".to_owned()),
+            updated_at_ms: Some(1_784_170_805_374),
+            track_count: Some(100),
+            play_count: None,
+            subscribed: None,
+            playable: Some(true),
+            target_kind: Some("playlist".to_owned()),
+            target_url: None,
+            previews: vec![ChartTrackPreview {
+                rank: Some(1),
+                previous_rank: Some(5),
+                rank_change: Some(4),
+                track_ref: Some(
+                    ResourceRef::new(Platform::Netease, "3404238777")
+                        .expect("valid track reference"),
+                ),
+                name: "周旋".to_owned(),
+                byline: Some("王以太/艾热 AIR".to_owned()),
+                cover_url: None,
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let catalog = ChartCatalog {
+            platform: Platform::Netease,
+            view: ChartCatalogView::Modern,
+            groups: vec![ChartGroup {
+                code: Some("OFFICIAL".to_owned()),
+                name: "官方榜".to_owned(),
+                display_type: Some("HORIZONTAL".to_owned()),
+                target_url: None,
+                charts: vec![chart],
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(catalog).expect("serialize chart catalog");
+        assert_eq!(value["view"], "modern");
+        assert_eq!(value["groups"][0]["code"], "OFFICIAL");
+        assert_eq!(value["groups"][0]["charts"][0]["ref"], "netease:19723756");
+        assert_eq!(
+            value["groups"][0]["charts"][0]["previews"][0]["rank_change"],
+            4
+        );
+    }
+
+    #[test]
+    fn artist_chart_contract_keeps_area_and_previous_rank_explicit() {
+        let request = ArtistChartRequest::new(ArtistChartArea::Western);
+        assert_eq!(request.area, ArtistChartArea::Western);
+        assert_eq!(
+            serde_json::to_value(request.area).expect("serialize artist chart area"),
+            "western"
+        );
+
+        let artist = Artist {
+            resource_ref: ResourceRef::new(Platform::Netease, "3684")
+                .expect("valid artist reference"),
+            platform: Platform::Netease,
+            id: "3684".to_owned(),
+            name: "林俊杰".to_owned(),
+            aliases: vec!["JJ Lin".to_owned()],
+            description: String::new(),
+            biography_sections: Vec::new(),
+            avatar_url: None,
+            cover_url: None,
+            album_count: Some(73),
+            track_count: Some(598),
+            mv_count: None,
+            video_count: None,
+            identities: Vec::new(),
+            extensions: Extensions::new(),
+        };
+        let chart = ArtistChart {
+            platform: Platform::Netease,
+            area: ArtistChartArea::Western,
+            updated_at_ms: Some(1_784_170_805_374),
+            entries: vec![ArtistChartEntry {
+                rank: 1,
+                previous_rank: Some(3),
+                rank_change: Some(2),
+                score: Some(63_562_038),
+                artist,
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(chart).expect("serialize artist chart");
+        assert_eq!(value["area"], "western");
+        assert_eq!(value["entries"][0]["previous_rank"], 3);
+        assert_eq!(value["entries"][0]["artist"]["ref"], "netease:3684");
     }
 
     #[test]
