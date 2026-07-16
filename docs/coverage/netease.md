@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=317`、`partial=6`、`implemented=33`、`verified=51`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=316`、`partial=6`、`implemented=33`、`verified=52`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -85,7 +85,7 @@
 | `comment_playlist` | `/comment/playlist` | `verified` | `GET /v1/resources/playlist/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:705123491` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `comment_report` | `/comment/report` | `implemented` | `POST /v1/resources/track/{ref}/comments/{comment_id}/reports`（统一由资源引用决定内容平台、`account` 选择同平台隔离登录态，JSON `{reason}` 表达参考必填举报理由，稳定返回目标、评论 ID、原样理由和 `submitted=true`；严格保持参考模块的歌曲专用边界，只接受 `type=track`，固定构造 `threadId=R_SO_4_{id}`，以默认 EAPI 调用 `/api/report/reportcomment` 并精确提交 `threadId/commentId/reason`，不虚构其他七类资源支持；空白理由、非歌曲目标、跨平台引用、未知 JSON/query 字段均在上游请求前以统一 400 拒绝，未登录态在网络前以 401 拒绝，完整成功响应保留在扩展；核心序列化、协议字段、歌曲限定、输入拒绝、能力发现、认证前置与统一 HTTP 包络均有离线测试；2026-07-16 无 Cookie 真实二进制 HTTP 验证合法歌曲举报返回 `authentication_required`，歌单目标与空白理由分别返回预期 400，待真实账户验证成功举报） |
 | `comment_video` | `/comment/video` | `verified` | `GET /v1/resources/video/{ref}/comments`（视频 ID 保持不透明字符串；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:89ADDE33C0AAE8EC14B99F6750DB954D` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
-| `countries_code_list` | `/countries/code/list` | `pending` | — |
+| `countries_code_list` | `/countries/code/list` | `verified` | `GET /v1/auth/country-codes`（统一以 `platform/account` 选择平台与隔离会话，省略时使用默认平台和 `default` 账户；固定 EAPI `/api/lbs/countries/v1` 空负载，映射 `data[{label,countryList[{code,locale,zh,en}]}]` 为有序 `CountryCallingCodeGroup[]`，稳定字段分别表达电话区号、地区代码、中英文名称，组/条目原文和目录状态不丢失；缺失分组数组、`countryList` 或任一必需字段均返回稳定 `upstream_error`，未知平台/query 在发网前拒绝；核心序列化、成功映射、畸形响应、能力发现、平台/账户/default 选择和 HTTP 错误包络均有测试；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 均返回上游 `code=200`，完整获得 22 组、189 个地区且地区代码无重复，首项为 `86/CN/中国/China`） |
 | `creator_authinfo_get` | `/creator/authinfo/get` | `pending` | — |
 | `daily_signin` | `/daily_signin` | `pending` | — |
 | `decrypt` | `/decrypt` | `pending` | — |
