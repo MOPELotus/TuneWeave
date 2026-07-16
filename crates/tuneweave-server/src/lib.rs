@@ -27,13 +27,14 @@ use tuneweave_core::{
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
     BannerListRequest, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream,
-    PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult,
-    Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
+    ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
+    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -187,6 +188,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
+        .route("/charts/dimensions/{chart_code}", get(dimension_chart))
+        .route(
+            "/charts/dimensions/{chart_code}/tracks",
+            get(dimension_chart_tracks),
+        )
         .route("/artists", get(artists))
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/overview", get(artist_overview))
@@ -858,6 +864,62 @@ async fn digital_album_chart(
         response = response.with_account(account);
     }
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DimensionChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "targetId")]
+    target_id: Option<String>,
+    #[serde(alias = "targetType")]
+    target_type: Option<String>,
+}
+
+async fn dimension_chart(
+    State(state): State<AppState>,
+    Path(chart_code): Path<String>,
+    Query(params): Query<DimensionChartParams>,
+) -> Result<Json<ApiResponse<DimensionChart>>, ApiError> {
+    let (platform, account, request) = dimension_chart_request(&state, chart_code, params)?;
+    let provider = state.registry.require(platform)?;
+    let chart = provider.dimension_chart(&request).await?;
+    let mut response = ApiResponse::new(chart).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn dimension_chart_tracks(
+    State(state): State<AppState>,
+    Path(chart_code): Path<String>,
+    Query(params): Query<DimensionChartParams>,
+) -> Result<Json<ApiResponse<DimensionChartTrackSnapshot>>, ApiError> {
+    let (platform, account, request) = dimension_chart_request(&state, chart_code, params)?;
+    let provider = state.registry.require(platform)?;
+    let snapshot = provider.dimension_chart_tracks(&request).await?;
+    let mut response = ApiResponse::new(snapshot).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn dimension_chart_request(
+    state: &AppState,
+    chart_code: String,
+    params: DimensionChartParams,
+) -> Result<(Platform, Option<String>, DimensionChartRequest), TuneWeaveError> {
+    let platform = account_platform(state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let mut request = DimensionChartRequest::new(
+        required_trimmed("chart_code", Some(chart_code))?,
+        required_trimmed("target_id", params.target_id)?,
+        required_trimmed("target_type", params.target_type)?,
+    );
+    request.account.clone_from(&account);
+    Ok((platform, account, request))
 }
 
 async fn album_subscribe(
@@ -2534,6 +2596,11 @@ fn optional_trimmed(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn required_trimmed(name: &str, value: Option<String>) -> Result<String, TuneWeaveError> {
+    optional_trimmed(value)
+        .ok_or_else(|| TuneWeaveError::invalid_request(format!("{name} must not be empty")))
+}
+
 fn required_string_or_number(name: &str, value: &Value) -> Result<String, TuneWeaveError> {
     let value = match value {
         Value::String(value) => value.clone(),
@@ -2876,8 +2943,8 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CreatorSummary, MusicProvider, Page, PageMeta, ProviderQrStart,
-        RadioCatalogOption, Result, SearchQuery, StreamRequest,
+        BannerTargetKind, CreatorSummary, DimensionChartTrackEntry, MusicProvider, Page, PageMeta,
+        ProviderQrStart, RadioCatalogOption, Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -2916,6 +2983,7 @@ mod tests {
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
+                Capability::DimensionCharts,
                 Capability::ArtistDetail,
                 Capability::ArtistOverview,
                 Capability::ArtistStats,
@@ -3234,6 +3302,75 @@ mod tests {
                     has_more: true,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn dimension_chart(&self, request: &DimensionChartRequest) -> Result<DimensionChart> {
+            let id = format!(
+                "{}#{}@{}#",
+                request.chart_code, request.target_id, request.target_type
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(DimensionChart {
+                resource_ref: ResourceRef::new(Platform::Netease, &id)
+                    .expect("valid test chart reference"),
+                platform: Platform::Netease,
+                id,
+                chart_code: request.chart_code.clone(),
+                target_id: request.target_id.clone(),
+                target_type: request.target_type.clone(),
+                name: "北京榜".to_owned(),
+                description: "当前城市用户一周内收听的歌曲。".to_owned(),
+                cover_url: Some("https://example.test/city.png".to_owned()),
+                updated_at_ms: Some(1_784_181_600_000),
+                play_count: Some(120),
+                share_count: Some(3),
+                comment_count: Some(9),
+                supports_comments: Some(true),
+                extensions,
+            })
+        }
+
+        async fn dimension_chart_tracks(
+            &self,
+            request: &DimensionChartRequest,
+        ) -> Result<DimensionChartTrackSnapshot> {
+            let id = format!(
+                "{}#{}@{}#",
+                request.chart_code, request.target_id, request.target_type
+            );
+            let mut entry_extensions = tuneweave_core::Extensions::new();
+            entry_extensions.insert(
+                "target_url".to_owned(),
+                json!("https://example.test/reason"),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(DimensionChartTrackSnapshot {
+                chart_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test chart reference"),
+                chart_code: request.chart_code.clone(),
+                target_id: request.target_id.clone(),
+                target_type: request.target_type.clone(),
+                entries: vec![DimensionChartTrackEntry {
+                    rank: 1,
+                    previous_rank: Some(4),
+                    rank_change: Some(3),
+                    track: sample_track("185809"),
+                    reason: Some("城市流行热度上升".to_owned()),
+                    reason_id: Some("17".to_owned()),
+                    score: Some(98.5),
+                    ratio: Some(0.98),
+                    collected: Some(false),
+                    extensions: entry_extensions,
+                }],
+                period_label: Some("每周更新".to_owned()),
+                groups: BTreeMap::from([
+                    ("CITY".to_owned(), "城市".to_owned()),
+                    ("1020".to_owned(), "流行".to_owned()),
+                ]),
+                extensions,
             })
         }
 
@@ -4867,6 +5004,63 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(invalid_year["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn dimension_chart_detail_accepts_reference_parameter_aliases() {
+        let (status, chart) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/dimensions/CITY_SONG_CHART?platform=netease&account=vip&targetId=110000&targetType=CITY",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(chart["data"]["ref"], "netease:CITY_SONG_CHART#110000@CITY#");
+        assert_eq!(chart["data"]["chart_code"], "CITY_SONG_CHART");
+        assert_eq!(chart["data"]["target_id"], "110000");
+        assert_eq!(chart["data"]["target_type"], "CITY");
+        assert_eq!(chart["data"]["name"], "北京榜");
+        assert_eq!(chart["data"]["extensions"]["account"], "vip");
+        assert_eq!(chart["meta"]["platform"], "netease");
+        assert_eq!(chart["meta"]["account"], "vip");
+        assert!(chart["meta"].get("pagination").is_none());
+    }
+
+    #[tokio::test]
+    async fn dimension_chart_tracks_return_a_complete_unpaginated_snapshot() {
+        let (status, chart) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/dimensions/CITY_STYLE_SONG_CHART/tracks?platform=netease&account=vip&target_id=110000_1020&target_type=CITY_STYLE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            chart["data"]["chart_ref"],
+            "netease:CITY_STYLE_SONG_CHART#110000_1020@CITY_STYLE#"
+        );
+        assert_eq!(chart["data"]["entries"][0]["rank"], 1);
+        assert_eq!(chart["data"]["entries"][0]["previous_rank"], 4);
+        assert_eq!(chart["data"]["entries"][0]["rank_change"], 3);
+        assert_eq!(
+            chart["data"]["entries"][0]["track"]["ref"],
+            "netease:185809"
+        );
+        assert_eq!(chart["data"]["entries"][0]["reason_id"], "17");
+        assert_eq!(chart["data"]["groups"]["1020"], "流行");
+        assert_eq!(chart["data"]["period_label"], "每周更新");
+        assert_eq!(chart["data"]["extensions"]["account"], "vip");
+        assert!(chart["meta"].get("pagination").is_none());
+    }
+
+    #[tokio::test]
+    async fn dimension_chart_rejects_missing_dimension_parameters() {
+        for path in [
+            "/v1/charts/dimensions/CITY_SONG_CHART?target_type=CITY",
+            "/v1/charts/dimensions/CITY_SONG_CHART?target_id=110000",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
     }
 
     #[tokio::test]
