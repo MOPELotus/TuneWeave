@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=315`、`partial=5`、`implemented=33`、`verified=54`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=313`、`partial=5`、`implemented=33`、`verified=56`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -266,8 +266,8 @@
 | `scrobble_v1` | `/scrobble/v1` | `pending` | — |
 | `search` | `/search` | `verified` | `GET /v1/search?variant=legacy`（与 `/cloudsearch` 共用统一端点和 `SearchItem` 判别联合，通过 `variant` 选择参考后端；完整支持 `keywords/q`、`limit/offset` 和全部参考类型 `1/10/100/1000/1002/1004/1006/1009/1014/1018/2000`，普通 10 类固定 EAPI `/api/search/get` 并提交 `s/type/limit/offset`，声音类型精确切换 EAPI `/api/search/voice/get` 并提交 `keyword/scene=normal/limit/offset`，不混入新版 `total=true`；旧声音的 `data.resources/totalCount/hasMore` 与普通 `result` 都进入统一分页，已知实体规范化、综合/声音及异常结构不丢失原文；核心 `default/legacy/cloud` 契约、两套协议负载、11 类型、旧声音形状、服务端别名/错误和分页后端标记均有测试；2026-07-17 显式 provider 联网测试与真实二进制统一 HTTP 逐类验证 11 种类型全部上游 `code=200`，1/10/100/1000/1002/1004/1006 各返回请求的 2 项，1009 按上游行为返回 30 项并标记 `limit_applied=false`，1014 合法空结果、1018 返回完整 opaque 综合块、2000 走声音路径并保留 `total=569`） |
 | `search_default` | `/search/default` | `verified` | `GET /v1/search/default`（统一支持 `platform/account`，缺省使用服务默认平台和 `default` 会话；固定 EAPI `/api/search/defaultkeyword/get` 空负载，将 `realkeyword/showKeyword/searchType/imageUrl` 映射为实际 `keyword`、展示 `display_text`、可选 `SearchKind` 和图片，展示词缺失时依次回退 `styleKeyword.keyWord` 与真实词，未知搜索类型保持 `null` 而不猜测；算法、样式、业务意图和完整响应保留在扩展，缺失 `data` 或实际关键词返回稳定 `upstream_error`；核心序列化、协议负载、主/回退字段、未知类型、畸形响应、能力发现、平台/账户/default 选择及 HTTP 错误均有测试；2026-07-17 显式 provider 联网测试和真实二进制统一 HTTP 均返回上游 `code=200`，当前实际词“周旋”、展示文案“🔥周旋 最近很火哦”、`kind=track`） |
-| `search_hot` | `/search/hot` | `pending` | — |
-| `search_hot_detail` | `/search/hot/detail` | `pending` | — |
+| `search_hot` | `/search/hot` | `verified` | `GET /v1/search/trending?detail=brief`（统一以 `platform/account` 选择平台和隔离会话，固定 EAPI `/api/search/hot` 并精确提交 `type=1111`；映射 `result.hots[{first,second,third,iconType}]` 为从 1 开始的 `SearchTrendingEntry[]`，`first` 是稳定关键词、可用 `third` 为说明、`iconType` 保留图标类型，不把语义不明的 `second` 伪装成分数，列表和条目原文完整保留；协议、字段、顺序、缺失数组/关键词、能力发现、统一端点别名和错误均有测试；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 均返回上游 `code=200` 和 10 项，首项 rank 1“薛之谦”、`icon_type=1`） |
+| `search_hot_detail` | `/search/hot/detail` | `verified` | `GET /v1/search/trending?detail=full`（与简略榜共用统一模型，缺省即详细模式；固定 WeAPI `/api/hotsearchlist/get` 空负载，将 `data[{searchWord,score,content,iconType,iconUrl,url}]` 映射为排名、关键词、分数、说明和图标/目标地址，空字符串保持可空字段，`alg/source` 等完整原文不丢失；完整覆盖 `detail=full/detail/detailed`、`mode` 别名、默认平台/账户和输入拒绝；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 均返回上游 `code=200` 和 20 项，首项 rank 1“薛之谦”、`score=107509`、`icon_type=4`） |
 | `search_match` | `/search/match` | `pending` | — |
 | `search_multimatch` | `/search/multimatch` | `pending` | — |
 | `search_suggest` | `/search/suggest` | `pending` | — |
