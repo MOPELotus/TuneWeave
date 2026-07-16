@@ -25,7 +25,8 @@ use tuneweave_core::{
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
     ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
+    User, Video, VideoKind,
 };
 
 use crate::{
@@ -287,6 +288,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
             Capability::TrackDetail,
+            Capability::TrackAvailability,
             Capability::AlbumDetail,
             Capability::AlbumList,
             Capability::AlbumStats,
@@ -527,6 +529,25 @@ impl MusicProvider for NeteaseProvider {
         })?;
         let privilege = privileges.remove(&song.id);
         map_song(song, privilege)
+    }
+
+    async fn track_availability(
+        &self,
+        id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let id = parse_numeric_id("track", id)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_weapi(
+                "/api/song/enhance/player/url",
+                json!({
+                    "ids": format!("[{id}]"),
+                    "br": request.bitrate
+                }),
+            )
+            .await?;
+        map_track_availability(id, request.bitrate, response.body)
     }
 
     async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
@@ -2883,6 +2904,62 @@ fn map_stream(
         match_score: Some(1.0),
         attempts: Vec::new(),
     })
+}
+
+fn map_track_availability(
+    id: u64,
+    requested_bitrate: u64,
+    response: Value,
+) -> Result<TrackAvailability> {
+    ensure_success(&response)?;
+    let mut safe_response = response.clone();
+    sanitize_player_urls(&mut safe_response);
+    let response: StreamEnvelope = parse_body(response)?;
+    let stream = response
+        .data
+        .into_iter()
+        .find(|stream| stream.id == id)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase omitted the requested availability result",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "id": id }))
+        })?;
+    let playable = stream.code == Some(200);
+    let track_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid availability track id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), safe_response);
+    Ok(TrackAvailability {
+        track_ref,
+        playable,
+        requested_bitrate,
+        actual_bitrate: stream.br.filter(|bitrate| *bitrate > 0),
+        platform_code: stream.code,
+        message: if playable {
+            "ok".to_owned()
+        } else {
+            "亲爱的,暂无版权".to_owned()
+        },
+        extensions,
+    })
+}
+
+fn sanitize_player_urls(response: &mut Value) {
+    if let Some(items) = response.get_mut("data").and_then(Value::as_array_mut) {
+        for item in items {
+            if let Some(item) = item.as_object_mut() {
+                item.insert("url".to_owned(), Value::Null);
+            }
+        }
+    }
 }
 
 fn stream_unavailable(stream: &StreamData, authenticated: bool) -> TuneWeaveError {
@@ -6715,6 +6792,14 @@ mod tests {
             .await
             .expect_err("invalid album id");
         assert_eq!(detail_error.code, ErrorCode::InvalidRequest);
+        let availability_error = MusicProvider::track_availability(
+            &provider,
+            "invalid",
+            &TrackAvailabilityRequest::default(),
+        )
+        .await
+        .expect_err("invalid track availability id");
+        assert_eq!(availability_error.code, ErrorCode::InvalidRequest);
         let tracks_error =
             MusicProvider::album_tracks(&provider, "invalid", &PageRequest::new(30, 0))
                 .await
@@ -7033,6 +7118,71 @@ mod tests {
     }
 
     #[test]
+    fn maps_track_availability_without_leaking_the_temporary_player_url() {
+        let available = map_track_availability(
+            1_969_519_579,
+            999_000,
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 1969519579_u64,
+                    "url": "https://example.test/temporary.mp3",
+                    "br": 320000,
+                    "size": 8798445,
+                    "code": 200,
+                    "type": "mp3",
+                    "level": "exhigh",
+                    "encodeType": "mp3",
+                    "fee": 8,
+                    "payed": 0,
+                    "freeTrialInfo": null,
+                    "freeTimeTrialPrivilege": {"remainTime": 0, "type": 0}
+                }]
+            }),
+        )
+        .expect("map playable availability");
+        assert_eq!(available.track_ref.to_string(), "netease:1969519579");
+        assert!(available.playable);
+        assert_eq!(available.requested_bitrate, 999_000);
+        assert_eq!(available.actual_bitrate, Some(320_000));
+        assert_eq!(available.platform_code, Some(200));
+        assert_eq!(available.message, "ok");
+        assert_eq!(
+            available.extensions["response"]["data"][0]["url"],
+            Value::Null
+        );
+        assert_eq!(
+            available.extensions["response"]["data"][0]["freeTimeTrialPrivilege"]["type"],
+            0
+        );
+
+        let unavailable = map_track_availability(
+            1,
+            128_000,
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 1,
+                    "url": null,
+                    "br": 0,
+                    "size": 0,
+                    "code": 404,
+                    "type": null,
+                    "level": null,
+                    "encodeType": null,
+                    "fee": 0,
+                    "freeTrialInfo": null
+                }]
+            }),
+        )
+        .expect("map unavailable result as data");
+        assert!(!unavailable.playable);
+        assert_eq!(unavailable.actual_bitrate, None);
+        assert_eq!(unavailable.platform_code, Some(404));
+        assert_eq!(unavailable.message, "亲爱的,暂无版权");
+    }
+
+    #[test]
     fn reports_missing_paid_stream_as_authentication_required() {
         let track = Track::new(
             ResourceRef::new(Platform::Netease, "123").expect("track reference"),
@@ -7139,6 +7289,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AlbumList));
         assert!(capabilities.contains(&Capability::AlbumStats));
         assert!(capabilities.contains(&Capability::AlbumTrackEntitlements));
+        assert!(capabilities.contains(&Capability::TrackAvailability));
         assert!(capabilities.contains(&Capability::AlbumSubscriptionWrite));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
@@ -8588,5 +8739,29 @@ mod tests {
         assert!(stream.url.starts_with("http"));
         assert_eq!(stream.resolved_track.to_string(), "netease:2709812973");
         assert!(stream.bitrate.is_some_and(|bitrate| bitrate > 0));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_track_availability_covers_playable_and_unavailable_results() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = TrackAvailabilityRequest::default();
+        let available = MusicProvider::track_availability(&provider, "1969519579", &request)
+            .await
+            .expect("live playable availability");
+        assert!(available.playable);
+        assert_eq!(available.platform_code, Some(200));
+        assert!(available.actual_bitrate.is_some_and(|bitrate| bitrate > 0));
+        assert_eq!(
+            available.extensions["response"]["data"][0]["url"],
+            Value::Null
+        );
+
+        let unavailable = MusicProvider::track_availability(&provider, "1", &request)
+            .await
+            .expect("live unavailable result");
+        assert!(!unavailable.playable);
+        assert_eq!(unavailable.platform_code, Some(404));
+        assert_eq!(unavailable.actual_bitrate, None);
     }
 }
