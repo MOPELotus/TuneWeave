@@ -282,6 +282,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioTaxonomy,
             Capability::RadioStationDetail,
             Capability::RadioStationList,
+            Capability::RadioStationSubscriptionWrite,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -475,6 +476,24 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_success(&response.body)?;
         map_radio_station_list_response(response.body, request)
+    }
+
+    async fn set_radio_station_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let id = parse_numeric_id("broadcast station", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_eapi(
+                "/api/content/interact/collect",
+                netease_radio_station_subscription_payload(id, subscribed),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "broadcast station subscription")?;
+        map_radio_station_subscription_result(id, subscribed, response.body)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1938,6 +1957,14 @@ fn map_radio_catalog_option(raw: Value, kind: &str) -> Result<RadioCatalogOption
         id,
         name,
         extensions,
+    })
+}
+
+fn netease_radio_station_subscription_payload(id: u64, subscribed: bool) -> Value {
+    json!({
+        "contentType": "BROADCAST",
+        "contentId": id.to_string(),
+        "cancelCollect": if subscribed { "false" } else { "true" }
     })
 }
 
@@ -4373,6 +4400,27 @@ fn map_artist_subscription_result(
     })
 }
 
+fn map_radio_station_subscription_result(
+    id: u64,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid broadcast station id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -4947,6 +4995,44 @@ mod tests {
         let error = map_radio_station_response(json!({ "code": 200, "data": {} }))
             .expect_err("missing broadcast station id");
         assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn builds_and_maps_broadcast_station_subscription_actions() {
+        assert_eq!(
+            netease_radio_station_subscription_payload(362, true),
+            json!({
+                "contentType": "BROADCAST",
+                "contentId": "362",
+                "cancelCollect": "false"
+            })
+        );
+        assert_eq!(
+            netease_radio_station_subscription_payload(362, false),
+            json!({
+                "contentType": "BROADCAST",
+                "contentId": "362",
+                "cancelCollect": "true"
+            })
+        );
+
+        let subscribed = map_radio_station_subscription_result(
+            362,
+            true,
+            json!({ "code": 200, "message": "success" }),
+        )
+        .expect("map broadcast subscription");
+        assert_eq!(subscribed.resource_ref.to_string(), "netease:362");
+        assert!(subscribed.subscribed);
+        assert_eq!(subscribed.extensions["response"]["code"], 200);
+
+        let unsubscribed = map_radio_station_subscription_result(
+            362,
+            false,
+            json!({ "code": 200, "message": "success" }),
+        )
+        .expect("map broadcast unsubscription");
+        assert!(!unsubscribed.subscribed);
     }
 
     #[test]
@@ -6249,6 +6335,11 @@ mod tests {
             .await
             .expect_err("invalid broadcast station id");
         assert_eq!(radio_error.code, ErrorCode::InvalidRequest);
+        let radio_subscription_error =
+            MusicProvider::set_radio_station_subscription(&provider, "invalid", true, None)
+                .await
+                .expect_err("invalid broadcast station subscription id");
+        assert_eq!(radio_subscription_error.code, ErrorCode::InvalidRequest);
         let detail_error = MusicProvider::album(&provider, "invalid", None)
             .await
             .expect_err("invalid album id");
@@ -6684,6 +6775,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
         assert!(capabilities.contains(&Capability::RadioStationDetail));
         assert!(capabilities.contains(&Capability::RadioStationList));
+        assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
     }
 
     #[test]
@@ -6915,6 +7007,22 @@ mod tests {
         .await
         .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn radio_station_subscription_requires_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for subscribed in [true, false] {
+            let error = MusicProvider::set_radio_station_subscription(
+                &provider,
+                "362",
+                subscribed,
+                Some("missing"),
+            )
+            .await
+            .expect_err("missing account alias");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
     }
 
     #[tokio::test]
@@ -7776,6 +7884,19 @@ mod tests {
             .await
             .expect_err("anonymous broadcast station collection must fail");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_broadcast_station_subscription_actions_require_authentication() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for subscribed in [true, false] {
+            let error =
+                MusicProvider::set_radio_station_subscription(&provider, "362", subscribed, None)
+                    .await
+                    .expect_err("anonymous broadcast station subscription must fail");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
     }
 
     #[tokio::test]
