@@ -2,7 +2,7 @@
 
 上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@321c25bd7d041711f1a9ab9e4b55997ce661313c`
 
-本表由该快照的 `module/*.js` 文件生成，共 407 项。它是完成度验收清单，不是功能推荐列表；实际实施优先级见 [`docs/implementation-plan.md`](../implementation-plan.md)。状态含义：
+本表由该快照的 `module/*.js` 文件生成，共 407 项。它是完成度验收清单，不是功能推荐列表；实际实施优先级见 [`docs/implementation-plan.md`](../implementation-plan.md)，网易云 Basic 的独立聚合进度见 [`netease-basic.md`](netease-basic.md)。状态含义：
 
 - `pending`：尚未完成统一映射或平台扩展端点。
 - `partial`：已有一部分统一能力，但仍缺输入、输出、分支或真实验证。
