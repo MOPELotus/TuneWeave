@@ -13,12 +13,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
-    ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview,
-    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry,
+    ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CloudImportRequest,
+    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog,
+    ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
@@ -53,14 +55,16 @@ use crate::{
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
-        AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
-        ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
-        ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
-        ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
-        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
-        ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
-        ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality, BannerEnvelope,
-        BroadcastTaxonomyEnvelope, CloudUploadAllocationEnvelope, CloudUploadServersEnvelope,
+        AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistChartEnvelope, ArtistDescriptionEnvelope,
+        ArtistDetailEnvelope, ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope,
+        ArtistFollowCountEnvelope, ArtistListEnvelope, ArtistListItem, ArtistMvItem,
+        ArtistMvsEnvelope, ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope,
+        ArtistNewVideoItem, ArtistNewVideosEnvelope, ArtistNewWorksEnvelope,
+        ArtistOverviewEnvelope, ArtistSublistEnvelope, ArtistTopTracksEnvelope,
+        ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
+        AudioMatchEnvelope, AudioQuality, BannerEnvelope, BroadcastTaxonomyEnvelope,
+        ChartCatalogEnvelope, ChartGroupItem, ChartItem, ChartRankPreviewItem,
+        ChartTextPreviewItem, CloudUploadAllocationEnvelope, CloudUploadServersEnvelope,
         DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
         DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
         DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
@@ -335,6 +339,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
+            Capability::ChartCatalog,
+            Capability::ArtistCharts,
             Capability::DimensionCharts,
             Capability::ArtistDetail,
             Capability::ArtistOverview,
@@ -931,6 +937,46 @@ impl MusicProvider for NeteaseProvider {
             .collect::<Result<Vec<_>>>()?;
         let (items, pagination) = select_page(items, limit, request.offset);
         Ok(Page { items, pagination })
+    }
+
+    async fn chart_catalog(&self, request: &ChartCatalogRequest) -> Result<ChartCatalog> {
+        let client = self.client_for(request.account.as_deref())?;
+        let response = match request.view {
+            ChartCatalogView::Overview => client.request_eapi("/api/toplist", json!({})).await?,
+            ChartCatalogView::Summary => {
+                client
+                    .request_weapi("/api/toplist/detail", json!({}))
+                    .await?
+            }
+            ChartCatalogView::Modern => {
+                client
+                    .request_weapi("/api/toplist/detail/v2", json!({}))
+                    .await?
+            }
+        };
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: ChartCatalogEnvelope = parse_body(response.body)?;
+        map_chart_catalog(response, request.view, raw_response)
+    }
+
+    async fn artist_chart(&self, request: &ArtistChartRequest) -> Result<ArtistChart> {
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_weapi(
+                "/api/toplist/artist",
+                json!({
+                    "type": netease_artist_chart_area(request.area),
+                    "limit": 100,
+                    "offset": 0,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: ArtistChartEnvelope = parse_body(response.body)?;
+        map_artist_chart(response, request.area, raw_response)
     }
 
     async fn dimension_chart(&self, request: &DimensionChartRequest) -> Result<DimensionChart> {
@@ -5102,6 +5148,15 @@ fn netease_digital_album_chart_request(
     ))
 }
 
+const fn netease_artist_chart_area(area: ArtistChartArea) -> u8 {
+    match area {
+        ArtistChartArea::Chinese => 1,
+        ArtistChartArea::Western => 2,
+        ArtistChartArea::Korean => 3,
+        ArtistChartArea::Japanese => 4,
+    }
+}
+
 fn netease_dimension_chart_payload(request: &DimensionChartRequest) -> Result<Value> {
     let (chart_code, target_id, target_type) = validated_dimension_chart_parts(request)?;
     Ok(json!({
@@ -7180,6 +7235,238 @@ fn map_digital_album_chart_entry(raw: Value, position: u32) -> Result<DigitalAlb
         product: map_digital_album_list_item(raw)?,
         extensions,
     })
+}
+
+fn map_chart_catalog(
+    response: ChartCatalogEnvelope,
+    view: ChartCatalogView,
+    raw_response: Value,
+) -> Result<ChartCatalog> {
+    let groups = match view {
+        ChartCatalogView::Modern => response
+            .data
+            .into_iter()
+            .map(map_chart_group)
+            .collect::<Result<Vec<_>>>()?,
+        ChartCatalogView::Overview | ChartCatalogView::Summary => {
+            let charts = response
+                .list
+                .into_iter()
+                .map(map_chart)
+                .collect::<Result<Vec<_>>>()?;
+            vec![ChartGroup {
+                code: None,
+                name: "all".to_owned(),
+                display_type: None,
+                target_url: None,
+                charts,
+                extensions: Extensions::new(),
+            }]
+        }
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(ChartCatalog {
+        platform: Platform::Netease,
+        view,
+        groups,
+        extensions,
+    })
+}
+
+fn map_chart_group(raw: Value) -> Result<ChartGroup> {
+    let group: ChartGroupItem = parse_body(raw.clone())?;
+    let charts = group
+        .list
+        .into_iter()
+        .map(map_chart)
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("group".to_owned(), raw);
+    Ok(ChartGroup {
+        code: normalized_string(group.category_code),
+        name: group.name,
+        display_type: normalized_string(group.display_type.or(group.front_display_type)),
+        target_url: normalized_string(group.target_url),
+        charts,
+        extensions,
+    })
+}
+
+fn map_chart(raw: Value) -> Result<Chart> {
+    let item: ChartItem = parse_body(raw.clone())?;
+    let id = item.id.and_then(scalar_string);
+    let target_kind = normalized_string(item.target_type).map(|value| value.to_ascii_lowercase());
+    let has_track_target = target_kind
+        .as_deref()
+        .is_none_or(|target| target.eq_ignore_ascii_case("playlist"));
+    let resource_ref = if has_track_target {
+        id.as_deref()
+            .filter(|id| *id != "0")
+            .map(|id| chart_resource_ref(id, "chart"))
+            .transpose()?
+    } else {
+        None
+    };
+    let previews = map_chart_previews(item.track_rank_list, item.tracks)?;
+    let cover_url = [
+        item.cover_url,
+        item.cover_img_url,
+        item.first_cover_url,
+        item.new_first_cover_url,
+    ]
+    .into_iter()
+    .find_map(normalized_string);
+    let target_url = normalized_string(item.target_url.or(item.front_target_url));
+    let mut extensions = Extensions::new();
+    extensions.insert("chart".to_owned(), raw);
+    Ok(Chart {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        name: item.name,
+        description: item.description.unwrap_or_default(),
+        cover_url,
+        update_frequency: normalized_string(item.update_frequency),
+        updated_at_ms: item.update_time,
+        track_count: item.track_count,
+        play_count: item.play_count,
+        subscribed: item.subscribed,
+        playable: item.can_play,
+        target_kind,
+        target_url,
+        previews,
+        extensions,
+    })
+}
+
+fn map_chart_previews(
+    ranked: Option<Vec<Value>>,
+    textual: Option<Vec<Value>>,
+) -> Result<Vec<ChartTrackPreview>> {
+    let ranked = ranked.unwrap_or_default();
+    if !ranked.is_empty() {
+        return ranked.into_iter().map(map_chart_rank_preview).collect();
+    }
+    textual
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| map_chart_text_preview(raw, index))
+        .collect()
+}
+
+fn map_chart_rank_preview(raw: Value) -> Result<ChartTrackPreview> {
+    let item: ChartRankPreviewItem = parse_body(raw.clone())?;
+    let rank = item.rank;
+    let previous_rank = item.last_rank.filter(|rank| *rank > 0);
+    let rank_change = rank
+        .zip(previous_rank)
+        .map(|(rank, previous)| i64::from(previous) - i64::from(rank));
+    let track_ref = item
+        .track_id
+        .and_then(scalar_string)
+        .filter(|id| id != "0")
+        .map(|id| chart_resource_ref(&id, "chart preview track"))
+        .transpose()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("preview".to_owned(), raw);
+    Ok(ChartTrackPreview {
+        rank,
+        previous_rank,
+        rank_change,
+        track_ref,
+        name: normalized_string(item.song_name.or(item.item_name)).unwrap_or_default(),
+        byline: normalized_string(item.artist_name),
+        cover_url: normalized_string(item.cover_url),
+        extensions,
+    })
+}
+
+fn map_chart_text_preview(raw: Value, index: usize) -> Result<ChartTrackPreview> {
+    let item: ChartTextPreviewItem = parse_body(raw.clone())?;
+    let mut extensions = Extensions::new();
+    extensions.insert("preview".to_owned(), raw);
+    Ok(ChartTrackPreview {
+        rank: Some(u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1)),
+        previous_rank: None,
+        rank_change: None,
+        track_ref: None,
+        name: normalized_string(item.first).unwrap_or_default(),
+        byline: normalized_string(item.second),
+        cover_url: None,
+        extensions,
+    })
+}
+
+fn map_artist_chart(
+    response: ArtistChartEnvelope,
+    area: ArtistChartArea,
+    raw_response: Value,
+) -> Result<ArtistChart> {
+    let updated_at_ms = response.list.update_time;
+    let entries = response
+        .list
+        .artists
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| map_artist_chart_entry(raw, index))
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(ArtistChart {
+        platform: Platform::Netease,
+        area,
+        updated_at_ms,
+        entries,
+        extensions,
+    })
+}
+
+fn map_artist_chart_entry(raw: Value, index: usize) -> Result<ArtistChartEntry> {
+    let rank = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
+    let previous_rank = raw
+        .get("lastRank")
+        .and_then(Value::as_u64)
+        .and_then(|rank| u32::try_from(rank).ok())
+        .filter(|rank| *rank > 0);
+    let rank_change = previous_rank.map(|previous| i64::from(previous) - i64::from(rank));
+    let score = raw.get("score").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    });
+    let mut artist = map_artist_list_item(raw.clone())?;
+    artist.extensions.remove("catalog_item");
+    artist
+        .extensions
+        .insert("artist_chart_item".to_owned(), raw.clone());
+    let mut extensions = Extensions::new();
+    extensions.insert("entry".to_owned(), raw);
+    Ok(ArtistChartEntry {
+        rank,
+        previous_rank,
+        rank_change,
+        score,
+        artist,
+        extensions,
+    })
+}
+
+fn chart_resource_ref(id: &str, kind: &str) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Netease, id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid {kind} id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+fn normalized_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn map_dimension_chart(
@@ -12366,6 +12653,215 @@ mod tests {
         let error =
             netease_digital_album_chart_request(&invalid).expect_err("year outside yearly chart");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn maps_classic_chart_catalog_and_text_previews_without_losing_raw_fields() {
+        let raw = json!({
+            "code": 200,
+            "artistToplist": {"id": 10520166, "name": "歌手榜"},
+            "rewardToplist": {"coverUrl": "https://example.test/reward.jpg"},
+            "list": [{
+                "id": 19723756,
+                "name": "飙升榜",
+                "coverImgUrl": "https://example.test/soaring.jpg",
+                "description": "每天热度上升最快的歌曲",
+                "updateFrequency": "每天更新",
+                "updateTime": 1_784_170_805_374_u64,
+                "trackCount": 100,
+                "playCount": 42_000,
+                "subscribed": false,
+                "ToplistType": "S",
+                "tracks": [
+                    {"first": "周旋", "second": "王以太/艾热 AIR"},
+                    {"first": "盛夏的果实", "second": "莫文蔚"}
+                ]
+            }]
+        });
+        let response: ChartCatalogEnvelope =
+            parse_body(raw.clone()).expect("classic chart catalog fixture");
+        let catalog = map_chart_catalog(response, ChartCatalogView::Summary, raw)
+            .expect("map classic chart catalog");
+
+        assert_eq!(catalog.view, ChartCatalogView::Summary);
+        assert_eq!(catalog.groups.len(), 1);
+        assert_eq!(catalog.groups[0].name, "all");
+        let chart = &catalog.groups[0].charts[0];
+        assert_eq!(
+            chart
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:19723756")
+        );
+        assert_eq!(
+            chart.cover_url.as_deref(),
+            Some("https://example.test/soaring.jpg")
+        );
+        assert_eq!(chart.track_count, Some(100));
+        assert_eq!(chart.previews[0].rank, Some(1));
+        assert_eq!(chart.previews[0].track_ref, None);
+        assert_eq!(chart.previews[0].name, "周旋");
+        assert_eq!(chart.previews[0].byline.as_deref(), Some("王以太/艾热 AIR"));
+        assert_eq!(chart.extensions["chart"]["ToplistType"], "S");
+        assert_eq!(
+            catalog.extensions["response"]["artistToplist"]["id"],
+            10520166
+        );
+        assert_eq!(
+            catalog.extensions["response"]["rewardToplist"]["coverUrl"],
+            "https://example.test/reward.jpg"
+        );
+    }
+
+    #[test]
+    fn maps_modern_grouped_charts_ranked_tracks_and_non_playlist_targets() {
+        let raw = json!({
+            "code": 200,
+            "data": [{
+                "categoryCode": "OFFICIAL",
+                "displayType": "HORIZONTAL",
+                "frontDisplayType": "CAROUSEL",
+                "name": "官方榜",
+                "targetUrl": "orpheus://toplist",
+                "list": [
+                    {
+                        "id": 19723756,
+                        "name": "飙升榜",
+                        "coverUrl": "https://example.test/soaring.jpg",
+                        "canPlay": true,
+                        "targetType": "PLAYLIST",
+                        "updateFrequency": "每天更新",
+                        "trackRankList": [
+                            {
+                                "trackId": 3404238777_u64,
+                                "songName": "周旋",
+                                "artistName": "王以太/艾热 AIR",
+                                "coverImgUrl": "https://example.test/song.jpg",
+                                "rank": 1,
+                                "lastRank": 5,
+                                "futureField": "kept"
+                            },
+                            {
+                                "trackId": 277382,
+                                "songName": "盛夏的果实",
+                                "artistName": "莫文蔚",
+                                "rank": 2,
+                                "lastRank": 0
+                            }
+                        ]
+                    },
+                    {
+                        "id": 0,
+                        "name": "实体专辑榜",
+                        "canPlay": false,
+                        "targetType": "H5",
+                        "targetUrl": "https://example.test/store",
+                        "toplistCode": "ALBUM_SELL_CHART##",
+                        "trackRankList": null,
+                        "tracks": null
+                    }
+                ]
+            }]
+        });
+        let response: ChartCatalogEnvelope =
+            parse_body(raw.clone()).expect("modern chart catalog fixture");
+        let catalog = map_chart_catalog(response, ChartCatalogView::Modern, raw)
+            .expect("map modern chart catalog");
+
+        let group = &catalog.groups[0];
+        assert_eq!(group.code.as_deref(), Some("OFFICIAL"));
+        assert_eq!(group.name, "官方榜");
+        assert_eq!(group.display_type.as_deref(), Some("HORIZONTAL"));
+        assert_eq!(group.extensions["group"]["frontDisplayType"], "CAROUSEL");
+        let chart = &group.charts[0];
+        assert_eq!(
+            chart
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:19723756")
+        );
+        assert_eq!(chart.target_kind.as_deref(), Some("playlist"));
+        assert_eq!(chart.previews[0].rank, Some(1));
+        assert_eq!(chart.previews[0].previous_rank, Some(5));
+        assert_eq!(chart.previews[0].rank_change, Some(4));
+        assert_eq!(
+            chart.previews[0]
+                .track_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:3404238777")
+        );
+        assert_eq!(
+            chart.previews[0].extensions["preview"]["futureField"],
+            "kept"
+        );
+        assert_eq!(chart.previews[1].previous_rank, None);
+        assert_eq!(chart.previews[1].rank_change, None);
+        let external = &group.charts[1];
+        assert_eq!(external.id.as_deref(), Some("0"));
+        assert_eq!(external.resource_ref, None);
+        assert_eq!(external.playable, Some(false));
+        assert_eq!(external.target_kind.as_deref(), Some("h5"));
+        assert_eq!(
+            external.target_url.as_deref(),
+            Some("https://example.test/store")
+        );
+    }
+
+    #[test]
+    fn maps_all_artist_chart_areas_rank_changes_and_artist_metadata() {
+        assert_eq!(netease_artist_chart_area(ArtistChartArea::Chinese), 1);
+        assert_eq!(netease_artist_chart_area(ArtistChartArea::Western), 2);
+        assert_eq!(netease_artist_chart_area(ArtistChartArea::Korean), 3);
+        assert_eq!(netease_artist_chart_area(ArtistChartArea::Japanese), 4);
+
+        let raw = json!({
+            "code": 200,
+            "list": {
+                "type": 2,
+                "updateTime": 1_784_170_805_374_u64,
+                "artists": [{
+                    "id": 3684,
+                    "name": "林俊杰",
+                    "alias": ["JJ Lin", "Wayne Lim"],
+                    "trans": "",
+                    "briefDesc": "歌手简介",
+                    "img1v1Url": "https://example.test/avatar.jpg",
+                    "picUrl": "https://example.test/cover.jpg",
+                    "albumSize": 73,
+                    "musicSize": 598,
+                    "lastRank": 5,
+                    "score": 63_562_038,
+                    "topicPerson": 40_831
+                }]
+            }
+        });
+        let response: ArtistChartEnvelope = parse_body(raw.clone()).expect("artist chart fixture");
+        let chart =
+            map_artist_chart(response, ArtistChartArea::Western, raw).expect("map artist chart");
+
+        assert_eq!(chart.area, ArtistChartArea::Western);
+        assert_eq!(chart.updated_at_ms, Some(1_784_170_805_374));
+        assert_eq!(chart.entries[0].rank, 1);
+        assert_eq!(chart.entries[0].previous_rank, Some(5));
+        assert_eq!(chart.entries[0].rank_change, Some(4));
+        assert_eq!(chart.entries[0].score, Some(63_562_038));
+        assert_eq!(
+            chart.entries[0].artist.resource_ref.to_string(),
+            "netease:3684"
+        );
+        assert_eq!(chart.entries[0].artist.aliases, ["JJ Lin", "Wayne Lim"]);
+        assert_eq!(chart.entries[0].artist.album_count, Some(73));
+        assert_eq!(
+            chart.entries[0].artist.extensions["artist_chart_item"]["topicPerson"],
+            40_831
+        );
+        assert_eq!(chart.extensions["response"]["list"]["type"], 2);
     }
 
     #[test]

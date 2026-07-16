@@ -654,6 +654,102 @@ pub(crate) struct DigitalAlbumChartItem {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ChartCatalogEnvelope {
+    #[serde(default)]
+    pub list: Vec<Value>,
+    #[serde(default)]
+    pub data: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartGroupItem {
+    #[serde(rename = "categoryCode")]
+    pub category_code: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "displayType")]
+    pub display_type: Option<String>,
+    #[serde(rename = "frontDisplayType")]
+    pub front_display_type: Option<String>,
+    #[serde(rename = "targetUrl")]
+    pub target_url: Option<String>,
+    #[serde(default)]
+    pub list: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartItem {
+    pub id: Option<Value>,
+    #[serde(default)]
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(rename = "coverImgUrl")]
+    pub cover_img_url: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+    #[serde(rename = "firstCoverUrl")]
+    pub first_cover_url: Option<String>,
+    #[serde(rename = "newFirstCoverUrl")]
+    pub new_first_cover_url: Option<String>,
+    #[serde(rename = "updateFrequency")]
+    pub update_frequency: Option<String>,
+    #[serde(rename = "updateTime")]
+    pub update_time: Option<u64>,
+    #[serde(rename = "trackCount")]
+    pub track_count: Option<u64>,
+    #[serde(rename = "playCount")]
+    pub play_count: Option<u64>,
+    pub subscribed: Option<bool>,
+    #[serde(rename = "canPlay")]
+    pub can_play: Option<bool>,
+    #[serde(rename = "targetType")]
+    pub target_type: Option<String>,
+    #[serde(rename = "targetUrl")]
+    pub target_url: Option<String>,
+    #[serde(rename = "frontTargetUrl")]
+    pub front_target_url: Option<String>,
+    pub tracks: Option<Vec<Value>>,
+    #[serde(rename = "trackRankList")]
+    pub track_rank_list: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartTextPreviewItem {
+    pub first: Option<String>,
+    pub second: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartRankPreviewItem {
+    #[serde(rename = "trackId")]
+    pub track_id: Option<Value>,
+    #[serde(rename = "songName")]
+    pub song_name: Option<String>,
+    #[serde(rename = "itemName")]
+    pub item_name: Option<String>,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(rename = "coverImgUrl")]
+    pub cover_url: Option<String>,
+    pub rank: Option<u32>,
+    #[serde(rename = "lastRank")]
+    pub last_rank: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistChartEnvelope {
+    pub list: ArtistChartList,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistChartList {
+    #[serde(default)]
+    pub artists: Vec<Value>,
+    #[serde(rename = "updateTime")]
+    pub update_time: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct DimensionChartDetailEnvelope {
     pub data: DimensionChartDetailData,
 }
