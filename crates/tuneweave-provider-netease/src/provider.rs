@@ -29,7 +29,8 @@ use crate::{
         LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
         PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
         RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -280,6 +281,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SessionManagement,
             Capability::AccountProfile,
             Capability::AccountPlaylists,
+            Capability::AccountAlbums,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -635,6 +637,24 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: UserPlaylistsEnvelope = parse_body(response.body)?;
         map_user_playlists(response, limit, request.offset)
+    }
+
+    async fn account_albums(&self, request: &PageRequest) -> Result<Page<Album>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.clamp(1, 100);
+        let response = client
+            .request_weapi(
+                "/api/album/sublist",
+                json!({
+                    "limit": limit,
+                    "offset": request.offset,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        map_subscribed_albums_response(response.body, request, limit)
     }
 
     async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
@@ -1151,6 +1171,48 @@ fn map_user_playlists(
             next_offset: response.more.then_some(next_offset),
             has_more: response.more,
             extensions: Default::default(),
+        },
+    })
+}
+
+fn map_subscribed_albums_response(
+    raw: Value,
+    request: &PageRequest,
+    limit: u32,
+) -> Result<Page<Album>> {
+    let response: SubscribedAlbumsEnvelope = parse_body(raw.clone())?;
+    let items = response
+        .data
+        .into_iter()
+        .map(|raw| {
+            let mut album = map_album_list_item(raw.clone())?;
+            album.extensions.remove("catalog_item");
+            album.extensions.insert("subscription_item".to_owned(), raw);
+            Ok(album)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let has_more = response.has_more.unwrap_or_else(|| {
+        response
+            .count
+            .map_or(consumed == limit, |total| u64::from(next_offset) < total)
+    });
+    let mut metadata = raw;
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("data");
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), metadata);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: request.offset,
+            total: response.count,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions,
         },
     })
 }
@@ -2731,6 +2793,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
+        assert!(capabilities.contains(&Capability::AccountAlbums));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
@@ -2821,6 +2884,22 @@ mod tests {
             &provider,
             &PageRequest {
                 limit: 30,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn account_albums_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_albums(
+            &provider,
+            &PageRequest {
+                limit: 25,
                 offset: 0,
                 account: Some("missing".to_owned()),
             },
@@ -3046,6 +3125,50 @@ mod tests {
         assert!(page.pagination.has_more);
     }
 
+    #[test]
+    fn maps_account_albums_and_preserves_list_metadata() {
+        let raw = json!({
+            "code": 200,
+            "data": [{
+                "id": 32311,
+                "name": "The Mass",
+                "alias": [],
+                "artists": [{"id": 5197, "name": "Era"}],
+                "picUrl": "https://example.test/album.jpg",
+                "publishTime": 1072886400000_u64,
+                "size": 10,
+                "company": "Universal Music",
+                "type": "专辑",
+                "subTime": 1704067200000_u64
+            }],
+            "count": 1,
+            "hasMore": false,
+            "paidCount": 0
+        });
+        let page = map_subscribed_albums_response(
+            raw,
+            &PageRequest {
+                limit: 25,
+                offset: 0,
+                account: Some("collector".to_owned()),
+            },
+            25,
+        )
+        .expect("map subscribed albums");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:32311");
+        assert_eq!(page.items[0].artists[0].name, "Era");
+        assert_eq!(
+            page.items[0].extensions["subscription_item"]["subTime"],
+            1704067200000_u64
+        );
+        assert_eq!(page.pagination.total, Some(1));
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["response"]["paidCount"], 0);
+        assert!(page.pagination.extensions["response"].get("data").is_none());
+    }
+
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_provider_search_and_track_detail() {
@@ -3172,6 +3295,16 @@ mod tests {
         let error = MusicProvider::set_album_subscription(&provider, "32311", true, None)
             .await
             .expect_err("anonymous album subscription must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_account_albums_require_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_albums(&provider, &PageRequest::new(2, 0))
+            .await
+            .expect_err("anonymous subscribed albums must fail");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
