@@ -29,6 +29,7 @@ use tuneweave_core::{
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest, CommentReactionPage,
     CommentSort, CommentTarget, CommentTargetKind, CommentWriteRequest, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -232,6 +233,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/resources/{kind}/{reference}/comments/{comment_id}/replies",
             post(comment_reply),
+        )
+        .route(
+            "/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
+            get(comment_reaction_list),
         )
         .route(
             "/users/{reference}/favorites/tracks",
@@ -2510,6 +2515,98 @@ async fn comment_list(
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct CommentReactionListQuery {
+    account: Option<String>,
+    #[serde(alias = "targetUserRef")]
+    target_user_ref: Option<String>,
+    #[serde(alias = "targetUserId", alias = "uid")]
+    target_user_id: Option<String>,
+    #[serde(alias = "pageSize")]
+    limit: Option<String>,
+    #[serde(alias = "pageNo")]
+    page: Option<String>,
+    cursor: Option<String>,
+    #[serde(alias = "idCursor")]
+    id_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CommentReactionPageData {
+    target: CommentTarget,
+    comment_id: String,
+    target_user_ref: ResourceRef,
+    kind: CommentReactionKind,
+    reactions: Vec<CommentReaction>,
+    current_comment: Option<Comment>,
+    extensions: Extensions,
+}
+
+async fn comment_reaction_list(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
+    Query(params): Query<CommentReactionListQuery>,
+) -> Result<Json<ApiResponse<CommentReactionPageData>>, ApiError> {
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let comment_id = validate_comment_id("comment_id", &comment_id)?;
+    let reaction = parse_comment_reaction_kind(&reaction)?;
+    let target_user_ref = parse_comment_reaction_target_user(
+        platform,
+        optional_trimmed(params.target_user_ref),
+        optional_trimmed(params.target_user_id),
+    )?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
+    if page == 0 {
+        return Err(TuneWeaveError::invalid_request("page must be greater than zero").into());
+    }
+    let cursor = optional_trimmed(params.cursor);
+    let id_cursor = optional_trimmed(params.id_cursor);
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let page_result = provider
+        .comment_reactions(&CommentReactionListRequest {
+            target,
+            comment_id,
+            target_user_ref,
+            kind: reaction,
+            limit,
+            page,
+            cursor,
+            id_cursor,
+            account: Some(account.clone()),
+        })
+        .await?;
+    let CommentReactionPage {
+        target,
+        comment_id,
+        target_user_ref,
+        kind,
+        reactions,
+        current_comment,
+        pagination,
+        extensions,
+    } = page_result;
+    Ok(Json(
+        ApiResponse::new(CommentReactionPageData {
+            target,
+            comment_id,
+            target_user_ref,
+            kind,
+            reactions,
+            current_comment,
+            extensions,
+        })
+        .with_platform(platform)
+        .with_account(account)
+        .with_pagination(pagination),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommentAccountQuery {
     account: Option<String>,
@@ -3317,6 +3414,57 @@ fn parse_comment_target_kind(value: &str) -> Result<CommentTargetKind, TuneWeave
     }
 }
 
+fn parse_comment_reaction_kind(value: &str) -> Result<CommentReactionKind, TuneWeaveError> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "hug" => Ok(CommentReactionKind::Hug),
+        "like" => Ok(CommentReactionKind::Like),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported comment reaction: {value}"
+        ))
+        .with_details(json!({ "allowed": ["hug", "like"] }))),
+    }
+}
+
+fn parse_comment_reaction_target_user(
+    platform: Platform,
+    target_user_ref: Option<String>,
+    target_user_id: Option<String>,
+) -> Result<ResourceRef, TuneWeaveError> {
+    let qualified = target_user_ref.map(parse_reference).transpose()?;
+    if let Some(reference) = qualified.as_ref()
+        && reference.platform() != platform
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "target_user_ref must use the comment resource platform",
+        )
+        .with_details(json!({
+            "comment_platform": platform,
+            "target_user_ref": reference
+        })));
+    }
+    let unqualified = target_user_id
+        .map(|id| {
+            ResourceRef::new(platform, id.clone()).map_err(|error| {
+                TuneWeaveError::invalid_request(format!("invalid target_user_id: {error}"))
+                    .with_details(json!({ "target_user_id": id }))
+            })
+        })
+        .transpose()?;
+    match (qualified, unqualified) {
+        (Some(qualified), Some(unqualified)) if qualified != unqualified => Err(
+            TuneWeaveError::invalid_request("target_user_ref and target_user_id must match")
+                .with_details(json!({
+                    "target_user_ref": qualified,
+                    "target_user_id": unqualified.id()
+                })),
+        ),
+        (Some(reference), _) | (_, Some(reference)) => Ok(reference),
+        (None, None) => Err(TuneWeaveError::invalid_request(
+            "target_user_ref or target_user_id is required",
+        )),
+    }
+}
+
 fn parse_comment_list_view(
     value: Option<&str>,
     has_parent_comment: bool,
@@ -3768,6 +3916,7 @@ mod tests {
                 Capability::Recommendations,
                 Capability::CommentWrite,
                 Capability::CommentsRead,
+                Capability::CommentReactionsRead,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
             ])
@@ -5054,6 +5203,37 @@ mod tests {
             })
         }
 
+        async fn comment_reactions(
+            &self,
+            request: &CommentReactionListRequest,
+        ) -> Result<CommentReactionPage> {
+            let offset = request.page.saturating_sub(1).saturating_mul(request.limit);
+            let mut pagination_extensions = Extensions::new();
+            pagination_extensions.insert("request".to_owned(), json!(request));
+            Ok(CommentReactionPage {
+                target: request.target.clone(),
+                comment_id: request.comment_id.clone(),
+                target_user_ref: request.target_user_ref.clone(),
+                kind: request.kind,
+                reactions: vec![CommentReaction {
+                    kind: request.kind,
+                    user: sample_user("2121989064"),
+                    content: Some("给了评论作者一个抱抱".to_owned()),
+                    extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+                }],
+                current_comment: Some(sample_comment(&request.comment_id, "当前评论")),
+                pagination: tuneweave_core::PageMeta {
+                    limit: request.limit,
+                    offset,
+                    total: Some(150),
+                    next_offset: Some(offset.saturating_add(request.limit)),
+                    has_more: true,
+                    extensions: pagination_extensions,
+                },
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            })
+        }
+
         async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
             Ok(json!({
                 "code": 200,
@@ -5636,6 +5816,68 @@ mod tests {
             "/v1/resources/track/netease:185809/comments?view=replies",
             "/v1/resources/track/netease:185809/comments?cursor=100",
             "/v1/resources/track/netease:185809/comments?sort=hot&cursor=100",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_reaction_lists_expose_unified_users_and_reference_cursor_aliases() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?uid=285516405&pageSize=2&pageNo=3&cursor=cursor-1&idCursor=100&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["target"]["ref"], "netease:863481066");
+        assert_eq!(response["data"]["target"]["kind"], "track");
+        assert_eq!(response["data"]["comment_id"], "1167145843");
+        assert_eq!(response["data"]["target_user_ref"], "netease:285516405");
+        assert_eq!(response["data"]["kind"], "hug");
+        assert_eq!(
+            response["data"]["reactions"][0]["user"]["ref"],
+            "netease:2121989064"
+        );
+        assert_eq!(
+            response["data"]["reactions"][0]["content"],
+            "给了评论作者一个抱抱"
+        );
+        assert_eq!(response["data"]["current_comment"]["id"], "1167145843");
+        assert_eq!(response["data"]["extensions"]["provider"], "mock");
+        assert!(response["data"].get("pagination").is_none());
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "personal");
+        assert_eq!(response["meta"]["pagination"]["limit"], 2);
+        assert_eq!(response["meta"]["pagination"]["offset"], 4);
+        let request = &response["meta"]["pagination"]["extensions"]["request"];
+        assert_eq!(request["target_user_ref"], "netease:285516405");
+        assert_eq!(request["page"], 3);
+        assert_eq!(request["cursor"], "cursor-1");
+        assert_eq!(request["id_cursor"], "100");
+
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/0/netease:863481066/comments/1167145843/reactions/like?target_user_ref=netease%3A285516405&target_user_id=285516405",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["kind"], "like");
+        assert_eq!(response["meta"]["account"], "default");
+        assert_eq!(response["meta"]["pagination"]["limit"], 100);
+    }
+
+    #[tokio::test]
+    async fn comment_reaction_lists_reject_missing_cross_platform_and_invalid_inputs() {
+        for path in [
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?target_user_ref=qq%3A285516405",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?target_user_ref=netease%3A1&uid=2",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?uid=285516405&limit=0",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?uid=285516405&limit=101",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?uid=285516405&page=0",
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/clap?uid=285516405",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
