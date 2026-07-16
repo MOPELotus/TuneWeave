@@ -16338,6 +16338,41 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
+    async fn live_cloud_video_stale_sample_keeps_stats_unavailable_stream_and_missing_detail() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let id = "89ADDE33C0AAE8EC14B99F6750DB954D";
+        let detail_request = VideoDetailRequest::new(VideoResourceKind::Video);
+
+        let detail_error = MusicProvider::video(&provider, id, &detail_request)
+            .await
+            .expect_err("stale reference video detail must be missing");
+        assert_eq!(detail_error.code, ErrorCode::ResourceNotFound);
+
+        let stats = MusicProvider::video_stats(&provider, id, &detail_request)
+            .await
+            .expect("live cloud video stats");
+        assert_eq!(stats.video_ref.to_string(), format!("netease:{id}"));
+        assert!(stats.like_count.is_some());
+        assert!(stats.comment_count.is_some());
+        assert!(stats.share_count.is_some());
+        assert_eq!(stats.extensions["response"]["code"], 200);
+
+        let stream = MusicProvider::video_stream(
+            &provider,
+            id,
+            &VideoStreamRequest::new(VideoResourceKind::Video, 1080),
+        )
+        .await
+        .expect("stale cloud video stream response");
+        assert!(!stream.available);
+        assert_eq!(stream.url, None);
+        assert_eq!(stream.platform_code, Some(200));
+        assert_eq!(stream.extensions["response"]["code"], 200);
+        assert_eq!(stream.extensions["response"]["urls"], json!([]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
     async fn live_public_artist_videos() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let request = ArtistVideoListRequest::new(2, 0);
