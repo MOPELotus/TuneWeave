@@ -31,15 +31,15 @@ use tuneweave_core::{
     DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult,
+    LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest,
+    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
+    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
@@ -316,6 +316,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTrending,
             Capability::SearchSuggestions,
             Capability::SearchMultiMatch,
+            Capability::SearchLocalTrackMatch,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -520,6 +521,17 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_weapi(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_search_multi_match(query, request.kind, response.body)
+    }
+
+    async fn match_local_track(
+        &self,
+        request: &LocalTrackMatchRequest,
+    ) -> Result<LocalTrackMatchResult> {
+        let (path, payload, md5) = netease_local_track_match_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_api(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_local_track_match(&md5, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7699,6 +7711,101 @@ fn map_netease_multi_match_item(section: &str, kind: Option<SearchKind>, raw: Va
     SearchItem::Opaque(item)
 }
 
+fn netease_local_track_match_request(
+    request: &LocalTrackMatchRequest,
+) -> Result<(&'static str, Value, String)> {
+    let md5 = normalize_local_match_md5(&request.md5)?;
+    let duration_seconds = request.duration_ms as f64 / 1_000.0;
+    let songs = json!([{
+        "title": request.title,
+        "album": request.album,
+        "artist": request.artist,
+        "duration": duration_seconds,
+        "persistId": md5
+    }]);
+    Ok((
+        "/api/search/match/new",
+        json!({ "songs": songs.to_string() }),
+        md5,
+    ))
+}
+
+fn normalize_local_match_md5(md5: &str) -> Result<String> {
+    let md5 = md5.trim().to_ascii_lowercase();
+    if md5.len() != 32 || !md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TuneWeaveError::invalid_request(
+            "local track md5 must contain exactly 32 hexadecimal characters",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "md5": md5 })));
+    }
+    Ok(md5)
+}
+
+fn map_netease_local_track_match(md5: &str, response: Value) -> Result<LocalTrackMatchResult> {
+    let result = response
+        .get("result")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase local track match response is missing its result object",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let raw_ids = result.get("ids").and_then(Value::as_array).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase local track match response is missing its ids array",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": response }))
+    })?;
+    let matched_ids = raw_ids
+        .iter()
+        .map(|value| {
+            json_scalar_string(value).ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase local track match response contains an invalid matched id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "id": value }))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw_songs = result
+        .get("songs")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase local track match response is missing its songs array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let matches = raw_songs
+        .into_iter()
+        .map(|raw| {
+            let song = parse_body::<Song>(raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track.extensions.insert("local_match_item".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LocalTrackMatchResult {
+        md5: md5.to_owned(),
+        matches,
+        extensions: Extensions::from([
+            ("matched_ids".to_owned(), json!(matched_ids)),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -8457,6 +8564,107 @@ mod tests {
     }
 
     #[test]
+    fn local_track_match_uses_reference_raw_api_payload_and_maps_candidates() {
+        let request = LocalTrackMatchRequest {
+            title: "富士山下".to_owned(),
+            album: String::new(),
+            artist: "陈奕迅".to_owned(),
+            duration_ms: 259_210,
+            md5: "BD708D006912A09D827F02E754CF8E56".to_owned(),
+            account: None,
+        };
+        let (path, payload, md5) =
+            netease_local_track_match_request(&request).expect("local match request");
+        assert_eq!(path, "/api/search/match/new");
+        assert_eq!(md5, "bd708d006912a09d827f02e754cf8e56");
+        let songs: Value =
+            serde_json::from_str(payload["songs"].as_str().expect("serialized songs payload"))
+                .expect("valid songs JSON");
+        assert_eq!(songs[0]["title"], "富士山下");
+        assert_eq!(songs[0]["album"], "");
+        assert_eq!(songs[0]["artist"], "陈奕迅");
+        assert_eq!(songs[0]["duration"], 259.21);
+        assert_eq!(songs[0]["persistId"], md5);
+
+        let result = map_netease_local_track_match(
+            &md5,
+            json!({
+                "code": 200,
+                "result": {
+                    "ids": [md5],
+                    "songs": [{
+                        "id": 65766,
+                        "name": "富士山下",
+                        "artists": [{"id": 2116, "name": "陈奕迅"}],
+                        "album": {
+                            "id": 6451,
+                            "name": "What's Going On…?",
+                            "picUrl": "https://example.test/album.jpg"
+                        },
+                        "duration": 258902,
+                        "mvid": 303140,
+                        "fee": 1,
+                        "status": 0,
+                        "lMusic": {"bitrate": 128000},
+                        "hMusic": {"bitrate": 320000}
+                    }]
+                }
+            }),
+        )
+        .expect("map local track match");
+        assert_eq!(result.md5, md5);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].resource_ref.to_string(), "netease:65766");
+        assert_eq!(result.matches[0].name, "富士山下");
+        assert_eq!(result.matches[0].artists[0].name, "陈奕迅");
+        assert_eq!(result.matches[0].duration_ms, Some(258_902));
+        assert_eq!(result.extensions["matched_ids"][0], md5);
+        assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn local_track_match_preserves_no_match_and_rejects_invalid_inputs_or_responses() {
+        let no_match = map_netease_local_track_match(
+            "00000000000000000000000000000000",
+            json!({"code": 200, "result": {"ids": [], "songs": []}}),
+        )
+        .expect("map no-match response");
+        assert!(no_match.matches.is_empty());
+        assert_eq!(no_match.extensions["matched_ids"], json!([]));
+
+        for md5 in ["", "not-md5", "0123456789abcdef0123456789abcdeg"] {
+            let request = LocalTrackMatchRequest {
+                title: String::new(),
+                album: String::new(),
+                artist: String::new(),
+                duration_ms: 0,
+                md5: md5.to_owned(),
+                account: None,
+            };
+            assert_eq!(
+                netease_local_track_match_request(&request)
+                    .expect_err("invalid md5")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "result": {"songs": []}}),
+            json!({"code": 200, "result": {"ids": [], "songs": {}}}),
+            json!({"code": 200, "result": {"ids": [{}], "songs": []}}),
+        ] {
+            assert_eq!(
+                map_netease_local_track_match("00000000000000000000000000000000", response)
+                    .expect_err("malformed local track match response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -8786,6 +8994,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SearchTrending));
         assert!(capabilities.contains(&Capability::SearchSuggestions));
         assert!(capabilities.contains(&Capability::SearchMultiMatch));
+        assert!(capabilities.contains(&Capability::SearchLocalTrackMatch));
     }
 
     #[test]
@@ -13746,6 +13955,46 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_local_track_match_covers_match_and_no_match_paths() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let matched = MusicProvider::match_local_track(
+            &provider,
+            &LocalTrackMatchRequest {
+                title: "富士山下".to_owned(),
+                album: String::new(),
+                artist: "陈奕迅".to_owned(),
+                duration_ms: 259_210,
+                md5: "bd708d006912a09d827f02e754cf8e56".to_owned(),
+                account: None,
+            },
+        )
+        .await
+        .expect("live matching local track metadata");
+        assert_eq!(matched.matches.len(), 1);
+        assert_eq!(matched.matches[0].resource_ref.to_string(), "netease:65766");
+        assert_eq!(matched.matches[0].name, "富士山下");
+        assert_eq!(matched.extensions["response"]["code"], 200);
+
+        let no_match = MusicProvider::match_local_track(
+            &provider,
+            &LocalTrackMatchRequest {
+                title: "TuneWeave不存在曲目xyz987".to_owned(),
+                album: String::new(),
+                artist: String::new(),
+                duration_ms: 0,
+                md5: "00000000000000000000000000000000".to_owned(),
+                account: None,
+            },
+        )
+        .await
+        .expect("live no-match local metadata response");
+        assert!(no_match.matches.is_empty());
+        assert_eq!(no_match.extensions["matched_ids"], json!([]));
+        assert_eq!(no_match.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
