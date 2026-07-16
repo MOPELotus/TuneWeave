@@ -163,6 +163,7 @@ impl StreamResolver {
 
             let stream_request = StreamRequest {
                 quality: request.quality,
+                variant: crate::StreamVariant::Default,
                 account: account.clone(),
             };
             match provider.stream(&candidate, &stream_request).await {

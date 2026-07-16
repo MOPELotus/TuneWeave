@@ -40,10 +40,13 @@ pub enum Quality {
     Auto,
     Low,
     Standard,
+    Higher,
     High,
     Lossless,
     Hires,
+    Surround,
     Spatial,
+    Dolby,
     Master,
 }
 
@@ -1644,9 +1647,20 @@ pub struct Lyrics {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamVariant {
+    #[default]
+    Default,
+    Legacy,
+    Modern,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StreamRequest {
     pub quality: Quality,
+    #[serde(default)]
+    pub variant: StreamVariant,
     pub account: Option<String>,
 }
 
@@ -1686,6 +1700,16 @@ pub enum ResolutionStatus {
     AuthenticationRequired,
     PermissionDenied,
     UpstreamError,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StreamOutcome {
+    pub track_ref: ResourceRef,
+    pub status: ResolutionStatus,
+    pub stream: Option<MediaStream>,
+    pub error_code: Option<crate::ErrorCode>,
+    pub error: Option<String>,
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1956,6 +1980,47 @@ mod tests {
         assert!(value["active"].is_null());
         assert_eq!(value["annual_count"], -1);
         assert!(value["expires_at"].is_null());
+    }
+
+    #[test]
+    fn stream_contract_preserves_modern_quality_tiers_variants_and_batch_failures() {
+        for (quality, name) in [
+            (Quality::Higher, "higher"),
+            (Quality::High, "high"),
+            (Quality::Surround, "surround"),
+            (Quality::Spatial, "spatial"),
+            (Quality::Dolby, "dolby"),
+            (Quality::Master, "master"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(quality).expect("serialize quality"),
+                name
+            );
+        }
+
+        let request = StreamRequest {
+            quality: Quality::Spatial,
+            variant: StreamVariant::Modern,
+            account: Some("vip".to_owned()),
+        };
+        let value = serde_json::to_value(request).expect("serialize stream request");
+        assert_eq!(value["quality"], "spatial");
+        assert_eq!(value["variant"], "modern");
+
+        let outcome = StreamOutcome {
+            track_ref: ResourceRef::new(Platform::Netease, "1969519579")
+                .expect("valid track reference"),
+            status: ResolutionStatus::PermissionDenied,
+            stream: None,
+            error_code: Some(crate::ErrorCode::PermissionDenied),
+            error: Some("not playable".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(outcome).expect("serialize stream outcome");
+        assert_eq!(value["track_ref"], "netease:1969519579");
+        assert_eq!(value["status"], "permission_denied");
+        assert_eq!(value["error_code"], "permission_denied");
+        assert!(value["stream"].is_null());
     }
 
     #[test]

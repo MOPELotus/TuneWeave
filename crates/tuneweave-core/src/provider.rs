@@ -16,14 +16,15 @@ use crate::{
     CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCodeGroup,
     CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics,
-    MediaStream, MembershipSummary, Page, PageRequest, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, StreamRequest, SubscriptionResult, Track,
+    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, MediaStream, MembershipSummary, Page, PageRequest,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
+    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, StreamOutcome, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
@@ -531,6 +532,35 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn streams(
+        &self,
+        tracks: &[Track],
+        request: &StreamRequest,
+    ) -> Result<Vec<StreamOutcome>> {
+        let mut outcomes = Vec::with_capacity(tracks.len());
+        for track in tracks {
+            match self.stream(track, request).await {
+                Ok(stream) => outcomes.push(StreamOutcome {
+                    track_ref: track.resource_ref.clone(),
+                    status: ResolutionStatus::Success,
+                    stream: Some(stream),
+                    error_code: None,
+                    error: None,
+                    extensions: Extensions::new(),
+                }),
+                Err(error) => outcomes.push(StreamOutcome {
+                    track_ref: track.resource_ref.clone(),
+                    status: stream_error_status(error.code),
+                    stream: None,
+                    error_code: Some(error.code),
+                    error: Some(error.message),
+                    extensions: Extensions::from([("details".to_owned(), error.details)]),
+                }),
+            }
+        }
+        Ok(outcomes)
+    }
+
     async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
@@ -773,5 +803,22 @@ fn search_capability(kind: SearchKind) -> Capability {
         SearchKind::Video => Capability::SearchVideos,
         SearchKind::Mixed => Capability::SearchMixed,
         SearchKind::Voice => Capability::SearchVoices,
+    }
+}
+
+fn stream_error_status(code: ErrorCode) -> ResolutionStatus {
+    match code {
+        ErrorCode::AuthenticationRequired => ResolutionStatus::AuthenticationRequired,
+        ErrorCode::PermissionDenied => ResolutionStatus::PermissionDenied,
+        ErrorCode::MatchRejected => ResolutionStatus::NoMatch,
+        ErrorCode::CapabilityNotSupported
+        | ErrorCode::PlatformUnavailable
+        | ErrorCode::ResourceNotFound => ResolutionStatus::Unavailable,
+        ErrorCode::InvalidRequest
+        | ErrorCode::Conflict
+        | ErrorCode::RateLimited
+        | ErrorCode::UpstreamError
+        | ErrorCode::UpstreamTimeout
+        | ErrorCode::InternalError => ResolutionStatus::UpstreamError,
     }
 }

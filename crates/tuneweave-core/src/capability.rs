@@ -51,6 +51,7 @@ pub enum Capability {
     PlaylistRead,
     Lyrics,
     AudioStream,
+    AudioStreamBatch,
     VideoStream,
     QrLogin,
     PasswordLogin,
@@ -124,6 +125,11 @@ mod tests {
             serde_json::to_value(Capability::UserMembership)
                 .expect("serialize user membership capability"),
             serde_json::json!("user_membership")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AudioStreamBatch)
+                .expect("serialize batch audio stream capability"),
+            serde_json::json!("audio_stream_batch")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
