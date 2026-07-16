@@ -22,9 +22,10 @@ use tuneweave_core::{
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationAction, CommentMutationResult, CommentPage, CommentReplyReference, CommentSort,
-    CommentTarget, CommentTargetKind, CommentWriteRequest, CreatorSummary, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
+    CommentReactionKind, CommentReactionListRequest, CommentReactionPage, CommentReplyReference,
+    CommentSort, CommentTarget, CommentTargetKind, CommentWriteRequest, CreatorSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
     ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
@@ -360,6 +361,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::Recommendations,
             Capability::CommentWrite,
             Capability::CommentsRead,
+            Capability::CommentReactionsRead,
             Capability::PlatformApi,
             Capability::PlatformBatch,
         ])
@@ -2016,6 +2018,18 @@ impl MusicProvider for NeteaseProvider {
         map_netease_comment_page(request, mode, response.body)
     }
 
+    async fn comment_reactions(
+        &self,
+        request: &CommentReactionListRequest,
+    ) -> Result<CommentReactionPage> {
+        let (path, payload) = netease_comment_reaction_list_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "comment reaction listing")?;
+        let response = client.request_eapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "comment reaction listing")?;
+        map_netease_comment_reaction_page(request, response.body)
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -2138,6 +2152,61 @@ fn required_comment_id(field: &str, value: &str) -> Result<String> {
         );
     }
     Ok(value.to_owned())
+}
+
+fn netease_comment_reaction_list_request(
+    request: &CommentReactionListRequest,
+) -> Result<(&'static str, Value)> {
+    if request.kind != CommentReactionKind::Hug {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase only exposes hug reaction directories",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "kind": request.kind, "allowed": ["hug"] })));
+    }
+    if request.target_user_ref.platform() != Platform::Netease {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase comment reaction users must use a netease resource reference",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "target_user_ref": request.target_user_ref })));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "comment reaction limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.page == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "comment reaction page must be greater than zero",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    let comment_id = required_comment_id("comment_id", &request.comment_id)?;
+    let target_user_id = required_comment_id("target_user_ref", request.target_user_ref.id())?;
+    let cursor = comment_reaction_cursor("cursor", request.cursor.as_deref())?;
+    let id_cursor = comment_reaction_cursor("id_cursor", request.id_cursor.as_deref())?;
+    Ok((
+        "/api/v2/resource/comments/hug/list",
+        json!({
+            "targetUserId": target_user_id,
+            "commentId": comment_id,
+            "cursor": cursor,
+            "threadId": thread_id,
+            "pageNo": request.page,
+            "idCursor": id_cursor,
+            "pageSize": request.limit
+        }),
+    ))
+}
+
+fn comment_reaction_cursor(field: &str, value: Option<&str>) -> Result<String> {
+    value.map_or_else(
+        || Ok("-1".to_owned()),
+        |value| required_comment_id(field, value),
+    )
 }
 
 fn map_comment_mutation_result(
@@ -2649,6 +2718,130 @@ fn map_netease_comment_user(raw: &Value) -> Option<User> {
             .map(str::to_owned),
         followed: raw.get("followed").and_then(json_bool),
         mutual: raw.get("mutual").and_then(json_bool),
+        extensions,
+    })
+}
+
+fn map_netease_comment_reaction_page(
+    request: &CommentReactionListRequest,
+    response: Value,
+) -> Result<CommentReactionPage> {
+    let data = netease_comment_reaction_data(&response)?;
+    let raw_reactions = data
+        .get("hugComments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase comment hug response is missing hugComments",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let reactions = raw_reactions
+        .iter()
+        .cloned()
+        .map(map_netease_comment_hug)
+        .collect::<Result<Vec<_>>>()?;
+    let current_comment = map_optional_comment(data.get("currentComment"))?;
+    let total = data
+        .get("hugTotalCounts")
+        .or_else(|| data.get("total"))
+        .or_else(|| data.get("count"))
+        .and_then(json_u64);
+    let has_more = data.get("hasMore").and_then(json_bool).unwrap_or(false);
+    let offset = request.page.saturating_sub(1).saturating_mul(request.limit);
+    let consumed = u32::try_from(reactions.len()).unwrap_or(u32::MAX);
+    let mut pagination_extensions = Extensions::new();
+    pagination_extensions.insert("mode".to_owned(), json!("reaction_hug"));
+    pagination_extensions.insert("page".to_owned(), json!(request.page));
+    pagination_extensions.insert("returned_count".to_owned(), json!(reactions.len()));
+    pagination_extensions.insert(
+        "limit_applied".to_owned(),
+        json!(reactions.len() <= request.limit as usize),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "requested_cursor",
+        request.cursor.clone(),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "requested_id_cursor",
+        request.id_cursor.clone(),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "next_cursor",
+        data.get("cursor").and_then(json_scalar_string),
+    );
+    insert_extension(
+        &mut pagination_extensions,
+        "next_id_cursor",
+        data.get("idCursor").and_then(json_scalar_string),
+    );
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentReactionPage {
+        target: request.target.clone(),
+        comment_id: request.comment_id.trim().to_owned(),
+        target_user_ref: request.target_user_ref.clone(),
+        kind: CommentReactionKind::Hug,
+        reactions,
+        current_comment,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(offset.saturating_add(consumed)),
+            has_more,
+            extensions: pagination_extensions,
+        },
+        extensions,
+    })
+}
+
+fn netease_comment_reaction_data(response: &Value) -> Result<&Value> {
+    let mut candidate = response;
+    for _ in 0..=2 {
+        if candidate.get("hugComments").is_some() {
+            return Ok(candidate);
+        }
+        let Some(data) = candidate.get("data").filter(|data| data.is_object()) else {
+            break;
+        };
+        candidate = data;
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        "NetEase comment hug response is missing its data container",
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": response })))
+}
+
+fn map_netease_comment_hug(raw: Value) -> Result<CommentReaction> {
+    let user = raw
+        .get("user")
+        .and_then(map_netease_comment_user)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase comment hug is missing a usable user",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "hug": raw }))
+        })?;
+    let content = raw
+        .get("hugContent")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw);
+    Ok(CommentReaction {
+        kind: CommentReactionKind::Hug,
+        user,
+        content,
         extensions,
     })
 }
@@ -7275,6 +7468,262 @@ mod tests {
         assert_eq!(delete.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn comment_hug_list_requests_preserve_every_resource_prefix_and_reference_parameter() {
+        let cases = [
+            (CommentTargetKind::Track, "863481066", "R_SO_4_863481066"),
+            (CommentTargetKind::Mv, "5436712", "R_MV_5_5436712"),
+            (CommentTargetKind::Playlist, "705123491", "A_PL_0_705123491"),
+            (CommentTargetKind::Album, "32311", "R_AL_3_32311"),
+            (
+                CommentTargetKind::RadioEpisode,
+                "794062371",
+                "A_DJ_1_794062371",
+            ),
+            (
+                CommentTargetKind::Video,
+                "89ADDE33C0AAE8EC14B99F6750DB954D",
+                "R_VI_62_89ADDE33C0AAE8EC14B99F6750DB954D",
+            ),
+            (
+                CommentTargetKind::Event,
+                "A_EV_2_6559519868_32953014",
+                "A_EV_2_6559519868_32953014",
+            ),
+            (CommentTargetKind::RadioStation, "362", "A_DR_14_362"),
+        ];
+        for (kind, id, thread_id) in cases {
+            let mut request = CommentReactionListRequest::new(
+                CommentTarget::new(
+                    ResourceRef::new(Platform::Netease, id).expect("valid comment target"),
+                    kind,
+                ),
+                "1167145843".to_owned(),
+                ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+                CommentReactionKind::Hug,
+                2,
+            );
+            request.page = 3;
+            request.cursor = Some("04-八月-2020 17:46:25:000".to_owned());
+            request.id_cursor = Some("362576849".to_owned());
+            let (path, payload) = netease_comment_reaction_list_request(&request)
+                .expect("build comment hug list request");
+            assert_eq!(path, "/api/v2/resource/comments/hug/list", "{kind:?}");
+            assert_eq!(payload["targetUserId"], "285516405", "{kind:?}");
+            assert_eq!(payload["commentId"], "1167145843", "{kind:?}");
+            assert_eq!(payload["threadId"], thread_id, "{kind:?}");
+            assert_eq!(payload["pageNo"], 3, "{kind:?}");
+            assert_eq!(payload["pageSize"], 2, "{kind:?}");
+            assert_eq!(payload["cursor"], "04-八月-2020 17:46:25:000", "{kind:?}");
+            assert_eq!(payload["idCursor"], "362576849", "{kind:?}");
+        }
+
+        let request = CommentReactionListRequest::new(
+            CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "863481066").expect("valid comment target"),
+                CommentTargetKind::Track,
+            ),
+            "1167145843".to_owned(),
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+            CommentReactionKind::Hug,
+            100,
+        );
+        let (_, payload) =
+            netease_comment_reaction_list_request(&request).expect("build default request");
+        assert_eq!(payload["pageNo"], 1);
+        assert_eq!(payload["pageSize"], 100);
+        assert_eq!(payload["cursor"], "-1");
+        assert_eq!(payload["idCursor"], "-1");
+    }
+
+    #[test]
+    fn comment_hug_list_requests_reject_unsupported_or_invalid_inputs() {
+        let base = CommentReactionListRequest::new(
+            CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "863481066").expect("valid comment target"),
+                CommentTargetKind::Track,
+            ),
+            "1167145843".to_owned(),
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+            CommentReactionKind::Hug,
+            100,
+        );
+        let mut cases = Vec::new();
+        cases.push(CommentReactionListRequest {
+            kind: CommentReactionKind::Like,
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            target_user_ref: ResourceRef::new(Platform::Qq, "285516405")
+                .expect("valid foreign user"),
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            limit: 0,
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            limit: 101,
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            page: 0,
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            comment_id: " ".to_owned(),
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            cursor: Some(" ".to_owned()),
+            ..base.clone()
+        });
+        cases.push(CommentReactionListRequest {
+            id_cursor: Some(" ".to_owned()),
+            ..base
+        });
+
+        for request in cases {
+            assert_eq!(
+                netease_comment_reaction_list_request(&request)
+                    .expect_err("invalid reaction request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn maps_comment_hug_lists_with_users_current_comment_totals_and_dual_cursors() {
+        let mut request = CommentReactionListRequest::new(
+            CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "863481066").expect("valid comment target"),
+                CommentTargetKind::Track,
+            ),
+            "1167145843".to_owned(),
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+            CommentReactionKind::Hug,
+            2,
+        );
+        request.page = 2;
+        request.cursor = Some("previous-cursor".to_owned());
+        request.id_cursor = Some("100".to_owned());
+        let response = json!({
+            "code": 200,
+            "data": {
+                "code": 200,
+                "data": {
+                    "currentComment": fixture_comment(1_167_145_843, "原评论"),
+                    "hugComments": [
+                        {
+                            "user": {
+                                "userId": 2_121_989_064_u64,
+                                "nickname": "清梦初仄",
+                                "avatarUrl": "https://example.test/hugger.jpg",
+                                "followed": false,
+                                "isHug": true
+                            },
+                            "hugContent": "给了 Puddin_of_Harley_Quinn 一个抱抱"
+                        },
+                        {
+                            "user": {"userId": 1_598_024_192_u64, "nickname": "李一窝_"},
+                            "hugContent": "第二个抱抱",
+                            "futureField": true
+                        }
+                    ],
+                    "hasMore": true,
+                    "cursor": "04-八月-2020 17:46:25:000",
+                    "idCursor": 362_576_849,
+                    "hugTotalCounts": 150
+                }
+            },
+            "message": ""
+        });
+        let page =
+            map_netease_comment_reaction_page(&request, response).expect("map comment hug list");
+        assert_eq!(page.kind, CommentReactionKind::Hug);
+        assert_eq!(page.target.resource_ref.to_string(), "netease:863481066");
+        assert_eq!(page.comment_id, "1167145843");
+        assert_eq!(page.target_user_ref.to_string(), "netease:285516405");
+        assert_eq!(page.reactions.len(), 2);
+        assert_eq!(page.reactions[0].user.id, "2121989064");
+        assert_eq!(page.reactions[0].user.name, "清梦初仄");
+        assert_eq!(
+            page.reactions[0].content.as_deref(),
+            Some("给了 Puddin_of_Harley_Quinn 一个抱抱")
+        );
+        assert_eq!(
+            page.reactions[1].extensions["response"]["futureField"],
+            true
+        );
+        assert_eq!(
+            page.current_comment
+                .as_ref()
+                .map(|comment| comment.id.as_str()),
+            Some("1167145843")
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 2);
+        assert_eq!(page.pagination.total, Some(150));
+        assert_eq!(page.pagination.next_offset, Some(4));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["mode"], "reaction_hug");
+        assert_eq!(
+            page.pagination.extensions["next_cursor"],
+            "04-八月-2020 17:46:25:000"
+        );
+        assert_eq!(page.pagination.extensions["next_id_cursor"], "362576849");
+        assert_eq!(
+            page.pagination.extensions["requested_cursor"],
+            "previous-cursor"
+        );
+        assert_eq!(page.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn comment_hug_list_mapping_rejects_missing_arrays_and_users() {
+        let request = CommentReactionListRequest::new(
+            CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "863481066").expect("valid comment target"),
+                CommentTargetKind::Track,
+            ),
+            "1167145843".to_owned(),
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+            CommentReactionKind::Hug,
+            2,
+        );
+        for response in [
+            json!({"code": 200, "data": {"hasMore": false}}),
+            json!({"code": 200, "data": {"hugComments": [{"hugContent": "无用户"}]}}),
+        ] {
+            assert_eq!(
+                map_netease_comment_reaction_page(&request, response)
+                    .expect_err("malformed hug response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_hug_lists_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = CommentReactionListRequest::new(
+            CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "863481066").expect("valid comment target"),
+                CommentTargetKind::Track,
+            ),
+            "1167145843".to_owned(),
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+            CommentReactionKind::Hug,
+            2,
+        );
+        let error = MusicProvider::comment_reactions(&provider, &request)
+            .await
+            .expect_err("anonymous hug list must fail before network access");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
     fn fixture_comment(id: u64, content: &str) -> Value {
         json!({
             "commentId": id,
@@ -10482,6 +10931,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DimensionCharts));
         assert!(capabilities.contains(&Capability::CommentWrite));
         assert!(capabilities.contains(&Capability::CommentsRead));
+        assert!(capabilities.contains(&Capability::CommentReactionsRead));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
