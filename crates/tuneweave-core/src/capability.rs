@@ -41,6 +41,7 @@ pub enum Capability {
     QrLogin,
     PasswordLogin,
     PhoneLogin,
+    ChallengeValidation,
     SessionManagement,
     AccountProfile,
     AccountPlaylists,
@@ -79,6 +80,10 @@ mod tests {
             serde_json::to_value(Capability::RadioStationSubscriptionWrite)
                 .expect("serialize capability"),
             serde_json::json!("radio_station_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::ChallengeValidation).expect("serialize capability"),
+            serde_json::json!("challenge_validation")
         );
     }
 }

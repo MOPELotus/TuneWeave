@@ -115,6 +115,16 @@ impl fmt::Debug for AuthChallengeRequest {
     }
 }
 
+/// The result of validating a one-time authentication challenge without creating a session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthChallengeValidation {
+    pub method: ChallengeMethod,
+    pub valid: bool,
+    pub platform_code: Option<String>,
+    pub message: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderQrStart {
     pub provider_transaction_id: String,

@@ -11,8 +11,8 @@ mod registry;
 mod resolver;
 
 pub use auth::{
-    AccountProfile, AuthChallengeRequest, AuthState, ChallengeMethod, PasswordFormat,
-    PasswordLoginRequest, PrincipalType, ProviderQrPoll, ProviderQrStart,
+    AccountProfile, AuthChallengeRequest, AuthChallengeValidation, AuthState, ChallengeMethod,
+    PasswordFormat, PasswordLoginRequest, PrincipalType, ProviderQrPoll, ProviderQrStart,
 };
 pub use capability::Capability;
 pub use error::{ErrorCode, Result, TuneWeaveError};
