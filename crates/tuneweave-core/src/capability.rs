@@ -11,6 +11,7 @@ pub enum Capability {
     SearchVideos,
     AudioRecognition,
     Banners,
+    RadioTaxonomy,
     TrackDetail,
     AlbumDetail,
     AlbumList,

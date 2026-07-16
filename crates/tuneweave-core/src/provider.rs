@@ -10,9 +10,9 @@ use crate::{
     DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
     ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
-    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
-    Video,
+    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, Result, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -57,6 +57,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Banners,
+        ))
+    }
+
+    async fn radio_taxonomy(&self, _request: &RadioTaxonomyRequest) -> Result<RadioTaxonomy> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RadioTaxonomy,
         ))
     }
 

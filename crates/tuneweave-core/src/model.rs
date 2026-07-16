@@ -207,6 +207,25 @@ impl PlatformBatchRequest {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioCatalogOption {
+    pub id: String,
+    pub name: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioTaxonomy {
+    pub categories: Vec<RadioCatalogOption>,
+    pub regions: Vec<RadioCatalogOption>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RadioTaxonomyRequest {
+    pub account: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -964,6 +983,27 @@ mod tests {
         assert_eq!(request.protocol.as_deref(), Some("eapi"));
         assert!(request.encrypted_response);
         assert_eq!(request.account.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn radio_taxonomy_keeps_provider_ids_as_strings() {
+        let taxonomy = RadioTaxonomy {
+            categories: vec![RadioCatalogOption {
+                id: "1".to_owned(),
+                name: "音乐台".to_owned(),
+                extensions: Extensions::new(),
+            }],
+            regions: vec![RadioCatalogOption {
+                id: "407".to_owned(),
+                name: "网络台".to_owned(),
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(taxonomy).expect("serialize radio taxonomy");
+        assert_eq!(value["categories"][0]["id"], "1");
+        assert_eq!(value["regions"][0]["id"], "407");
     }
 
     #[test]
