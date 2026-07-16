@@ -27,18 +27,19 @@ use tuneweave_core::{
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
     BannerListRequest, Capability, ChallengeMethod, CloudImportRequest, CloudImportResult,
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
-    CommentDeleteRequest, CommentMutationResult, CommentTarget, CommentTargetKind,
-    CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
-    DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult,
-    Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentSort, CommentTarget, CommentTargetKind, CommentWriteRequest, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, Extensions, ImageUploadRequest, ImageUploadResult, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -222,7 +223,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/playlists/{reference}/tracks", get(playlist_tracks))
         .route(
             "/resources/{kind}/{reference}/comments",
-            post(comment_create),
+            get(comment_list).post(comment_create),
         )
         .route(
             "/resources/{kind}/{reference}/comments/{comment_id}",
@@ -2405,6 +2406,110 @@ async fn cloud_match(
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct CommentListQuery {
+    account: Option<String>,
+    view: Option<String>,
+    #[serde(alias = "sortType")]
+    sort: Option<String>,
+    #[serde(alias = "pageSize")]
+    limit: Option<String>,
+    offset: Option<String>,
+    #[serde(alias = "pageNo")]
+    page: Option<String>,
+    cursor: Option<String>,
+    #[serde(alias = "before", alias = "beforeTime", alias = "time")]
+    before_time_ms: Option<String>,
+    #[serde(alias = "parentCommentId")]
+    parent_comment_id: Option<String>,
+    #[serde(alias = "showInner")]
+    include_replies: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CommentPageData {
+    target: CommentTarget,
+    comments: Vec<Comment>,
+    hot_comments: Vec<Comment>,
+    top_comments: Vec<Comment>,
+    current_comment: Option<Comment>,
+    extensions: Extensions,
+}
+
+async fn comment_list(
+    State(state): State<AppState>,
+    Path((kind, reference)): Path<(String, String)>,
+    Query(params): Query<CommentListQuery>,
+) -> Result<Json<ApiResponse<CommentPageData>>, ApiError> {
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let page = parse_optional_u32_parameter("page", params.page.as_deref())?;
+    if page == Some(0) {
+        return Err(TuneWeaveError::invalid_request("page must be greater than zero").into());
+    }
+    let before_time_ms =
+        parse_optional_u64_parameter("before_time_ms", params.before_time_ms.as_deref())?;
+    let parent_comment_id = optional_trimmed(params.parent_comment_id);
+    let view = parse_comment_list_view(params.view.as_deref(), parent_comment_id.is_some())?;
+    let sort = parse_comment_sort(params.sort.as_deref())?;
+    let cursor = optional_trimmed(params.cursor);
+    validate_comment_list_options(
+        view,
+        sort,
+        page,
+        cursor.as_deref(),
+        before_time_ms,
+        parent_comment_id.as_deref(),
+    )?;
+    let include_replies =
+        parse_bool_parameter("include_replies", params.include_replies.as_deref(), true)?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page_result = provider
+        .comments(&CommentListRequest {
+            target,
+            view,
+            sort,
+            limit,
+            offset,
+            page,
+            cursor,
+            before_time_ms,
+            parent_comment_id,
+            include_replies,
+            account: account.clone(),
+        })
+        .await?;
+    let CommentPage {
+        target,
+        comments,
+        hot_comments,
+        top_comments,
+        current_comment,
+        pagination,
+        extensions,
+    } = page_result;
+    let mut response = ApiResponse::new(CommentPageData {
+        target,
+        comments,
+        hot_comments,
+        top_comments,
+        current_comment,
+        extensions,
+    })
+    .with_platform(platform)
+    .with_pagination(pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommentAccountQuery {
     account: Option<String>,
@@ -2512,6 +2617,57 @@ fn validate_comment_id(field: &str, value: &str) -> Result<String, TuneWeaveErro
         )));
     }
     Ok(value.to_owned())
+}
+
+fn validate_comment_list_options(
+    view: CommentListView,
+    sort: Option<CommentSort>,
+    page: Option<u32>,
+    cursor: Option<&str>,
+    before_time_ms: Option<u64>,
+    parent_comment_id: Option<&str>,
+) -> Result<(), TuneWeaveError> {
+    match view {
+        CommentListView::All if sort.is_none() => {
+            if page.is_some() || cursor.is_some() || parent_comment_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "page and cursor require sort; parent_comment_id requires view=replies",
+                ));
+            }
+        }
+        CommentListView::All => {
+            if before_time_ms.is_some() || parent_comment_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "sorted comments do not accept before_time_ms or parent_comment_id",
+                ));
+            }
+            if sort != Some(CommentSort::Time) && cursor.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "cursor is only accepted with sort=time",
+                ));
+            }
+        }
+        CommentListView::Hot => {
+            if sort.is_some() || page.is_some() || cursor.is_some() || parent_comment_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "view=hot does not accept sort, page, cursor, or parent_comment_id",
+                ));
+            }
+        }
+        CommentListView::Replies => {
+            if parent_comment_id.is_none() {
+                return Err(TuneWeaveError::invalid_request(
+                    "parent_comment_id is required for view=replies",
+                ));
+            }
+            if sort.is_some() || page.is_some() || cursor.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "view=replies does not accept sort, page, or cursor",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn account_profile(
@@ -3161,6 +3317,43 @@ fn parse_comment_target_kind(value: &str) -> Result<CommentTargetKind, TuneWeave
     }
 }
 
+fn parse_comment_list_view(
+    value: Option<&str>,
+    has_parent_comment: bool,
+) -> Result<CommentListView, TuneWeaveError> {
+    let default = if has_parent_comment { "replies" } else { "all" };
+    match value
+        .unwrap_or(default)
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "all" | "default" | "legacy" => Ok(CommentListView::All),
+        "hot" => Ok(CommentListView::Hot),
+        "replies" | "reply" | "floor" => Ok(CommentListView::Replies),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported comment view: {value}"))
+                .with_details(json!({ "allowed": ["all", "hot", "replies"] })),
+        ),
+    }
+}
+
+fn parse_comment_sort(value: Option<&str>) -> Result<Option<CommentSort>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "recommended" | "recommend" | "1" | "99" => Ok(Some(CommentSort::Recommended)),
+        "hot" | "2" => Ok(Some(CommentSort::Hot)),
+        "time" | "newest" | "3" => Ok(Some(CommentSort::Time)),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported comment sort: {value}"))
+                .with_details(json!({ "allowed": ["recommended", "hot", "time", 1, 2, 3, 99] })),
+        ),
+    }
+}
+
 fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
     match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(Quality::Auto),
@@ -3483,9 +3676,9 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CommentMutationAction, CreatorSummary, DimensionChartTrackEntry,
-        MusicProvider, Page, PageMeta, ProviderQrStart, RadioCatalogOption, Result, SearchQuery,
-        StreamRequest,
+        BannerTargetKind, CommentMutationAction, CommentReplyReference, CreatorSummary,
+        DimensionChartTrackEntry, MusicProvider, Page, PageMeta, ProviderQrStart,
+        RadioCatalogOption, Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -3574,6 +3767,7 @@ mod tests {
                 Capability::ListeningHistory,
                 Capability::Recommendations,
                 Capability::CommentWrite,
+                Capability::CommentsRead,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
             ])
@@ -4824,6 +5018,42 @@ mod tests {
             })
         }
 
+        async fn comments(&self, request: &CommentListRequest) -> Result<CommentPage> {
+            let mut pagination_extensions = Extensions::new();
+            pagination_extensions.insert("request".to_owned(), json!(request));
+            let comments = if request.view != CommentListView::Hot {
+                vec![sample_comment("3160990055", "普通评论")]
+            } else {
+                Vec::new()
+            };
+            let hot_comments = if request.view == CommentListView::Hot
+                || (request.view == CommentListView::All && request.sort.is_none())
+            {
+                vec![sample_comment("200", "热门评论")]
+            } else {
+                Vec::new()
+            };
+            let current_comment = (request.view == CommentListView::Replies
+                || request.sort.is_some())
+            .then(|| sample_comment("300", "当前评论"));
+            Ok(CommentPage {
+                target: request.target.clone(),
+                comments,
+                hot_comments,
+                top_comments: vec![sample_comment("400", "置顶评论")],
+                current_comment,
+                pagination: tuneweave_core::PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(68_334),
+                    next_offset: Some(request.offset.saturating_add(request.limit)),
+                    has_more: true,
+                    extensions: pagination_extensions,
+                },
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            })
+        }
+
         async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
             Ok(json!({
                 "code": 200,
@@ -4957,6 +5187,29 @@ mod tests {
             followed: Some(false),
             mutual: Some(false),
             extensions: Default::default(),
+        }
+    }
+
+    fn sample_comment(id: &str, content: &str) -> Comment {
+        Comment {
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            content: content.to_owned(),
+            author: Some(sample_user("278612322")),
+            created_at_ms: Some(1_582_035_919_432),
+            created_at_text: Some("2020-02-18".to_owned()),
+            liked: Some(false),
+            like_count: Some(5_646),
+            parent_comment_id: None,
+            reply_count: Some(2),
+            replied_to: vec![CommentReplyReference {
+                comment_id: Some("100".to_owned()),
+                content: "原评论".to_owned(),
+                author: Some(sample_user("200")),
+                extensions: Extensions::new(),
+            }],
+            ip_location: Some("上海".to_owned()),
+            extensions: Extensions::new(),
         }
     }
 
@@ -5266,6 +5519,128 @@ mod tests {
                 .code,
             tuneweave_core::ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn comment_view_and_sort_parsers_cover_unified_and_reference_values() {
+        for (value, expected) in [
+            ("all", CommentListView::All),
+            ("legacy", CommentListView::All),
+            ("hot", CommentListView::Hot),
+            ("floor", CommentListView::Replies),
+        ] {
+            assert_eq!(
+                parse_comment_list_view(Some(value), false).expect(value),
+                expected
+            );
+        }
+        assert_eq!(
+            parse_comment_list_view(None, true).expect("parent default"),
+            CommentListView::Replies
+        );
+        for (value, expected) in [
+            ("recommended", CommentSort::Recommended),
+            ("1", CommentSort::Recommended),
+            ("99", CommentSort::Recommended),
+            ("hot", CommentSort::Hot),
+            ("2", CommentSort::Hot),
+            ("time", CommentSort::Time),
+            ("3", CommentSort::Time),
+        ] {
+            assert_eq!(
+                parse_comment_sort(Some(value)).expect(value),
+                Some(expected)
+            );
+        }
+        assert_eq!(parse_comment_sort(None).expect("no sort"), None);
+    }
+
+    #[tokio::test]
+    async fn comment_lists_expose_legacy_modern_hot_and_floor_views() {
+        let (status, legacy) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/netease:185809/comments?account=reader&limit=2&offset=3&before=1582035919432",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(legacy["data"]["target"]["ref"], "netease:185809");
+        assert_eq!(legacy["data"]["target"]["kind"], "track");
+        assert_eq!(legacy["data"]["comments"][0]["id"], "3160990055");
+        assert_eq!(
+            legacy["data"]["comments"][0]["author"]["ref"],
+            "netease:278612322"
+        );
+        assert_eq!(
+            legacy["data"]["comments"][0]["replied_to"][0]["comment_id"],
+            "100"
+        );
+        assert_eq!(legacy["data"]["hot_comments"][0]["id"], "200");
+        assert_eq!(legacy["data"]["top_comments"][0]["id"], "400");
+        assert!(legacy["data"]["current_comment"].is_null());
+        assert_eq!(legacy["data"]["extensions"]["provider"], "mock");
+        assert!(legacy["data"].get("pagination").is_none());
+        assert_eq!(legacy["meta"]["platform"], "netease");
+        assert_eq!(legacy["meta"]["account"], "reader");
+        assert_eq!(legacy["meta"]["pagination"]["limit"], 2);
+        assert_eq!(legacy["meta"]["pagination"]["offset"], 3);
+        assert_eq!(
+            legacy["meta"]["pagination"]["extensions"]["request"]["before_time_ms"],
+            1_582_035_919_432_u64
+        );
+
+        let (status, modern) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/0/netease:185809/comments?sortType=3&pageSize=2&pageNo=2&cursor=1581222127578&showInner=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(modern["data"]["current_comment"]["id"], "300");
+        let request = &modern["meta"]["pagination"]["extensions"]["request"];
+        assert_eq!(request["sort"], "time");
+        assert_eq!(request["limit"], 2);
+        assert_eq!(request["page"], 2);
+        assert_eq!(request["cursor"], "1581222127578");
+        assert_eq!(request["include_replies"], false);
+
+        let (status, hot) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/netease:185809/comments?view=hot&limit=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hot["data"]["comments"].as_array().map(Vec::len), Some(0));
+        assert_eq!(hot["data"]["hot_comments"][0]["content"], "热门评论");
+
+        let (status, floor) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/netease:185809/comments?parentCommentId=3160990055&time=1580000000000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(floor["data"]["current_comment"]["content"], "当前评论");
+        let request = &floor["meta"]["pagination"]["extensions"]["request"];
+        assert_eq!(request["view"], "replies");
+        assert_eq!(request["parent_comment_id"], "3160990055");
+        assert_eq!(request["before_time_ms"], 1_580_000_000_000_u64);
+    }
+
+    #[tokio::test]
+    async fn comment_lists_reject_invalid_pagination_view_sort_and_conflicts() {
+        for path in [
+            "/v1/resources/track/netease:185809/comments?limit=0",
+            "/v1/resources/track/netease:185809/comments?limit=101",
+            "/v1/resources/track/netease:185809/comments?page=0&sort=time",
+            "/v1/resources/track/netease:185809/comments?view=unknown",
+            "/v1/resources/track/netease:185809/comments?sortType=4",
+            "/v1/resources/track/netease:185809/comments?view=hot&sort=hot",
+            "/v1/resources/track/netease:185809/comments?view=replies",
+            "/v1/resources/track/netease:185809/comments?cursor=100",
+            "/v1/resources/track/netease:185809/comments?sort=hot&cursor=100",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
