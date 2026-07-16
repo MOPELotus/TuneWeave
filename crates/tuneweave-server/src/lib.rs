@@ -454,6 +454,7 @@ struct DigitalAlbumListParams {
     area: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    catalog: Option<String>,
 }
 
 async fn digital_albums(
@@ -472,6 +473,7 @@ async fn digital_albums(
     request.account.clone_from(&account);
     request.area = optional_trimmed(params.area);
     request.kind = optional_trimmed(params.kind);
+    request.catalog = optional_trimmed(params.catalog);
     let page = provider.digital_albums(&request).await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
@@ -1422,6 +1424,11 @@ mod tests {
             if let Some(kind) = &request.kind {
                 album.extensions.insert("type".to_owned(), json!(kind));
             }
+            if let Some(catalog) = &request.catalog {
+                album
+                    .extensions
+                    .insert("catalog".to_owned(), json!(catalog));
+            }
             Ok(Page {
                 items: vec![album],
                 pagination: PageMeta {
@@ -1900,13 +1907,14 @@ mod tests {
     async fn digital_album_list_uses_unified_filters_and_pagination() {
         let (status, albums) = json_response_from(
             test_app_with_provider(),
-            "/v1/digital-albums?platform=netease&account=vip&area=KR&type=album&limit=5&offset=10",
+            "/v1/digital-albums?platform=netease&account=vip&catalog=latest&area=KR&type=album&limit=5&offset=10",
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(albums["data"][0]["ref"], "netease:120605500");
         assert_eq!(albums["data"][0]["extensions"]["area"], "KR");
         assert_eq!(albums["data"][0]["extensions"]["type"], "album");
+        assert_eq!(albums["data"][0]["extensions"]["catalog"], "latest");
         assert_eq!(albums["meta"]["pagination"]["limit"], 5);
         assert_eq!(albums["meta"]["pagination"]["offset"], 10);
         assert_eq!(albums["meta"]["pagination"]["total"], Value::Null);
