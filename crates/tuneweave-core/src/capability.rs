@@ -11,6 +11,7 @@ pub enum Capability {
     SearchVideos,
     TrackDetail,
     AlbumDetail,
+    AlbumList,
     AlbumStats,
     DigitalAlbumDetail,
     DigitalAlbumList,

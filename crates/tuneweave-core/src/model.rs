@@ -87,6 +87,28 @@ impl PageRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AlbumListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub area: Option<String>,
+    pub catalog: Option<String>,
+}
+
+impl AlbumListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            area: None,
+            catalog: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DigitalAlbumListRequest {
     pub limit: u32,
     pub offset: u32,
