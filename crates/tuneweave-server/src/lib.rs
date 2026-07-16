@@ -22,18 +22,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, Capability, ChallengeMethod, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistChart, ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview,
+    ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
+    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerClient, BannerListRequest, Capability,
+    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, CloudImportRequest,
+    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -221,12 +222,15 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
+        .route("/charts", get(chart_catalog))
+        .route("/charts/artists", get(artist_chart))
         .route("/charts/digital-albums", get(digital_album_chart))
         .route("/charts/dimensions/{chart_code}", get(dimension_chart))
         .route(
             "/charts/dimensions/{chart_code}/tracks",
             get(dimension_chart_tracks),
         )
+        .route("/charts/{reference}/tracks", get(playlist_tracks))
         .route("/artists", get(artists))
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/overview", get(artist_overview))
@@ -1226,6 +1230,58 @@ async fn digital_album_chart(
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChartCatalogParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "catalog")]
+    view: Option<String>,
+}
+
+async fn chart_catalog(
+    State(state): State<AppState>,
+    Query(params): Query<ChartCatalogParams>,
+) -> Result<Json<ApiResponse<ChartCatalog>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let mut request = ChartCatalogRequest::new(parse_chart_catalog_view(params.view.as_deref())?);
+    request.account.clone_from(&account);
+    let catalog = provider.chart_catalog(&request).await?;
+    let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ArtistChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    area: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+async fn artist_chart(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistChartParams>,
+) -> Result<Json<ApiResponse<ArtistChart>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let area = resolve_artist_chart_area(params.area.as_deref(), params.kind.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let mut request = ArtistChartRequest::new(area);
+    request.account.clone_from(&account);
+    let chart = provider.artist_chart(&request).await?;
+    let mut response = ApiResponse::new(chart).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -4893,6 +4949,55 @@ fn parse_artist_track_order(value: Option<&str>) -> Result<ArtistTrackOrder, Tun
     }
 }
 
+fn parse_chart_catalog_view(value: Option<&str>) -> Result<ChartCatalogView, TuneWeaveError> {
+    match value
+        .unwrap_or("summary")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "overview" | "introduction" | "toplist" => Ok(ChartCatalogView::Overview),
+        "summary" | "detail" | "classic" | "toplist_detail" => Ok(ChartCatalogView::Summary),
+        "modern" | "v2" | "detail_v2" | "toplist_detail_v2" => Ok(ChartCatalogView::Modern),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported chart catalog view: {value}"
+        ))
+        .with_details(json!({ "allowed": ["overview", "summary", "modern"] }))),
+    }
+}
+
+fn resolve_artist_chart_area(
+    area: Option<&str>,
+    kind: Option<&str>,
+) -> Result<ArtistChartArea, TuneWeaveError> {
+    let area = area.map(parse_artist_chart_area).transpose()?;
+    let kind = kind.map(parse_artist_chart_area).transpose()?;
+    match (area, kind) {
+        (Some(area), Some(kind)) if area != kind => Err(TuneWeaveError::invalid_request(
+            "area and type select different artist chart regions",
+        )
+        .with_details(json!({ "conflicts": ["area", "type"] }))),
+        (Some(area), _) | (_, Some(area)) => Ok(area),
+        (None, None) => Ok(ArtistChartArea::Chinese),
+    }
+}
+
+fn parse_artist_chart_area(value: &str) -> Result<ArtistChartArea, TuneWeaveError> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "chinese" | "china" | "zh" | "1" => Ok(ArtistChartArea::Chinese),
+        "western" | "west" | "eu_america" | "europe_america" | "2" => Ok(ArtistChartArea::Western),
+        "korean" | "korea" | "kr" | "3" => Ok(ArtistChartArea::Korean),
+        "japanese" | "japan" | "jp" | "4" => Ok(ArtistChartArea::Japanese),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported artist chart area: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["chinese", "western", "korean", "japanese", 1, 2, 3, 4]
+        }))),
+    }
+}
+
 fn parse_digital_album_chart_period(
     value: Option<&str>,
 ) -> Result<DigitalAlbumChartPeriod, TuneWeaveError> {
@@ -5178,9 +5283,10 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CommentMutationAction, CommentReplyReference, CommentThreadStats,
-        CreatorSummary, DimensionChartTrackEntry, MusicProvider, Page, PageMeta, ProviderQrStart,
-        RadioCatalogOption, Result, SearchQuery, StreamRequest,
+        BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
+        CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
+        MusicProvider, Page, PageMeta, ProviderQrStart, RadioCatalogOption, Result, SearchQuery,
+        StreamRequest,
     };
 
     use super::*;
@@ -5236,6 +5342,8 @@ mod tests {
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
+                Capability::ChartCatalog,
+                Capability::ArtistCharts,
                 Capability::DimensionCharts,
                 Capability::ArtistDetail,
                 Capability::ArtistOverview,
@@ -5762,6 +5870,71 @@ mod tests {
                     has_more: true,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn chart_catalog(&self, request: &ChartCatalogRequest) -> Result<ChartCatalog> {
+            Ok(ChartCatalog {
+                platform: Platform::Netease,
+                view: request.view,
+                groups: vec![ChartGroup {
+                    code: Some("OFFICIAL".to_owned()),
+                    name: "官方榜".to_owned(),
+                    display_type: Some("HORIZONTAL".to_owned()),
+                    target_url: None,
+                    charts: vec![Chart {
+                        resource_ref: Some(
+                            ResourceRef::new(Platform::Netease, "19723756")
+                                .expect("valid test chart reference"),
+                        ),
+                        platform: Platform::Netease,
+                        id: Some("19723756".to_owned()),
+                        name: "飙升榜".to_owned(),
+                        description: "每天更新".to_owned(),
+                        cover_url: Some("https://example.test/chart.jpg".to_owned()),
+                        update_frequency: Some("每天更新".to_owned()),
+                        updated_at_ms: Some(1_784_170_805_374),
+                        track_count: Some(100),
+                        play_count: Some(42_000),
+                        subscribed: Some(false),
+                        playable: Some(true),
+                        target_kind: Some("playlist".to_owned()),
+                        target_url: None,
+                        previews: vec![ChartTrackPreview {
+                            rank: Some(1),
+                            previous_rank: Some(5),
+                            rank_change: Some(4),
+                            track_ref: Some(
+                                ResourceRef::new(Platform::Netease, "3404238777")
+                                    .expect("valid test chart track reference"),
+                            ),
+                            name: "周旋".to_owned(),
+                            byline: Some("王以太/艾热 AIR".to_owned()),
+                            cover_url: None,
+                            extensions: Extensions::new(),
+                        }],
+                        extensions: Extensions::new(),
+                    }],
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn artist_chart(&self, request: &ArtistChartRequest) -> Result<ArtistChart> {
+            Ok(ArtistChart {
+                platform: Platform::Netease,
+                area: request.area,
+                updated_at_ms: Some(1_784_170_805_374),
+                entries: vec![tuneweave_core::ArtistChartEntry {
+                    rank: 1,
+                    previous_rank: Some(5),
+                    rank_change: Some(4),
+                    score: Some(63_562_038),
+                    artist: sample_artist("3684"),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                extensions: Extensions::new(),
             })
         }
 
@@ -8899,6 +9072,105 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(invalid_year["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn general_chart_catalog_uses_unified_view_platform_and_account_parameters() {
+        let (status, catalog) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts?platform=netease&account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(catalog["data"]["platform"], "netease");
+        assert_eq!(catalog["data"]["view"], "summary");
+        assert_eq!(catalog["data"]["groups"][0]["code"], "OFFICIAL");
+        assert_eq!(
+            catalog["data"]["groups"][0]["charts"][0]["ref"],
+            "netease:19723756"
+        );
+        assert_eq!(
+            catalog["data"]["groups"][0]["charts"][0]["previews"][0]["track_ref"],
+            "netease:3404238777"
+        );
+        assert_eq!(catalog["data"]["extensions"]["account"], "vip");
+        assert_eq!(catalog["meta"]["platform"], "netease");
+        assert_eq!(catalog["meta"]["account"], "vip");
+        assert!(catalog["meta"].get("pagination").is_none());
+    }
+
+    #[tokio::test]
+    async fn general_chart_catalog_accepts_all_reference_view_aliases() {
+        for (query, expected) in [
+            ("view=overview", "overview"),
+            ("catalog=toplist", "overview"),
+            ("view=toplist_detail", "summary"),
+            ("view=detail-v2", "modern"),
+            ("view=toplist_detail_v2", "modern"),
+        ] {
+            let (status, catalog) =
+                json_response_from(test_app_with_provider(), &format!("/v1/charts?{query}")).await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            assert_eq!(catalog["data"]["view"], expected, "{query}");
+        }
+
+        let (status, invalid) =
+            json_response_from(test_app_with_provider(), "/v1/charts?view=future").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn artist_charts_accept_named_and_numeric_areas_and_reject_conflicts() {
+        for (query, expected) in [
+            ("area=western", "western"),
+            ("type=3", "korean"),
+            ("area=jp", "japanese"),
+            ("type=1", "chinese"),
+        ] {
+            let (status, chart) = json_response_from(
+                test_app_with_provider(),
+                &format!("/v1/charts/artists?platform=netease&account=vip&{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            assert_eq!(chart["data"]["area"], expected, "{query}");
+            assert_eq!(chart["data"]["entries"][0]["rank"], 1, "{query}");
+            assert_eq!(
+                chart["data"]["entries"][0]["artist"]["ref"], "netease:3684",
+                "{query}"
+            );
+            assert_eq!(
+                chart["data"]["entries"][0]["extensions"]["account"], "vip",
+                "{query}"
+            );
+            assert_eq!(chart["meta"]["account"], "vip", "{query}");
+        }
+
+        for query in ["area=western&type=3", "area=unknown"] {
+            let (status, invalid) = json_response_from(
+                test_app_with_provider(),
+                &format!("/v1/charts/artists?{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(invalid["error"]["code"], "invalid_request", "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chart_tracks_reuse_the_platform_playlist_snapshot_with_unified_pagination() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/netease:19723756/tracks?account=vip&limit=2&offset=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:123");
+        assert_eq!(tracks["meta"]["platform"], "netease");
+        assert_eq!(tracks["meta"]["account"], "vip");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
+        assert_eq!(tracks["meta"]["pagination"]["offset"], 3);
     }
 
     #[tokio::test]
