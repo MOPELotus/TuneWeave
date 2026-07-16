@@ -15,11 +15,11 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AccountProfile, Album, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, Track, TuneWeaveError,
+    AccountProfile, Album, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
+    DigitalAlbum, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, Track, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -158,6 +158,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}", get(track))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
+        .route("/digital-albums/{reference}", get(digital_album))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
@@ -393,6 +394,27 @@ async fn album_tracks(
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn digital_album(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<DigitalAlbum>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let album = provider.digital_album(reference.id(), account).await?;
+    let mut response = ApiResponse::new(album).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -1268,6 +1290,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
+                Capability::DigitalAlbumDetail,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1315,6 +1338,10 @@ mod tests {
                     has_more: false,
                 },
             })
+        }
+
+        async fn digital_album(&self, id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
+            Ok(sample_digital_album(id))
         }
 
         async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
@@ -1591,6 +1618,33 @@ mod tests {
         }
     }
 
+    fn sample_digital_album(id: &str) -> DigitalAlbum {
+        DigitalAlbum {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            name: "冀西南林路行".to_owned(),
+            artists: vec![ArtistSummary {
+                resource_ref: None,
+                name: "万能青年旅店".to_owned(),
+            }],
+            description: "西郊有密林 助君出重围".to_owned(),
+            cover_url: None,
+            published_at: Some("2020-12-21T16:00:01Z".to_owned()),
+            price: Some(tuneweave_core::Money {
+                amount: 22.0,
+                currency: "CNY".to_owned(),
+            }),
+            is_free: Some(false),
+            purchasable: Some(true),
+            purchased: Some(false),
+            sale_count: Some(42),
+            track_count: None,
+            tags: vec!["独家".to_owned()],
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_history(id: &str) -> PlaybackHistoryEntry {
         PlaybackHistoryEntry {
             track: sample_track(id),
@@ -1705,6 +1759,22 @@ mod tests {
         assert_eq!(tracks["data"][0]["ref"], "netease:185809");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 5);
         assert_eq!(tracks["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn digital_album_detail_uses_reference_platform_and_account() {
+        let (status, album) = json_response_from(
+            test_app_with_provider(),
+            "/v1/digital-albums/netease:120605500?account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(album["data"]["ref"], "netease:120605500");
+        assert_eq!(album["data"]["name"], "冀西南林路行");
+        assert_eq!(album["data"]["price"]["amount"], 22.0);
+        assert_eq!(album["data"]["price"]["currency"], "CNY");
+        assert_eq!(album["meta"]["platform"], "netease");
+        assert_eq!(album["meta"]["account"], "vip");
     }
 
     #[tokio::test]
