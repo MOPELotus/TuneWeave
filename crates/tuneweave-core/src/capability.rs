@@ -24,6 +24,7 @@ pub enum Capability {
     ArtistAlbums,
     ArtistFans,
     ArtistVideos,
+    ArtistTracks,
     PlaylistRead,
     Lyrics,
     AudioStream,

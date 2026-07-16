@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistListRequest, ArtistStats,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AuthChallengeRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
+    ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
+    ArtistWorksRequest, AuthChallengeRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, Page, PageRequest,
     PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
@@ -169,6 +169,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistVideos,
+        ))
+    }
+
+    async fn artist_tracks(
+        &self,
+        _id: &str,
+        _request: &ArtistTrackListRequest,
+    ) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistTracks,
         ))
     }
 

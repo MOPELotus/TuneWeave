@@ -326,6 +326,34 @@ impl ArtistVideoListRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtistTrackOrder {
+    #[default]
+    Hot,
+    Time,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistTrackListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub order: ArtistTrackOrder,
+}
+
+impl ArtistTrackListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            order: ArtistTrackOrder::Hot,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistUpdatesRequest {
     pub limit: u32,
@@ -901,6 +929,23 @@ mod tests {
         assert_eq!(value["limit"], 20);
         assert_eq!(value["before_ms"], 1_720_000_000_000_u64);
         assert_eq!(value["account"], "personal");
+    }
+
+    #[test]
+    fn artist_track_list_request_defaults_to_hot_order() {
+        let mut request = ArtistTrackListRequest::new(100, 20);
+        request.account = Some("personal".to_owned());
+
+        assert_eq!(request.order, ArtistTrackOrder::Hot);
+        let value = serde_json::to_value(request).expect("serialize artist track list request");
+        assert_eq!(value["limit"], 100);
+        assert_eq!(value["offset"], 20);
+        assert_eq!(value["account"], "personal");
+        assert_eq!(value["order"], "hot");
+        assert_eq!(
+            serde_json::to_value(ArtistTrackOrder::Time).expect("serialize artist track order"),
+            "time"
+        );
     }
 
     #[test]
