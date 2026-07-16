@@ -1,7 +1,7 @@
 mod response;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -28,10 +28,10 @@ use tuneweave_core::{
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
     Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderRegistry, Quality, RecommendationRequest, ResolveRequest,
-    ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
-    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
+    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -249,7 +249,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
-        .route("/extensions/netease/api", post(netease_extension_api));
+        .route("/extensions/netease/api", post(netease_extension_api))
+        .route(
+            "/extensions/netease/batch",
+            get(netease_extension_batch_get).post(netease_extension_batch_post),
+        );
 
     Router::new()
         .route("/healthz", get(health))
@@ -2019,6 +2023,169 @@ async fn netease_extension_api(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct NeteaseExtensionBatchBody {
+    #[serde(default)]
+    requests: BTreeMap<String, Value>,
+    #[serde(default, alias = "protocol")]
+    crypto: Option<String>,
+    #[serde(default, alias = "e_r")]
+    encrypted_response: Option<Value>,
+    account: Option<String>,
+    #[serde(flatten)]
+    direct_requests: BTreeMap<String, Value>,
+}
+
+struct NeteaseBatchInput {
+    requests: BTreeMap<String, Value>,
+    protocol: Option<String>,
+    encrypted_response: Option<Value>,
+    account: Option<String>,
+}
+
+async fn netease_extension_batch_post(
+    State(state): State<AppState>,
+    payload: Result<Json<NeteaseExtensionBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let body = json_body(payload)?;
+    let requests = merge_netease_batch_requests(body.requests, body.direct_requests)?;
+    execute_netease_batch(
+        &state,
+        NeteaseBatchInput {
+            requests,
+            protocol: body.crypto,
+            encrypted_response: body.encrypted_response,
+            account: body.account,
+        },
+    )
+    .await
+}
+
+async fn netease_extension_batch_get(
+    State(state): State<AppState>,
+    Query(mut query): Query<BTreeMap<String, String>>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let protocol = take_netease_batch_alias(&mut query, "crypto", "protocol")?;
+    let encrypted_response =
+        take_netease_batch_alias(&mut query, "e_r", "encrypted_response")?.map(Value::String);
+    let account = query.remove("account");
+    let requests = query
+        .remove("requests")
+        .map(|requests| parse_netease_batch_requests_json(&requests))
+        .transpose()?
+        .unwrap_or_default();
+    let direct_requests = query
+        .into_iter()
+        .map(|(uri, data)| (uri, Value::String(data)))
+        .collect();
+    let requests = merge_netease_batch_requests(requests, direct_requests)?;
+    execute_netease_batch(
+        &state,
+        NeteaseBatchInput {
+            requests,
+            protocol,
+            encrypted_response,
+            account,
+        },
+    )
+    .await
+}
+
+async fn execute_netease_batch(
+    state: &AppState,
+    input: NeteaseBatchInput,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let account = optional_trimmed(input.account);
+    let protocol = optional_trimmed(input.protocol);
+    let encrypted_response = parse_json_bool("encrypted_response", input.encrypted_response)?;
+    let provider = state.registry.require(Platform::Netease)?;
+    let data = provider
+        .platform_batch(&PlatformBatchRequest {
+            requests: input.requests,
+            protocol,
+            encrypted_response,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn merge_netease_batch_requests(
+    mut requests: BTreeMap<String, Value>,
+    direct_requests: BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, TuneWeaveError> {
+    for uri in requests.keys() {
+        if !uri.starts_with("/api/") {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "unsupported NetEase batch request: {uri}"
+            ))
+            .with_details(json!({ "uri": uri })));
+        }
+    }
+    for (uri, data) in direct_requests {
+        if !uri.starts_with("/api/") {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "unsupported NetEase batch field: {uri}"
+            ))
+            .with_details(json!({ "field": uri })));
+        }
+        if requests.insert(uri.clone(), data).is_some() {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "duplicate NetEase batch request: {uri}"
+            ))
+            .with_details(json!({ "uri": uri })));
+        }
+    }
+    if requests.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase batch requires at least one /api/... request",
+        ));
+    }
+    Ok(requests)
+}
+
+fn take_netease_batch_alias(
+    query: &mut BTreeMap<String, String>,
+    primary: &str,
+    alias: &str,
+) -> Result<Option<String>, TuneWeaveError> {
+    let primary_value = query.remove(primary);
+    let alias_value = query.remove(alias);
+    if primary_value.is_some() && alias_value.is_some() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{primary} and {alias} cannot be used together"
+        )));
+    }
+    Ok(primary_value.or(alias_value))
+}
+
+fn parse_netease_batch_requests_json(
+    requests: &str,
+) -> Result<BTreeMap<String, Value>, TuneWeaveError> {
+    serde_json::from_str::<BTreeMap<String, Value>>(requests).map_err(|_| {
+        TuneWeaveError::invalid_request("requests must be a JSON object of /api/... calls")
+    })
+}
+
+fn parse_json_bool(name: &str, value: Option<Value>) -> Result<bool, TuneWeaveError> {
+    match value {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(value),
+        Some(Value::Number(value)) if value.as_i64() == Some(1) => Ok(true),
+        Some(Value::Number(value)) if value.as_i64() == Some(0) => Ok(false),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(false),
+        Some(Value::String(value)) => parse_bool_parameter(name, Some(&value), false),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "{name} must be true or false"
+        ))
+        .with_details(json!({ "parameter": name, "value": value }))),
+    }
+}
+
 fn empty_json_object() -> Value {
     json!({})
 }
@@ -2414,6 +2581,7 @@ mod tests {
                 Capability::ListeningHistory,
                 Capability::Recommendations,
                 Capability::PlatformApi,
+                Capability::PlatformBatch,
             ])
         }
 
@@ -3194,6 +3362,16 @@ mod tests {
                 "uri": request.uri,
                 "data": request.data,
                 "crypto": request.protocol,
+                "account": request.account
+            }))
+        }
+
+        async fn platform_batch(&self, request: &PlatformBatchRequest) -> Result<Value> {
+            Ok(json!({
+                "code": 200,
+                "requests": request.requests,
+                "crypto": request.protocol,
+                "encrypted_response": request.encrypted_response,
                 "account": request.account
             }))
         }
@@ -4622,6 +4800,86 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
             assert_eq!(json["error"]["code"], "invalid_request", "{field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn netease_batch_post_accepts_container_and_reference_dynamic_fields() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/batch",
+            Some(json!({
+                "requests": {
+                    "/api/v2/banner/get": { "clientType": "pc" }
+                },
+                "/api/search/get": "{\"s\":\"TuneWeave\",\"type\":1}",
+                "protocol": "weapi",
+                "e_r": "1",
+                "account": "batch-user"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(
+            json["data"]["requests"]["/api/v2/banner/get"]["clientType"],
+            "pc"
+        );
+        assert_eq!(
+            json["data"]["requests"]["/api/search/get"],
+            "{\"s\":\"TuneWeave\",\"type\":1}"
+        );
+        assert_eq!(json["data"]["crypto"], "weapi");
+        assert_eq!(json["data"]["encrypted_response"], true);
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "batch-user");
+    }
+
+    #[tokio::test]
+    async fn netease_batch_get_accepts_reference_query_shape() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/batch?%2Fapi%2Fv2%2Fbanner%2Fget=%7B%22clientType%22%3A%22pc%22%7D&crypto=eapi&e_r=true&account=query-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["data"]["requests"]["/api/v2/banner/get"],
+            "{\"clientType\":\"pc\"}"
+        );
+        assert_eq!(json["data"]["crypto"], "eapi");
+        assert_eq!(json["data"]["encrypted_response"], true);
+        assert_eq!(json["meta"]["account"], "query-user");
+    }
+
+    #[tokio::test]
+    async fn netease_batch_rejects_empty_duplicate_and_transport_fields() {
+        for body in [
+            json!({}),
+            json!({
+                "requests": { "/api/search/get": {} },
+                "/api/search/get": {}
+            }),
+            json!({ "cookie": "MUSIC_U=raw-secret" }),
+            json!({ "domain": "https://example.com" }),
+            json!({ "proxy": "http://example.com" }),
+            json!({ "headers": { "Cookie": "raw-secret" } }),
+            json!({ "realIP": "127.0.0.1" }),
+            json!({
+                "requests": { "/api/search/get": {} },
+                "encrypted_response": 2
+            }),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/extensions/netease/batch",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
         }
     }
 
