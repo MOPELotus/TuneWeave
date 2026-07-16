@@ -183,6 +183,28 @@ impl PlatformApiRequest {
     }
 }
 
+/// A provider-specific collection of API calls executed as one upstream batch.
+///
+/// Request keys and values remain provider-owned. Providers must validate every
+/// target and keep transport credentials outside this payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlatformBatchRequest {
+    pub requests: BTreeMap<String, Value>,
+    pub protocol: Option<String>,
+    pub account: Option<String>,
+}
+
+impl PlatformBatchRequest {
+    #[must_use]
+    pub fn new(requests: BTreeMap<String, Value>) -> Self {
+        Self {
+            requests,
+            protocol: None,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -919,6 +941,23 @@ mod tests {
 
         assert_eq!(request.uri, "/api/search/get");
         assert_eq!(request.data["s"], "TuneWeave");
+        assert_eq!(request.protocol.as_deref(), Some("eapi"));
+        assert_eq!(request.account.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn platform_batch_request_keeps_dynamic_provider_calls() {
+        let mut requests = BTreeMap::new();
+        requests.insert(
+            "/api/v2/banner/get".to_owned(),
+            serde_json::json!({ "clientType": "pc" }),
+        );
+        let mut request = PlatformBatchRequest::new(requests);
+        request.protocol = Some("eapi".to_owned());
+        request.account = Some("default".to_owned());
+
+        assert_eq!(request.requests.len(), 1);
+        assert_eq!(request.requests["/api/v2/banner/get"]["clientType"], "pc");
         assert_eq!(request.protocol.as_deref(), Some("eapi"));
         assert_eq!(request.account.as_deref(), Some("default"));
     }

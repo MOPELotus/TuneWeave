@@ -9,9 +9,10 @@ use crate::{
     AuthChallengeRequest, Banner, BannerListRequest, Capability, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
     ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor,
-    ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
+    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -450,6 +451,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PlatformApi,
+        ))
+    }
+
+    async fn platform_batch(&self, _request: &PlatformBatchRequest) -> Result<serde_json::Value> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlatformBatch,
         ))
     }
 }

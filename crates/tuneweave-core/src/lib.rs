@@ -26,10 +26,11 @@ pub use model::{
     BannerTargetKind, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions,
     ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, Page,
-    PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RecommendationRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TrialWindow, User, Video, VideoKind,
+    PageMeta, PageRequest, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality,
+    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, User,
+    Video, VideoKind,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

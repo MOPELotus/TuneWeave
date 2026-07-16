@@ -53,4 +53,5 @@ pub enum Capability {
     Recommendations,
     MusicPartner,
     PlatformApi,
+    PlatformBatch,
 }
