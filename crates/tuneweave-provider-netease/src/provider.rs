@@ -8,24 +8,26 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumStats, AlbumSummary, ArtistSummary, AuthChallengeRequest,
-    AuthState, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumListRequest, ErrorCode,
-    Extensions, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result,
-    SearchKind, SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, ArtistSummary,
+    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
+    DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, Money,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
+    TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AlbumDetail, AlbumEnvelope, AlbumStatsEnvelope, AudioQuality, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
+        AlbumDetail, AlbumEnvelope, AlbumListEnvelope, AlbumStatsEnvelope, AudioQuality,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -260,6 +262,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::AlbumDetail,
+            Capability::AlbumList,
             Capability::AlbumStats,
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
@@ -373,6 +376,64 @@ impl MusicProvider for NeteaseProvider {
             .map(|song| map_song(song, None))
             .collect::<Result<Vec<_>>>()?;
         Ok(Page { items, pagination })
+    }
+
+    async fn albums(&self, request: &AlbumListRequest) -> Result<Page<Album>> {
+        let limit = request.limit.clamp(1, 100);
+        let catalog = AlbumCatalog::parse(request.catalog.as_deref())?;
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = match catalog {
+            AlbumCatalog::New => (
+                "/api/album/new",
+                json!({
+                    "limit": limit,
+                    "offset": request.offset,
+                    "total": true,
+                    "area": normalize_album_area(request.area.as_deref())?
+                }),
+            ),
+            AlbumCatalog::Newest => {
+                if request
+                    .area
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|area| !area.is_empty())
+                {
+                    return Err(TuneWeaveError::invalid_request(
+                        "area is not supported for the NetEase newest album catalog",
+                    )
+                    .with_platform(Platform::Netease));
+                }
+                ("/api/discovery/newAlbum", json!({}))
+            }
+        };
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        let response: AlbumListEnvelope = parse_body(response.body)?;
+        let items = response
+            .albums
+            .into_iter()
+            .map(map_album_list_item)
+            .collect::<Result<Vec<_>>>()?;
+        if catalog == AlbumCatalog::Newest {
+            let (items, pagination) = select_page(items, limit, request.offset);
+            return Ok(Page { items, pagination });
+        }
+        let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let next_offset = request.offset.saturating_add(consumed);
+        let has_more = response
+            .total
+            .map_or(consumed == limit, |total| u64::from(next_offset) < total);
+        Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit,
+                offset: request.offset,
+                total: response.total,
+                next_offset: has_more.then_some(next_offset),
+                has_more,
+            },
+        })
     }
 
     async fn album_stats(&self, id: &str, account: Option<&str>) -> Result<AlbumStats> {
@@ -1032,6 +1093,46 @@ fn map_session_profile(account: &str, status: NeteaseSessionStatus) -> AccountPr
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AlbumCatalog {
+    New,
+    Newest,
+}
+
+impl AlbumCatalog {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("new").trim().to_ascii_lowercase().as_str() {
+            "new" => Ok(Self::New),
+            "newest" => Ok(Self::Newest),
+            value => Err(TuneWeaveError::invalid_request(format!(
+                "unsupported album catalog: {value}"
+            ))
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "allowed": ["new", "newest"] }))),
+        }
+    }
+}
+
+fn normalize_album_area(area: Option<&str>) -> Result<String> {
+    let area = area.unwrap_or("ALL").trim().to_ascii_uppercase();
+    let normalized = match area.as_str() {
+        "ALL" => Some("ALL"),
+        "ZH" | "Z_H" => Some("ZH"),
+        "EA" | "E_A" => Some("EA"),
+        "KR" => Some("KR"),
+        "JP" => Some("JP"),
+        _ => None,
+    };
+    normalized.map(str::to_owned).ok_or_else(|| {
+        TuneWeaveError::invalid_request("NetEase album area is not supported")
+            .with_platform(Platform::Netease)
+            .with_details(json!({
+                "area": area,
+                "allowed": ["ALL", "ZH", "EA", "KR", "JP"]
+            }))
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DigitalAlbumCatalog {
     Latest,
     Style,
@@ -1462,6 +1563,13 @@ fn map_album(album: AlbumDetail) -> Result<Album> {
         kind: album.kind,
         extensions,
     })
+}
+
+fn map_album_list_item(raw: Value) -> Result<Album> {
+    let album: AlbumDetail = parse_body(raw.clone())?;
+    let mut album = map_album(album)?;
+    album.extensions.insert("catalog_item".to_owned(), raw);
+    Ok(album)
 }
 
 fn map_album_stats(id: u64, stats: AlbumStatsEnvelope) -> Result<AlbumStats> {
@@ -1948,6 +2056,38 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_album_catalog_items_without_losing_upstream_fields() {
+        let album = map_album_list_item(json!({
+            "id": 387169747,
+            "name": "小海子村儿",
+            "alias": [],
+            "artists": [
+                {"id": 2515, "name": "窦唯"},
+                {"id": 33154502, "name": "朝简"}
+            ],
+            "description": "",
+            "picUrl": "https://example.test/album.jpg",
+            "publishTime": 1784163600000_u64,
+            "size": 1,
+            "company": "北京窦唯音乐工作室",
+            "type": "专辑",
+            "subType": "录音室版",
+            "paid": false,
+            "onSale": false,
+            "mark": 0,
+            "copyrightId": 2717412,
+            "commentThreadId": "R_AL_3_387169747"
+        }))
+        .expect("map album catalog item");
+
+        assert_eq!(album.resource_ref.to_string(), "netease:387169747");
+        assert_eq!(album.artists.len(), 2);
+        assert_eq!(album.track_count, Some(1));
+        assert_eq!(album.company.as_deref(), Some("北京窦唯音乐工作室"));
+        assert_eq!(album.extensions["catalog_item"]["copyrightId"], 2717412);
+    }
+
+    #[test]
     fn maps_netease_album_dynamic_stats_to_the_unified_model() {
         let stats: AlbumStatsEnvelope = serde_json::from_value(json!({
             "commentCount": 1989,
@@ -2075,6 +2215,20 @@ mod tests {
         );
         let error = normalize_digital_album_area(DigitalAlbumCatalog::Style, Some("unknown"))
             .expect_err("invalid area");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn validates_netease_album_catalogs_and_areas() {
+        assert_eq!(
+            AlbumCatalog::parse(Some("newest")).expect("newest catalog"),
+            AlbumCatalog::Newest
+        );
+        assert_eq!(
+            normalize_album_area(Some("e_a")).expect("valid album area"),
+            "EA"
+        );
+        let error = normalize_album_area(Some("unknown")).expect_err("invalid album area");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
@@ -2259,6 +2413,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
+        assert!(capabilities.contains(&Capability::AlbumList));
         assert!(capabilities.contains(&Capability::AlbumStats));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
@@ -2621,6 +2776,35 @@ mod tests {
         assert_eq!(tracks.items.len(), 2);
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
         assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_new_album_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = AlbumListRequest::new(2, 0);
+        request.catalog = Some("new".to_owned());
+        request.area = Some("ALL".to_owned());
+        let page = MusicProvider::albums(&provider, &request)
+            .await
+            .expect("live new album catalog");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.total.is_some_and(|total| total >= 2));
+        assert!(page.items.iter().all(|album| !album.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_newest_album_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = AlbumListRequest::new(2, 0);
+        request.catalog = Some("newest".to_owned());
+        let page = MusicProvider::albums(&provider, &request)
+            .await
+            .expect("live newest album catalog");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.total.is_some_and(|total| total >= 2));
+        assert!(page.items.iter().all(|album| !album.name.is_empty()));
     }
 
     #[tokio::test]

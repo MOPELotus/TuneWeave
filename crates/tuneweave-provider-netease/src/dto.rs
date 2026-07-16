@@ -30,6 +30,13 @@ pub(crate) struct AlbumEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AlbumListEnvelope {
+    #[serde(default)]
+    pub albums: Vec<Value>,
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AlbumDetail {
     pub id: u64,
     pub name: String,
