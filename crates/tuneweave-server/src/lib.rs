@@ -15,7 +15,7 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, AuthState,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, AuthChallengeRequest, AuthState,
     Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
     MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
@@ -169,6 +169,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
+        .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/albums", get(artist_albums))
         .route(
             "/account/library/albums/{reference}",
@@ -800,6 +801,27 @@ async fn playlist_tracks(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+async fn artist(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Artist>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let artist = provider.artist(reference.id(), account).await?;
+    let mut response = ApiResponse::new(artist).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -1648,8 +1670,8 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistSummary, MusicProvider, Page, PageMeta, ProviderQrStart, Result, SearchQuery,
-        StreamRequest,
+        ArtistBiographySection, ArtistSummary, MusicProvider, Page, PageMeta, ProviderQrStart,
+        Result, SearchQuery, StreamRequest,
     };
 
     use super::*;
@@ -1682,6 +1704,7 @@ mod tests {
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::DigitalAlbumCharts,
+                Capability::ArtistDetail,
                 Capability::ArtistAlbums,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
@@ -1858,6 +1881,10 @@ mod tests {
                     extensions: Default::default(),
                 },
             })
+        }
+
+        async fn artist(&self, id: &str, _account: Option<&str>) -> Result<Artist> {
+            Ok(sample_artist(id))
         }
 
         async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -2192,6 +2219,29 @@ mod tests {
         }
     }
 
+    fn sample_artist(id: &str) -> Artist {
+        Artist {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            name: "周杰伦".to_owned(),
+            aliases: vec!["Jay Chou".to_owned(), "周董".to_owned()],
+            description: "歌手、词曲作者与制作人。".to_owned(),
+            biography_sections: vec![ArtistBiographySection {
+                title: "代表作品".to_owned(),
+                text: "范特西".to_owned(),
+            }],
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+            cover_url: Some("https://example.test/cover.jpg".to_owned()),
+            album_count: Some(44),
+            track_count: Some(568),
+            mv_count: Some(9),
+            video_count: Some(8),
+            identities: vec!["作曲".to_owned()],
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_album_stats(id: &str) -> AlbumStats {
         AlbumStats {
             album_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -2405,6 +2455,23 @@ mod tests {
         assert_eq!(albums["meta"]["pagination"]["offset"], 10);
         assert_eq!(albums["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(albums["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_detail_uses_reference_platform_and_account() {
+        let (status, artist) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artist["data"]["ref"], "netease:6452");
+        assert_eq!(artist["data"]["name"], "周杰伦");
+        assert_eq!(artist["data"]["aliases"][0], "Jay Chou");
+        assert_eq!(artist["data"]["biography_sections"][0]["title"], "代表作品");
+        assert_eq!(artist["data"]["track_count"], 568);
+        assert_eq!(artist["meta"]["platform"], "netease");
+        assert_eq!(artist["meta"]["account"], "collector");
     }
 
     #[tokio::test]
