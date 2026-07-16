@@ -168,6 +168,19 @@ pub struct Album {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AlbumStats {
+    pub album_ref: ResourceRef,
+    pub subscribed: Option<bool>,
+    pub subscriber_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub share_count: Option<u64>,
+    pub like_count: Option<u64>,
+    pub on_sale: Option<bool>,
+    pub subscribed_at: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Money {
     pub amount: f64,
     pub currency: String,
