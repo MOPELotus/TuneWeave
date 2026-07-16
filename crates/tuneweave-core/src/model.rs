@@ -194,6 +194,17 @@ pub struct LocalTrackMatchResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MembershipSummary {
+    pub user_ref: ResourceRef,
+    pub level: Option<u32>,
+    pub active: Option<bool>,
+    pub annual_count: Option<i64>,
+    pub expires_at: Option<String>,
+    pub icon_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
     Track(Track),
@@ -1924,6 +1935,26 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize local track match");
         assert_eq!(value["md5"], "bd708d006912a09d827f02e754cf8e56");
         assert_eq!(value["matches"][0]["ref"], "netease:65766");
+    }
+
+    #[test]
+    fn membership_summary_keeps_unknown_status_fields_nullable() {
+        let summary = MembershipSummary {
+            user_ref: ResourceRef::new(Platform::Netease, "32953014")
+                .expect("valid user reference"),
+            level: Some(7),
+            active: None,
+            annual_count: Some(-1),
+            expires_at: None,
+            icon_url: Some("https://example.test/vip.png".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(summary).expect("serialize membership summary");
+        assert_eq!(value["user_ref"], "netease:32953014");
+        assert_eq!(value["level"], 7);
+        assert!(value["active"].is_null());
+        assert_eq!(value["annual_count"], -1);
+        assert!(value["expires_at"].is_null());
     }
 
     #[test]

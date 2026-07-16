@@ -20,6 +20,7 @@ pub enum Capability {
     SearchSuggestions,
     SearchMultiMatch,
     SearchLocalTrackMatch,
+    UserMembership,
     AudioRecognition,
     Banners,
     RadioTaxonomy,
@@ -118,6 +119,11 @@ mod tests {
             serde_json::to_value(Capability::SearchLocalTrackMatch)
                 .expect("serialize local track match capability"),
             serde_json::json!("search_local_track_match")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::UserMembership)
+                .expect("serialize user membership capability"),
+            serde_json::json!("user_membership")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
