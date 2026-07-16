@@ -8,13 +8,13 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist,
-    ArtistBiographySection, ArtistContentCount, ArtistStats, ArtistSummary, AuthChallengeRequest,
-    AuthState, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, Money,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
+    ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistStats,
+    ArtistSummary, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
+    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
     StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
@@ -27,10 +27,11 @@ use crate::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
-        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        ArtistListEnvelope, ArtistListItem, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
         TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
@@ -276,6 +277,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumCharts,
             Capability::ArtistDetail,
             Capability::ArtistStats,
+            Capability::ArtistList,
             Capability::ArtistAlbums,
             Capability::ArtistFans,
             Capability::PlaylistRead,
@@ -623,6 +625,25 @@ impl MusicProvider for NeteaseProvider {
         let follow_count_raw = follow_count_response.body;
         let follow_count: ArtistFollowCountEnvelope = parse_body(follow_count_raw.clone())?;
         map_artist_stats(id, response, raw, follow_count, follow_count_raw)
+    }
+
+    async fn artists(&self, request: &ArtistListRequest) -> Result<Page<Artist>> {
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let mut payload = json!({
+            "limit": limit,
+            "offset": request.offset,
+            "total": true,
+            "type": netease_artist_category(request.category),
+            "area": netease_artist_area(request.area)
+        });
+        if let Some(initial) = netease_artist_initial(request.initial.as_deref())? {
+            payload["initial"] = Value::from(initial);
+        }
+        let response = client.request_weapi("/api/v1/artist/list", payload).await?;
+        ensure_success(&response.body)?;
+        let response: ArtistListEnvelope = parse_body(response.body)?;
+        map_artist_list_response(response, limit, request.offset)
     }
 
     async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -1927,6 +1948,115 @@ fn map_album_list_item(raw: Value) -> Result<Album> {
     Ok(album)
 }
 
+const fn netease_artist_category(category: ArtistCategory) -> i64 {
+    match category {
+        ArtistCategory::All => -1,
+        ArtistCategory::Male => 1,
+        ArtistCategory::Female => 2,
+        ArtistCategory::Group => 3,
+    }
+}
+
+const fn netease_artist_area(area: ArtistArea) -> i64 {
+    match area {
+        ArtistArea::All => -1,
+        ArtistArea::Chinese => 7,
+        ArtistArea::Western => 96,
+        ArtistArea::Japanese => 8,
+        ArtistArea::Korean => 16,
+        ArtistArea::Other => 0,
+    }
+}
+
+fn netease_artist_initial(initial: Option<&str>) -> Result<Option<i64>> {
+    let Some(initial) = initial.map(str::trim).filter(|initial| !initial.is_empty()) else {
+        return Ok(None);
+    };
+    match initial.to_ascii_lowercase().as_str() {
+        "hot" | "-1" => return Ok(Some(-1)),
+        "other" | "#" | "0" => return Ok(Some(0)),
+        _ => {}
+    }
+    let bytes = initial.as_bytes();
+    if bytes.len() == 1 && bytes[0].is_ascii_alphabetic() {
+        return Ok(Some(i64::from(bytes[0].to_ascii_uppercase())));
+    }
+    Err(
+        TuneWeaveError::invalid_request("initial must be one ASCII letter, hot, or other")
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "initial": initial })),
+    )
+}
+
+fn map_artist_list_response(
+    response: ArtistListEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Artist>> {
+    let items = response
+        .artists
+        .into_iter()
+        .map(map_artist_list_item)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response.more.unwrap_or(consumed == limit);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: None,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::new(),
+        },
+    })
+}
+
+fn map_artist_list_item(raw: Value) -> Result<Artist> {
+    let item: ArtistListItem = parse_body(raw.clone())?;
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, item.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid artist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut aliases = Vec::new();
+    for alias in item
+        .alias
+        .into_iter()
+        .chain(item.translated_names)
+        .chain(item.trans)
+    {
+        let alias = alias.trim();
+        if !alias.is_empty() && alias != item.name && !aliases.iter().any(|item| item == alias) {
+            aliases.push(alias.to_owned());
+        }
+    }
+    let mut extensions = Extensions::new();
+    extensions.insert("catalog_item".to_owned(), raw);
+    Ok(Artist {
+        resource_ref,
+        platform: Platform::Netease,
+        id: item.id.to_string(),
+        name: item.name,
+        aliases,
+        description: item.brief_description.unwrap_or_default(),
+        biography_sections: Vec::new(),
+        avatar_url: item.avatar_url,
+        cover_url: item.cover_url,
+        album_count: item.album_count,
+        track_count: item.track_count,
+        mv_count: None,
+        video_count: None,
+        identities: Vec::new(),
+        extensions,
+    })
+}
+
 fn map_artist_albums_response(
     response: ArtistAlbumsEnvelope,
     limit: u32,
@@ -2724,6 +2854,63 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_catalog_filters_and_items() {
+        assert_eq!(netease_artist_category(ArtistCategory::Male), 1);
+        assert_eq!(netease_artist_category(ArtistCategory::Group), 3);
+        assert_eq!(netease_artist_area(ArtistArea::Western), 96);
+        assert_eq!(netease_artist_area(ArtistArea::Korean), 16);
+        assert_eq!(
+            netease_artist_initial(Some("b")).expect("letter initial"),
+            Some(66)
+        );
+        assert_eq!(
+            netease_artist_initial(Some("hot")).expect("hot initial"),
+            Some(-1)
+        );
+        assert_eq!(
+            netease_artist_initial(Some("#")).expect("other initial"),
+            Some(0)
+        );
+        assert_eq!(netease_artist_initial(None).expect("missing initial"), None);
+        let error = netease_artist_initial(Some("中文")).expect_err("invalid initial");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let response: ArtistListEnvelope = serde_json::from_value(json!({
+            "artists": [
+                {
+                    "id": 178059,
+                    "name": "Bruno Mars",
+                    "alias": [],
+                    "transNames": ["布鲁诺·马尔斯"],
+                    "trans": "布鲁诺·马尔斯",
+                    "briefDesc": "歌手简介",
+                    "img1v1Url": "https://example.test/avatar.jpg",
+                    "picUrl": "https://example.test/cover.jpg",
+                    "albumSize": 50,
+                    "musicSize": 959,
+                    "followed": false,
+                    "accountId": 1671465495
+                }
+            ],
+            "more": true
+        }))
+        .expect("artist list fixture");
+
+        let page = map_artist_list_response(response, 1, 0).expect("map artist list");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:178059");
+        assert_eq!(page.items[0].aliases, ["布鲁诺·马尔斯"]);
+        assert_eq!(page.items[0].album_count, Some(50));
+        assert_eq!(page.items[0].track_count, Some(959));
+        assert_eq!(
+            page.items[0].extensions["catalog_item"]["accountId"],
+            1671465495
+        );
+        assert_eq!(page.pagination.next_offset, Some(1));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
     fn maps_netease_artist_albums_and_cursor_metadata() {
         let response: ArtistAlbumsEnvelope = serde_json::from_value(json!({
             "artist": { "id": 6452, "name": "周杰伦", "albumSize": 42 },
@@ -3235,6 +3422,17 @@ mod tests {
                 .await
                 .expect_err("invalid artist fans id");
         assert_eq!(artist_fans_error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn artist_catalog_rejects_invalid_initial_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = ArtistListRequest::new(30, 0);
+        request.initial = Some("中文".to_owned());
+        let error = MusicProvider::artists(&provider, &request)
+            .await
+            .expect_err("invalid artist initial");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -3924,6 +4122,24 @@ mod tests {
         assert!(page.pagination.has_more);
         assert_eq!(page.pagination.next_offset, Some(5));
         assert_eq!(page.pagination.extensions["artist"]["id"], 6452);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = ArtistListRequest::new(2, 0);
+        request.category = ArtistCategory::Male;
+        request.area = ArtistArea::Western;
+        request.initial = Some("b".to_owned());
+        let page = MusicProvider::artists(&provider, &request)
+            .await
+            .expect("live artist catalog");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|artist| !artist.name.is_empty()));
+        assert!(page.items.iter().all(|artist| artist.avatar_url.is_some()));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
     }
 
     #[tokio::test]

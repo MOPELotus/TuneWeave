@@ -46,6 +46,34 @@ pub(crate) struct ArtistAlbumsEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistListEnvelope {
+    #[serde(default)]
+    pub artists: Vec<Value>,
+    pub more: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistListItem {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub alias: Vec<String>,
+    #[serde(rename = "transNames", default)]
+    pub translated_names: Vec<String>,
+    pub trans: Option<String>,
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    #[serde(rename = "img1v1Url")]
+    pub avatar_url: Option<String>,
+    #[serde(rename = "picUrl")]
+    pub cover_url: Option<String>,
+    #[serde(rename = "albumSize")]
+    pub album_count: Option<u64>,
+    #[serde(rename = "musicSize")]
+    pub track_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistDetailEnvelope {
     pub data: ArtistDetailData,
 }
