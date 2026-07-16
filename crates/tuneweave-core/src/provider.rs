@@ -16,8 +16,8 @@ use crate::{
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
     Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result,
-    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    SearchItem, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -46,6 +46,20 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::SearchTracks,
         ))
+    }
+
+    async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        if query.kind != SearchKind::Track {
+            return Err(TuneWeaveError::unsupported(
+                self.platform(),
+                search_capability(query.kind),
+            ));
+        }
+        let page = self.search(query).await?;
+        Ok(Page {
+            items: page.items.into_iter().map(SearchItem::Track).collect(),
+            pagination: page.pagination,
+        })
     }
 
     async fn recognize_audio(
@@ -604,5 +618,21 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::PlatformBatch,
         ))
+    }
+}
+
+fn search_capability(kind: SearchKind) -> Capability {
+    match kind {
+        SearchKind::Track => Capability::SearchTracks,
+        SearchKind::Album => Capability::SearchAlbums,
+        SearchKind::Artist => Capability::SearchArtists,
+        SearchKind::Playlist => Capability::SearchPlaylists,
+        SearchKind::User => Capability::SearchUsers,
+        SearchKind::Mv => Capability::SearchMvs,
+        SearchKind::Lyric => Capability::SearchLyrics,
+        SearchKind::RadioStation => Capability::SearchRadioStations,
+        SearchKind::Video => Capability::SearchVideos,
+        SearchKind::Mixed => Capability::SearchMixed,
+        SearchKind::Voice => Capability::SearchVoices,
     }
 }

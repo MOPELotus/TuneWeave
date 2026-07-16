@@ -34,9 +34,10 @@ pub use model::{
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind,
-    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video, VideoKind,
+    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchItem,
+    SearchKind, SearchOpaqueItem, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video,
+    VideoKind,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

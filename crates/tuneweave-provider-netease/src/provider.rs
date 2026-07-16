@@ -5784,7 +5784,13 @@ fn capability_for_search(kind: SearchKind) -> Capability {
         SearchKind::Album => Capability::SearchAlbums,
         SearchKind::Artist => Capability::SearchArtists,
         SearchKind::Playlist => Capability::SearchPlaylists,
+        SearchKind::User => Capability::SearchUsers,
+        SearchKind::Mv => Capability::SearchMvs,
+        SearchKind::Lyric => Capability::SearchLyrics,
+        SearchKind::RadioStation => Capability::SearchRadioStations,
         SearchKind::Video => Capability::SearchVideos,
+        SearchKind::Mixed => Capability::SearchMixed,
+        SearchKind::Voice => Capability::SearchVoices,
     }
 }
 

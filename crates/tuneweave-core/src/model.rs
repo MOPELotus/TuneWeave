@@ -8,14 +8,20 @@ use crate::{Capability, Platform, ResourceRef};
 pub type Extensions = BTreeMap<String, Value>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum SearchKind {
     #[default]
     Track,
     Album,
     Artist,
     Playlist,
+    User,
+    Mv,
+    Lyric,
+    RadioStation,
     Video,
+    Mixed,
+    Voice,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -51,6 +57,28 @@ impl SearchQuery {
             account: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum SearchItem {
+    Track(Track),
+    Album(Album),
+    Artist(Artist),
+    Playlist(Playlist),
+    User(User),
+    Video(Video),
+    RadioStation(RadioStation),
+    Opaque(SearchOpaqueItem),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchOpaqueItem {
+    pub platform: Platform,
+    pub kind: String,
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1786,6 +1814,72 @@ mod tests {
         assert_eq!(value["name"], "轻手揍人丸");
         assert_eq!(value["followed"], false);
         assert_eq!(value["mutual"], false);
+    }
+
+    #[test]
+    fn catalog_search_items_keep_resource_types_and_opaque_platform_data_explicit() {
+        let track = SearchItem::Track(Track::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+            "反方向的钟",
+        ));
+        let value = serde_json::to_value(track).expect("serialize typed search item");
+        assert_eq!(value["type"], "track");
+        assert_eq!(value["data"]["ref"], "netease:185809");
+
+        let mut extensions = Extensions::new();
+        extensions.insert(
+            "response".to_owned(),
+            serde_json::json!({ "resource": "voice" }),
+        );
+        let opaque = SearchItem::Opaque(SearchOpaqueItem {
+            platform: Platform::Netease,
+            kind: "voice".to_owned(),
+            id: Some("34001".to_owned()),
+            title: Some("声音节目".to_owned()),
+            extensions,
+        });
+        let value = serde_json::to_value(opaque).expect("serialize opaque search item");
+        assert_eq!(value["type"], "opaque");
+        assert_eq!(value["data"]["platform"], "netease");
+        assert_eq!(value["data"]["kind"], "voice");
+        assert_eq!(value["data"]["extensions"]["response"]["resource"], "voice");
+    }
+
+    #[test]
+    fn search_kinds_cover_every_reference_cloudsearch_branch() {
+        let kinds = [
+            SearchKind::Track,
+            SearchKind::Album,
+            SearchKind::Artist,
+            SearchKind::Playlist,
+            SearchKind::User,
+            SearchKind::Mv,
+            SearchKind::Lyric,
+            SearchKind::RadioStation,
+            SearchKind::Video,
+            SearchKind::Mixed,
+            SearchKind::Voice,
+        ];
+        let values = kinds
+            .into_iter()
+            .map(|kind| serde_json::to_value(kind).expect("serialize search kind"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                "track",
+                "album",
+                "artist",
+                "playlist",
+                "user",
+                "mv",
+                "lyric",
+                "radio_station",
+                "video",
+                "mixed",
+                "voice",
+            ]
+        );
     }
 
     #[test]

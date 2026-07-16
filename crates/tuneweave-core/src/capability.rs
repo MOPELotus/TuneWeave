@@ -8,7 +8,13 @@ pub enum Capability {
     SearchAlbums,
     SearchArtists,
     SearchPlaylists,
+    SearchUsers,
+    SearchMvs,
+    SearchLyrics,
+    SearchRadioStations,
     SearchVideos,
+    SearchMixed,
+    SearchVoices,
     AudioRecognition,
     Banners,
     RadioTaxonomy,
@@ -96,6 +102,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::PrincipalStatus).expect("serialize capability"),
             serde_json::json!("principal_status")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SearchRadioStations)
+                .expect("serialize search capability"),
+            serde_json::json!("search_radio_stations")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SearchVoices).expect("serialize search capability"),
+            serde_json::json!("search_voices")
         );
     }
 }
