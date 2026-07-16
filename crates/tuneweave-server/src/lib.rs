@@ -30,9 +30,9 @@ use tuneweave_core::{
     Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -171,6 +171,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
+        .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/audio/recognize", post(audio_recognize))
         .route("/tracks/{reference}", get(track))
@@ -432,6 +433,64 @@ async fn radio_taxonomy(
         })
         .await?;
     let mut response = ApiResponse::new(taxonomy).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RadioStationListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    #[serde(alias = "categoryId")]
+    category_id: Option<String>,
+    #[serde(alias = "regionId")]
+    region_id: Option<String>,
+    #[serde(alias = "lastId")]
+    last_id: Option<String>,
+    score: Option<String>,
+}
+
+async fn radio_stations(
+    State(state): State<AppState>,
+    Query(params): Query<RadioStationListParams>,
+) -> Result<Json<ApiResponse<Vec<RadioStation>>>, ApiError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let category_id = optional_trimmed(params.category_id);
+    let region_id = optional_trimmed(params.region_id);
+    let last_id = optional_trimmed(params.last_id);
+    let score = parse_optional_i64_parameter("score", params.score.as_deref())?;
+    let cursor = if last_id.is_some() || score.is_some() {
+        Some(RadioStationCursor {
+            id: last_id.unwrap_or_else(|| "0".to_owned()),
+            score: score.unwrap_or(-1),
+        })
+    } else {
+        None
+    };
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .radio_stations(&RadioStationListRequest {
+            limit,
+            offset,
+            category_id,
+            region_id,
+            cursor,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -2566,6 +2625,20 @@ fn parse_optional_u64_parameter(
         .transpose()
 }
 
+fn parse_optional_i64_parameter(
+    name: &str,
+    value: Option<&str>,
+) -> Result<Option<i64>, TuneWeaveError> {
+    value
+        .map(|value| {
+            value.parse().map_err(|_| {
+                TuneWeaveError::invalid_request(format!("{name} must be a signed integer"))
+                    .with_details(json!({ "parameter": name, "value": value }))
+            })
+        })
+        .transpose()
+}
+
 fn parse_optional_u16_parameter(
     name: &str,
     value: Option<&str>,
@@ -2624,6 +2697,7 @@ mod tests {
                 Capability::Banners,
                 Capability::RadioTaxonomy,
                 Capability::RadioStationDetail,
+                Capability::RadioStationList,
                 Capability::TrackDetail,
                 Capability::AlbumDetail,
                 Capability::AlbumList,
@@ -2754,6 +2828,38 @@ mod tests {
                 json!({ "thirdChannelId": "4022", "account": account }),
             );
             Ok(station)
+        }
+
+        async fn radio_stations(
+            &self,
+            request: &RadioStationListRequest,
+        ) -> Result<Page<RadioStation>> {
+            let mut station = sample_radio_station("175");
+            station.name = "河北音乐广播".to_owned();
+            station.region = Some("河北".to_owned());
+            station.extensions.insert(
+                "broadcast_station".to_owned(),
+                json!({ "score": 1492, "source": "QT" }),
+            );
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("request".to_owned(), json!(request));
+            extensions.insert(
+                "next_cursor".to_owned(),
+                json!({ "id": "14", "score": 1472 }),
+            );
+            extensions.insert("requested_offset".to_owned(), json!(request.offset));
+            extensions.insert("offset_applied".to_owned(), json!(false));
+            Ok(Page {
+                items: vec![station],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(843),
+                    next_offset: None,
+                    has_more: true,
+                    extensions,
+                },
+            })
         }
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
@@ -3883,6 +3989,76 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "radio-user");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-user");
+    }
+
+    #[tokio::test]
+    async fn radio_station_catalog_preserves_filters_cursor_and_ignored_offset() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/radio/stations?platform=netease&account=radio-user&categoryId=1&region_id=407&lastId=172&score=1542&limit=20&offset=100",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:175");
+        assert_eq!(json["data"][0]["name"], "河北音乐广播");
+        assert_eq!(
+            json["data"][0]["extensions"]["broadcast_station"]["score"],
+            1492
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["category_id"],
+            "1"
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["region_id"],
+            "407"
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["cursor"]["id"],
+            "172"
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["cursor"]["score"],
+            1542
+        );
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["requested_offset"],
+            100
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["offset_applied"],
+            false
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["next_cursor"]["id"],
+            "14"
+        );
+        assert_eq!(json["meta"]["account"], "radio-user");
+    }
+
+    #[tokio::test]
+    async fn radio_station_catalog_accepts_independent_reference_cursor_fields() {
+        for (query, expected_id, expected_score) in
+            [("lastId=172", "172", -1), ("score=1542", "0", 1542)]
+        {
+            let path = format!("/v1/radio/stations?{query}");
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["request"]["cursor"]["id"],
+                expected_id
+            );
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["request"]["cursor"]["score"],
+                expected_score
+            );
+        }
+
+        let (status, json) =
+            json_response_from(test_app_with_provider(), "/v1/radio/stations?score=invalid").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
