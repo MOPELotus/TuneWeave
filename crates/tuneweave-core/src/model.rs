@@ -298,6 +298,20 @@ pub struct ArtistStats {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct User {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub signature: Option<String>,
+    pub followed: Option<bool>,
+    pub mutual: Option<bool>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     #[serde(rename = "ref")]
@@ -686,6 +700,28 @@ mod tests {
         assert_eq!(value["follower_count"], 13_704_928);
         assert_eq!(value["video_counts"][0]["category"], "0");
         assert_eq!(value["video_counts"][0]["count"], 9);
+    }
+
+    #[test]
+    fn user_serializes_a_cross_platform_identity_and_relationship_state() {
+        let user = User {
+            resource_ref: ResourceRef::new(Platform::Netease, "6298206519")
+                .expect("valid user reference"),
+            platform: Platform::Netease,
+            id: "6298206519".to_owned(),
+            name: "轻手揍人丸".to_owned(),
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+            signature: Some("111".to_owned()),
+            followed: Some(false),
+            mutual: Some(false),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(user).expect("serialize user");
+        assert_eq!(value["ref"], "netease:6298206519");
+        assert_eq!(value["name"], "轻手揍人丸");
+        assert_eq!(value["followed"], false);
+        assert_eq!(value["mutual"], false);
     }
 
     #[test]

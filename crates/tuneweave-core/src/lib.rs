@@ -25,7 +25,7 @@ pub use model::{
     PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RecommendationRequest,
     ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TrialWindow,
+    SubscriptionResult, Track, TrackEntitlement, TrialWindow, User,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
