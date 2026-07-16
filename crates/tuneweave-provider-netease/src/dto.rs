@@ -63,6 +63,14 @@ pub(crate) struct ArtistSublistEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistTopTracksEnvelope {
+    #[serde(default)]
+    pub songs: Vec<Value>,
+    #[serde(default)]
+    pub privileges: Vec<Privilege>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistListEnvelope {
     #[serde(default)]
     pub artists: Vec<Value>,

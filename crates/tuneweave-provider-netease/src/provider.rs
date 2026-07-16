@@ -33,13 +33,14 @@ use crate::{
         ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
         ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistSublistEnvelope,
-        ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
-        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord,
+        ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -288,6 +289,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ArtistFans,
             Capability::ArtistVideos,
             Capability::ArtistTracks,
+            Capability::ArtistTopTracks,
             Capability::ArtistSubscriptionWrite,
             Capability::PlaylistRead,
             Capability::Lyrics,
@@ -784,6 +786,18 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: ArtistTracksEnvelope = parse_body(response.body)?;
         map_artist_tracks_response(response, limit, request.offset)
+    }
+
+    async fn artist_top_tracks(&self, id: &str, account: Option<&str>) -> Result<Page<Track>> {
+        let id = parse_numeric_id("artist", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_weapi("/api/artist/top/song", json!({ "id": id }))
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: ArtistTopTracksEnvelope = parse_body(response.body)?;
+        map_artist_top_tracks_response(response, raw_response)
     }
 
     async fn set_artist_subscription(
@@ -2421,6 +2435,42 @@ fn map_artist_sublist_response(
     })
 }
 
+fn map_artist_top_tracks_response(
+    response: ArtistTopTracksEnvelope,
+    raw_response: Value,
+) -> Result<Page<Track>> {
+    let mut privileges = response
+        .privileges
+        .into_iter()
+        .map(|privilege| (privilege.id, privilege))
+        .collect::<HashMap<_, _>>();
+    let items = response
+        .songs
+        .into_iter()
+        .map(|raw| {
+            let song: Song = parse_body(raw.clone())?;
+            let privilege = privileges.remove(&song.id);
+            let mut track = map_song(song, privilege)?;
+            track.extensions.insert("artist_top_track".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total = items.len() as u64;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: 50,
+            offset: 0,
+            total: Some(total),
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
 fn map_artist_fans_response(
     response: ArtistFansEnvelope,
     limit: u32,
@@ -3997,6 +4047,59 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_top_tracks_as_a_fixed_snapshot() {
+        let raw = json!({
+            "songs": [
+                {
+                    "id": 185809,
+                    "name": "晴天",
+                    "alia": [],
+                    "ar": [{"id": 6452, "name": "周杰伦"}],
+                    "al": {
+                        "id": 18905,
+                        "name": "叶惠美",
+                        "picUrl": "https://example.test/cover.jpg"
+                    },
+                    "dt": 269000,
+                    "mv": 186001,
+                    "fee": 1,
+                    "st": 0,
+                    "copyright": 2
+                }
+            ],
+            "privileges": [
+                {
+                    "id": 185809,
+                    "st": 0,
+                    "fee": 1,
+                    "pl": 320000,
+                    "maxbr": 999000
+                }
+            ],
+            "code": 200
+        });
+        let response: ArtistTopTracksEnvelope =
+            serde_json::from_value(raw.clone()).expect("artist top tracks fixture");
+
+        let page = map_artist_top_tracks_response(response, raw).expect("map artist top tracks");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:185809");
+        assert_eq!(page.items[0].name, "晴天");
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(page.items[0].playable, Some(true));
+        assert_eq!(
+            page.items[0].extensions["privilege"]["play_bitrate"],
+            320000
+        );
+        assert_eq!(page.items[0].extensions["artist_top_track"]["copyright"], 2);
+        assert_eq!(page.pagination.limit, 50);
+        assert_eq!(page.pagination.total, Some(1));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_artist_videos_and_cursor_to_the_unified_video_model() {
         let response: ArtistVideosEnvelope = serde_json::from_value(json!({
             "data": {
@@ -4851,6 +4954,10 @@ mod tests {
                 .await
                 .expect_err("invalid artist subscription id");
         assert_eq!(artist_subscription_error.code, ErrorCode::InvalidRequest);
+        let artist_top_tracks_error = MusicProvider::artist_top_tracks(&provider, "invalid", None)
+            .await
+            .expect_err("invalid artist top tracks id");
+        assert_eq!(artist_top_tracks_error.code, ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]
@@ -5703,6 +5810,27 @@ mod tests {
         assert!(page.pagination.total.is_some_and(|total| total > 2));
         assert_eq!(page.pagination.next_offset, Some(2));
         assert!(page.pagination.has_more);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_top_tracks() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page = MusicProvider::artist_top_tracks(&provider, "6452", None)
+            .await
+            .expect("live artist top tracks");
+        assert_eq!(page.items.len(), 50);
+        assert!(page.items.iter().all(|track| !track.name.is_empty()));
+        assert!(
+            page.items
+                .iter()
+                .all(|track| track.artists.iter().any(|artist| artist.name == "周杰伦"))
+        );
+        assert_eq!(page.pagination.limit, 50);
+        assert_eq!(page.pagination.total, Some(50));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert!(page.pagination.extensions.contains_key("response"));
     }
 
     #[tokio::test]
