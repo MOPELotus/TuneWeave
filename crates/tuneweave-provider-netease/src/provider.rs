@@ -7891,6 +7891,7 @@ fn map_artist_new_tracks_response(
     limit: u32,
     before_ms: u64,
 ) -> Result<Page<Track>> {
+    let work_block_count = response.data.new_works.len();
     let next_before_ms = response
         .data
         .new_works
@@ -7900,18 +7901,18 @@ fn map_artist_new_tracks_response(
         .data
         .new_works
         .into_iter()
-        .map(|raw| {
-            let song: Song = parse_body(raw.clone())?;
-            let mut track = map_song(song, None)?;
-            track.extensions.insert("artist_new_track".to_owned(), raw);
-            Ok(track)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    let has_more = response.data.has_more.unwrap_or(consumed == limit);
+        .map(map_artist_new_track_block)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let consumed_blocks = u32::try_from(work_block_count).unwrap_or(u32::MAX);
+    let has_more = response.data.has_more.unwrap_or(consumed_blocks == limit);
     let mut extensions = Extensions::new();
     extensions.insert("response".to_owned(), raw_response);
     extensions.insert("before_ms".to_owned(), json!(before_ms));
+    extensions.insert("limit_unit".to_owned(), json!("work_blocks"));
+    extensions.insert("work_block_count".to_owned(), json!(work_block_count));
     insert_extension(&mut extensions, "next_before_ms", next_before_ms);
     Ok(Page {
         items,
@@ -7924,6 +7925,40 @@ fn map_artist_new_tracks_response(
             extensions,
         },
     })
+}
+
+fn map_artist_new_track_block(raw: Value) -> Result<Vec<Track>> {
+    if raw.get("id").is_some() {
+        let song: Song = parse_body(raw.clone())?;
+        let mut track = map_song(song, None)?;
+        track.extensions.insert("artist_new_track".to_owned(), raw);
+        return Ok(vec![track]);
+    }
+
+    let songs =
+        artist_work_resources(&raw, &["songLists", "songList", "songs"]).ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase followed artist track block is missing its song list",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "block": raw }))
+        })?;
+    songs
+        .iter()
+        .cloned()
+        .map(|song_raw| {
+            let song: Song = parse_body(song_raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track
+                .extensions
+                .insert("artist_new_track".to_owned(), song_raw);
+            track
+                .extensions
+                .insert("artist_new_track_block".to_owned(), raw.clone());
+            Ok(track)
+        })
+        .collect()
 }
 
 fn map_artist_new_works_response(
@@ -13609,18 +13644,33 @@ mod tests {
                 "newSongCount": 3,
                 "newWorks": [
                     {
-                        "id": 2099001,
-                        "name": "新歌",
-                        "alias": ["New Song"],
-                        "artists": [{ "id": 6452, "name": "周杰伦" }],
-                        "album": {
-                            "id": 3099001,
-                            "name": "新专辑",
-                            "picUrl": "https://example.test/new-album.jpg"
-                        },
-                        "duration": 208000,
-                        "mvid": 1099001,
-                        "publishTime": 1_720_000_000_000_u64
+                        "albumId": 3099001,
+                        "blockType": "SONG",
+                        "publishTime": 1_720_000_000_000_u64,
+                        "blockTitle": { "artistName": "周杰伦" },
+                        "songLists": [
+                            {
+                                "id": 2099001,
+                                "name": "新歌",
+                                "alia": ["New Song"],
+                                "ar": [{ "id": 6452, "name": "周杰伦" }],
+                                "al": {
+                                    "id": 3099001,
+                                    "name": "新专辑",
+                                    "picUrl": "https://example.test/new-album.jpg"
+                                },
+                                "dt": 208000,
+                                "mv": 1099001
+                            },
+                            {
+                                "id": 2099002,
+                                "name": "第二首新歌",
+                                "ar": [{ "id": 6452, "name": "周杰伦" }],
+                                "al": { "id": 3099001, "name": "新专辑" },
+                                "dt": 198000,
+                                "mv": 0
+                            }
+                        ]
                     }
                 ]
             }
@@ -13631,7 +13681,9 @@ mod tests {
         let page = map_artist_new_tracks_response(response, raw, 1, 1_730_000_000_000)
             .expect("map followed artist tracks");
 
+        assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].resource_ref.to_string(), "netease:2099001");
+        assert_eq!(page.items[1].resource_ref.to_string(), "netease:2099002");
         assert_eq!(page.items[0].name, "新歌");
         assert_eq!(page.items[0].artists[0].name, "周杰伦");
         assert_eq!(
@@ -13651,8 +13703,9 @@ mod tests {
                 .as_deref(),
             Some("netease:1099001")
         );
+        assert_eq!(page.items[0].extensions["artist_new_track"]["id"], 2099001);
         assert_eq!(
-            page.items[0].extensions["artist_new_track"]["publishTime"],
+            page.items[0].extensions["artist_new_track_block"]["publishTime"],
             1_720_000_000_000_u64
         );
         assert_eq!(page.pagination.total, Some(3));
@@ -13660,6 +13713,8 @@ mod tests {
             page.pagination.extensions["next_before_ms"],
             1_720_000_000_000_u64
         );
+        assert_eq!(page.pagination.extensions["limit_unit"], "work_blocks");
+        assert_eq!(page.pagination.extensions["work_block_count"], 1);
         assert!(page.pagination.has_more);
     }
 
