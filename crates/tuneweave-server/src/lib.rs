@@ -16,15 +16,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistListRequest, ArtistStats, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
-    ArtistWorksRequest, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoKind,
+    ArtistListRequest, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
+    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -178,6 +178,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/albums", get(artist_albums))
         .route("/artists/{reference}/fans", get(artist_fans))
         .route("/artists/{reference}/videos", get(artist_videos))
+        .route("/artists/{reference}/tracks", get(artist_tracks))
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -1014,6 +1015,41 @@ async fn artist_videos(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ArtistTrackListParams {
+    limit: Option<String>,
+    offset: Option<String>,
+    account: Option<String>,
+    order: Option<String>,
+}
+
+async fn artist_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<ArtistTrackListParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let mut request = ArtistTrackListRequest::new(limit, offset);
+    request.account.clone_from(&account);
+    request.order = parse_artist_track_order(params.order.as_deref())?;
+    let page = provider.artist_tracks(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 async fn user_favorite_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -1826,6 +1862,17 @@ fn parse_video_kind(value: Option<&str>) -> Result<VideoKind, TuneWeaveError> {
     }
 }
 
+fn parse_artist_track_order(value: Option<&str>) -> Result<ArtistTrackOrder, TuneWeaveError> {
+    match value.unwrap_or("hot").trim().to_ascii_lowercase().as_str() {
+        "hot" => Ok(ArtistTrackOrder::Hot),
+        "time" => Ok(ArtistTrackOrder::Time),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported artist track order: {value}"
+        ))
+        .with_details(json!({ "allowed": ["hot", "time"] }))),
+    }
+}
+
 fn parse_digital_album_chart_period(
     value: Option<&str>,
 ) -> Result<DigitalAlbumChartPeriod, TuneWeaveError> {
@@ -2033,6 +2080,7 @@ mod tests {
                 Capability::ArtistAlbums,
                 Capability::ArtistFans,
                 Capability::ArtistVideos,
+                Capability::ArtistTracks,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -2296,6 +2344,29 @@ mod tests {
                     limit: request.limit,
                     offset: request.offset,
                     total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn artist_tracks(
+            &self,
+            id: &str,
+            request: &ArtistTrackListRequest,
+        ) -> Result<Page<Track>> {
+            let mut track = sample_track("298317");
+            track.extensions.insert("artist_id".to_owned(), json!(id));
+            track
+                .extensions
+                .insert("order".to_owned(), json!(request.order));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(566),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Default::default(),
@@ -3059,6 +3130,39 @@ mod tests {
         assert_eq!(videos["meta"]["pagination"]["offset"], 10);
         assert_eq!(videos["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(videos["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_tracks_use_reference_platform_order_account_and_pagination() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/tracks?order=time&limit=2&offset=10&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:298317");
+        assert_eq!(tracks["data"][0]["extensions"]["artist_id"], "6452");
+        assert_eq!(tracks["data"][0]["extensions"]["order"], "time");
+        assert_eq!(tracks["meta"]["platform"], "netease");
+        assert_eq!(tracks["meta"]["account"], "collector");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
+        assert_eq!(tracks["meta"]["pagination"]["offset"], 10);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 566);
+        assert_eq!(tracks["meta"]["pagination"]["next_offset"], 11);
+        assert_eq!(tracks["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_tracks_reject_unknown_order() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/tracks?order=random",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(response["error"]["details"]["allowed"][0], "hot");
+        assert_eq!(response["error"]["details"]["allowed"][1], "time");
     }
 
     #[tokio::test]
