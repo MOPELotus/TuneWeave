@@ -1713,6 +1713,12 @@ pub struct StreamOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StreamBatch {
+    pub outcomes: Vec<StreamOutcome>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResolutionAttempt {
     pub platform: Platform,
     pub account: Option<String>,
@@ -2016,11 +2022,15 @@ mod tests {
             error: Some("not playable".to_owned()),
             extensions: Extensions::new(),
         };
-        let value = serde_json::to_value(outcome).expect("serialize stream outcome");
-        assert_eq!(value["track_ref"], "netease:1969519579");
-        assert_eq!(value["status"], "permission_denied");
-        assert_eq!(value["error_code"], "permission_denied");
-        assert!(value["stream"].is_null());
+        let value = serde_json::to_value(StreamBatch {
+            outcomes: vec![outcome],
+            extensions: Extensions::new(),
+        })
+        .expect("serialize stream batch");
+        assert_eq!(value["outcomes"][0]["track_ref"], "netease:1969519579");
+        assert_eq!(value["outcomes"][0]["status"], "permission_denied");
+        assert_eq!(value["outcomes"][0]["error_code"], "permission_denied");
+        assert!(value["outcomes"][0]["stream"].is_null());
     }
 
     #[test]

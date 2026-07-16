@@ -24,7 +24,7 @@ use crate::{
     RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamOutcome, StreamRequest, SubscriptionResult, Track,
+    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
@@ -532,11 +532,7 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
-    async fn streams(
-        &self,
-        tracks: &[Track],
-        request: &StreamRequest,
-    ) -> Result<Vec<StreamOutcome>> {
+    async fn streams(&self, tracks: &[Track], request: &StreamRequest) -> Result<StreamBatch> {
         let mut outcomes = Vec::with_capacity(tracks.len());
         for track in tracks {
             match self.stream(track, request).await {
@@ -558,7 +554,10 @@ pub trait MusicProvider: Send + Sync {
                 }),
             }
         }
-        Ok(outcomes)
+        Ok(StreamBatch {
+            outcomes,
+            extensions: Extensions::new(),
+        })
     }
 
     async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {
