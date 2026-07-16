@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=316`、`partial=6`、`implemented=33`、`verified=52`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=316`、`partial=5`、`implemented=33`、`verified=53`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -264,7 +264,7 @@
 | `sati_timescene_resources_get` | `/sati/timescene/resources/get` | `pending` | — |
 | `scrobble` | `/scrobble` | `pending` | — |
 | `scrobble_v1` | `/scrobble/v1` | `pending` | — |
-| `search` | `/search` | `partial` | `GET /v1/search`（当前仅单曲类型） |
+| `search` | `/search` | `verified` | `GET /v1/search?variant=legacy`（与 `/cloudsearch` 共用统一端点和 `SearchItem` 判别联合，通过 `variant` 选择参考后端；完整支持 `keywords/q`、`limit/offset` 和全部参考类型 `1/10/100/1000/1002/1004/1006/1009/1014/1018/2000`，普通 10 类固定 EAPI `/api/search/get` 并提交 `s/type/limit/offset`，声音类型精确切换 EAPI `/api/search/voice/get` 并提交 `keyword/scene=normal/limit/offset`，不混入新版 `total=true`；旧声音的 `data.resources/totalCount/hasMore` 与普通 `result` 都进入统一分页，已知实体规范化、综合/声音及异常结构不丢失原文；核心 `default/legacy/cloud` 契约、两套协议负载、11 类型、旧声音形状、服务端别名/错误和分页后端标记均有测试；2026-07-17 显式 provider 联网测试与真实二进制统一 HTTP 逐类验证 11 种类型全部上游 `code=200`，1/10/100/1000/1002/1004/1006 各返回请求的 2 项，1009 按上游行为返回 30 项并标记 `limit_applied=false`，1014 合法空结果、1018 返回完整 opaque 综合块、2000 走声音路径并保留 `total=569`） |
 | `search_default` | `/search/default` | `pending` | — |
 | `search_hot` | `/search/hot` | `pending` | — |
 | `search_hot_detail` | `/search/hot/detail` | `pending` | — |
