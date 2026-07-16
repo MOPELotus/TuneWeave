@@ -93,6 +93,7 @@ pub struct DigitalAlbumListRequest {
     pub account: Option<String>,
     pub area: Option<String>,
     pub kind: Option<String>,
+    pub catalog: Option<String>,
 }
 
 impl DigitalAlbumListRequest {
@@ -104,6 +105,7 @@ impl DigitalAlbumListRequest {
             account: None,
             area: None,
             kind: None,
+            catalog: None,
         }
     }
 }
