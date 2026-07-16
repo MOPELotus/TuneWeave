@@ -288,6 +288,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ArtistFans,
             Capability::ArtistVideos,
             Capability::ArtistTracks,
+            Capability::ArtistSubscriptionWrite,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -782,6 +783,20 @@ impl MusicProvider for NeteaseProvider {
         ensure_success(&response.body)?;
         let response: ArtistTracksEnvelope = parse_body(response.body)?;
         map_artist_tracks_response(response, limit, request.offset)
+    }
+
+    async fn set_artist_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let id = parse_numeric_id("artist", id)?;
+        let (path, payload) = netease_artist_subscription_request(id, subscribed);
+        let client = self.client_for(account)?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_artist_subscription_result(id, subscribed, response.body)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1726,6 +1741,21 @@ fn netease_album_subscription_request(id: u64, subscribed: bool) -> (&'static st
         "/api/album/unsub"
     };
     (path, json!({ "id": id }))
+}
+
+fn netease_artist_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
+    let path = if subscribed {
+        "/api/artist/sub"
+    } else {
+        "/api/artist/unsub"
+    };
+    (
+        path,
+        json!({
+            "artistId": id,
+            "artistIds": format!("[{id}]")
+        }),
+    )
 }
 
 fn netease_digital_album_chart_request(
@@ -3336,6 +3366,27 @@ fn map_album_subscription_result(
     })
 }
 
+fn map_artist_subscription_result(
+    id: u64,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid artist id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -4450,6 +4501,24 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_maps_netease_artist_subscription_actions() {
+        let (path, payload) = netease_artist_subscription_request(6452, true);
+        assert_eq!(path, "/api/artist/sub");
+        assert_eq!(payload["artistId"], 6452);
+        assert_eq!(payload["artistIds"], "[6452]");
+        let (path, payload) = netease_artist_subscription_request(6452, false);
+        assert_eq!(path, "/api/artist/unsub");
+        assert_eq!(payload["artistId"], 6452);
+        assert_eq!(payload["artistIds"], "[6452]");
+
+        let result = map_artist_subscription_result(6452, true, json!({ "code": 200 }))
+            .expect("map artist subscription result");
+        assert_eq!(result.resource_ref.to_string(), "netease:6452");
+        assert!(result.subscribed);
+        assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_digital_album_product_to_the_unified_model() {
         let raw = json!({
             "code": 200,
@@ -4681,6 +4750,11 @@ mod tests {
                 .await
                 .expect_err("invalid artist tracks id");
         assert_eq!(artist_tracks_error.code, ErrorCode::InvalidRequest);
+        let artist_subscription_error =
+            MusicProvider::set_artist_subscription(&provider, "invalid", true, None)
+                .await
+                .expect_err("invalid artist subscription id");
+        assert_eq!(artist_subscription_error.code, ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]
@@ -4714,6 +4788,16 @@ mod tests {
         let error = MusicProvider::account_artist_new_videos(&provider, &request)
             .await
             .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn artist_subscription_requires_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error =
+            MusicProvider::set_artist_subscription(&provider, "6452", true, Some("collector"))
+                .await
+                .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -5698,6 +5782,16 @@ mod tests {
         let error = MusicProvider::set_album_subscription(&provider, "32311", true, None)
             .await
             .expect_err("anonymous album subscription must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_artist_subscription_requires_authentication_without_a_session() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::set_artist_subscription(&provider, "6452", true, None)
+            .await
+            .expect_err("anonymous artist subscription must fail");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
