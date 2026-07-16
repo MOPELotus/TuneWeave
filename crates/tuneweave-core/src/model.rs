@@ -720,6 +720,37 @@ pub struct CommentReactionPage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentThreadStatsRequest {
+    pub kind: CommentTargetKind,
+    pub resource_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentThreadStats {
+    pub target: CommentTarget,
+    pub requested_ref: Option<ResourceRef>,
+    pub liked: Option<bool>,
+    pub like_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub comment_count_text: Option<String>,
+    pub share_count: Option<u64>,
+    pub comment_upgraded: Option<bool>,
+    pub musician_comment_count: Option<u64>,
+    pub latest_liked_users: Vec<User>,
+    pub comments: Vec<Comment>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentThreadStatsBatch {
+    pub kind: CommentTargetKind,
+    pub requested_refs: Vec<ResourceRef>,
+    pub stats: Vec<CommentThreadStats>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumListRequest {
     pub limit: u32,
     pub offset: u32,
@@ -2266,5 +2297,43 @@ mod tests {
         assert_eq!(page["kind"], "hug");
         assert_eq!(page["reactions"][0]["user"]["ref"], "netease:2121989064");
         assert_eq!(page["pagination"]["total"], 150);
+    }
+
+    #[test]
+    fn comment_thread_stats_keep_requested_and_canonical_targets_distinct() {
+        let requested = ResourceRef::new(Platform::Netease, "89ADDE33C0AAE8EC14B99F6750DB954D")
+            .expect("valid video reference");
+        let canonical =
+            ResourceRef::new(Platform::Netease, "2335163").expect("valid canonical reference");
+        let batch = CommentThreadStatsBatch {
+            kind: CommentTargetKind::Video,
+            requested_refs: vec![requested.clone()],
+            stats: vec![CommentThreadStats {
+                target: CommentTarget::new(canonical, CommentTargetKind::Video),
+                requested_ref: Some(requested),
+                liked: Some(false),
+                like_count: Some(20),
+                comment_count: Some(1_123),
+                comment_count_text: Some("1000+".to_owned()),
+                share_count: Some(30),
+                comment_upgraded: Some(false),
+                musician_comment_count: Some(0),
+                latest_liked_users: Vec::new(),
+                comments: Vec::new(),
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(batch).expect("serialize comment stats batch");
+        assert_eq!(
+            value["requested_refs"][0],
+            "netease:89ADDE33C0AAE8EC14B99F6750DB954D"
+        );
+        assert_eq!(value["stats"][0]["target"]["ref"], "netease:2335163");
+        assert_eq!(
+            value["stats"][0]["requested_ref"],
+            "netease:89ADDE33C0AAE8EC14B99F6750DB954D"
+        );
+        assert_eq!(value["stats"][0]["comment_count"], 1_123);
     }
 }
