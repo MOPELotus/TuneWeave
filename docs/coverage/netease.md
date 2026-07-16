@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=313`、`partial=5`、`implemented=33`、`verified=56`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=311`、`partial=5`、`implemented=33`、`verified=58`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -270,8 +270,8 @@
 | `search_hot_detail` | `/search/hot/detail` | `verified` | `GET /v1/search/trending?detail=full`（与简略榜共用统一模型，缺省即详细模式；固定 WeAPI `/api/hotsearchlist/get` 空负载，将 `data[{searchWord,score,content,iconType,iconUrl,url}]` 映射为排名、关键词、分数、说明和图标/目标地址，空字符串保持可空字段，`alg/source` 等完整原文不丢失；完整覆盖 `detail=full/detail/detailed`、`mode` 别名、默认平台/账户和输入拒绝；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 均返回上游 `code=200` 和 20 项，首项 rank 1“薛之谦”、`score=107509`、`icon_type=4`） |
 | `search_match` | `/search/match` | `pending` | — |
 | `search_multimatch` | `/search/multimatch` | `pending` | — |
-| `search_suggest` | `/search/suggest` | `pending` | — |
-| `search_suggest_pc` | `/search/suggest/pc` | `pending` | — |
+| `search_suggest` | `/search/suggest` | `verified` | `GET /v1/search/suggestions?client=web|mobile`（统一接收 `q/keywords/keyword`、平台和账户，兼容参考 `type=mobile`；web 固定 WeAPI `/api/search/suggest/web`、mobile 固定 WeAPI `/api/search/suggest/keyword`，两者都精确提交 `s`；web 按上游 `order` 保持歌曲/专辑/歌手/歌单/用户/MV/电台/视频分组顺序，将每项映射为带统一 `SearchItem resource` 的建议，未列入 order 但实际存在的已知数组也不会遗漏；mobile 将 `result.allMatch[{keyword,type,...}]` 映射为纯关键词及可识别类型，不伪造资源；完整列表/条目和未知分组原文不丢失，缺失容器、错误数组或无关键词返回稳定错误；协议双分支、资源/关键词映射、能力发现、统一/参考参数和输入拒绝均有测试；2026-07-17 显式 provider 联网测试与真实二进制统一 HTTP 均返回 `code=200`，web 6 条且全部带统一资源，mobile 6 条纯关键词，首项均为“海阔天空”） |
+| `search_suggest_pc` | `/search/suggest/pc` | `verified` | `GET /v1/search/suggestions?client=pc`（固定 EAPI `/api/search/pc/suggest/keyword/get` 并精确提交参考 `keyword`；完整映射 `data.suggests` 为普通建议、`data.recs` 为独立 recommendations，保留 `showText/iconUrl/resourceType/relatedResource/highLightInfo/recTitle` 等完整原文，任一数组缺省可为空但错误类型或无关键词会稳定失败；统一端点同时接受 `keyword` 原参数名；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 返回上游 `code=200`、10 条建议，当前 recommendations 合法为空，首项“海阔天空”） |
 | `send_album` | `/send/album` | `pending` | — |
 | `send_playlist` | `/send/playlist` | `pending` | — |
 | `send_song` | `/send/song` | `pending` | — |
