@@ -37,8 +37,8 @@ use tuneweave_core::{
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
     Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest,
-    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    LocalTrackMatchResult, Lyrics, MediaStream, MembershipSummary, PageRequest, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchDefaultKeyword,
@@ -266,6 +266,7 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/tracks",
             get(user_favorite_tracks),
         )
+        .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
@@ -286,6 +287,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
+        .route("/account/membership", get(account_membership))
         .route(
             "/account/avatar",
             put(account_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD_BYTES)),
@@ -1822,6 +1824,55 @@ async fn user_favorite_tracks(
             .with_platform(platform)
             .with_account(account)
             .with_pagination(page.pagination),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserMembershipParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountMembershipParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn user_membership(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UserMembershipParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let membership = provider
+        .user_membership(Some(reference.id()), Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(membership)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn account_membership(
+    State(state): State<AppState>,
+    params: Result<Query<AccountMembershipParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let membership = provider.user_membership(None, Some(&account)).await?;
+    Ok(Json(
+        ApiResponse::new(membership)
+            .with_platform(platform)
+            .with_account(account),
     ))
 }
 
@@ -4423,6 +4474,7 @@ mod tests {
                 Capability::SearchSuggestions,
                 Capability::SearchMultiMatch,
                 Capability::SearchLocalTrackMatch,
+                Capability::UserMembership,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4649,6 +4701,25 @@ mod tests {
                     ("artist".to_owned(), json!(request.artist)),
                     ("account".to_owned(), json!(request.account)),
                 ]),
+            })
+        }
+
+        async fn user_membership(
+            &self,
+            id: Option<&str>,
+            account: Option<&str>,
+        ) -> Result<MembershipSummary> {
+            Ok(MembershipSummary {
+                user_ref: id
+                    .map(|id| ResourceRef::new(Platform::Netease, id))
+                    .transpose()
+                    .expect("valid mock membership user reference"),
+                level: Some(7),
+                active: id.is_none().then_some(true),
+                annual_count: Some(1),
+                expires_at: None,
+                icon_url: None,
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
 
@@ -9188,6 +9259,57 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn membership_endpoints_separate_public_user_and_current_account_status() {
+        let (status, public) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014/membership?account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(public["data"]["user_ref"], "netease:32953014");
+        assert_eq!(public["data"]["level"], 7);
+        assert!(public["data"]["active"].is_null());
+        assert_eq!(public["data"]["annual_count"], 1);
+        assert_eq!(public["data"]["extensions"]["account"], "viewer");
+        assert_eq!(public["meta"]["platform"], "netease");
+        assert_eq!(public["meta"]["account"], "viewer");
+
+        let (status, current) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/membership?platform=netease&account=vip-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(current["data"]["user_ref"].is_null());
+        assert_eq!(current["data"]["level"], 7);
+        assert_eq!(current["data"]["active"], true);
+        assert_eq!(current["data"]["extensions"]["account"], "vip-user");
+        assert_eq!(current["meta"]["platform"], "netease");
+        assert_eq!(current["meta"]["account"], "vip-user");
+
+        let (status, defaulted) =
+            json_response_from(test_app_with_provider(), "/v1/account/membership").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["meta"]["platform"], "netease");
+        assert_eq!(defaulted["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn membership_endpoints_reject_bad_references_platforms_and_query_fields() {
+        for path in [
+            "/v1/users/invalid/membership",
+            "/v1/users/netease:32953014/membership?platform=netease",
+            "/v1/users/netease:32953014/membership?unknown=true",
+            "/v1/account/membership?platform=unknown",
+            "/v1/account/membership?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
