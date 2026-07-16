@@ -38,7 +38,8 @@ use tuneweave_core::{
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
     ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
@@ -314,6 +315,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchDefault,
             Capability::SearchTrending,
             Capability::SearchSuggestions,
+            Capability::SearchMultiMatch,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -500,6 +502,24 @@ impl MusicProvider for NeteaseProvider {
         };
         ensure_success(&response.body)?;
         map_netease_search_suggestions(request.client, query, response.body)
+    }
+
+    async fn search_multi_match(
+        &self,
+        request: &SearchMultiMatchRequest,
+    ) -> Result<SearchMultiMatch> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "multi-match search query cannot be empty",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = netease_search_multi_match_request(request.kind, query);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_search_multi_match(query, request.kind, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7537,6 +7557,148 @@ fn search_item_keyword(item: &SearchItem) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+fn netease_search_multi_match_request(kind: SearchKind, query: &str) -> (&'static str, Value) {
+    (
+        "/api/search/suggest/multimatch",
+        json!({
+            "type": netease_cloud_search_type(kind),
+            "s": query
+        }),
+    )
+}
+
+fn map_netease_search_multi_match(
+    query: &str,
+    requested_kind: SearchKind,
+    response: Value,
+) -> Result<SearchMultiMatch> {
+    let result = response
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase multi-match search response is missing its result object",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let mut section_names = Vec::new();
+    if let Some(order) = result.get("orders").or_else(|| result.get("order")) {
+        let order = order.as_array().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase multi-match search section order is not an array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "order": order }))
+        })?;
+        for section in order {
+            let section = section
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase multi-match search section order contains an invalid name",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "section": section }))
+                })?;
+            if !section_names.iter().any(|known| known == section) {
+                section_names.push(section.to_owned());
+            }
+        }
+    }
+    for (section, value) in result {
+        if !matches!(section.as_str(), "orders" | "order")
+            && value.is_array()
+            && !section_names.iter().any(|known| known == section)
+        {
+            section_names.push(section.clone());
+        }
+    }
+
+    let mut sections = Vec::with_capacity(section_names.len());
+    for (index, section) in section_names.into_iter().enumerate() {
+        let raw_items = match result.get(&section) {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items.clone(),
+            Some(value) => {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    format!("NetEase multi-match search section {section} is not an array"),
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "section": section, "value": value })));
+            }
+        };
+        let kind = netease_multi_match_section_kind(&section);
+        let items = raw_items
+            .iter()
+            .cloned()
+            .map(|raw| map_netease_multi_match_item(&section, kind, raw))
+            .collect();
+        sections.push(SearchMultiMatchSection {
+            section,
+            kind,
+            items,
+            extensions: Extensions::from([
+                ("order_index".to_owned(), json!(index)),
+                ("returned_count".to_owned(), json!(raw_items.len())),
+            ]),
+        });
+    }
+
+    Ok(SearchMultiMatch {
+        query: query.to_owned(),
+        requested_kind,
+        sections,
+        extensions: Extensions::from([
+            (
+                "platform_type".to_owned(),
+                json!(netease_cloud_search_type(requested_kind)),
+            ),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
+fn netease_multi_match_section_kind(section: &str) -> Option<SearchKind> {
+    match section {
+        "song" | "songs" => Some(SearchKind::Track),
+        "album" | "albums" => Some(SearchKind::Album),
+        "artist" | "artists" => Some(SearchKind::Artist),
+        "playlist" | "playlists" => Some(SearchKind::Playlist),
+        "user" | "users" | "userprofile" | "userprofiles" => Some(SearchKind::User),
+        "mv" | "mvs" => Some(SearchKind::Mv),
+        "djRadio" | "djRadios" | "radio" | "radios" => Some(SearchKind::RadioStation),
+        "new_mlog" | "video" | "videos" => Some(SearchKind::Video),
+        "voice" | "voices" | "resources" => Some(SearchKind::Voice),
+        _ => None,
+    }
+}
+
+fn map_netease_multi_match_item(section: &str, kind: Option<SearchKind>, raw: Value) -> SearchItem {
+    if section == "new_mlog" {
+        let record = raw.get("baseInfo").cloned().unwrap_or_else(|| raw.clone());
+        if let Ok(mut video) = map_artist_video(record) {
+            video.extensions.insert("multi_match_item".to_owned(), raw);
+            return SearchItem::Video(video);
+        }
+    }
+    if let Some(kind) = kind {
+        return map_cloud_search_item(kind, raw);
+    }
+    let SearchItem::Opaque(mut item) = opaque_cloud_search_item(SearchKind::Mixed, raw, None)
+    else {
+        unreachable!("mixed search items always use the opaque representation")
+    };
+    item.kind = section.to_owned();
+    SearchItem::Opaque(item)
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -8208,6 +8370,93 @@ mod tests {
     }
 
     #[test]
+    fn multi_match_search_matches_reference_protocol_and_preserves_ordered_types() {
+        let (path, payload) = netease_search_multi_match_request(SearchKind::Track, "海阔天空");
+        assert_eq!(path, "/api/search/suggest/multimatch");
+        assert_eq!(payload, json!({"type": 1, "s": "海阔天空"}));
+
+        let result = map_netease_search_multi_match(
+            "海阔天空",
+            SearchKind::Track,
+            json!({
+                "code": 200,
+                "result": {
+                    "orders": ["artist", "new_mlog", "playlist"],
+                    "artist": [{"id": 11127, "name": "Beyond"}],
+                    "new_mlog": [{
+                        "resourceId": "5501497",
+                        "baseInfo": {
+                            "id": "5501497",
+                            "resource": {
+                                "mlogBaseData": {
+                                    "id": "5501497",
+                                    "text": "海阔天空 Ver.2",
+                                    "coverUrl": "https://example.test/video.jpg",
+                                    "duration": 330230,
+                                    "pubTime": 1496769827329_u64
+                                },
+                                "mlogExtVO": {
+                                    "artists": [{"id": 11127, "name": "Beyond"}],
+                                    "playCount": 3321987
+                                }
+                            }
+                        }
+                    }],
+                    "playlist": [{"id": 151235962, "name": "粤语经典老歌"}],
+                    "mystery": [{"id": "opaque-1", "title": "未知匹配"}]
+                }
+            }),
+        )
+        .expect("map multi-match search");
+
+        assert_eq!(result.query, "海阔天空");
+        assert_eq!(result.requested_kind, SearchKind::Track);
+        assert_eq!(result.sections.len(), 4);
+        assert_eq!(result.sections[0].section, "artist");
+        assert_eq!(result.sections[0].kind, Some(SearchKind::Artist));
+        assert!(matches!(result.sections[0].items[0], SearchItem::Artist(_)));
+        assert_eq!(result.sections[1].section, "new_mlog");
+        assert_eq!(result.sections[1].kind, Some(SearchKind::Video));
+        let SearchItem::Video(video) = &result.sections[1].items[0] else {
+            panic!("new_mlog should map to a video");
+        };
+        assert_eq!(video.resource_ref.to_string(), "netease:5501497");
+        assert_eq!(video.title, "海阔天空 Ver.2");
+        assert_eq!(video.creators[0].name, "Beyond");
+        assert_eq!(result.sections[2].section, "playlist");
+        assert!(matches!(
+            result.sections[2].items[0],
+            SearchItem::Playlist(_)
+        ));
+        assert_eq!(result.sections[3].section, "mystery");
+        assert_eq!(result.sections[3].kind, None);
+        let SearchItem::Opaque(item) = &result.sections[3].items[0] else {
+            panic!("unknown sections should remain opaque");
+        };
+        assert_eq!(item.kind, "mystery");
+        assert_eq!(item.id.as_deref(), Some("opaque-1"));
+        assert_eq!(result.extensions["platform_type"], 1);
+        assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn multi_match_search_rejects_malformed_result_order_and_sections() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "result": {"orders": {}}}),
+            json!({"code": 200, "result": {"orders": [1]}}),
+            json!({"code": 200, "result": {"orders": ["artist"], "artist": {}}}),
+        ] {
+            assert_eq!(
+                map_netease_search_multi_match("test", SearchKind::Track, response)
+                    .expect_err("malformed multi-match search")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -8536,6 +8785,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SearchDefault));
         assert!(capabilities.contains(&Capability::SearchTrending));
         assert!(capabilities.contains(&Capability::SearchSuggestions));
+        assert!(capabilities.contains(&Capability::SearchMultiMatch));
     }
 
     #[test]
@@ -13453,6 +13703,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_multi_match_search_preserves_ordered_cross_type_resources() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let result = MusicProvider::search_multi_match(
+            &provider,
+            &SearchMultiMatchRequest {
+                query: "海阔天空".to_owned(),
+                kind: SearchKind::Track,
+                account: None,
+            },
+        )
+        .await
+        .expect("live multi-match search");
+        assert_eq!(result.query, "海阔天空");
+        assert_eq!(result.requested_kind, SearchKind::Track);
+        assert!(!result.sections.is_empty());
+        assert!(
+            result.sections.iter().any(
+                |section| section.kind == Some(SearchKind::Artist) && !section.items.is_empty()
+            )
+        );
+        assert!(
+            result
+                .sections
+                .iter()
+                .any(|section| section.kind == Some(SearchKind::Playlist)
+                    && !section.items.is_empty())
+        );
+        assert_eq!(result.extensions["platform_type"], 1);
+        assert_eq!(result.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
