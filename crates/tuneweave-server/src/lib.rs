@@ -1731,7 +1731,10 @@ async fn track_stream(
     let request = controls.resolve_request(reference.platform());
 
     let origin_provider = state.registry.require(reference.platform())?;
-    let origin = origin_provider.track(reference.id(), None).await?;
+    let origin_request = controls.provider_request(reference.platform());
+    let origin = origin_provider
+        .track(reference.id(), origin_request.account.as_deref())
+        .await?;
     let stream = state.resolver.resolve(&origin, &request).await?;
     let resolved_platform = stream.resolved_platform;
     let mut response = ApiResponse::new(stream).with_platform(resolved_platform);
@@ -1777,7 +1780,9 @@ async fn track_download(
     let reference = parse_reference(reference)?;
     let request = download_request(&params)?;
     let provider = state.registry.require(reference.platform())?;
-    let track = provider.track(reference.id(), None).await?;
+    let track = provider
+        .track(reference.id(), request.account.as_deref())
+        .await?;
     let download = provider.download(&track, &request).await?;
     let mut response = ApiResponse::new(download).with_platform(reference.platform());
     if let Some(account) = request.account {
@@ -1795,7 +1800,9 @@ async fn track_download_redirect(
     let reference = parse_reference(reference)?;
     let request = download_request(&params)?;
     let provider = state.registry.require(reference.platform())?;
-    let track = provider.track(reference.id(), None).await?;
+    let track = provider
+        .track(reference.id(), request.account.as_deref())
+        .await?;
     let download = provider.download(&track, &request).await?;
     if let Some(url) = download.url.as_deref() {
         return Ok(download_redirect_response(url));
@@ -2247,7 +2254,11 @@ async fn resolve_stream_reference(
         Ok(provider) => provider,
         Err(error) => return stream_outcome_from_error(reference, &error),
     };
-    let origin = match provider.track(reference.id(), None).await {
+    let provider_request = controls.provider_request(reference.platform());
+    let origin = match provider
+        .track(reference.id(), provider_request.account.as_deref())
+        .await
+    {
         Ok(track) => track,
         Err(error) => return stream_outcome_from_error(reference, &error),
     };
@@ -6892,8 +6903,12 @@ mod tests {
             })
         }
 
-        async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
-            Ok(sample_track(id))
+        async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+            let mut track = sample_track(id);
+            track
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(track)
         }
 
         async fn track_availability(
@@ -7872,15 +7887,26 @@ mod tests {
             Ok(MediaStream {
                 url: "https://example.test/audio.mp3".to_owned(),
                 backup_urls: Vec::new(),
-                headers: BTreeMap::from([(
-                    "x-test-stream-variant".to_owned(),
-                    match request.variant {
-                        StreamVariant::Default => "default",
-                        StreamVariant::Legacy => "legacy",
-                        StreamVariant::Modern => "modern",
-                    }
-                    .to_owned(),
-                )]),
+                headers: BTreeMap::from([
+                    (
+                        "x-test-stream-variant".to_owned(),
+                        match request.variant {
+                            StreamVariant::Default => "default",
+                            StreamVariant::Legacy => "legacy",
+                            StreamVariant::Modern => "modern",
+                        }
+                        .to_owned(),
+                    ),
+                    (
+                        "x-test-origin-account".to_owned(),
+                        track
+                            .extensions
+                            .get("account")
+                            .and_then(Value::as_str)
+                            .unwrap_or("none")
+                            .to_owned(),
+                    ),
+                ]),
                 expires_at: None,
                 format: Some("mp3".to_owned()),
                 codec: Some("mp3".to_owned()),
@@ -7924,6 +7950,14 @@ mod tests {
                 extensions: Extensions::from([
                     ("variant".to_owned(), json!(request.variant)),
                     ("account".to_owned(), json!(request.account)),
+                    (
+                        "origin_account".to_owned(),
+                        track
+                            .extensions
+                            .get("account")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ),
                 ]),
             })
         }
@@ -11217,6 +11251,27 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stream_and_download_forward_account_to_origin_metadata_lookup() {
+        let (status, stream) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:9001/stream?account=locker&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stream["data"]["headers"]["x-test-origin-account"], "locker");
+        assert_eq!(stream["meta"]["account"], "locker");
+
+        let (status, download) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:9001/download?account=locker",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(download["data"]["extensions"]["origin_account"], "locker");
+        assert_eq!(download["meta"]["account"], "locker");
     }
 
     #[tokio::test]
