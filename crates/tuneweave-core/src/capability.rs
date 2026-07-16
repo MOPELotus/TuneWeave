@@ -29,6 +29,7 @@ pub enum Capability {
     SessionManagement,
     AccountProfile,
     AccountPlaylists,
+    AccountAlbums,
     PlaylistWrite,
     Favorites,
     ListeningHistory,
