@@ -27,6 +27,7 @@ pub use model::{
     AudioRecognitionRequest, Banner, BannerClient, BannerListRequest, BannerTargetKind, Chart,
     ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
     CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,

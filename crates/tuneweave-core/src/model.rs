@@ -486,6 +486,60 @@ pub struct CloudMatchResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloudTrack {
+    #[serde(rename = "ref")]
+    pub cloud_track_ref: ResourceRef,
+    pub track: Track,
+    pub filename: Option<String>,
+    pub file_size: Option<u64>,
+    pub file_type: Option<String>,
+    pub bitrate: Option<u64>,
+    pub md5: Option<String>,
+    pub added_at: Option<String>,
+    pub matched_track_ref: Option<ResourceRef>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudTrackDetailRequest {
+    pub track_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+impl CloudTrackDetailRequest {
+    #[must_use]
+    pub fn new(track_refs: Vec<ResourceRef>) -> Self {
+        Self {
+            track_refs,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudTrackDeleteRequest {
+    pub track_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+impl CloudTrackDeleteRequest {
+    #[must_use]
+    pub fn new(track_refs: Vec<ResourceRef>) -> Self {
+        Self {
+            track_refs,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloudTrackDeleteResult {
+    pub track_refs: Vec<ResourceRef>,
+    pub deleted: bool,
+    pub extensions: Extensions,
+}
+
 /// A provider-specific API request exposed below a platform extension route.
 ///
 /// `protocol` is intentionally opaque to the core crate. Each provider owns
@@ -2583,6 +2637,47 @@ mod tests {
             value["upload_headers"]["x-nos-token"],
             "secret-upload-token"
         );
+    }
+
+    #[test]
+    fn cloud_library_contract_keeps_file_track_and_batch_semantics_distinct() {
+        let cloud_ref =
+            ResourceRef::new(Platform::Netease, "19723756").expect("cloud track reference");
+        let matched_ref =
+            ResourceRef::new(Platform::Netease, "185809").expect("matched track reference");
+        let cloud_track = CloudTrack {
+            cloud_track_ref: cloud_ref.clone(),
+            track: Track::new(cloud_ref.clone(), "反方向的钟"),
+            filename: Some("反方向的钟.flac".to_owned()),
+            file_size: Some(50_412_168),
+            file_type: Some("flac".to_owned()),
+            bitrate: Some(1_652_000),
+            md5: Some("d02b8ab79d91c01167ba31e349fe5275".to_owned()),
+            added_at: Some("2026-07-17T00:00:00Z".to_owned()),
+            matched_track_ref: Some(matched_ref.clone()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(&cloud_track).expect("serialize cloud track");
+        assert_eq!(value["ref"], "netease:19723756");
+        assert_eq!(value["track"]["ref"], "netease:19723756");
+        assert_eq!(value["matched_track_ref"], "netease:185809");
+        assert_eq!(value["bitrate"], 1_652_000);
+
+        let references = vec![cloud_ref.clone(), cloud_ref.clone(), matched_ref];
+        let mut detail = CloudTrackDetailRequest::new(references.clone());
+        detail.account = Some("locker".to_owned());
+        assert_eq!(detail.track_refs, references);
+        assert_eq!(detail.account.as_deref(), Some("locker"));
+
+        let delete = CloudTrackDeleteRequest::new(detail.track_refs.clone());
+        let result = CloudTrackDeleteResult {
+            track_refs: delete.track_refs,
+            deleted: true,
+            extensions: Extensions::new(),
+        };
+        assert_eq!(result.track_refs.len(), 3);
+        assert_eq!(result.track_refs[0], result.track_refs[1]);
+        assert!(result.deleted);
     }
 
     #[test]

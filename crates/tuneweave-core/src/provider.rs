@@ -9,28 +9,30 @@ use crate::{
     AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
     AuthPrincipalStatusRequest, Banner, BannerListRequest, Capability, ChartCatalog,
     ChartCatalogRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
-    CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest, CloudUploadRequest,
-    CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, CommentDeleteRequest,
-    CommentListRequest, CommentMutationResult, CommentPage, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentThreadStatsBatch, CommentThreadStatsRequest,
-    CommentWriteRequest, CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
-    DimensionChartRequest, DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest,
-    ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, Page, PageRequest, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, ProviderDescriptor,
-    ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoStats, VideoStream, VideoStreamRequest,
+    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
+    CommentDeleteRequest, CommentListRequest, CommentMutationResult, CommentPage,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentThreadStatsBatch,
+    CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCodeGroup,
+    CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
+    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, Page,
+    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
+    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -832,6 +834,44 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountCloudMatch,
+        ))
+    }
+
+    async fn cloud_tracks(&self, _request: &PageRequest) -> Result<Page<CloudTrack>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudRead,
+        ))
+    }
+
+    async fn cloud_track_details(
+        &self,
+        _request: &CloudTrackDetailRequest,
+    ) -> Result<Vec<CloudTrack>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudRead,
+        ))
+    }
+
+    async fn delete_cloud_tracks(
+        &self,
+        _request: &CloudTrackDeleteRequest,
+    ) -> Result<CloudTrackDeleteResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudDelete,
+        ))
+    }
+
+    async fn download_cloud_track(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<MediaDownload> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudDownload,
         ))
     }
 

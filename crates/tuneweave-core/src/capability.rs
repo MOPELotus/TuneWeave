@@ -80,6 +80,9 @@ pub enum Capability {
     AccountCloudImport,
     AccountCloudLyrics,
     AccountCloudMatch,
+    AccountCloudRead,
+    AccountCloudDelete,
+    AccountCloudDownload,
     PlaylistWrite,
     Favorites,
     ListeningHistory,
@@ -227,6 +230,25 @@ mod tests {
             serde_json::to_value(Capability::CommentThreadStats)
                 .expect("serialize comment thread stats capability"),
             serde_json::json!("comment_thread_stats")
+        );
+    }
+
+    #[test]
+    fn cloud_library_capabilities_use_stable_discovery_names() {
+        assert_eq!(
+            serde_json::to_value(Capability::AccountCloudRead)
+                .expect("serialize cloud read capability"),
+            serde_json::json!("account_cloud_read")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountCloudDelete)
+                .expect("serialize cloud delete capability"),
+            serde_json::json!("account_cloud_delete")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountCloudDownload)
+                .expect("serialize cloud download capability"),
+            serde_json::json!("account_cloud_download")
         );
     }
 }
