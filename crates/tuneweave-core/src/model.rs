@@ -281,6 +281,22 @@ pub struct Artist {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistContentCount {
+    pub category: Option<String>,
+    pub count: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistStats {
+    pub artist_ref: ResourceRef,
+    pub followed: Option<bool>,
+    pub video_counts: Vec<ArtistContentCount>,
+    pub online_concert_count: Option<u64>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     #[serde(rename = "ref")]
@@ -645,6 +661,28 @@ mod tests {
         assert_eq!(value["platform"], "netease");
         assert_eq!(value["biography_sections"][0]["title"], "人物简介");
         assert_eq!(value["track_count"], 568);
+    }
+
+    #[test]
+    fn artist_stats_keep_provider_categories_without_guessing_their_meaning() {
+        let stats = ArtistStats {
+            artist_ref: ResourceRef::new(Platform::Netease, "6452")
+                .expect("valid artist reference"),
+            followed: Some(false),
+            video_counts: vec![ArtistContentCount {
+                category: Some("0".to_owned()),
+                count: 9,
+                extensions: Extensions::new(),
+            }],
+            online_concert_count: Some(0),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(stats).expect("serialize artist stats");
+        assert_eq!(value["artist_ref"], "netease:6452");
+        assert_eq!(value["followed"], false);
+        assert_eq!(value["video_counts"][0]["category"], "0");
+        assert_eq!(value["video_counts"][0]["count"], 9);
     }
 
     #[test]
