@@ -8,7 +8,12 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, rejection::JsonRejection},
+    body::Bytes,
+    extract::{
+        DefaultBodyLimit, Path, Query, State,
+        rejection::{BytesRejection, JsonRejection},
+    },
+    http::{HeaderMap, header},
     routing::{get, post, put},
 };
 use rand::{RngExt, distr::Alphanumeric};
@@ -20,17 +25,18 @@ use tuneweave_core::{
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
     AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthState, Capability,
     ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
-    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind,
-    SearchQuery, StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
+    ImageUploadResult, Lyrics, MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest,
+    Platform, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry, Quality,
+    RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 struct AuthTransactions {
@@ -212,6 +218,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
+        .route(
+            "/account/avatar",
+            put(account_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD_BYTES)),
+        )
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
         .route("/account/following/artists", get(account_following_artists))
@@ -1593,6 +1603,88 @@ struct AccountQuery {
     offset: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+struct AvatarUploadParams {
+    platform: Option<String>,
+    account: Option<String>,
+    filename: Option<String>,
+    #[serde(alias = "imgSize", alias = "img_size")]
+    image_size: Option<String>,
+    #[serde(alias = "imgX", alias = "img_x")]
+    crop_x: Option<String>,
+    #[serde(alias = "imgY", alias = "img_y")]
+    crop_y: Option<String>,
+}
+
+async fn account_avatar(
+    State(state): State<AppState>,
+    Query(params): Query<AvatarUploadParams>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Json<ApiResponse<ImageUploadResult>>, ApiError> {
+    let data = payload.map_err(|_| {
+        TuneWeaveError::invalid_request("image body is invalid or exceeds 20 MiB")
+            .with_details(json!({ "max_bytes": MAX_AVATAR_UPLOAD_BYTES }))
+    })?;
+    if data.is_empty() {
+        return Err(TuneWeaveError::invalid_request("image body must not be empty").into());
+    }
+    if data.len() > MAX_AVATAR_UPLOAD_BYTES {
+        return Err(TuneWeaveError::invalid_request("image body exceeds 20 MiB")
+            .with_details(json!({ "max_bytes": MAX_AVATAR_UPLOAD_BYTES }))
+            .into());
+    }
+    let filename = params.filename.as_deref().unwrap_or("avatar.jpg").trim();
+    if filename.is_empty() || filename.len() > 255 || filename.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "filename must be 1 to 255 bytes and contain no control characters",
+        )
+        .into());
+    }
+    let content_type = match headers.get(header::CONTENT_TYPE) {
+        Some(value) => value
+            .to_str()
+            .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))?
+            .trim(),
+        None => "image/jpeg",
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default();
+    if !media_type.to_ascii_lowercase().starts_with("image/") || media_type.len() <= 6 {
+        return Err(
+            TuneWeaveError::invalid_request("Content-Type must use the image media type").into(),
+        );
+    }
+    let image_size = parse_optional_u32_parameter("image_size", params.image_size.as_deref())?;
+    if image_size == Some(0) {
+        return Err(TuneWeaveError::invalid_request("image_size must be greater than zero").into());
+    }
+    let crop_x = parse_optional_u32_parameter("crop_x", params.crop_x.as_deref())?;
+    let crop_y = parse_optional_u32_parameter("crop_y", params.crop_y.as_deref())?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .upload_account_avatar(&ImageUploadRequest {
+            filename: filename.to_owned(),
+            content_type: content_type.to_owned(),
+            data: data.to_vec(),
+            image_size,
+            crop_x,
+            crop_y,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn account_profile(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -2157,6 +2249,20 @@ fn parse_u32_parameter(
     })
 }
 
+fn parse_optional_u32_parameter(
+    name: &str,
+    value: Option<&str>,
+) -> Result<Option<u32>, TuneWeaveError> {
+    value
+        .map(|value| {
+            value.parse().map_err(|_| {
+                TuneWeaveError::invalid_request(format!("{name} must be an unsigned integer"))
+                    .with_details(json!({ "parameter": name, "value": value }))
+            })
+        })
+        .transpose()
+}
+
 fn parse_optional_u64_parameter(
     name: &str,
     value: Option<&str>,
@@ -2260,6 +2366,7 @@ mod tests {
                 Capability::AccountArtistNewTracks,
                 Capability::AccountArtistNewWorks,
                 Capability::AccountArtistNewTracksPlayAll,
+                Capability::AccountAvatarWrite,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -3001,6 +3108,25 @@ mod tests {
             Ok(profile)
         }
 
+        async fn upload_account_avatar(
+            &self,
+            request: &ImageUploadRequest,
+        ) -> Result<ImageUploadResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("filename".to_owned(), json!(request.filename));
+            extensions.insert("content_type".to_owned(), json!(request.content_type));
+            extensions.insert("data_len".to_owned(), json!(request.data.len()));
+            extensions.insert("image_size".to_owned(), json!(request.image_size));
+            extensions.insert("crop_x".to_owned(), json!(request.crop_x));
+            extensions.insert("crop_y".to_owned(), json!(request.crop_y));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(ImageUploadResult {
+                url: Some("https://example.test/avatar.png".to_owned()),
+                image_id: Some("109951168000000000".to_owned()),
+                extensions,
+            })
+        }
+
         async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
             Ok(json!({
                 "code": 200,
@@ -3238,6 +3364,28 @@ mod tests {
         };
         let response = app
             .oneshot(request.body(body).expect("build request"))
+            .await
+            .expect("request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json = serde_json::from_slice(&body).expect("valid JSON");
+        (status, json)
+    }
+
+    async fn binary_request_from(
+        app: Router,
+        path: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(Method::PUT).uri(path);
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let response = app
+            .oneshot(request.body(Body::from(body)).expect("build request"))
             .await
             .expect("request succeeds");
         let status = response.status();
@@ -3988,6 +4136,82 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn account_avatar_accepts_binary_images_and_reference_parameter_aliases() {
+        let (status, json) = binary_request_from(
+            test_app_with_provider(),
+            "/v1/account/avatar?platform=netease&account=personal&filename=avatar.png&imgSize=300&imgX=1&imgY=2",
+            Some("image/png"),
+            vec![0x89, b'P', b'N', b'G'],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["url"], "https://example.test/avatar.png");
+        assert_eq!(json["data"]["image_id"], "109951168000000000");
+        assert_eq!(json["data"]["extensions"]["filename"], "avatar.png");
+        assert_eq!(json["data"]["extensions"]["content_type"], "image/png");
+        assert_eq!(json["data"]["extensions"]["data_len"], 4);
+        assert_eq!(json["data"]["extensions"]["image_size"], 300);
+        assert_eq!(json["data"]["extensions"]["crop_x"], 1);
+        assert_eq!(json["data"]["extensions"]["crop_y"], 2);
+        assert_eq!(json["data"]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn account_avatar_uses_safe_jpeg_defaults() {
+        let (status, json) = binary_request_from(
+            test_app_with_provider(),
+            "/v1/account/avatar",
+            None,
+            vec![0xff, 0xd8, 0xff, 0xd9],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["filename"], "avatar.jpg");
+        assert_eq!(json["data"]["extensions"]["content_type"], "image/jpeg");
+        assert_eq!(json["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn account_avatar_rejects_invalid_binary_inputs() {
+        for (path, content_type, body) in [
+            ("/v1/account/avatar", Some("image/jpeg"), Vec::new()),
+            ("/v1/account/avatar", Some("text/plain"), vec![1, 2, 3]),
+            (
+                "/v1/account/avatar?image_size=0",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            ),
+        ] {
+            let (status, json) =
+                binary_request_from(test_app_with_provider(), path, content_type, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_avatar_size_limit_uses_the_error_envelope() {
+        let (status, json) = binary_request_from(
+            test_app_with_provider(),
+            "/v1/account/avatar",
+            Some("image/jpeg"),
+            vec![0; MAX_AVATAR_UPLOAD_BYTES + 1],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+        assert_eq!(
+            json["error"]["details"]["max_bytes"],
+            MAX_AVATAR_UPLOAD_BYTES
+        );
     }
 
     #[tokio::test]
