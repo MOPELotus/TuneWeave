@@ -35,9 +35,9 @@ use tuneweave_core::{
     PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
     Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolveRequest, ResourceRef, SearchKind, SearchQuery, StreamResolver, SubscriptionResult,
-    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    Video, VideoKind,
+    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -369,6 +369,7 @@ async fn capabilities(
 
 #[derive(Debug, Default, Deserialize)]
 struct SearchParams {
+    #[serde(alias = "keywords")]
     q: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
@@ -381,7 +382,7 @@ struct SearchParams {
 async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
-) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+) -> Result<Json<ApiResponse<Vec<SearchItem>>>, ApiError> {
     let query_text = params
         .q
         .as_deref()
@@ -409,7 +410,7 @@ async fn search(
         offset,
         account: account.clone(),
     };
-    let page = provider.search(&query).await?;
+    let page = provider.search_catalog(&query).await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -3191,14 +3192,27 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
         .to_ascii_lowercase()
         .as_str()
     {
-        "track" => Ok(SearchKind::Track),
-        "album" => Ok(SearchKind::Album),
-        "artist" => Ok(SearchKind::Artist),
-        "playlist" => Ok(SearchKind::Playlist),
-        "video" => Ok(SearchKind::Video),
-        value => Err(TuneWeaveError::invalid_request(format!(
-            "unsupported search type: {value}"
-        ))),
+        "track" | "song" | "1" => Ok(SearchKind::Track),
+        "album" | "10" => Ok(SearchKind::Album),
+        "artist" | "100" => Ok(SearchKind::Artist),
+        "playlist" | "1000" => Ok(SearchKind::Playlist),
+        "user" | "1002" => Ok(SearchKind::User),
+        "mv" | "1004" => Ok(SearchKind::Mv),
+        "lyric" | "lyrics" | "1006" => Ok(SearchKind::Lyric),
+        "radio_station" | "radio" | "dj" | "1009" => Ok(SearchKind::RadioStation),
+        "video" | "1014" => Ok(SearchKind::Video),
+        "mixed" | "complex" | "1018" => Ok(SearchKind::Mixed),
+        "voice" | "2000" => Ok(SearchKind::Voice),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported search type: {value}"))
+                .with_details(json!({
+                    "allowed": [
+                        "track", "album", "artist", "playlist", "user", "mv", "lyric",
+                        "radio_station", "video", "mixed", "voice", 1, 10, 100, 1000, 1002,
+                        1004, 1006, 1009, 1014, 1018, 2000
+                    ]
+                })),
+        ),
     }
 }
 
@@ -3341,6 +3355,16 @@ mod tests {
         fn capabilities(&self) -> BTreeSet<Capability> {
             BTreeSet::from([
                 Capability::SearchTracks,
+                Capability::SearchAlbums,
+                Capability::SearchArtists,
+                Capability::SearchPlaylists,
+                Capability::SearchUsers,
+                Capability::SearchMvs,
+                Capability::SearchLyrics,
+                Capability::SearchRadioStations,
+                Capability::SearchVideos,
+                Capability::SearchMixed,
+                Capability::SearchVoices,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -3387,6 +3411,7 @@ mod tests {
                 Capability::AccountArtistNewWorks,
                 Capability::AccountArtistNewTracksPlayAll,
                 Capability::AccountAvatarWrite,
+                Capability::AccountCloudUpload,
                 Capability::AccountCloudDirectUpload,
                 Capability::AccountCloudImport,
                 Capability::AccountCloudLyrics,
@@ -3409,6 +3434,46 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+            let item = match query.kind {
+                SearchKind::Track | SearchKind::Lyric => SearchItem::Track(sample_track("123")),
+                SearchKind::Album => SearchItem::Album(sample_album("18915")),
+                SearchKind::Artist => SearchItem::Artist(sample_artist("6452")),
+                SearchKind::Playlist => SearchItem::Playlist(sample_playlist("3778678")),
+                SearchKind::User => SearchItem::User(sample_user("6298206519")),
+                SearchKind::Mv | SearchKind::Video => SearchItem::Video(sample_video("22695250")),
+                SearchKind::RadioStation => SearchItem::RadioStation(sample_radio_station("362")),
+                SearchKind::Mixed | SearchKind::Voice => {
+                    SearchItem::Opaque(tuneweave_core::SearchOpaqueItem {
+                        platform: Platform::Netease,
+                        kind: serde_json::to_value(query.kind)
+                            .expect("serialize search kind")
+                            .as_str()
+                            .expect("string search kind")
+                            .to_owned(),
+                        id: Some("opaque-1".to_owned()),
+                        title: Some("opaque search result".to_owned()),
+                        extensions: tuneweave_core::Extensions::new(),
+                    })
+                }
+            };
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("kind".to_owned(), json!(query.kind));
+            extensions.insert("query".to_owned(), json!(query.query));
+            extensions.insert("account".to_owned(), json!(query.account));
+            Ok(Page {
+                items: vec![item],
+                pagination: PageMeta {
+                    limit: query.limit,
+                    offset: query.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions,
                 },
             })
         }
@@ -4906,10 +4971,80 @@ mod tests {
         let (status, json) =
             json_response_from(test_app_with_provider(), "/v1/search?q=clock&limit=10").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"][0]["ref"], "netease:123");
+        assert_eq!(json["data"][0]["type"], "track");
+        assert_eq!(json["data"][0]["data"]["ref"], "netease:123");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+        assert_eq!(json["meta"]["pagination"]["extensions"]["kind"], "track");
+        assert_eq!(json["meta"]["pagination"]["extensions"]["query"], "clock");
+    }
+
+    #[tokio::test]
+    async fn search_accepts_every_reference_cloudsearch_type_and_keywords_alias() {
+        for (platform_type, kind, item_type, reference) in [
+            ("1", "track", "track", Some("netease:123")),
+            ("10", "album", "album", Some("netease:18915")),
+            ("100", "artist", "artist", Some("netease:6452")),
+            ("1000", "playlist", "playlist", Some("netease:3778678")),
+            ("1002", "user", "user", Some("netease:6298206519")),
+            ("1004", "mv", "video", Some("netease:22695250")),
+            ("1006", "lyric", "track", Some("netease:123")),
+            (
+                "1009",
+                "radio_station",
+                "radio_station",
+                Some("netease:362"),
+            ),
+            ("1014", "video", "video", Some("netease:22695250")),
+            ("1018", "mixed", "opaque", None),
+            ("2000", "voice", "opaque", None),
+        ] {
+            let path = format!(
+                "/v1/search?keywords=clock&type={platform_type}&platform=netease&account=search-user&limit=5&offset=2"
+            );
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "type={platform_type}");
+            assert_eq!(json["data"][0]["type"], item_type, "type={platform_type}");
+            if let Some(reference) = reference {
+                assert_eq!(
+                    json["data"][0]["data"]["ref"], reference,
+                    "type={platform_type}"
+                );
+            } else {
+                assert_eq!(
+                    json["data"][0]["data"]["kind"], kind,
+                    "type={platform_type}"
+                );
+            }
+            assert_eq!(json["meta"]["account"], "search-user");
+            assert_eq!(json["meta"]["pagination"]["limit"], 5);
+            assert_eq!(json["meta"]["pagination"]["offset"], 2);
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["kind"], kind,
+                "type={platform_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_kind_parser_accepts_unified_and_reference_names() {
+        for (value, expected) in [
+            ("track", SearchKind::Track),
+            ("song", SearchKind::Track),
+            ("album", SearchKind::Album),
+            ("artist", SearchKind::Artist),
+            ("playlist", SearchKind::Playlist),
+            ("user", SearchKind::User),
+            ("mv", SearchKind::Mv),
+            ("lyrics", SearchKind::Lyric),
+            ("dj", SearchKind::RadioStation),
+            ("video", SearchKind::Video),
+            ("complex", SearchKind::Mixed),
+            ("voice", SearchKind::Voice),
+        ] {
+            assert_eq!(parse_search_kind(Some(value)).expect(value), expected);
+        }
     }
 
     #[tokio::test]
@@ -5671,10 +5806,15 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_search_parameters_use_the_error_envelope() {
-        let (status, json) =
-            json_response_from(test_app_with_provider(), "/v1/search?q=clock&limit=101").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(json["error"]["code"], "invalid_request");
+        for path in [
+            "/v1/search?q=clock&limit=101",
+            "/v1/search?q=clock&type=podcast",
+            "/v1/search?type=1",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
