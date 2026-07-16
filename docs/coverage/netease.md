@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=353`、`partial=7`、`implemented=16`、`verified=28`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=352`、`partial=7`、`implemented=17`、`verified=28`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -41,7 +41,7 @@
 | `artist_new_song_playall` | `/artist/new/song/playall` | `implemented` | `GET /v1/account/following/artists/new-tracks/play-all`（固定返回最近至多 50 首 `Track[]` 和上游 `count`，完整歌曲字段保留在扩展；离线成功态映射、账户端点和能力发现测试已完成；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
 | `artist_songs` | `/artist/songs` | `verified` | `GET /v1/artists/{ref}/tracks`（完整支持 `order=hot/time`、分页及 `account` 登录态选择，统一为 `Track[]` 并在 `extensions.artist_track` 保留完整歌曲原文；2026-07-16 真实上游与统一 HTTP 均实测成功，`/v1/artists/netease:6452/tracks?order=time&limit=2` 首项为 `netease:2712553851`《即兴曲》，总数 566、`next_offset=2`、`has_more=true`） |
 | `artist_sub` | `/artist/sub` | `implemented` | `PUT/DELETE /v1/account/following/artists/{ref}`（关注与取消关注共用统一 `SubscriptionResult`，登录态由引用平台和 `account` 别名选择，完整上游响应保留在扩展；请求构造、成功态映射、非法 ID、账户别名及 HTTP 端点测试已完成；2026-07-16 匿名 WeAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功写入及回滚） |
-| `artist_sublist` | `/artist/sublist` | `pending` | — |
+| `artist_sublist` | `/artist/sublist` | `implemented` | `GET /v1/account/following/artists`（统一为分页 `Artist[]`，支持 `platform/account/limit/offset`，名称、别名、封面及作品计数进入稳定字段，关注时间和完整歌手原文保留在 `extensions.following_item`；离线成功态映射、账户别名和 HTTP 端点测试已完成；2026-07-16 匿名 WeAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
 | `artist_top_song` | `/artist/top/song` | `pending` | — |
 | `artist_video` | `/artist/video` | `verified` | `GET /v1/artists/{ref}/videos?type=all`（统一为游标分页 `Video[]`，映射标题、创作者、封面、时长、发布时间和播放数，原始 Mlog 资源完整保留；2026-07-16 匿名 HTTP 实测 `netease:2116` 连续两页各返回 2 项，游标由 `2` 前进至 `4` 且资源无重复，首项 `netease:34702399`《K歌之王 AIR (Day Version / Lyric Video / China Version)》） |
 | `artists` | `/artists` | `pending` | — |
