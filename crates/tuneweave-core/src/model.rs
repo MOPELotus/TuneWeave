@@ -153,6 +153,29 @@ pub struct SearchSuggestionList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchMultiMatchRequest {
+    pub query: String,
+    pub kind: SearchKind,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchMultiMatchSection {
+    pub section: String,
+    pub kind: Option<SearchKind>,
+    pub items: Vec<SearchItem>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchMultiMatch {
+    pub query: String,
+    pub requested_kind: SearchKind,
+    pub sections: Vec<SearchMultiMatchSection>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -1816,6 +1839,49 @@ mod tests {
         assert_eq!(value["matches"][0]["track"]["ref"], "netease:185809");
         assert_eq!(value["matches"][0]["start_time_ms"], 1_500);
         assert_eq!(value["query_id"], "query-1");
+    }
+
+    #[test]
+    fn multi_match_preserves_section_order_and_resource_types() {
+        let result = SearchMultiMatch {
+            query: "海阔天空".to_owned(),
+            requested_kind: SearchKind::Track,
+            sections: vec![SearchMultiMatchSection {
+                section: "artist".to_owned(),
+                kind: Some(SearchKind::Artist),
+                items: vec![SearchItem::Artist(Artist {
+                    resource_ref: ResourceRef::new(Platform::Netease, "11127")
+                        .expect("valid artist reference"),
+                    platform: Platform::Netease,
+                    id: "11127".to_owned(),
+                    name: "Beyond".to_owned(),
+                    aliases: Vec::new(),
+                    description: String::new(),
+                    biography_sections: Vec::new(),
+                    avatar_url: None,
+                    cover_url: None,
+                    album_count: None,
+                    track_count: None,
+                    mv_count: None,
+                    video_count: None,
+                    identities: Vec::new(),
+                    extensions: Extensions::new(),
+                })],
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(result).expect("serialize multi-match search");
+        assert_eq!(value["query"], "海阔天空");
+        assert_eq!(value["requested_kind"], "track");
+        assert_eq!(value["sections"][0]["section"], "artist");
+        assert_eq!(value["sections"][0]["kind"], "artist");
+        assert_eq!(value["sections"][0]["items"][0]["type"], "artist");
+        assert_eq!(
+            value["sections"][0]["items"][0]["data"]["ref"],
+            "netease:11127"
+        );
     }
 
     #[test]
