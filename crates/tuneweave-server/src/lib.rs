@@ -221,6 +221,10 @@ pub fn build_router(state: AppState) -> Router {
             "/account/following/artists/new-works",
             get(account_artist_new_works),
         )
+        .route(
+            "/account/following/artists/new-tracks/play-all",
+            get(account_artist_new_tracks_play_all),
+        )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
         .route("/extensions/netease/api", post(netease_extension_api));
@@ -1593,6 +1597,24 @@ async fn account_artist_new_works(
     ))
 }
 
+async fn account_artist_new_tracks_play_all(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_artist_new_tracks_play_all(Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_favorite_tracks(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -2024,6 +2046,7 @@ mod tests {
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
                 Capability::AccountArtistNewWorks,
+                Capability::AccountArtistNewTracksPlayAll,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -2454,6 +2477,28 @@ mod tests {
                     next_offset: None,
                     has_more: true,
                     extensions,
+                },
+            })
+        }
+
+        async fn account_artist_new_tracks_play_all(
+            &self,
+            account: Option<&str>,
+        ) -> Result<Page<Track>> {
+            let mut track = sample_track("2099001");
+            track.name = "新歌".to_owned();
+            track
+                .extensions
+                .insert("account".to_owned(), json!(account.unwrap_or("default")));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: 50,
+                    offset: 0,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Default::default(),
                 },
             })
         }
@@ -3549,6 +3594,24 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["first_request"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn account_artist_new_tracks_play_all_returns_the_fixed_snapshot() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists/new-tracks/play-all?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:2099001");
+        assert_eq!(json["data"][0]["name"], "新歌");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 50);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
+        assert_eq!(json["meta"]["pagination"]["has_more"], false);
     }
 
     #[tokio::test]
