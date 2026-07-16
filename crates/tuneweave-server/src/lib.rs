@@ -25,9 +25,10 @@ use tuneweave_core::{
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
     AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, Capability, ChallengeMethod, CloudUploadCompleteRequest, CloudUploadRequest,
-    CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    BannerListRequest, Capability, ChallengeMethod, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream,
     PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
@@ -249,6 +250,9 @@ pub fn build_router(state: AppState) -> Router {
             "/account/cloud/uploads/complete",
             post(cloud_upload_complete),
         )
+        .route("/account/cloud/imports", post(cloud_import))
+        .route("/account/cloud/lyrics", get(cloud_lyrics))
+        .route("/account/cloud/matches", post(cloud_match))
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
         .route(
@@ -2168,6 +2172,141 @@ async fn cloud_upload_complete(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudImportBody {
+    md5: String,
+    #[serde(alias = "id")]
+    source_track_id: Option<Value>,
+    bitrate: Value,
+    #[serde(alias = "fileSize")]
+    file_size: Value,
+    #[serde(alias = "fileType")]
+    file_type: String,
+    #[serde(alias = "song")]
+    song_name: String,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+async fn cloud_import(
+    State(state): State<AppState>,
+    Query(params): Query<CloudAccountQuery>,
+    payload: Result<Json<CloudImportBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CloudImportResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let source_track_id = body
+        .source_track_id
+        .as_ref()
+        .map(|value| required_string_or_number("source_track_id", value))
+        .transpose()?;
+    let bitrate = required_json_u64("bitrate", &body.bitrate)?;
+    let file_size = required_json_u64("file_size", &body.file_size)?;
+    if bitrate < 1_000 {
+        return Err(TuneWeaveError::invalid_request("bitrate must be at least 1000 bit/s").into());
+    }
+    if file_size == 0 {
+        return Err(TuneWeaveError::invalid_request("file_size must be greater than zero").into());
+    }
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .import_cloud_track(&CloudImportRequest {
+            md5: body.md5,
+            source_track_id,
+            bitrate,
+            file_size,
+            file_type: body.file_type,
+            song_name: body.song_name,
+            artist: body.artist.unwrap_or_default(),
+            album: body.album.unwrap_or_default(),
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudLyricsQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "uid")]
+    user_id: Option<String>,
+    #[serde(alias = "sid")]
+    track_id: Option<String>,
+}
+
+async fn cloud_lyrics(
+    State(state): State<AppState>,
+    Query(params): Query<CloudLyricsQuery>,
+) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
+    let user_id = required_trimmed("user_id", params.user_id)?;
+    let track_id = required_trimmed("track_id", params.track_id)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let lyrics = provider
+        .cloud_lyrics(&CloudLyricsRequest {
+            user_id,
+            track_id,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(lyrics)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudMatchBody {
+    #[serde(alias = "uid")]
+    user_id: Value,
+    #[serde(alias = "sid")]
+    cloud_track_id: Value,
+    #[serde(alias = "asid")]
+    target_track_id: Option<Value>,
+}
+
+async fn cloud_match(
+    State(state): State<AppState>,
+    Query(params): Query<CloudAccountQuery>,
+    payload: Result<Json<CloudMatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CloudMatchResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let user_id = required_string_or_number("user_id", &body.user_id)?;
+    let cloud_track_id = required_string_or_number("cloud_track_id", &body.cloud_track_id)?;
+    let target_track_id = body
+        .target_track_id
+        .as_ref()
+        .map(|value| required_string_or_number("target_track_id", value))
+        .transpose()?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .match_cloud_track(&CloudMatchRequest {
+            user_id,
+            cloud_track_id,
+            target_track_id,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn account_profile(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -2763,6 +2902,14 @@ fn required_string_or_number(name: &str, value: &Value) -> Result<String, TuneWe
     Ok(value.to_owned())
 }
 
+fn required_json_u64(name: &str, value: &Value) -> Result<u64, TuneWeaveError> {
+    let value = required_string_or_number(name, value)?;
+    value.parse().map_err(|_| {
+        TuneWeaveError::invalid_request(format!("{name} must be an unsigned integer"))
+            .with_details(json!({ "parameter": name, "value": value }))
+    })
+}
+
 fn auth_transaction_not_found() -> TuneWeaveError {
     TuneWeaveError::new(
         tuneweave_core::ErrorCode::ResourceNotFound,
@@ -3158,6 +3305,9 @@ mod tests {
                 Capability::AccountArtistNewTracksPlayAll,
                 Capability::AccountAvatarWrite,
                 Capability::AccountCloudDirectUpload,
+                Capability::AccountCloudImport,
+                Capability::AccountCloudLyrics,
+                Capability::AccountCloudMatch,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -4246,6 +4396,68 @@ mod tests {
                 upload_required: None,
                 uploaded: None,
                 published: true,
+                extensions,
+            })
+        }
+
+        async fn import_cloud_track(
+            &self,
+            request: &CloudImportRequest,
+        ) -> Result<CloudImportResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("md5".to_owned(), json!(request.md5));
+            extensions.insert("source_track_id".to_owned(), json!(request.source_track_id));
+            extensions.insert("bitrate".to_owned(), json!(request.bitrate));
+            extensions.insert("file_size".to_owned(), json!(request.file_size));
+            extensions.insert("file_type".to_owned(), json!(request.file_type));
+            extensions.insert("song_name".to_owned(), json!(request.song_name));
+            extensions.insert("artist".to_owned(), json!(request.artist));
+            extensions.insert("album".to_owned(), json!(request.album));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CloudImportResult {
+                track_ref: Some(
+                    ResourceRef::new(Platform::Netease, "cloud-imported")
+                        .expect("valid imported cloud track reference"),
+                ),
+                imported: true,
+                already_present: Some(false),
+                extensions,
+            })
+        }
+
+        async fn cloud_lyrics(&self, request: &CloudLyricsRequest) -> Result<Lyrics> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("user_id".to_owned(), json!(request.user_id));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(Lyrics {
+                track_ref: ResourceRef::new(Platform::Netease, &request.track_id)
+                    .expect("valid cloud lyrics track reference"),
+                plain: Some("[00:01.00]云盘歌词".to_owned()),
+                translated: None,
+                romanized: None,
+                word_synced: None,
+                format: "lrc".to_owned(),
+                contributors: Vec::new(),
+                extensions,
+            })
+        }
+
+        async fn match_cloud_track(&self, request: &CloudMatchRequest) -> Result<CloudMatchResult> {
+            let target_track_ref = request
+                .target_track_id
+                .as_deref()
+                .filter(|id| *id != "0")
+                .map(|id| ResourceRef::new(Platform::Netease, id))
+                .transpose()
+                .expect("valid cloud match target reference");
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("user_id".to_owned(), json!(request.user_id));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CloudMatchResult {
+                cloud_track_ref: ResourceRef::new(Platform::Netease, &request.cloud_track_id)
+                    .expect("valid cloud track reference"),
+                matched: target_track_ref.is_some(),
+                target_track_ref,
                 extensions,
             })
         }
@@ -5947,6 +6159,151 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(json["error"]["code"], "invalid_request", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn cloud_import_accepts_reference_aliases_and_stringified_numbers() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/imports?platform=netease&account=locker",
+            Some(json!({
+                "md5": "d02b8ab79d91c01167ba31e349fe5275",
+                "id": 185809,
+                "bitrate": "1652999",
+                "fileSize": "50412168",
+                "fileType": "flac",
+                "song": "最伟大的作品",
+                "artist": "周杰伦",
+                "album": "最伟大的作品"
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "netease:cloud-imported");
+        assert_eq!(json["data"]["imported"], true);
+        assert_eq!(json["data"]["already_present"], false);
+        assert_eq!(json["data"]["extensions"]["source_track_id"], "185809");
+        assert_eq!(json["data"]["extensions"]["bitrate"], 1_652_999);
+        assert_eq!(json["data"]["extensions"]["file_size"], 50_412_168);
+        assert_eq!(json["data"]["extensions"]["file_type"], "flac");
+        assert_eq!(json["data"]["extensions"]["song_name"], "最伟大的作品");
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_lyrics_accept_reference_query_names_and_opaque_track_ids() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/cloud/lyrics?platform=netease&account=locker&uid=32953014&sid=cloud-song",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "netease:cloud-song");
+        assert_eq!(json["data"]["plain"], "[00:01.00]云盘歌词");
+        assert_eq!(json["data"]["format"], "lrc");
+        assert_eq!(json["data"]["extensions"]["user_id"], "32953014");
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_match_supports_reference_matching_and_cancellation_branches() {
+        let (status, matched) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/matches?platform=netease&account=locker",
+            Some(json!({
+                "uid": 32953014,
+                "sid": "cloud-song",
+                "asid": 185809
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(matched["data"]["cloud_track_ref"], "netease:cloud-song");
+        assert_eq!(matched["data"]["target_track_ref"], "netease:185809");
+        assert_eq!(matched["data"]["matched"], true);
+        assert_eq!(matched["data"]["extensions"]["user_id"], "32953014");
+        assert_eq!(matched["meta"]["account"], "locker");
+
+        let (status, canceled) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/matches?platform=netease&account=locker",
+            Some(json!({
+                "user_id": "32953014",
+                "cloud_track_id": "cloud-song",
+                "target_track_id": 0
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(canceled["data"]["matched"], false);
+        assert_eq!(canceled["data"]["target_track_ref"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn cloud_account_routes_reject_missing_non_scalar_and_out_of_range_inputs() {
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/v1/account/cloud/imports",
+                Some(json!({
+                    "md5": "d02b8ab79d91c01167ba31e349fe5275",
+                    "bitrate": 999,
+                    "file_size": 1,
+                    "file_type": "flac",
+                    "song_name": "song"
+                })),
+            ),
+            (
+                Method::POST,
+                "/v1/account/cloud/imports",
+                Some(json!({
+                    "md5": "d02b8ab79d91c01167ba31e349fe5275",
+                    "bitrate": 128000,
+                    "file_size": 0,
+                    "file_type": "flac",
+                    "song_name": "song"
+                })),
+            ),
+            (
+                Method::POST,
+                "/v1/account/cloud/matches",
+                Some(json!({
+                    "user_id": { "id": 32953014 },
+                    "cloud_track_id": "cloud-song"
+                })),
+            ),
+            (
+                Method::POST,
+                "/v1/account/cloud/matches",
+                Some(json!({
+                    "user_id": "32953014",
+                    "cloud_track_id": "cloud-song",
+                    "unexpected": true
+                })),
+            ),
+        ] {
+            let (status, json) =
+                json_request_from(test_app_with_provider(), method, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/cloud/lyrics?uid=32953014",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
