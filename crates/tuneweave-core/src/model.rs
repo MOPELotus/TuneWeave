@@ -507,6 +507,68 @@ impl PageRequest {
     }
 }
 
+/// The media or social resource whose comment thread is being addressed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentTargetKind {
+    Track,
+    Mv,
+    Playlist,
+    Album,
+    RadioEpisode,
+    Video,
+    Event,
+    RadioStation,
+}
+
+/// A platform-qualified comment thread target.
+///
+/// Event-like targets use their complete platform thread id as the resource reference id.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentTarget {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub kind: CommentTargetKind,
+}
+
+impl CommentTarget {
+    #[must_use]
+    pub const fn new(resource_ref: ResourceRef, kind: CommentTargetKind) -> Self {
+        Self { resource_ref, kind }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentWriteRequest {
+    pub target: CommentTarget,
+    pub content: String,
+    pub reply_to: Option<String>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentDeleteRequest {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentMutationAction {
+    Create,
+    Reply,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentMutationResult {
+    pub target: CommentTarget,
+    pub comment_id: Option<String>,
+    pub action: CommentMutationAction,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumListRequest {
     pub limit: u32,
@@ -1900,5 +1962,33 @@ mod tests {
             .insert("paid_count".to_owned(), Value::from(1));
         let value = serde_json::to_value(metadata).expect("serialize extended metadata");
         assert_eq!(value["extensions"]["paid_count"], 1);
+    }
+
+    #[test]
+    fn comment_mutations_keep_platform_target_and_action_explicit() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+            CommentTargetKind::Track,
+        );
+        let request = CommentWriteRequest {
+            target: target.clone(),
+            content: "统一评论".to_owned(),
+            reply_to: Some("1438569889".to_owned()),
+            account: Some("personal".to_owned()),
+        };
+        let request = serde_json::to_value(request).expect("serialize comment write request");
+        assert_eq!(request["target"]["ref"], "netease:185809");
+        assert_eq!(request["target"]["kind"], "track");
+        assert_eq!(request["reply_to"], "1438569889");
+
+        let result = CommentMutationResult {
+            target,
+            comment_id: Some("1535550516319".to_owned()),
+            action: CommentMutationAction::Reply,
+            extensions: Extensions::new(),
+        };
+        let result = serde_json::to_value(result).expect("serialize comment mutation result");
+        assert_eq!(result["action"], "reply");
+        assert_eq!(result["comment_id"], "1535550516319");
     }
 }

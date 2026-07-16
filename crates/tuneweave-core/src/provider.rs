@@ -10,14 +10,15 @@ use crate::{
     Banner, BannerListRequest, Capability, CloudImportRequest, CloudImportResult,
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest,
-    DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest,
-    ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result,
-    SearchItem, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    CommentDeleteRequest, CommentMutationResult, CommentWriteRequest, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
+    DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result, SearchItem, SearchKind,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -603,6 +604,23 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountCloudMatch,
+        ))
+    }
+
+    async fn post_comment(&self, _request: &CommentWriteRequest) -> Result<CommentMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CommentWrite,
+        ))
+    }
+
+    async fn delete_comment(
+        &self,
+        _request: &CommentDeleteRequest,
+    ) -> Result<CommentMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CommentWrite,
         ))
     }
 
