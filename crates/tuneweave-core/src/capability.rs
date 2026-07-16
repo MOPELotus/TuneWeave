@@ -12,6 +12,7 @@ pub enum Capability {
     AudioRecognition,
     Banners,
     RadioTaxonomy,
+    RadioStationDetail,
     TrackDetail,
     AlbumDetail,
     AlbumList,
@@ -56,4 +57,17 @@ pub enum Capability {
     MusicPartner,
     PlatformApi,
     PlatformBatch,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radio_station_detail_uses_the_stable_discovery_name() {
+        assert_eq!(
+            serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
+            serde_json::json!("radio_station_detail")
+        );
+    }
 }

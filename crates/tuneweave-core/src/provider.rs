@@ -67,6 +67,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn radio_station(&self, _id: &str, _account: Option<&str>) -> Result<RadioStation> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RadioStationDetail,
+        ))
+    }
+
     async fn track(&self, _id: &str, _account: Option<&str>) -> Result<Track> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
