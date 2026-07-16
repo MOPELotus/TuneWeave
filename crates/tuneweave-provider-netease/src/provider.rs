@@ -18,10 +18,11 @@ use tuneweave_core::{
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, ImageUploadRequest,
     ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta,
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoKind,
 };
 
 use crate::{
@@ -316,6 +317,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::ListeningHistory,
             Capability::Recommendations,
             Capability::PlatformApi,
+            Capability::PlatformBatch,
         ])
     }
 
@@ -1405,6 +1407,22 @@ impl MusicProvider for NeteaseProvider {
         ensure_platform_api_success(&response.body)?;
         Ok(response.body)
     }
+
+    async fn platform_batch(&self, request: &PlatformBatchRequest) -> Result<Value> {
+        validate_platform_batch_request(request)?;
+        let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
+        let client = self.client_for(request.account.as_deref())?;
+        let data = serialize_netease_batch_requests(request);
+        let response = match protocol {
+            NeteaseApiProtocol::Eapi => client.request_eapi("/api/batch", data).await?,
+            NeteaseApiProtocol::Weapi => client.request_weapi("/api/batch", data).await?,
+            NeteaseApiProtocol::Api => client.request_api("/api/batch", data).await?,
+            NeteaseApiProtocol::Linuxapi => client.request_linuxapi("/api/batch", data).await?,
+            NeteaseApiProtocol::Xeapi => client.request_xeapi("/api/batch", data).await?,
+        };
+        ensure_platform_api_success(&response.body)?;
+        Ok(response.body)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1437,29 +1455,8 @@ impl NeteaseApiProtocol {
 }
 
 fn validate_platform_api_request(request: &PlatformApiRequest) -> Result<&str> {
-    let uri = request.uri.trim();
-    if uri != request.uri || !uri.starts_with("/api/") || uri.len() == "/api/".len() {
-        return Err(TuneWeaveError::invalid_request(
-            "NetEase extension API uri must start with /api/ and name an endpoint",
-        )
-        .with_platform(Platform::Netease));
-    }
-    if uri.contains(['\r', '\n', '#', '\\']) || uri.contains("://") {
-        return Err(TuneWeaveError::invalid_request(
-            "NetEase extension API uri contains a forbidden character",
-        )
-        .with_platform(Platform::Netease));
-    }
-    let path = uri.split_once('?').map_or(uri, |(path, _)| path);
-    if path
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
-    {
-        return Err(TuneWeaveError::invalid_request(
-            "NetEase extension API uri cannot contain dot path segments",
-        )
-        .with_platform(Platform::Netease));
-    }
+    let uri = request.uri.as_str();
+    validate_netease_api_uri(uri)?;
     let data = request.data.as_object().ok_or_else(|| {
         TuneWeaveError::invalid_request("NetEase extension API data must be a JSON object")
             .with_platform(Platform::Netease)
@@ -1471,6 +1468,67 @@ fn validate_platform_api_request(request: &PlatformApiRequest) -> Result<&str> {
         .with_platform(Platform::Netease));
     }
     Ok(uri)
+}
+
+fn validate_platform_batch_request(request: &PlatformBatchRequest) -> Result<()> {
+    if request.requests.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase batch requires at least one /api/... request",
+        )
+        .with_platform(Platform::Netease));
+    }
+    for uri in request.requests.keys() {
+        validate_netease_api_uri(uri)?;
+    }
+    Ok(())
+}
+
+fn serialize_netease_batch_requests(request: &PlatformBatchRequest) -> Value {
+    Value::Object(
+        request
+            .requests
+            .iter()
+            .map(|(uri, data)| {
+                let data = match data {
+                    Value::String(data) => data.clone(),
+                    data => data.to_string(),
+                };
+                (uri.clone(), Value::String(data))
+            })
+            .collect(),
+    )
+}
+
+fn validate_netease_api_uri(uri: &str) -> Result<()> {
+    if uri.trim() != uri {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase API uri cannot contain surrounding whitespace",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if !uri.starts_with("/api/") || uri.len() == "/api/".len() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase API uri must start with /api/ and name an endpoint",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if uri.contains(['\r', '\n', '#', '\\']) || uri.contains("://") {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase API uri contains a forbidden character",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let path = uri.split_once('?').map_or(uri, |(path, _)| path);
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase API uri cannot contain dot path segments",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
 }
 
 fn ensure_platform_api_success(body: &Value) -> Result<()> {
@@ -5932,6 +5990,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
         assert!(capabilities.contains(&Capability::PlatformApi));
+        assert!(capabilities.contains(&Capability::PlatformBatch));
     }
 
     #[test]
@@ -5996,6 +6055,54 @@ mod tests {
         let error = ensure_platform_api_success(&json!({ "code": 401, "msg": "login" }))
             .expect_err("authentication failure");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn validates_netease_batch_dynamic_request_paths() {
+        let mut requests = BTreeMap::new();
+        requests.insert(
+            "/api/v2/banner/get".to_owned(),
+            json!({ "clientType": "pc" }),
+        );
+        requests.insert(
+            "/api/search/get".to_owned(),
+            Value::String(r#"{"s":"TuneWeave","type":1}"#.to_owned()),
+        );
+        let request = PlatformBatchRequest::new(requests);
+        validate_platform_batch_request(&request).expect("valid batch");
+        let serialized = serialize_netease_batch_requests(&request);
+        let banner: Value = serde_json::from_str(
+            serialized["/api/v2/banner/get"]
+                .as_str()
+                .expect("serialized banner parameters"),
+        )
+        .expect("valid banner parameter JSON");
+        assert_eq!(banner["clientType"], "pc");
+        assert_eq!(
+            serialized["/api/search/get"],
+            r#"{"s":"TuneWeave","type":1}"#
+        );
+
+        assert_eq!(
+            validate_platform_batch_request(&PlatformBatchRequest::new(BTreeMap::new()))
+                .expect_err("empty batch")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        for uri in [
+            "https://example.com/api/search/get",
+            "/api/../login",
+            "/api/search/get#fragment",
+            "/api/search/get ",
+        ] {
+            let request = PlatformBatchRequest::new(BTreeMap::from([(uri.to_owned(), json!({}))]));
+            assert_eq!(
+                validate_platform_batch_request(&request)
+                    .expect_err("unsafe batch uri")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
     }
 
     #[tokio::test]
@@ -6436,6 +6543,27 @@ mod tests {
                 .await
                 .unwrap_or_else(|error| panic!("{protocol} request failed: {error}"));
             assert_eq!(body["code"], 200, "{protocol} response");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_platform_batch_supports_every_reference_protocol() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi"] {
+            let mut request = PlatformBatchRequest::new(BTreeMap::from([(
+                "/api/v2/banner/get".to_owned(),
+                json!({ "clientType": "pc" }),
+            )]));
+            request.protocol = Some(protocol.to_owned());
+            let body = MusicProvider::platform_batch(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{protocol} batch failed: {error}"));
+            assert_eq!(body["code"], 200, "{protocol} response: {body}");
+            assert!(
+                body["/api/v2/banner/get"].is_object(),
+                "{protocol} batch item"
+            );
         }
     }
 
