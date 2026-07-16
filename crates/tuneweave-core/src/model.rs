@@ -294,6 +294,38 @@ impl ArtistListRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoKind {
+    #[default]
+    All,
+    Mv,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistVideoListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub cursor: Option<String>,
+    pub account: Option<String>,
+    pub kind: VideoKind,
+    pub order: Option<String>,
+}
+
+impl ArtistVideoListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            cursor: None,
+            account: None,
+            kind: VideoKind::All,
+            order: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
@@ -355,6 +387,31 @@ pub struct User {
     pub signature: Option<String>,
     pub followed: Option<bool>,
     pub mutual: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreatorSummary {
+    #[serde(rename = "ref")]
+    pub resource_ref: Option<ResourceRef>,
+    pub name: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Video {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub title: String,
+    pub creators: Vec<CreatorSummary>,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub published_at: Option<String>,
+    pub play_count: Option<u64>,
+    pub subscribed: Option<bool>,
     pub extensions: Extensions,
 }
 
@@ -739,6 +796,37 @@ mod tests {
             serde_json::to_value(ArtistArea::Western).expect("serialize artist area"),
             "western"
         );
+    }
+
+    #[test]
+    fn video_serializes_reusable_creator_and_media_metadata() {
+        let video = Video {
+            resource_ref: ResourceRef::new(Platform::Netease, "22695250")
+                .expect("valid video reference"),
+            platform: Platform::Netease,
+            id: "22695250".to_owned(),
+            title: "任性 (5525 Live版)".to_owned(),
+            creators: vec![CreatorSummary {
+                resource_ref: Some(
+                    ResourceRef::new(Platform::Netease, "6452").expect("valid creator reference"),
+                ),
+                name: "周杰伦".to_owned(),
+                avatar_url: None,
+            }],
+            description: String::new(),
+            cover_url: Some("https://example.test/cover.jpg".to_owned()),
+            duration_ms: Some(266_000),
+            published_at: Some("2025-02-23".to_owned()),
+            play_count: Some(100_726),
+            subscribed: Some(false),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(video).expect("serialize video");
+        assert_eq!(value["ref"], "netease:22695250");
+        assert_eq!(value["creators"][0]["ref"], "netease:6452");
+        assert_eq!(value["duration_ms"], 266_000);
+        assert_eq!(value["subscribed"], false);
     }
 
     #[test]
