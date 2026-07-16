@@ -172,6 +172,21 @@ pub(crate) struct DigitalAlbumListEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumChartEnvelope {
+    #[serde(default)]
+    pub products: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumChartItem {
+    #[serde(rename = "albumType")]
+    pub album_type: Option<u8>,
+    pub rank: Option<u32>,
+    #[serde(rename = "rankIncr")]
+    pub rank_change: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct DigitalAlbumListItem {
     #[serde(rename = "albumId")]
     pub album_id: u64,

@@ -10,9 +10,10 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, ArtistSummary,
     AuthChallengeRequest, AuthState, Capability, ChallengeMethod, DigitalAlbum,
-    DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, Money,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
+    Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
+    PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
     RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
     TrackEntitlement, TrialWindow, TuneWeaveError,
@@ -23,12 +24,12 @@ use crate::{
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
-        AlbumStatsEnvelope, AudioQuality, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
-        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        AlbumStatsEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -268,6 +269,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AlbumTrackEntitlements,
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
+            Capability::DigitalAlbumCharts,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -533,6 +535,29 @@ impl MusicProvider for NeteaseProvider {
                 has_more,
             },
         })
+    }
+
+    async fn digital_album_chart(
+        &self,
+        request: &DigitalAlbumChartRequest,
+    ) -> Result<Page<DigitalAlbumChartEntry>> {
+        let limit = request.limit.clamp(1, 100);
+        let (path, payload) = netease_digital_album_chart_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(&path, payload).await?;
+        ensure_success(&response.body)?;
+        let response: DigitalAlbumChartEnvelope = parse_body(response.body)?;
+        let items = response
+            .products
+            .into_iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                map_digital_album_chart_entry(raw, position)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (items, pagination) = select_page(items, limit, request.offset);
+        Ok(Page { items, pagination })
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1215,6 +1240,35 @@ fn normalize_digital_album_area(
     })
 }
 
+fn netease_digital_album_chart_request(
+    request: &DigitalAlbumChartRequest,
+) -> Result<(String, Value)> {
+    let period = match request.period {
+        DigitalAlbumChartPeriod::Daily => "daily",
+        DigitalAlbumChartPeriod::Week => "week",
+        DigitalAlbumChartPeriod::Year => "year",
+        DigitalAlbumChartPeriod::Total => "total",
+    };
+    if request.year.is_some() && request.period != DigitalAlbumChartPeriod::Year {
+        return Err(TuneWeaveError::invalid_request(
+            "year is only supported for the NetEase yearly digital album chart",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let album_type = match request.kind {
+        DigitalAlbumChartKind::Album => 0,
+        DigitalAlbumChartKind::Single => 1,
+    };
+    let mut payload = json!({ "albumType": album_type });
+    if let Some(year) = request.year {
+        payload["year"] = json!(year);
+    }
+    Ok((
+        format!("/api/feealbum/songsaleboard/{period}/type"),
+        payload,
+    ))
+}
+
 fn normalize_account_label(account: Option<&str>) -> Result<&str> {
     let account = account.unwrap_or("default").trim();
     let account = if account.is_empty() {
@@ -1817,6 +1871,20 @@ fn map_digital_album_list_item(raw: Value) -> Result<DigitalAlbum> {
     })
 }
 
+fn map_digital_album_chart_entry(raw: Value, position: u32) -> Result<DigitalAlbumChartEntry> {
+    let item: DigitalAlbumChartItem = parse_body(raw.clone())?;
+    let rank = item.rank.unwrap_or(position).saturating_add(1);
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "upstream_rank", item.rank);
+    insert_extension(&mut extensions, "album_type", item.album_type);
+    Ok(DigitalAlbumChartEntry {
+        rank,
+        rank_change: item.rank_change,
+        product: map_digital_album_list_item(raw)?,
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -2317,6 +2385,64 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_digital_album_chart_rank_and_product_fields() {
+        let entry = map_digital_album_chart_entry(
+            json!({
+                "albumId": 156507145,
+                "albumName": "希忘Hope",
+                "albumType": 0,
+                "artistName": "华晨宇",
+                "coverUrl": "https://example.test/chart.jpg",
+                "price": 27.0,
+                "rank": 0,
+                "rankIncr": 5,
+                "saleNum": 324,
+                "salesCertificationSystemLevelCode": "collectionDiamond"
+            }),
+            9,
+        )
+        .expect("map digital album chart entry");
+
+        assert_eq!(entry.rank, 1);
+        assert_eq!(entry.rank_change, Some(5));
+        assert_eq!(entry.product.resource_ref.to_string(), "netease:156507145");
+        assert_eq!(entry.product.sale_count, Some(324));
+        assert_eq!(entry.product.price.expect("price").amount, 27.0);
+        assert_eq!(entry.extensions["upstream_rank"], 0);
+        assert_eq!(entry.extensions["album_type"], 0);
+        assert_eq!(
+            entry.product.extensions["product"]["salesCertificationSystemLevelCode"],
+            "collectionDiamond"
+        );
+    }
+
+    #[test]
+    fn builds_netease_digital_album_chart_period_and_kind_requests() {
+        let daily = DigitalAlbumChartRequest::new(20, 0);
+        let (path, payload) =
+            netease_digital_album_chart_request(&daily).expect("daily album chart request");
+        assert_eq!(path, "/api/feealbum/songsaleboard/daily/type");
+        assert_eq!(payload["albumType"], 0);
+        assert!(payload.get("year").is_none());
+
+        let mut yearly_single = DigitalAlbumChartRequest::new(10, 0);
+        yearly_single.period = DigitalAlbumChartPeriod::Year;
+        yearly_single.kind = DigitalAlbumChartKind::Single;
+        yearly_single.year = Some(2025);
+        let (path, payload) = netease_digital_album_chart_request(&yearly_single)
+            .expect("yearly single chart request");
+        assert_eq!(path, "/api/feealbum/songsaleboard/year/type");
+        assert_eq!(payload["albumType"], 1);
+        assert_eq!(payload["year"], 2025);
+
+        let mut invalid = DigitalAlbumChartRequest::new(20, 0);
+        invalid.year = Some(2025);
+        let error =
+            netease_digital_album_chart_request(&invalid).expect_err("year outside yearly chart");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn validates_netease_digital_album_areas() {
         assert_eq!(
             normalize_digital_album_area(DigitalAlbumCatalog::Latest, Some("zh"))
@@ -2547,6 +2673,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AlbumTrackEntitlements));
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
+        assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
     }
 
     #[tokio::test]
@@ -3010,6 +3137,51 @@ mod tests {
         assert!(page.pagination.has_more);
         assert!(page.items.iter().all(|album| !album.name.is_empty()));
         assert!(page.items.iter().all(|album| album.price.is_some()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_digital_album_chart_periods_and_kinds() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for (period, kind, year) in [
+            (
+                DigitalAlbumChartPeriod::Daily,
+                DigitalAlbumChartKind::Album,
+                None,
+            ),
+            (
+                DigitalAlbumChartPeriod::Daily,
+                DigitalAlbumChartKind::Single,
+                None,
+            ),
+            (
+                DigitalAlbumChartPeriod::Week,
+                DigitalAlbumChartKind::Album,
+                None,
+            ),
+            (
+                DigitalAlbumChartPeriod::Year,
+                DigitalAlbumChartKind::Album,
+                Some(2025_u16),
+            ),
+            (
+                DigitalAlbumChartPeriod::Total,
+                DigitalAlbumChartKind::Album,
+                None,
+            ),
+        ] {
+            let mut request = DigitalAlbumChartRequest::new(2, 0);
+            request.period = period;
+            request.kind = kind;
+            request.year = year;
+            let page = MusicProvider::digital_album_chart(&provider, &request)
+                .await
+                .expect("live digital album chart");
+            assert_eq!(page.items.len(), 2);
+            assert!(page.pagination.total.is_some_and(|total| total >= 2));
+            assert_eq!(page.items[0].rank, 1);
+            assert!(!page.items[0].product.name.is_empty());
+        }
     }
 
     #[tokio::test]
