@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=363`、`partial=7`、`implemented=11`、`verified=23`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=362`、`partial=7`、`implemented=11`、`verified=24`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -31,7 +31,7 @@
 | `artist_desc` | `/artist/desc` | `verified` | `GET /v1/artists/{ref}`（与 `/artist/detail` 合并为统一 `Artist`，映射简介及分段传记，并在扩展字段保留专题原始响应；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦简介、6 段传记及 3 项专题数据） |
 | `artist_detail` | `/artist/detail` | `verified` | `GET /v1/artists/{ref}`（映射名称、别名、身份、头像、封面及作品计数，并保留完整原始响应；2026-07-16 匿名 HTTP 实测返回 44 张专辑、568 首曲目、9 个 MV 与 8 个视频） |
 | `artist_detail_dynamic` | `/artist/detail/dynamic` | `verified` | `GET /v1/artists/{ref}/stats`（统一关注态、视频分类计数与在线演出计数，未知平台类别保留原始标识，演出及推荐对象保留完整响应；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 `followed=false`、分类 `0:9/1:9`、在线演出数 0） |
-| `artist_fans` | `/artist/fans` | `pending` | — |
+| `artist_fans` | `/artist/fans` | `verified` | `GET /v1/artists/{ref}/fans`（统一为分页 `User[]`，昵称、头像、签名和关系状态进入稳定字段，地区、认证、VIP 等完整资料保留在单项扩展；2026-07-16 匿名 HTTP 实测 `netease:2116` 返回 2 位粉丝、`next_offset=2`、`has_more=true`，上游无总数故 `total=null`） |
 | `artist_follow_count` | `/artist/follow/count` | `verified` | `GET /v1/artists/{ref}/stats`（统一粉丝总数和账户关注态，日增量等附加字段保留完整响应；2026-07-16 匿名 HTTP 实测 `netease:2116` 返回 `follower_count=13704933`、`followed=false`，统一值与上游 `fansCnt/isFollow` 一致） |
 | `artist_list` | `/artist/list` | `pending` | — |
 | `artist_mv` | `/artist/mv` | `pending` | — |
