@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=306`、`partial=5`、`implemented=35`、`verified=61`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=303`、`partial=5`、`implemented=35`、`verified=64`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -293,8 +293,8 @@
 | `song_creators` | `/song/creators` | `pending` | — |
 | `song_detail` | `/song/detail` | `verified` | `GET /v1/tracks/{ref}` |
 | `song_downlist` | `/song/downlist` | `pending` | — |
-| `song_download_url` | `/song/download/url` | `pending` | — |
-| `song_download_url_v1` | `/song/download/url/v1` | `pending` | — |
+| `song_download_url` | `/song/download/url` | `verified` | `GET /v1/tracks/{ref}/download?variant=legacy`（统一 `bitrate` 与参考 `br` 接受任意无符号 bit/s 并原样提交 EAPI `/api/song/enhance/download/url`，省略时按统一音质映射默认码率；统一 `MediaDownload` 保留可用态、URL、格式、实际码率、大小、时长、业务码、费用及完整响应；2026-07-17 provider 忽略测试与真实二进制 HTTP 均验证 `netease:2709812973&br=192123` 成功，上游顶层/条目 `code=200`、实际 192000 bit/s、`available=true`） |
+| `song_download_url_v1` | `/song/download/url/v1` | `verified` | `GET /v1/tracks/{ref}/download`（缺省或 `variant/backend=modern|v1` 固定 EAPI `/api/song/enhance/download/url/v1`，精确提交字符串 ID、`immerseType=c51` 和九档 `level`；对象与数组两种 `data` 形状均支持，顶层成功但条目无 URL 以 `available=false` 正常返回，不伪造错误或 URL；2026-07-17 可重复 provider 联网测试和真实二进制 HTTP 对 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster` 九档全部验证上游 `code=200`，八档取得 URL，当前 `sky` 如实返回条目 `code=-110/url=null`） |
 | `song_dynamic_cover` | `/song/dynamic/cover` | `pending` | — |
 | `song_like` | `/song/like` | `pending` | — |
 | `song_like_check` | `/song/like/check` | `pending` | — |
@@ -312,7 +312,7 @@
 | `song_url_match` | `/song/url/match` | `implemented` | `GET /v1/tracks/{ref}/stream?unblock=true&source=...`、批量端点同参数（复用统一严格匹配解析器而不引入第二套 URL 匹配；支持选择任意平台注册来源，省略时按 QQ/酷狗/酷我/咪咕顺序后回原平台，账号绑定首个目标，返回完整尝试轨迹；离线已验证来源选择、冲突拒绝、账户归属和批量逐项结果；2026-07-17 真实二进制 HTTP 验证当前未注册 QQ 时明确记录 `qq:unavailable` 后 `netease:success`，待 QQ Basic 接入后验证真实跨平台成功 URL） |
 | `song_url_ncmget` | `/song/url/ncmget` | `pending` | — |
 | `song_url_v1` | `/song/url/v1` | `implemented` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（缺省或 `variant/backend=modern|v1` 固定 XEAPI `/api/song/enhance/player/url/v1`，精确提交数字 ID 列表、`level`、`encodeType=flac`，`sky` 额外提交 `immerseType=c51`；完整支持 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster` 九档及统一别名，批量保序、保重复、逐项失败且完整响应不重复；`unblock/source` 分支复用统一回退；2026-07-17 真实二进制 HTTP 对九档逐项验证均为上游 `code=200` 和成功流，三项含重复 ID 的 GET/POST 批量均按原顺序成功；跨平台成功态待对应 provider Basic 接入） |
-| `song_url_v1_302` | `/song/url/v1/302` | `pending` | — |
+| `song_url_v1_302` | `/song/url/v1/302` | `verified` | `GET /v1/tracks/{ref}/download/redirect`（先请求对应旧/新版专用下载 URL，非空即发 302；无 URL 时以同一 `quality/variant/bitrate/account` 请求播放 URL，成功后发 302，两个阶段都失败则返回统一错误并保留下载结果和流错误详情；不向客户端暴露上游 Cookie；2026-07-17 真实二进制 HTTP 禁止自动跟随后验证 `exhigh` 直接下载分支与 `sky` 下载 `code=-110` 后播放兜底分支均返回 302 且存在 `Location`） |
 | `song_wiki_summary` | `/song/wiki/summary` | `pending` | — |
 | `starpick_comments_summary` | `/starpick/comments/summary` | `pending` | — |
 | `style_album` | `/style/album` | `pending` | — |

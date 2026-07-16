@@ -4,11 +4,11 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=13`、`partial=7`、`implemented=16`、`verified=28`。
+当前共 64 个验收单元：`pending=12`、`partial=7`、`implemented=16`、`verified=29`。
 
-- 完整实现率：`(implemented + verified) / 64 = 44 / 64 = 68.75%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 51 / 64 = 79.69%`。
-- 完整联网验收率：`verified / 64 = 28 / 64 = 43.75%`。
+- 完整实现率：`(implemented + verified) / 64 = 45 / 64 = 70.31%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 52 / 64 = 81.25%`。
+- 完整联网验收率：`verified / 64 = 29 / 64 = 45.31%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
@@ -46,7 +46,7 @@
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `pending` | `ad_get/ad_listening_rights_gain` 等未接入 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `pending` | `mv_url/video_url` 未接入 |
 | P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `pending` | DJ/voice 音频播放链未接入 |
-| P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `pending` | `song_download_url*`、`song_url_v1_302` 未接入 |
+| P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
 | A03 | 账户与身份 | 验证码独立校验 | `implemented` | 错误码真实路径已验收，待有效验证码成功态 |
