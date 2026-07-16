@@ -44,6 +44,7 @@ pub use response::{ApiError, ApiResponse, ResponseMeta};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 struct AuthTransactions {
@@ -244,6 +245,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/avatar",
             put(account_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD_BYTES)),
+        )
+        .route(
+            "/account/cloud/uploads",
+            post(cloud_upload).layer(DefaultBodyLimit::max(MAX_CLOUD_PROXY_UPLOAD_BYTES)),
         )
         .route("/account/cloud/uploads/ticket", post(cloud_upload_ticket))
         .route(
@@ -2076,6 +2081,84 @@ async fn account_avatar(
 struct CloudAccountQuery {
     platform: Option<String>,
     account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CloudUploadParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "fileName")]
+    filename: Option<String>,
+    bitrate: Option<String>,
+    #[serde(alias = "song", alias = "songName")]
+    song_name: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+fn validate_cloud_proxy_upload_size(size: usize) -> Result<(), TuneWeaveError> {
+    if size == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "audio body must not be empty",
+        ));
+    }
+    if size > MAX_CLOUD_PROXY_UPLOAD_BYTES {
+        return Err(
+            TuneWeaveError::invalid_request("audio body exceeds 500 MiB")
+                .with_details(json!({ "max_bytes": MAX_CLOUD_PROXY_UPLOAD_BYTES })),
+        );
+    }
+    Ok(())
+}
+
+async fn cloud_upload(
+    State(state): State<AppState>,
+    Query(params): Query<CloudUploadParams>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Json<ApiResponse<CloudUploadResult>>, ApiError> {
+    let data = payload.map_err(|_| {
+        TuneWeaveError::invalid_request("audio body is invalid or exceeds 500 MiB")
+            .with_details(json!({ "max_bytes": MAX_CLOUD_PROXY_UPLOAD_BYTES }))
+    })?;
+    validate_cloud_proxy_upload_size(data.len())?;
+    let filename = required_trimmed("filename", params.filename)?;
+    let bitrate = parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?
+        .unwrap_or(CloudUploadRequest::DEFAULT_BITRATE);
+    if bitrate == 0 {
+        return Err(TuneWeaveError::invalid_request("bitrate must be greater than zero").into());
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map(str::to_owned)
+                .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .upload_cloud_track(&CloudUploadRequest {
+            filename,
+            content_type,
+            data: data.into(),
+            bitrate,
+            song_name: optional_trimmed(params.song_name),
+            artist: optional_trimmed(params.artist),
+            album: optional_trimmed(params.album),
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4343,6 +4426,31 @@ mod tests {
             })
         }
 
+        async fn upload_cloud_track(
+            &self,
+            request: &CloudUploadRequest,
+        ) -> Result<CloudUploadResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("filename".to_owned(), json!(request.filename));
+            extensions.insert("content_type".to_owned(), json!(request.content_type));
+            extensions.insert("data_len".to_owned(), json!(request.data.len()));
+            extensions.insert("bitrate".to_owned(), json!(request.bitrate));
+            extensions.insert("song_name".to_owned(), json!(request.song_name));
+            extensions.insert("artist".to_owned(), json!(request.artist));
+            extensions.insert("album".to_owned(), json!(request.album));
+            extensions.insert("account".to_owned(), json!(request.account));
+            Ok(CloudUploadResult {
+                track_ref: Some(
+                    ResourceRef::new(Platform::Netease, "cloud-uploaded")
+                        .expect("valid uploaded cloud track reference"),
+                ),
+                upload_required: Some(true),
+                uploaded: Some(true),
+                published: true,
+                extensions,
+            })
+        }
+
         async fn cloud_upload_ticket(
             &self,
             request: &CloudUploadTicketRequest,
@@ -4736,7 +4844,17 @@ mod tests {
         content_type: Option<&str>,
         body: Vec<u8>,
     ) -> (StatusCode, Value) {
-        let mut request = Request::builder().method(Method::PUT).uri(path);
+        binary_request_with_method(app, Method::PUT, path, content_type, body).await
+    }
+
+    async fn binary_request_with_method(
+        app: Router,
+        method: Method,
+        path: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(path);
         if let Some(content_type) = content_type {
             request = request.header(header::CONTENT_TYPE, content_type);
         }
@@ -6043,6 +6161,88 @@ mod tests {
             json["error"]["details"]["max_bytes"],
             MAX_AVATAR_UPLOAD_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_proxy_upload_accepts_binary_audio_and_reference_metadata_aliases() {
+        let (status, json) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/uploads?platform=netease&account=locker&filename=clock.flac&bitrate=1411200&song=Clock&artist=Jay&album=Jay",
+            Some("audio/flac"),
+            b"fLaC-audio-content".to_vec(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "netease:cloud-uploaded");
+        assert_eq!(json["data"]["upload_required"], true);
+        assert_eq!(json["data"]["uploaded"], true);
+        assert_eq!(json["data"]["published"], true);
+        assert_eq!(json["data"]["extensions"]["filename"], "clock.flac");
+        assert_eq!(json["data"]["extensions"]["content_type"], "audio/flac");
+        assert_eq!(json["data"]["extensions"]["data_len"], 18);
+        assert_eq!(json["data"]["extensions"]["bitrate"], 1_411_200);
+        assert_eq!(json["data"]["extensions"]["song_name"], "Clock");
+        assert_eq!(json["data"]["extensions"]["artist"], "Jay");
+        assert_eq!(json["data"]["extensions"]["album"], "Jay");
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_proxy_upload_uses_default_bitrate_and_optional_content_type() {
+        let (status, json) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/uploads?filename=song.mp3",
+            None,
+            b"audio".to_vec(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["content_type"], "");
+        assert_eq!(json["data"]["extensions"]["bitrate"], 999_000);
+        assert_eq!(json["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn cloud_proxy_upload_rejects_missing_audio_fields_and_invalid_bitrate() {
+        for (path, body) in [
+            ("/v1/account/cloud/uploads?filename=song.mp3", Vec::new()),
+            ("/v1/account/cloud/uploads", vec![1]),
+            (
+                "/v1/account/cloud/uploads?filename=song.mp3&bitrate=0",
+                vec![1],
+            ),
+            (
+                "/v1/account/cloud/uploads?filename=song.mp3&bitrate=fast",
+                vec![1],
+            ),
+        ] {
+            let (status, json) = binary_request_with_method(
+                test_app_with_provider(),
+                Method::POST,
+                path,
+                Some("audio/mpeg"),
+                body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[test]
+    fn cloud_proxy_upload_validates_the_reference_size_boundary_without_allocating_it() {
+        validate_cloud_proxy_upload_size(MAX_CLOUD_PROXY_UPLOAD_BYTES)
+            .expect("reference maximum is accepted");
+        let error = validate_cloud_proxy_upload_size(MAX_CLOUD_PROXY_UPLOAD_BYTES + 1)
+            .expect_err("oversized proxy upload");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+        assert_eq!(error.details["max_bytes"], MAX_CLOUD_PROXY_UPLOAD_BYTES);
     }
 
     #[tokio::test]
