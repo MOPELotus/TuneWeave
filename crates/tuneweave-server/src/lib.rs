@@ -20,7 +20,7 @@ use tuneweave_core::{
     PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
-    StreamResolver, Track, TuneWeaveError,
+    StreamResolver, Track, TrackEntitlement, TuneWeaveError,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -161,6 +161,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
         .route("/albums/{reference}/stats", get(album_stats))
+        .route(
+            "/albums/{reference}/track-entitlements",
+            get(album_track_entitlements),
+        )
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
@@ -455,6 +459,39 @@ async fn album_stats(
     let provider = state.registry.require(platform)?;
     let stats = provider.album_stats(reference.id(), account).await?;
     let mut response = ApiResponse::new(stats).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn album_track_entitlements(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<TrackEntitlement>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .album_track_entitlements(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -1392,6 +1429,7 @@ mod tests {
                 Capability::AlbumDetail,
                 Capability::AlbumList,
                 Capability::AlbumStats,
+                Capability::AlbumTrackEntitlements,
                 Capability::DigitalAlbumDetail,
                 Capability::DigitalAlbumList,
                 Capability::PlaylistRead,
@@ -1467,6 +1505,23 @@ mod tests {
 
         async fn album_stats(&self, id: &str, _account: Option<&str>) -> Result<AlbumStats> {
             Ok(sample_album_stats(id))
+        }
+
+        async fn album_track_entitlements(
+            &self,
+            _id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<TrackEntitlement>> {
+            Ok(Page {
+                items: vec![sample_track_entitlement("2058263030")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(10),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                },
+            })
         }
 
         async fn digital_album(&self, id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
@@ -1789,6 +1844,29 @@ mod tests {
         }
     }
 
+    fn sample_track_entitlement(id: &str) -> TrackEntitlement {
+        TrackEntitlement {
+            track_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            playable: Some(true),
+            downloadable: Some(false),
+            play_bitrate: Some(320_000),
+            download_bitrate: Some(0),
+            max_play_bitrate: Some(999_000),
+            max_download_bitrate: Some(999_000),
+            play_quality: Some(Quality::High),
+            download_quality: None,
+            available_qualities: vec![
+                Quality::Standard,
+                Quality::High,
+                Quality::Lossless,
+                Quality::Hires,
+            ],
+            fee: Some(8),
+            paid: Some(false),
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_digital_album(id: &str) -> DigitalAlbum {
         DigitalAlbum {
             resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -1962,6 +2040,22 @@ mod tests {
         assert_eq!(stats["data"]["comment_count"], 1_989);
         assert_eq!(stats["meta"]["platform"], "netease");
         assert_eq!(stats["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn album_track_entitlements_use_reference_platform_and_pagination() {
+        let (status, entitlements) = json_response_from(
+            test_app_with_provider(),
+            "/v1/albums/netease:168223858/track-entitlements?account=vip&limit=2&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(entitlements["data"][0]["track_ref"], "netease:2058263030");
+        assert_eq!(entitlements["data"][0]["playable"], true);
+        assert_eq!(entitlements["data"][0]["play_quality"], "high");
+        assert_eq!(entitlements["data"][0]["available_qualities"][3], "hires");
+        assert_eq!(entitlements["meta"]["pagination"]["total"], 10);
+        assert_eq!(entitlements["meta"]["account"], "vip");
     }
 
     #[tokio::test]
