@@ -123,6 +123,29 @@ pub(crate) struct DigitalAlbumDescription {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumListEnvelope {
+    #[serde(default)]
+    pub products: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DigitalAlbumListItem {
+    #[serde(rename = "albumId")]
+    pub album_id: u64,
+    #[serde(rename = "albumName")]
+    pub album_name: String,
+    #[serde(rename = "artistName")]
+    pub artist_name: Option<String>,
+    #[serde(rename = "coverUrl")]
+    pub cover_url: Option<String>,
+    pub price: Option<f64>,
+    #[serde(rename = "pubTime")]
+    pub publish_time: Option<u64>,
+    #[serde(rename = "saleNum")]
+    pub sale_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistEnvelope {
     pub playlist: Option<PlaylistDetail>,
 }
