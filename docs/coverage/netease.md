@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=334`、`partial=6`、`implemented=25`、`verified=39`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=331`、`partial=6`、`implemented=28`、`verified=39`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -62,9 +62,9 @@
 | `chart_song_detail` | `/chart/song/detail` | `verified` | `GET /v1/charts/dimensions/{chart_code}/tracks`（统一为不可分页的 `DimensionChartTrackSnapshot`；列表顺序映射为从 1 开始的当前排名，保留上期排名、升降、理由、理由 ID、分数、比例、收藏态、分组、平台权益与每项/整份原始响应，不伪造 `limit/offset`；2026-07-16 provider 与匿名 HTTP 真实联网验证 `CITY_STYLE_SONG_CHART + 110000_1020 + CITY_STYLE` 返回完整 100 项、无分页元数据，首项 `netease:3399839173`《甲乙丙丁 (你我怎么两清)》当前/上期均第 1、可播放，上游 `code=200`） |
 | `check_music` | `/check/music` | `verified` | `GET /v1/tracks/{ref}/availability`（统一为 `TrackAvailability`，引用决定平台，`account` 选择登录态；完整支持统一 `bitrate`、参考 `br` 及缺省 999000 bit/s，固定 WeAPI `/api/song/enhance/player/url`，严格按参考实现以单项 `code=200` 判定可播，不可播是 HTTP 200 的正常布尔结果；返回请求/实际码率、平台码和兼容消息，保留费用、音质等诊断但清除临时播放 URL，避免绕过统一流解析；2026-07-16 provider 与匿名 HTTP 真实联网验证：`netease:1969519579` 默认请求可播、实际 320000，`br=128000` 实际 128000；`netease:1` 返回 `playable=false/platform_code=404`，三次上游顶层均为 200） |
 | `cloud` | `/cloud` | `pending` | — |
-| `cloud_import` | `/cloud/import` | `pending` | — |
-| `cloud_lyric_get` | `/cloud/lyric/get` | `pending` | — |
-| `cloud_match` | `/cloud/match` | `pending` | — |
+| `cloud_import` | `/cloud/import` | `implemented` | `POST /v1/account/cloud/imports`（以 `platform/account` 选择隔离登录态，统一接收 `md5/source_track_id/bitrate/file_size/file_type/song_name/artist/album`，并兼容参考字段 `id/fileSize/fileType/song` 及字符串化数字；TuneWeave 对外码率保持 bit/s，网易 provider 严格按参考文档执行 `floor(bit/s / 1000)` 后传入上游 kbps，缺省源曲目 ID 为 `-2`、歌手/专辑为“未知”；完整实现 EAPI `/api/cloud/upload/check/v2` 与 `/api/cloud/user/song/import` 两段事务，保留检查状态 0/1/2、已存在判定及两段原始响应；协议 JSON 字符串、单位换算、默认值、文件/MD5/码率/来源 ID 边界、成功映射、字段别名和错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在导入检查前稳定返回 401 `authentication_required`，待真实账户验证可导入、已存在及不可导入三种成功/失败业务态） |
+| `cloud_lyric_get` | `/cloud/lyric/get` | `implemented` | `GET /v1/account/cloud/lyrics`（统一查询参数 `platform/account/user_id/track_id`，兼容参考 `uid/sid`；固定 EAPI `/api/cloud/lyric/get` 并完整提交 `lv=-1/kv=-1`，云盘歌曲 ID 按平台不透明字符串处理；结果复用统一 `Lyrics`，映射普通、翻译、罗马音、逐字歌词和贡献者，并在扩展保留用户 ID 与完整云盘响应；不透明 ID、参考载荷、统一歌词映射、字段别名、缺字段错误与认证前置均有离线测试；2026-07-16 匿名真实 HTTP 验证在歌词请求前稳定返回 401 `authentication_required`，待真实账户及含 `LYRICS` 标签的云盘文件验证内容成功态） |
+| `cloud_match` | `/cloud/match` | `implemented` | `POST /v1/account/cloud/matches`（统一接收 `user_id/cloud_track_id/target_track_id`，兼容参考 `uid/sid/asid` 和字符串或数字 ID；固定 WeAPI `/api/cloud/user/song/match`，目标为 `0` 或省略时明确映射为取消匹配，非零目标映射为网易歌曲引用；统一返回云盘引用、目标引用与 `matched` 状态并保留完整响应；协议载荷、不透明 ID、匹配/取消两分支、参考/统一字段、非标量拒绝、账户隔离和 HTTP 包络均有离线测试；2026-07-16 以 `asid=0` 匿名真实 HTTP 验证在写请求前稳定返回 401 `authentication_required`，待真实账户验证匹配写入与取消回滚） |
 | `cloud_upload_complete` | `/cloud/upload/complete` | `implemented` | `POST /v1/account/cloud/uploads/complete`（以 `platform/account` 选择隔离登录态，统一接收 `provisional_track_id/resource_id/md5/filename/song_name/artist/album/bitrate`，并兼容参考字段 `songId/resourceId/song`；完整实现 EAPI `/api/upload/cloud/info/v2` 登记与 `/api/cloud/pub/v2` 发布两段事务，曲名缺省时取文件主名，歌手/专辑缺省时分别使用“未知艺术家/未知专辑”，统一返回最终曲目引用并保留两段原始响应；请求边界、元数据默认值、成功映射、账户前置和 HTTP 别名均有离线测试；2026-07-16 匿名真实 HTTP 验证在发起上游登记前稳定返回 401 `authentication_required`，待真实账户验证成功发布） |
 | `cloud_upload_token` | `/cloud/upload/token` | `implemented` | `POST /v1/account/cloud/uploads/ticket`（统一接收 `md5/file_size/filename/bitrate/content_type` 并兼容 `fileSize/contentType`；依次执行 EAPI `/api/cloud/upload/check`、WeAPI `/api/nos/token/alloc` 与真实 LBS 服务发现，完整返回 `needUpload/songId/resourceId` 对应字段、受限 NOS 上传 URL、方法及所需请求头；对象键按路径段编码，上传目标严格限制为无凭据、无自定义端口的 `http(s)://*.127.net` 和精确 `offset=0&complete=true&version=1.0` 参数，拒绝外域、重复参数与目标注入；NOS token 只存在于直传所需响应头映射，Debug 和扩展原文均不泄漏；协议构造、文件/MD5/码率边界、域名白名单、token 脱敏、统一 HTTP 字段及错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在申请 token 前稳定返回 401 `authentication_required`，待真实账户验证票据与原始音频直传成功态） |
 | `cloudsearch` | `/cloudsearch` | `pending` | — |
