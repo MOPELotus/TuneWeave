@@ -28,7 +28,8 @@ use tuneweave_core::{
     AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
     AuthPrincipalStatusRequest, AuthState, Banner, BannerClient, BannerListRequest, Capability,
     ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
+    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
@@ -347,6 +348,22 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/avatar",
             put(account_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD_BYTES)),
+        )
+        .route(
+            "/account/cloud/tracks",
+            get(cloud_tracks).delete(cloud_tracks_delete),
+        )
+        .route(
+            "/account/cloud/tracks/details",
+            get(cloud_track_details_get).post(cloud_track_details_post),
+        )
+        .route(
+            "/account/cloud/tracks/{reference}/download/redirect",
+            get(cloud_track_download_redirect),
+        )
+        .route(
+            "/account/cloud/tracks/{reference}/download",
+            get(cloud_track_download),
         )
         .route(
             "/account/cloud/uploads",
@@ -4102,6 +4119,279 @@ async fn account_avatar(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CloudTracksQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudTrackDetailsQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "track_refs", alias = "trackRefs")]
+    refs: Option<String>,
+    #[serde(alias = "id", alias = "songIds", alias = "trackIds")]
+    ids: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudTrackReferenceBody {
+    #[serde(alias = "track_refs", alias = "trackRefs")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id", alias = "songIds", alias = "trackIds")]
+    ids: Option<PlaylistReferenceInput>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudTrackDeleteBody {
+    #[serde(alias = "track_refs", alias = "trackRefs")]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id", alias = "songIds", alias = "trackIds")]
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudTrackDownloadQuery {
+    account: Option<String>,
+}
+
+fn parse_cloud_track_reference_fields(
+    refs: Option<PlaylistReferenceInput>,
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<&str>,
+    default_platform: Platform,
+) -> Result<(Platform, Vec<ResourceRef>), TuneWeaveError> {
+    match (refs, ids) {
+        (Some(_), Some(_)) => Err(TuneWeaveError::invalid_request(
+            "refs and ids cannot be provided together",
+        )
+        .with_details(json!({ "conflicts": ["refs", "ids"] }))),
+        (None, None) => Err(TuneWeaveError::invalid_request(
+            "one of refs or ids must be provided",
+        )),
+        (Some(refs), None) => {
+            let references = split_playlist_reference_values("refs", refs.into_values())?
+                .into_iter()
+                .map(parse_reference)
+                .collect::<Result<Vec<_>, _>>()?;
+            let reference_platform =
+                single_reference_platform("cloud track operation", &references)?;
+            if let Some(platform) = platform {
+                let selected = parse_platform_parameter(platform)?;
+                if selected != reference_platform {
+                    return Err(TuneWeaveError::invalid_request(
+                        "platform conflicts with the cloud track references",
+                    )
+                    .with_details(json!({
+                        "platform": selected,
+                        "reference_platform": reference_platform
+                    })));
+                }
+            }
+            Ok((reference_platform, references))
+        }
+        (None, Some(ids)) => {
+            let platform = platform.map_or(Ok(default_platform), parse_platform_parameter)?;
+            let references = split_playlist_reference_values("ids", ids.into_values())?
+                .into_iter()
+                .map(|id| {
+                    ResourceRef::new(platform, &id).map_err(|error| {
+                        TuneWeaveError::invalid_request(format!("invalid cloud track id: {error}"))
+                            .with_details(json!({ "id": id, "platform": platform }))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((platform, references))
+        }
+    }
+}
+
+async fn cloud_tracks(
+    State(state): State<AppState>,
+    params: Result<Query<CloudTracksQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .cloud_tracks(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn cloud_track_details_response(
+    state: &AppState,
+    platform: Option<&str>,
+    account: Option<&str>,
+    refs: Option<PlaylistReferenceInput>,
+    ids: Option<PlaylistReferenceInput>,
+) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
+    let (platform, track_refs) =
+        parse_cloud_track_reference_fields(refs, ids, platform, state.default_platform)?;
+    let account = account_alias(account)?;
+    let provider = state.registry.require(platform)?;
+    let tracks = provider
+        .cloud_track_details(&CloudTrackDetailRequest {
+            track_refs,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(tracks)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn cloud_track_details_get(
+    State(state): State<AppState>,
+    params: Result<Query<CloudTrackDetailsQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
+    let params = query_params(params)?;
+    cloud_track_details_response(
+        &state,
+        params.platform.as_deref(),
+        params.account.as_deref(),
+        params
+            .refs
+            .map(PlaylistReferenceValue::String)
+            .map(PlaylistReferenceInput::One),
+        params
+            .ids
+            .map(PlaylistReferenceValue::String)
+            .map(PlaylistReferenceInput::One),
+    )
+    .await
+}
+
+async fn cloud_track_details_post(
+    State(state): State<AppState>,
+    params: Result<Query<CloudAccountQuery>, QueryRejection>,
+    payload: Result<Json<CloudTrackReferenceBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
+    let params = query_params(params)?;
+    let body = json_body(payload)?;
+    cloud_track_details_response(
+        &state,
+        params.platform.as_deref(),
+        params.account.as_deref(),
+        body.refs,
+        body.ids,
+    )
+    .await
+}
+
+async fn cloud_tracks_delete(
+    State(state): State<AppState>,
+    payload: Result<Json<CloudTrackDeleteBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CloudTrackDeleteResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let (platform, track_refs) = parse_cloud_track_reference_fields(
+        body.refs,
+        body.ids,
+        body.platform.as_deref(),
+        state.default_platform,
+    )?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_cloud_tracks(&CloudTrackDeleteRequest {
+            track_refs,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn cloud_track_download(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<CloudTrackDownloadQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<MediaDownload>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let download = provider
+        .download_cloud_track(reference.id(), Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(download)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn cloud_track_download_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<CloudTrackDownloadQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(reference.platform())?;
+    let download = provider
+        .download_cloud_track(reference.id(), Some(&account))
+        .await?;
+    if let Some(url) = download
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return Ok(download_redirect_response(url));
+    }
+    let track = provider.track(reference.id(), Some(&account)).await?;
+    let stream_request = StreamRequest {
+        quality: Quality::Auto,
+        variant: StreamVariant::Default,
+        bitrate: None,
+        account: Some(account),
+    };
+    match provider.stream(&track, &stream_request).await {
+        Ok(stream) => Ok(download_redirect_response(&stream.url)),
+        Err(mut error) => {
+            let stream_details = std::mem::take(&mut error.details);
+            error.details = json!({
+                "download": download,
+                "stream": stream_details
+            });
+            Err(error.into())
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CloudAccountQuery {
     platform: Option<String>,
     account: Option<String>,
@@ -6279,6 +6569,9 @@ mod tests {
                 Capability::AccountCloudImport,
                 Capability::AccountCloudLyrics,
                 Capability::AccountCloudMatch,
+                Capability::AccountCloudRead,
+                Capability::AccountCloudDelete,
+                Capability::AccountCloudDownload,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -7931,6 +8224,83 @@ mod tests {
             })
         }
 
+        async fn cloud_tracks(&self, request: &PageRequest) -> Result<Page<CloudTrack>> {
+            let mut track = sample_cloud_track("9001");
+            track
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(12),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([
+                        ("storage_size".to_owned(), json!(50_412_168_u64)),
+                        ("storage_max_size".to_owned(), json!(1_073_741_824_u64)),
+                    ]),
+                },
+            })
+        }
+
+        async fn cloud_track_details(
+            &self,
+            request: &CloudTrackDetailRequest,
+        ) -> Result<Vec<CloudTrack>> {
+            Ok(request
+                .track_refs
+                .iter()
+                .map(|track_ref| {
+                    let mut track = sample_cloud_track(track_ref.id());
+                    track
+                        .extensions
+                        .insert("account".to_owned(), json!(request.account));
+                    track
+                })
+                .collect())
+        }
+
+        async fn delete_cloud_tracks(
+            &self,
+            request: &CloudTrackDeleteRequest,
+        ) -> Result<CloudTrackDeleteResult> {
+            Ok(CloudTrackDeleteResult {
+                track_refs: request.track_refs.clone(),
+                deleted: true,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn download_cloud_track(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<MediaDownload> {
+            let available = id != "unavailable";
+            Ok(MediaDownload {
+                track_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid cloud download reference"),
+                platform: Platform::Netease,
+                available,
+                url: available.then(|| format!("https://example.test/cloud/{id}.flac")),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: Some("flac".to_owned()),
+                codec: Some("flac".to_owned()),
+                bitrate: Some(999_000),
+                size: Some(50_412_168),
+                duration_ms: Some(258_000),
+                requested_quality: Quality::Auto,
+                actual_quality: Quality::Lossless,
+                platform_code: Some(200),
+                fee: Some(0),
+                message: (!available).then(|| "cloud download unavailable".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
         async fn post_comment(
             &self,
             request: &CommentWriteRequest,
@@ -8132,6 +8502,26 @@ mod tests {
         });
         track.duration_ms = Some(258_000);
         track
+    }
+
+    fn sample_cloud_track(id: &str) -> CloudTrack {
+        let cloud_track_ref =
+            ResourceRef::new(Platform::Netease, id).expect("valid cloud track reference");
+        CloudTrack {
+            cloud_track_ref: cloud_track_ref.clone(),
+            track: sample_track(id),
+            filename: Some("反方向的钟.flac".to_owned()),
+            file_size: Some(50_412_168),
+            file_type: Some("flac".to_owned()),
+            bitrate: Some(999_000),
+            md5: Some("d02b8ab79d91c01167ba31e349fe5275".to_owned()),
+            added_at: Some("2024-01-01T00:00:00Z".to_owned()),
+            matched_track_ref: Some(
+                ResourceRef::new(Platform::Netease, "185809")
+                    .expect("valid matched track reference"),
+            ),
+            extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+        }
     }
 
     fn sample_playlist(id: &str) -> Playlist {
@@ -11841,6 +12231,173 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(canceled["data"]["matched"], false);
         assert_eq!(canceled["data"]["target_track_ref"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn cloud_library_tracks_use_platform_account_and_unified_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/cloud/tracks?platform=netease&account=locker&limit=10&offset=5",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:9001");
+        assert_eq!(json["data"][0]["track"]["ref"], "netease:9001");
+        assert_eq!(json["data"][0]["filename"], "反方向的钟.flac");
+        assert_eq!(json["data"][0]["file_size"], 50_412_168);
+        assert_eq!(json["data"][0]["file_type"], "flac");
+        assert_eq!(json["data"][0]["matched_track_ref"], "netease:185809");
+        assert_eq!(json["data"][0]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+        assert_eq!(json["meta"]["pagination"]["limit"], 10);
+        assert_eq!(json["meta"]["pagination"]["offset"], 5);
+        assert_eq!(json["meta"]["pagination"]["total"], 12);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 6);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["storage_max_size"],
+            1_073_741_824_u64
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_track_details_accept_full_references_and_raw_id_batches() {
+        let (status, get_details) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/cloud/tracks/details?account=locker&refs=netease:9002,netease:9001",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(get_details["data"][0]["ref"], "netease:9002");
+        assert_eq!(get_details["data"][1]["ref"], "netease:9001");
+        assert_eq!(get_details["meta"]["platform"], "netease");
+        assert_eq!(get_details["meta"]["account"], "locker");
+
+        let (status, post_details) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/cloud/tracks/details?platform=netease&account=archive",
+            Some(json!({ "trackIds": [9002, "9001", 9002] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(post_details["data"][0]["ref"], "netease:9002");
+        assert_eq!(post_details["data"][1]["ref"], "netease:9001");
+        assert_eq!(post_details["data"][2]["ref"], "netease:9002");
+        assert_eq!(post_details["data"][0]["extensions"]["account"], "archive");
+        assert_eq!(post_details["meta"]["account"], "archive");
+    }
+
+    #[tokio::test]
+    async fn cloud_track_delete_preserves_reference_order_duplicates_and_account() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/cloud/tracks",
+            Some(json!({
+                "track_refs": ["netease:9002", "netease:9001", "netease:9002"],
+                "account": "locker"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["deleted"], true);
+        assert_eq!(
+            json["data"]["track_refs"],
+            json!(["netease:9002", "netease:9001", "netease:9002"])
+        );
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn cloud_track_download_exposes_data_and_redirects_with_stream_fallback() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/cloud/tracks/netease:9001/download?account=locker",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:9001");
+        assert_eq!(json["data"]["available"], true);
+        assert_eq!(json["data"]["url"], "https://example.test/cloud/9001.flac");
+        assert_eq!(json["data"]["requested_quality"], "auto");
+        assert_eq!(json["data"]["actual_quality"], "lossless");
+        assert_eq!(json["data"]["extensions"]["account"], "locker");
+        assert_eq!(json["meta"]["account"], "locker");
+
+        for (reference, expected_location) in [
+            ("netease:9001", "https://example.test/cloud/9001.flac"),
+            ("netease:unavailable", "https://example.test/audio.mp3"),
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/account/cloud/tracks/{reference}/download/redirect?account=locker"
+                        ))
+                        .body(Body::empty())
+                        .expect("build cloud download redirect request"),
+                )
+                .await
+                .expect("cloud download redirect response");
+            assert_eq!(response.status(), StatusCode::FOUND, "{reference}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .expect("redirect location"),
+                expected_location,
+                "{reference}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_library_routes_reject_conflicts_mixed_platforms_and_unknown_fields() {
+        for path in [
+            "/v1/account/cloud/tracks?limit=0",
+            "/v1/account/cloud/tracks?limit=101",
+            "/v1/account/cloud/tracks?unknown=true",
+            "/v1/account/cloud/tracks/details",
+            "/v1/account/cloud/tracks/details?refs=netease:9001&ids=9001",
+            "/v1/account/cloud/tracks/details?refs=netease:9001,qq:9002",
+            "/v1/account/cloud/tracks/details?platform=qq&refs=netease:9001",
+            "/v1/account/cloud/tracks/netease:9001/download?platform=netease",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
+
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/v1/account/cloud/tracks/details",
+                json!({ "refs": ["netease:9001"], "ids": [9001] }),
+            ),
+            (
+                Method::POST,
+                "/v1/account/cloud/tracks/details",
+                json!({ "refs": { "id": "netease:9001" } }),
+            ),
+            (
+                Method::DELETE,
+                "/v1/account/cloud/tracks",
+                json!({ "platform": "netease", "account": "locker" }),
+            ),
+            (
+                Method::DELETE,
+                "/v1/account/cloud/tracks",
+                json!({ "ids": [9001], "unexpected": true }),
+            ),
+        ] {
+            let (status, json) =
+                json_request_from(test_app_with_provider(), method, path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
