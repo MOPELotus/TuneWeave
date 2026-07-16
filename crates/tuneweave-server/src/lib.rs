@@ -211,6 +211,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/playlists", get(account_playlists))
         .route("/account/library/albums", get(account_albums))
         .route(
+            "/account/following/artists/{reference}",
+            put(artist_subscribe).delete(artist_unsubscribe),
+        )
+        .route(
             "/account/following/artists/new-videos",
             get(account_artist_new_videos),
         )
@@ -671,6 +675,42 @@ async fn set_album_subscription(
     let provider = state.registry.require(platform)?;
     let result = provider
         .set_album_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn artist_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_artist_subscription(state, reference, params, true).await
+}
+
+async fn artist_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_artist_subscription(state, reference, params, false).await
+}
+
+async fn set_artist_subscription(
+    state: AppState,
+    reference: String,
+    params: AccountParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_artist_subscription(reference.id(), subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -2081,6 +2121,7 @@ mod tests {
                 Capability::ArtistFans,
                 Capability::ArtistVideos,
                 Capability::ArtistTracks,
+                Capability::ArtistSubscriptionWrite,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -2371,6 +2412,24 @@ mod tests {
                     has_more: true,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn set_artist_subscription(
+            &self,
+            id: &str,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            let mut extensions = tuneweave_core::Extensions::new();
+            if let Some(account) = account {
+                extensions.insert("account".to_owned(), json!(account));
+            }
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test reference"),
+                subscribed,
+                extensions,
             })
         }
 
@@ -3283,6 +3342,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(unsubscribed["data"]["resource_ref"], "netease:32311");
+        assert_eq!(unsubscribed["data"]["subscribed"], false);
+        assert_eq!(unsubscribed["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn artist_following_put_and_delete_share_the_subscription_result() {
+        let (status, subscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/following/artists/netease:6452?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscribed["data"]["resource_ref"], "netease:6452");
+        assert_eq!(subscribed["data"]["subscribed"], true);
+        assert_eq!(subscribed["data"]["extensions"]["account"], "collector");
+        assert_eq!(subscribed["meta"]["platform"], "netease");
+        assert_eq!(subscribed["meta"]["account"], "collector");
+
+        let (status, unsubscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/following/artists/netease:6452?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unsubscribed["data"]["resource_ref"], "netease:6452");
         assert_eq!(unsubscribed["data"]["subscribed"], false);
         assert_eq!(unsubscribed["meta"]["account"], "collector");
     }
