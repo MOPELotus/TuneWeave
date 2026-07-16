@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, Capability,
     DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest,
-    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TuneWeaveError,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult,
+    Track, TrackEntitlement, TuneWeaveError,
 };
 
 /// A dynamically registered music platform adapter.
@@ -283,6 +283,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SessionManagement,
+        ))
+    }
+
+    async fn platform_api(&self, _request: &PlatformApiRequest) -> Result<serde_json::Value> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlatformApi,
         ))
     }
 }

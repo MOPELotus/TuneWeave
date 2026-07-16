@@ -53,6 +53,30 @@ impl SearchQuery {
     }
 }
 
+/// A provider-specific API request exposed below a platform extension route.
+///
+/// `protocol` is intentionally opaque to the core crate. Each provider owns
+/// the accepted values and must constrain the upstream destination itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlatformApiRequest {
+    pub uri: String,
+    pub data: Value,
+    pub protocol: Option<String>,
+    pub account: Option<String>,
+}
+
+impl PlatformApiRequest {
+    #[must_use]
+    pub fn new(uri: impl Into<String>, data: Value) -> Self {
+        Self {
+            uri: uri.into(),
+            data,
+            protocol: None,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -520,6 +544,19 @@ mod tests {
         let value = serde_json::to_value(money).expect("serialize money");
         assert_eq!(value["amount"], 22.0);
         assert_eq!(value["currency"], "CNY");
+    }
+
+    #[test]
+    fn platform_api_request_keeps_protocol_and_account_provider_owned() {
+        let mut request =
+            PlatformApiRequest::new("/api/search/get", serde_json::json!({ "s": "TuneWeave" }));
+        request.protocol = Some("eapi".to_owned());
+        request.account = Some("default".to_owned());
+
+        assert_eq!(request.uri, "/api/search/get");
+        assert_eq!(request.data["s"], "TuneWeave");
+        assert_eq!(request.protocol.as_deref(), Some("eapi"));
+        assert_eq!(request.account.as_deref(), Some("default"));
     }
 
     #[test]

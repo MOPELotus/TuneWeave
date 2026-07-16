@@ -35,4 +35,5 @@ pub enum Capability {
     ListeningHistory,
     Recommendations,
     MusicPartner,
+    PlatformApi,
 }
