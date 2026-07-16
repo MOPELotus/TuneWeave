@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest,
-    ArtistWorkUpdate, ArtistWorksRequest, AuthChallengeRequest, Capability, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream,
-    Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
+    AuthChallengeRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, Page, PageRequest,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
     RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
     TrackEntitlement, TuneWeaveError, User, Video,
@@ -38,6 +39,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SearchTracks,
+        ))
+    }
+
+    async fn recognize_audio(
+        &self,
+        _request: &AudioRecognitionRequest,
+    ) -> Result<AudioRecognition> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AudioRecognition,
         ))
     }
 

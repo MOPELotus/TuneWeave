@@ -53,6 +53,28 @@ impl SearchQuery {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioRecognitionRequest {
+    pub fingerprint: String,
+    pub duration_seconds: u32,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioRecognitionMatch {
+    pub track: Track,
+    pub start_time_ms: Option<u64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioRecognition {
+    pub matches: Vec<AudioRecognitionMatch>,
+    pub query_id: Option<String>,
+    pub no_match_reason: Option<i64>,
+    pub extensions: Extensions,
+}
+
 /// A provider-specific API request exposed below a platform extension route.
 ///
 /// `protocol` is intentionally opaque to the core crate. Each provider owns
@@ -815,6 +837,34 @@ mod tests {
         assert_eq!(request.data["s"], "TuneWeave");
         assert_eq!(request.protocol.as_deref(), Some("eapi"));
         assert_eq!(request.account.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn audio_recognition_keeps_track_and_match_offset_typed() {
+        let request = AudioRecognitionRequest {
+            fingerprint: "encoded-fingerprint".to_owned(),
+            duration_seconds: 6,
+            account: None,
+        };
+        assert_eq!(request.duration_seconds, 6);
+
+        let recognition = AudioRecognition {
+            matches: vec![AudioRecognitionMatch {
+                track: Track::new(
+                    ResourceRef::new(Platform::Netease, "185809").expect("valid track reference"),
+                    "晴天",
+                ),
+                start_time_ms: Some(1_500),
+                extensions: Extensions::new(),
+            }],
+            query_id: Some("query-1".to_owned()),
+            no_match_reason: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(recognition).expect("serialize audio recognition");
+        assert_eq!(value["matches"][0]["track"]["ref"], "netease:185809");
+        assert_eq!(value["matches"][0]["start_time_ms"], 1_500);
+        assert_eq!(value["query_id"], "query-1");
     }
 
     #[test]
