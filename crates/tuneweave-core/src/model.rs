@@ -569,6 +569,23 @@ pub struct CommentMutationResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentReportRequest {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub reason: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentReportResult {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub reason: String,
+    pub submitted: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommentListView {
@@ -2388,5 +2405,37 @@ mod tests {
         let result = serde_json::to_value(result).expect("serialize reaction mutation result");
         assert_eq!(result["kind"], "like");
         assert_eq!(result["active"], true);
+    }
+
+    #[test]
+    fn comment_reports_keep_target_comment_reason_and_submission_state_explicit() {
+        let request = CommentReportRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "2058263032").expect("valid track reference"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "123456789".to_owned(),
+            reason: "人身攻击".to_owned(),
+            account: Some("personal".to_owned()),
+        };
+        let result = CommentReportResult {
+            target: request.target.clone(),
+            comment_id: request.comment_id.clone(),
+            reason: request.reason.clone(),
+            submitted: true,
+            extensions: Extensions::new(),
+        };
+
+        let request = serde_json::to_value(request).expect("serialize comment report request");
+        assert_eq!(request["target"]["ref"], "netease:2058263032");
+        assert_eq!(request["comment_id"], "123456789");
+        assert_eq!(request["reason"], "人身攻击");
+        assert_eq!(request["account"], "personal");
+
+        let result = serde_json::to_value(result).expect("serialize comment report result");
+        assert_eq!(result["target"]["kind"], "track");
+        assert_eq!(result["comment_id"], "123456789");
+        assert_eq!(result["reason"], "人身攻击");
+        assert_eq!(result["submitted"], true);
     }
 }
