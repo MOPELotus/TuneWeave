@@ -21,19 +21,20 @@ use tuneweave_core::{
     BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackEntry,
-    DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
-    LyricContributor, Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest,
-    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoKind,
+    CloudUploadTicketRequest, CommentDeleteRequest, CommentMutationAction, CommentMutationResult,
+    CommentTarget, CommentTargetKind, CommentWriteRequest, CreatorSummary, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
+    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoKind,
 };
 use url::Url;
 
@@ -356,6 +357,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
+            Capability::CommentWrite,
             Capability::PlatformApi,
             Capability::PlatformBatch,
         ])
@@ -1978,6 +1980,32 @@ impl MusicProvider for NeteaseProvider {
         map_cloud_match_result(&cloud_track_id, &target_track_id, &user_id, response.body)
     }
 
+    async fn post_comment(&self, request: &CommentWriteRequest) -> Result<CommentMutationResult> {
+        let (path, payload, action) = netease_comment_write_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "comment writing")?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "comment writing")?;
+        map_comment_mutation_result(&request.target, action, None, response.body)
+    }
+
+    async fn delete_comment(
+        &self,
+        request: &CommentDeleteRequest,
+    ) -> Result<CommentMutationResult> {
+        let (path, payload, comment_id) = netease_comment_delete_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "comment deletion")?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "comment deletion")?;
+        map_comment_mutation_result(
+            &request.target,
+            CommentMutationAction::Delete,
+            Some(&comment_id),
+            response.body,
+        )
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -2010,6 +2038,122 @@ impl MusicProvider for NeteaseProvider {
         ensure_platform_api_success(&response.body)?;
         Ok(response.body)
     }
+}
+
+fn netease_comment_write_request(
+    request: &CommentWriteRequest,
+) -> Result<(&'static str, Value, CommentMutationAction)> {
+    let content = request.content.trim();
+    if content.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("comment content cannot be empty")
+                .with_platform(Platform::Netease),
+        );
+    }
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    let mut payload = json!({
+        "threadId": thread_id,
+        "content": request.content
+    });
+    if let Some(reply_to) = request.reply_to.as_deref() {
+        let comment_id = required_comment_id("reply_to", reply_to)?;
+        payload["commentId"] = json!(comment_id);
+        Ok((
+            "/api/resource/comments/reply",
+            payload,
+            CommentMutationAction::Reply,
+        ))
+    } else {
+        Ok((
+            "/api/resource/comments/add",
+            payload,
+            CommentMutationAction::Create,
+        ))
+    }
+}
+
+fn netease_comment_delete_request(
+    request: &CommentDeleteRequest,
+) -> Result<(&'static str, Value, String)> {
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    let comment_id = required_comment_id("comment_id", &request.comment_id)?;
+    Ok((
+        "/api/resource/comments/delete",
+        json!({
+            "threadId": thread_id,
+            "commentId": comment_id
+        }),
+        comment_id,
+    ))
+}
+
+fn netease_comment_thread_id(target: &CommentTarget) -> Result<String> {
+    if target.resource_ref.platform() != Platform::Netease {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase comment targets must use a netease resource reference",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "ref": target.resource_ref })));
+    }
+    let id = target.resource_ref.id();
+    if target.kind == CommentTargetKind::Event {
+        if !id.starts_with("A_EV_2_") {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase event comment targets must use the complete A_EV_2_ thread id",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "ref": target.resource_ref })));
+        }
+        return Ok(id.to_owned());
+    }
+    let prefix = match target.kind {
+        CommentTargetKind::Track => "R_SO_4_",
+        CommentTargetKind::Mv => "R_MV_5_",
+        CommentTargetKind::Playlist => "A_PL_0_",
+        CommentTargetKind::Album => "R_AL_3_",
+        CommentTargetKind::RadioEpisode => "A_DJ_1_",
+        CommentTargetKind::Video => "R_VI_62_",
+        CommentTargetKind::RadioStation => "A_DR_14_",
+        CommentTargetKind::Event => unreachable!("event targets return above"),
+    };
+    Ok(format!("{prefix}{id}"))
+}
+
+fn required_comment_id(field: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request(format!("{field} cannot be empty"))
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok(value.to_owned())
+}
+
+fn map_comment_mutation_result(
+    target: &CommentTarget,
+    action: CommentMutationAction,
+    requested_comment_id: Option<&str>,
+    response: Value,
+) -> Result<CommentMutationResult> {
+    let comment_id = requested_comment_id.map(str::to_owned).or_else(|| {
+        [
+            response.pointer("/comment/commentId"),
+            response.pointer("/data/commentId"),
+            response.get("commentId"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(json_scalar_string)
+    });
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentMutationResult {
+        target: target.clone(),
+        comment_id,
+        action,
+        extensions,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6458,6 +6602,183 @@ mod tests {
     }
 
     #[test]
+    fn comment_writes_map_every_reference_resource_type_and_action() {
+        let cases = [
+            (CommentTargetKind::Track, "185809", "R_SO_4_185809"),
+            (CommentTargetKind::Mv, "5436712", "R_MV_5_5436712"),
+            (CommentTargetKind::Playlist, "705123491", "A_PL_0_705123491"),
+            (CommentTargetKind::Album, "32311", "R_AL_3_32311"),
+            (
+                CommentTargetKind::RadioEpisode,
+                "794062371",
+                "A_DJ_1_794062371",
+            ),
+            (
+                CommentTargetKind::Video,
+                "89ADDE33C0AAE8EC14B99F6750DB954D",
+                "R_VI_62_89ADDE33C0AAE8EC14B99F6750DB954D",
+            ),
+            (
+                CommentTargetKind::Event,
+                "A_EV_2_6559519868_32953014",
+                "A_EV_2_6559519868_32953014",
+            ),
+            (CommentTargetKind::RadioStation, "362", "A_DR_14_362"),
+        ];
+        for (kind, id, thread_id) in cases {
+            let target = CommentTarget::new(
+                ResourceRef::new(Platform::Netease, id).expect("valid comment target"),
+                kind,
+            );
+            let create = CommentWriteRequest {
+                target: target.clone(),
+                content: "  保留内容空格  ".to_owned(),
+                reply_to: None,
+                account: Some("personal".to_owned()),
+            };
+            let (path, payload, action) =
+                netease_comment_write_request(&create).expect("build create request");
+            assert_eq!(path, "/api/resource/comments/add", "{kind:?}");
+            assert_eq!(action, CommentMutationAction::Create, "{kind:?}");
+            assert_eq!(payload["threadId"], thread_id, "{kind:?}");
+            assert_eq!(payload["content"], "  保留内容空格  ", "{kind:?}");
+            assert!(payload.get("commentId").is_none(), "{kind:?}");
+
+            let reply = CommentWriteRequest {
+                reply_to: Some("1438569889".to_owned()),
+                ..create
+            };
+            let (path, payload, action) =
+                netease_comment_write_request(&reply).expect("build reply request");
+            assert_eq!(path, "/api/resource/comments/reply", "{kind:?}");
+            assert_eq!(action, CommentMutationAction::Reply, "{kind:?}");
+            assert_eq!(payload["threadId"], thread_id, "{kind:?}");
+            assert_eq!(payload["commentId"], "1438569889", "{kind:?}");
+
+            let delete = CommentDeleteRequest {
+                target,
+                comment_id: "1535550516319".to_owned(),
+                account: Some("personal".to_owned()),
+            };
+            let (path, payload, comment_id) =
+                netease_comment_delete_request(&delete).expect("build delete request");
+            assert_eq!(path, "/api/resource/comments/delete", "{kind:?}");
+            assert_eq!(payload["threadId"], thread_id, "{kind:?}");
+            assert_eq!(payload["commentId"], "1535550516319", "{kind:?}");
+            assert_eq!(comment_id, "1535550516319", "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn comment_writes_validate_targets_fields_and_preserve_results() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid comment target"),
+            CommentTargetKind::Track,
+        );
+        let result = map_comment_mutation_result(
+            &target,
+            CommentMutationAction::Create,
+            None,
+            json!({"code": 200, "comment": {"commentId": 1535550516319_u64}}),
+        )
+        .expect("map comment result");
+        assert_eq!(result.comment_id.as_deref(), Some("1535550516319"));
+        assert_eq!(result.action, CommentMutationAction::Create);
+        assert_eq!(result.extensions["response"]["code"], 200);
+
+        let invalid_platform = CommentWriteRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Qq, "185809").expect("valid QQ reference"),
+                CommentTargetKind::Track,
+            ),
+            content: "test".to_owned(),
+            reply_to: None,
+            account: None,
+        };
+        assert_eq!(
+            netease_comment_write_request(&invalid_platform)
+                .expect_err("foreign target")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let invalid_event = CommentWriteRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "6559519868").expect("valid reference"),
+                CommentTargetKind::Event,
+            ),
+            content: "test".to_owned(),
+            reply_to: None,
+            account: None,
+        };
+        assert_eq!(
+            netease_comment_write_request(&invalid_event)
+                .expect_err("incomplete event thread")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        for (content, reply_to) in [("", None), ("test", Some("  "))] {
+            let invalid = CommentWriteRequest {
+                target: target.clone(),
+                content: content.to_owned(),
+                reply_to: reply_to.map(str::to_owned),
+                account: None,
+            };
+            assert_eq!(
+                netease_comment_write_request(&invalid)
+                    .expect_err("invalid comment field")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let invalid_delete = CommentDeleteRequest {
+            target,
+            comment_id: " ".to_owned(),
+            account: None,
+        };
+        assert_eq!(
+            netease_comment_delete_request(&invalid_delete)
+                .expect_err("empty comment id")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_writes_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "185809").expect("valid comment target"),
+            CommentTargetKind::Track,
+        );
+        let create = MusicProvider::post_comment(
+            &provider,
+            &CommentWriteRequest {
+                target: target.clone(),
+                content: "test".to_owned(),
+                reply_to: None,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous create must fail");
+        assert_eq!(create.code, ErrorCode::AuthenticationRequired);
+
+        let delete = MusicProvider::delete_comment(
+            &provider,
+            &CommentDeleteRequest {
+                target,
+                comment_id: "1535550516319".to_owned(),
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous delete must fail");
+        assert_eq!(delete.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn maps_legacy_search_song_shape() {
         let song = serde_json::from_value(json!({
             "id": 123,
@@ -9261,6 +9582,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
         assert!(capabilities.contains(&Capability::DimensionCharts));
+        assert!(capabilities.contains(&Capability::CommentWrite));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
