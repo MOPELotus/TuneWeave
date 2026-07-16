@@ -31,18 +31,18 @@ use tuneweave_core::{
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
     CommentReaction, CommentReactionKind, CommentReactionListRequest,
     CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStatsBatch,
-    CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    Extensions, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
-    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
-    SearchItem, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoKind,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, Extensions, ImageUploadRequest, ImageUploadResult, Lyrics,
+    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -239,6 +239,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/resources/{kind}/{reference}/comments/{comment_id}/replies",
             post(comment_reply),
+        )
+        .route(
+            "/resources/{kind}/{reference}/comments/{comment_id}/reports",
+            post(comment_report),
         )
         .route(
             "/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
@@ -2737,6 +2741,41 @@ struct CommentContentBody {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentReportBody {
+    reason: String,
+}
+
+async fn comment_report(
+    State(state): State<AppState>,
+    Path((kind, reference, comment_id)): Path<(String, String, String)>,
+    params: Result<Query<CommentAccountQuery>, QueryRejection>,
+    payload: Result<Json<CommentReportBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<CommentReportResult>>, ApiError> {
+    let body = json_body(payload)?;
+    validate_comment_report_reason(&body.reason)?;
+    let target = parse_comment_target(&kind, reference)?;
+    let platform = target.resource_ref.platform();
+    let comment_id = validate_comment_id("comment_id", &comment_id)?;
+    let params = query_params(params)?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .report_comment(&CommentReportRequest {
+            target,
+            comment_id,
+            reason: body.reason,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn comment_create(
     State(state): State<AppState>,
     Path((kind, reference)): Path<(String, String)>,
@@ -2820,6 +2859,15 @@ fn validate_comment_content(content: &str) -> Result<(), TuneWeaveError> {
     if content.trim().is_empty() {
         return Err(TuneWeaveError::invalid_request(
             "comment content cannot be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_comment_report_reason(reason: &str) -> Result<(), TuneWeaveError> {
+    if reason.trim().is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "comment report reason cannot be empty",
         ));
     }
     Ok(())
@@ -4043,6 +4091,7 @@ mod tests {
                 Capability::CommentsRead,
                 Capability::CommentReactionsRead,
                 Capability::CommentReactionsWrite,
+                Capability::CommentReportsWrite,
                 Capability::CommentThreadStats,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
@@ -5378,6 +5427,22 @@ mod tests {
             })
         }
 
+        async fn report_comment(
+            &self,
+            request: &CommentReportRequest,
+        ) -> Result<CommentReportResult> {
+            Ok(CommentReportResult {
+                target: request.target.clone(),
+                comment_id: request.comment_id.clone(),
+                reason: request.reason.clone(),
+                submitted: true,
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("provider".to_owned(), json!("mock")),
+                ]),
+            })
+        }
+
         async fn comment_thread_stats(
             &self,
             request: &CommentThreadStatsRequest,
@@ -6186,6 +6251,53 @@ mod tests {
         ] {
             let (status, response) =
                 json_request_from(test_app_with_provider(), Method::PUT, path, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_report_exposes_reason_account_and_submission_state() {
+        let (status, response) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/resources/track/netease:2058263032/comments/123456789/reports?account=personal",
+            Some(json!({"reason": "  人身攻击  "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["target"]["ref"], "netease:2058263032");
+        assert_eq!(response["data"]["target"]["kind"], "track");
+        assert_eq!(response["data"]["comment_id"], "123456789");
+        assert_eq!(response["data"]["reason"], "  人身攻击  ");
+        assert_eq!(response["data"]["submitted"], true);
+        assert_eq!(response["data"]["extensions"]["account"], "personal");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn comment_report_rejects_invalid_reason_body_target_and_query() {
+        for (path, body) in [
+            (
+                "/v1/resources/track/netease:2058263032/comments/123456789/reports",
+                json!({"reason": " \t"}),
+            ),
+            (
+                "/v1/resources/track/netease:2058263032/comments/123456789/reports",
+                json!({"reason": "人身攻击", "unknown": true}),
+            ),
+            (
+                "/v1/resources/article/netease:2058263032/comments/123456789/reports",
+                json!({"reason": "人身攻击"}),
+            ),
+            (
+                "/v1/resources/track/netease:2058263032/comments/123456789/reports?unknown=true",
+                json!({"reason": "人身攻击"}),
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::POST, path, Some(body)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
