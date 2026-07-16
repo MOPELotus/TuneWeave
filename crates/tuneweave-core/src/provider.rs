@@ -7,14 +7,17 @@ use crate::{
     ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest, ArtistVideoListRequest,
     ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
     AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
-    Banner, BannerListRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page,
-    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
-    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    Banner, BannerListRequest, Capability, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest,
+    DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest,
+    ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
+    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -538,6 +541,54 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountAvatarWrite,
+        ))
+    }
+
+    async fn upload_cloud_track(&self, _request: &CloudUploadRequest) -> Result<CloudUploadResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUpload,
+        ))
+    }
+
+    async fn cloud_upload_ticket(
+        &self,
+        _request: &CloudUploadTicketRequest,
+    ) -> Result<CloudUploadTicket> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudDirectUpload,
+        ))
+    }
+
+    async fn complete_cloud_upload(
+        &self,
+        _request: &CloudUploadCompleteRequest,
+    ) -> Result<CloudUploadResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudDirectUpload,
+        ))
+    }
+
+    async fn import_cloud_track(&self, _request: &CloudImportRequest) -> Result<CloudImportResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudImport,
+        ))
+    }
+
+    async fn cloud_lyrics(&self, _request: &CloudLyricsRequest) -> Result<Lyrics> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudLyrics,
+        ))
+    }
+
+    async fn match_cloud_track(&self, _request: &CloudMatchRequest) -> Result<CloudMatchResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudMatch,
         ))
     }
 

@@ -159,6 +159,157 @@ pub struct ImageUploadResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct CloudUploadRequest {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+    pub bitrate: u64,
+    pub song_name: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub account: Option<String>,
+}
+
+impl CloudUploadRequest {
+    pub const DEFAULT_BITRATE: u64 = 999_000;
+}
+
+impl fmt::Debug for CloudUploadRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudUploadRequest")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("data_len", &self.data.len())
+            .field("bitrate", &self.bitrate)
+            .field("song_name", &self.song_name)
+            .field("artist", &self.artist)
+            .field("album", &self.album)
+            .field("account", &self.account)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudUploadTicketRequest {
+    pub md5: String,
+    pub file_size: u64,
+    pub filename: String,
+    pub bitrate: u64,
+    pub content_type: Option<String>,
+    pub account: Option<String>,
+}
+
+impl CloudUploadTicketRequest {
+    #[must_use]
+    pub fn new(md5: impl Into<String>, file_size: u64, filename: impl Into<String>) -> Self {
+        Self {
+            md5: md5.into(),
+            file_size,
+            filename: filename.into(),
+            bitrate: CloudUploadRequest::DEFAULT_BITRATE,
+            content_type: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudUploadTicket {
+    pub upload_required: bool,
+    pub provisional_track_id: Option<String>,
+    pub resource_id: String,
+    pub upload_method: String,
+    pub upload_url: String,
+    pub upload_headers: BTreeMap<String, String>,
+    pub extensions: Extensions,
+}
+
+impl fmt::Debug for CloudUploadTicket {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudUploadTicket")
+            .field("upload_required", &self.upload_required)
+            .field("provisional_track_id", &self.provisional_track_id)
+            .field("resource_id", &self.resource_id)
+            .field("upload_method", &self.upload_method)
+            .field("upload_url", &self.upload_url)
+            .field(
+                "upload_header_names",
+                &self.upload_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("extensions", &self.extensions)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudUploadCompleteRequest {
+    pub provisional_track_id: String,
+    pub resource_id: String,
+    pub md5: String,
+    pub filename: String,
+    pub song_name: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub bitrate: u64,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloudUploadResult {
+    pub track_ref: Option<ResourceRef>,
+    pub upload_required: Option<bool>,
+    pub uploaded: Option<bool>,
+    pub published: bool,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudImportRequest {
+    pub md5: String,
+    pub source_track_id: Option<String>,
+    pub bitrate: u64,
+    pub file_size: u64,
+    pub file_type: String,
+    pub song_name: String,
+    pub artist: String,
+    pub album: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloudImportResult {
+    pub track_ref: Option<ResourceRef>,
+    pub imported: bool,
+    pub already_present: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudLyricsRequest {
+    pub user_id: String,
+    pub track_id: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloudMatchRequest {
+    pub user_id: String,
+    pub cloud_track_id: String,
+    pub target_track_id: Option<String>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloudMatchResult {
+    pub cloud_track_ref: ResourceRef,
+    pub target_track_ref: Option<ResourceRef>,
+    pub matched: bool,
+    pub extensions: Extensions,
+}
+
 /// A provider-specific API request exposed below a platform extension route.
 ///
 /// `protocol` is intentionally opaque to the core crate. Each provider owns
@@ -1267,6 +1418,52 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize image upload result");
         assert_eq!(value["url"], "https://example.test/avatar.png");
         assert_eq!(value["image_id"], "109951168000000000");
+    }
+
+    #[test]
+    fn cloud_upload_models_redact_bytes_and_direct_upload_credentials() {
+        let request = CloudUploadRequest {
+            filename: "反方向的钟.flac".to_owned(),
+            content_type: "audio/flac".to_owned(),
+            data: b"private-audio-content".to_vec(),
+            bitrate: CloudUploadRequest::DEFAULT_BITRATE,
+            song_name: None,
+            artist: None,
+            album: None,
+            account: Some("default".to_owned()),
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("data_len: 21"));
+        assert!(!debug.contains("private-audio-content"));
+
+        let ticket_request = CloudUploadTicketRequest::new(
+            "d02b8ab79d91c01167ba31e349fe5275",
+            50_412_168,
+            "最伟大的作品.flac",
+        );
+        assert_eq!(ticket_request.bitrate, 999_000);
+
+        let ticket = CloudUploadTicket {
+            upload_required: true,
+            provisional_track_id: Some("123".to_owned()),
+            resource_id: "resource-1".to_owned(),
+            upload_method: "POST".to_owned(),
+            upload_url: "https://upload.example.test/object".to_owned(),
+            upload_headers: BTreeMap::from([
+                ("Content-MD5".to_owned(), ticket_request.md5.clone()),
+                ("x-nos-token".to_owned(), "secret-upload-token".to_owned()),
+            ]),
+            extensions: Extensions::new(),
+        };
+        let debug = format!("{ticket:?}");
+        assert!(debug.contains("x-nos-token"));
+        assert!(!debug.contains("secret-upload-token"));
+        let value = serde_json::to_value(ticket).expect("serialize upload ticket");
+        assert_eq!(value["upload_method"], "POST");
+        assert_eq!(
+            value["upload_headers"]["x-nos-token"],
+            "secret-upload-token"
+        );
     }
 
     #[test]
