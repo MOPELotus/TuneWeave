@@ -176,6 +176,23 @@ pub struct SearchMultiMatch {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LocalTrackMatchRequest {
+    pub title: String,
+    pub album: String,
+    pub artist: String,
+    pub duration_ms: u64,
+    pub md5: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocalTrackMatchResult {
+    pub md5: String,
+    pub matches: Vec<Track>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -1882,6 +1899,31 @@ mod tests {
             value["sections"][0]["items"][0]["data"]["ref"],
             "netease:11127"
         );
+    }
+
+    #[test]
+    fn local_track_match_keeps_milliseconds_checksum_and_candidates_stable() {
+        let request = LocalTrackMatchRequest {
+            title: "富士山下".to_owned(),
+            album: String::new(),
+            artist: "陈奕迅".to_owned(),
+            duration_ms: 259_210,
+            md5: "bd708d006912a09d827f02e754cf8e56".to_owned(),
+            account: Some("default".to_owned()),
+        };
+        assert_eq!(request.duration_ms, 259_210);
+
+        let result = LocalTrackMatchResult {
+            md5: request.md5,
+            matches: vec![Track::new(
+                ResourceRef::new(Platform::Netease, "65766").expect("valid track reference"),
+                "富士山下",
+            )],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize local track match");
+        assert_eq!(value["md5"], "bd708d006912a09d827f02e754cf8e56");
+        assert_eq!(value["matches"][0]["ref"], "netease:65766");
     }
 
     #[test]
