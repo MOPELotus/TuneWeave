@@ -1,7 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchEnvelope {
@@ -1113,6 +1120,7 @@ pub(crate) struct FreeTrialInfo {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Song {
     pub id: u64,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub name: String,
     #[serde(default, alias = "alias")]
     pub alia: Vec<String>,
@@ -1144,12 +1152,14 @@ pub(crate) struct Song {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Artist {
     pub id: u64,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Album {
     pub id: u64,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub name: String,
     #[serde(rename = "picUrl")]
     pub pic_url: Option<String>,

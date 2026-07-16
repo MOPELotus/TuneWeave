@@ -4985,6 +4985,11 @@ fn map_netease_cloud_track(raw: Value) -> Result<CloudTrack> {
     }
     let cover_url = cloud_text_field(&raw, &["cover", "coverUrl", "picUrl"]);
     if let Some(album) = track.album.as_mut() {
+        if album.name.trim().is_empty()
+            && let Some(album_name) = cloud_text_field(&raw, &["album", "albumName"])
+        {
+            album.name = album_name;
+        }
         if album.cover_url.is_none() {
             album.cover_url.clone_from(&cover_url);
         }
@@ -9053,6 +9058,7 @@ fn map_song(song: Song, outer_privilege: Option<Privilege>) -> Result<Track> {
     let artists = song
         .ar
         .into_iter()
+        .filter(|artist| !artist.name.trim().is_empty())
         .map(
             |artist| -> std::result::Result<ArtistSummary, ParseResourceRefError> {
                 Ok(ArtistSummary {
@@ -15688,6 +15694,31 @@ mod tests {
         );
         assert_eq!(page.pagination.extensions["upgrade_sign"], 7);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn cloud_library_mapping_tolerates_nullable_song_artist_and_album_names() {
+        let mut item = fixture_cloud_item("9001", 9001);
+        item["simpleSong"]["name"] = Value::Null;
+        item["simpleSong"]["ar"] = json!([{"id": 0, "name": null}]);
+        item["simpleSong"]["al"] = json!({"id": 0, "name": null, "picUrl": null});
+
+        let cloud = map_netease_cloud_track(item).expect("map nullable cloud metadata");
+        assert_eq!(cloud.track.name, "反方向的钟（云盘）");
+        assert_eq!(cloud.track.artists.len(), 1);
+        assert_eq!(cloud.track.artists[0].name, "周杰伦");
+        assert_eq!(
+            cloud.track.album.as_ref().map(|album| album.name.as_str()),
+            Some("Jay")
+        );
+        assert_eq!(
+            cloud
+                .track
+                .album
+                .as_ref()
+                .and_then(|album| album.cover_url.as_deref()),
+            Some("https://example.test/cloud-cover.jpg")
+        );
     }
 
     #[test]
