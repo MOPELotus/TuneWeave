@@ -13,7 +13,8 @@ use axum::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{BytesRejection, JsonRejection, QueryRejection},
     },
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use rand::{RngExt, distr::Alphanumeric};
@@ -37,17 +38,18 @@ use tuneweave_core::{
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaStream, MembershipSummary, PageRequest, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
-    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
-    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -204,6 +206,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/availability", get(track_availability))
+        .route(
+            "/tracks/{reference}/download/redirect",
+            get(track_download_redirect),
+        )
+        .route("/tracks/{reference}/download", get(track_download))
         .route("/albums", get(albums))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
@@ -1619,6 +1626,81 @@ async fn track_stream(
     }
 
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DownloadParams {
+    #[serde(alias = "level")]
+    quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<String>,
+    account: Option<String>,
+}
+
+fn download_request(params: &DownloadParams) -> Result<StreamRequest, TuneWeaveError> {
+    Ok(StreamRequest {
+        quality: parse_quality(params.quality.as_deref())?,
+        variant: parse_stream_variant(params.variant.as_deref())?,
+        bitrate: parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?,
+        account: params
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .map(str::to_owned),
+    })
+}
+
+async fn track_download(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<DownloadParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<MediaDownload>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let request = download_request(&params)?;
+    let provider = state.registry.require(reference.platform())?;
+    let track = provider.track(reference.id(), None).await?;
+    let download = provider.download(&track, &request).await?;
+    let mut response = ApiResponse::new(download).with_platform(reference.platform());
+    if let Some(account) = request.account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_download_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<DownloadParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let request = download_request(&params)?;
+    let provider = state.registry.require(reference.platform())?;
+    let track = provider.track(reference.id(), None).await?;
+    let download = provider.download(&track, &request).await?;
+    if let Some(url) = download.url.as_deref() {
+        return Ok(download_redirect_response(url));
+    }
+    match provider.stream(&track, &request).await {
+        Ok(stream) => Ok(download_redirect_response(&stream.url)),
+        Err(mut error) => {
+            let stream_details = std::mem::take(&mut error.details);
+            error.details = json!({
+                "download": download,
+                "stream": stream_details
+            });
+            Err(error.into())
+        }
+    }
+}
+
+fn download_redirect_response(url: &str) -> Response {
+    (StatusCode::FOUND, [(header::LOCATION, url.to_owned())]).into_response()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5169,6 +5251,7 @@ mod tests {
                 Capability::Lyrics,
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
+                Capability::AudioDownload,
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
@@ -6270,6 +6353,36 @@ mod tests {
                 resolved_platform: Platform::Netease,
                 match_score: Some(1.0),
                 attempts: Vec::new(),
+            })
+        }
+
+        async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+            let available = track.id != "fallback";
+            Ok(MediaDownload {
+                track_ref: track.resource_ref.clone(),
+                platform: Platform::Netease,
+                available,
+                url: available.then(|| format!("https://example.test/download/{}.flac", track.id)),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: available.then(|| "flac".to_owned()),
+                codec: available.then(|| "flac".to_owned()),
+                bitrate: request.bitrate.or(Some(999_000)),
+                size: available.then_some(2048),
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: if available {
+                    Quality::Lossless
+                } else {
+                    Quality::Auto
+                },
+                platform_code: Some(if available { 200 } else { -110 }),
+                fee: Some(0),
+                message: (!available).then(|| "download unavailable".to_owned()),
+                extensions: Extensions::from([
+                    ("variant".to_owned(), json!(request.variant)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -9131,6 +9244,85 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
             assert_eq!(json["error"]["code"], "invalid_request", "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn track_download_accepts_modern_level_backend_and_bitrate_aliases() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:2709812973/download?level=sky&backend=v1&br=192123&account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:2709812973");
+        assert_eq!(json["data"]["available"], true);
+        assert_eq!(json["data"]["requested_quality"], "spatial");
+        assert_eq!(json["data"]["bitrate"], 192_123);
+        assert_eq!(json["data"]["extensions"]["variant"], "modern");
+        assert_eq!(json["data"]["extensions"]["account"], "vip");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn track_download_keeps_an_unavailable_url_as_successful_data() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:fallback/download?quality=spatial&variant=modern",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["available"], false);
+        assert_eq!(json["data"]["url"], Value::Null);
+        assert_eq!(json["data"]["platform_code"], -110);
+        assert_eq!(json["data"]["actual_quality"], "auto");
+    }
+
+    #[tokio::test]
+    async fn track_download_redirect_prefers_download_and_falls_back_to_stream() {
+        for (reference, expected_location) in [
+            (
+                "netease:2709812973",
+                "https://example.test/download/2709812973.flac",
+            ),
+            ("netease:fallback", "https://example.test/audio.mp3"),
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/tracks/{reference}/download/redirect?level=exhigh"
+                        ))
+                        .body(Body::empty())
+                        .expect("build download redirect request"),
+                )
+                .await
+                .expect("download redirect request succeeds");
+            assert_eq!(response.status(), StatusCode::FOUND, "{reference}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_location),
+                "{reference}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn track_download_rejects_invalid_or_unknown_parameters() {
+        for path in [
+            "/v1/tracks/netease:1/download?quality=future",
+            "/v1/tracks/netease:1/download?variant=future",
+            "/v1/tracks/netease:1/download?br=invalid",
+            "/v1/tracks/netease:1/download?unknown=true",
+            "/v1/tracks/netease:1/download/redirect?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
         }
     }
 
