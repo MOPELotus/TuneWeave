@@ -12,8 +12,8 @@ use tuneweave_core::{
     ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, MusicProvider,
     Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
     Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchKind,
-    SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest, ResourceRef,
+    Result, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -22,6 +22,7 @@ use crate::{
     dto::{
         AudioQuality, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
         PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
@@ -267,6 +268,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountPlaylists,
             Capability::Favorites,
             Capability::ListeningHistory,
+            Capability::Recommendations,
         ])
     }
 
@@ -440,6 +442,34 @@ impl MusicProvider for NeteaseProvider {
         let user_id = parse_numeric_id("user", user_id)?.to_string();
         let client = self.client_for(request.account.as_deref())?;
         fetch_play_history(&client, &user_id, request).await
+    }
+
+    async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let response = client
+            .request_weapi(
+                "/api/v3/discovery/recommend/songs",
+                json!({ "afresh": request.refresh }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "daily track recommendations")?;
+        let response: RecommendedTracksEnvelope = parse_body(response.body)?;
+        map_recommended_tracks(response, request.limit, request.offset)
+    }
+
+    async fn recommended_playlists(
+        &self,
+        request: &RecommendationRequest,
+    ) -> Result<Page<Playlist>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let response = client
+            .request_weapi("/api/v1/discovery/recommend/resource", json!({}))
+            .await?;
+        ensure_account_access(&client, &response.body, "daily playlist recommendations")?;
+        let response: RecommendedPlaylistsEnvelope = parse_body(response.body)?;
+        map_recommended_playlists(response, request.limit, request.offset)
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -760,6 +790,61 @@ fn map_play_history_record(record: PlayHistoryRecord) -> Result<PlaybackHistoryE
         last_played_at: None,
         extensions: Extensions::new(),
     })
+}
+
+fn map_recommended_tracks(
+    response: RecommendedTracksEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Track>> {
+    let mut reasons = response
+        .data
+        .recommend_reasons
+        .into_iter()
+        .map(|reason| (reason.song_id, reason))
+        .collect::<HashMap<_, _>>();
+    let tracks = response
+        .data
+        .daily_songs
+        .into_iter()
+        .map(|song| {
+            let song_id = song.id;
+            let mut track = map_song(song, None)?;
+            if let Some(reason) = reasons.remove(&song_id) {
+                insert_recommendation_reason(&mut track.extensions, reason);
+            }
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let limit = limit.clamp(1, 100);
+    let (items, pagination) = select_page(tracks, limit, offset);
+    Ok(Page { items, pagination })
+}
+
+fn insert_recommendation_reason(extensions: &mut Extensions, reason: RecommendationReason) {
+    extensions.insert(
+        "recommendation".to_owned(),
+        json!({
+            "reason": reason.reason,
+            "reason_id": reason.reason_id,
+            "target_url": reason.target_url,
+        }),
+    );
+}
+
+fn map_recommended_playlists(
+    response: RecommendedPlaylistsEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Playlist>> {
+    let playlists = response
+        .recommend
+        .into_iter()
+        .map(map_playlist)
+        .collect::<Result<Vec<_>>>()?;
+    let limit = limit.clamp(1, 100);
+    let (items, pagination) = select_page(playlists, limit, offset);
+    Ok(Page { items, pagination })
 }
 
 fn ensure_account_access(client: &NeteaseClient, body: &Value, operation: &str) -> Result<()> {
@@ -1134,6 +1219,8 @@ fn map_playlist(playlist: PlaylistDetail) -> Result<Playlist> {
     insert_extension(&mut extensions, "privacy", playlist.privacy);
     insert_extension(&mut extensions, "special_type", playlist.special_type);
     insert_extension(&mut extensions, "play_count", playlist.play_count);
+    insert_extension(&mut extensions, "copywriter", playlist.copywriter);
+    insert_extension(&mut extensions, "algorithm", playlist.alg);
 
     Ok(Playlist {
         resource_ref,
@@ -1599,6 +1686,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
+        assert!(capabilities.contains(&Capability::Recommendations));
     }
 
     #[tokio::test]
@@ -1789,6 +1877,75 @@ mod tests {
         assert_eq!(error.details["upstream_code"], -2);
     }
 
+    #[tokio::test]
+    async fn recommendations_require_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = RecommendationRequest {
+            limit: 30,
+            offset: 0,
+            account: Some("missing".to_owned()),
+            refresh: true,
+        };
+        let track_error = MusicProvider::recommended_tracks(&provider, &request)
+            .await
+            .expect_err("missing track recommendation account");
+        assert_eq!(track_error.code, ErrorCode::AuthenticationRequired);
+        let playlist_error = MusicProvider::recommended_playlists(&provider, &request)
+            .await
+            .expect_err("missing playlist recommendation account");
+        assert_eq!(playlist_error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn maps_daily_track_reasons_and_recommended_playlist_extensions() {
+        let tracks = map_recommended_tracks(
+            RecommendedTracksEnvelope {
+                data: crate::dto::RecommendedTracksData {
+                    daily_songs: vec![fixture_song()],
+                    recommend_reasons: vec![RecommendationReason {
+                        song_id: 123,
+                        reason: Some("因为你喜欢周杰伦".to_owned()),
+                        reason_id: Some(json!("artist")),
+                        target_url: Some("orpheus://artist/6452".to_owned()),
+                    }],
+                },
+            },
+            30,
+            0,
+        )
+        .expect("map recommended tracks");
+        assert_eq!(tracks.items[0].resource_ref.to_string(), "netease:123");
+        assert_eq!(
+            tracks.items[0].extensions["recommendation"]["reason"],
+            "因为你喜欢周杰伦"
+        );
+        assert_eq!(tracks.pagination.total, Some(1));
+
+        let response: RecommendedPlaylistsEnvelope = serde_json::from_value(json!({
+            "recommend": [{
+                "id": 99,
+                "name": "每日歌单",
+                "picUrl": "https://example.test/recommend.jpg",
+                "trackCount": 20,
+                "copywriter": "根据你的口味生成",
+                "alg": "daily"
+            }]
+        }))
+        .expect("recommended playlists fixture");
+        let playlists =
+            map_recommended_playlists(response, 30, 0).expect("map recommended playlists");
+        assert_eq!(playlists.items[0].resource_ref.to_string(), "netease:99");
+        assert_eq!(
+            playlists.items[0].cover_url.as_deref(),
+            Some("https://example.test/recommend.jpg")
+        );
+        assert_eq!(playlists.items[0].extensions["algorithm"], "daily");
+        assert_eq!(
+            playlists.items[0].extensions["copywriter"],
+            "根据你的口味生成"
+        );
+    }
+
     #[test]
     fn paginates_favorite_track_ids_without_reordering_them() {
         let (ids, pagination) = select_page(vec![1, 2, 3, 4], 2, 1);
@@ -1938,6 +2095,49 @@ mod tests {
         .expect("live account play history");
         assert!(page.pagination.total.is_some());
         assert!(page.items.iter().all(|entry| !entry.track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_anonymous_daily_track_recommendations_are_usable() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = RecommendationRequest::new(30, 0);
+        let tracks = MusicProvider::recommended_tracks(&provider, &request)
+            .await
+            .expect("anonymous daily tracks");
+        assert!(!tracks.items.is_empty());
+        assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_daily_playlist_recommendations_require_authentication() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error =
+            MusicProvider::recommended_playlists(&provider, &RecommendationRequest::new(30, 0))
+                .await
+                .expect_err("anonymous daily playlists must fail");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NETEASE_COOKIE for a live logged-in account"]
+    async fn live_daily_recommendations() {
+        let cookie = std::env::var("NETEASE_COOKIE").expect("NETEASE_COOKIE must be set");
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            cookie: Some(cookie),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let request = RecommendationRequest::new(30, 0);
+        let tracks = MusicProvider::recommended_tracks(&provider, &request)
+            .await
+            .expect("live recommended tracks");
+        let playlists = MusicProvider::recommended_playlists(&provider, &request)
+            .await
+            .expect("live recommended playlists");
+        assert!(!tracks.items.is_empty());
+        assert!(!playlists.items.is_empty());
     }
 
     #[tokio::test]

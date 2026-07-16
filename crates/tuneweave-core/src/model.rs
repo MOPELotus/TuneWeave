@@ -115,6 +115,26 @@ impl PlaybackHistoryRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub refresh: bool,
+}
+
+impl RecommendationRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            refresh: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
     pub resource_ref: Option<ResourceRef>,

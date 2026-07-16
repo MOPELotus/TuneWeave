@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchEnvelope {
@@ -57,11 +58,41 @@ pub(crate) struct PlayHistoryRecord {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct RecommendedTracksEnvelope {
+    pub data: RecommendedTracksData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecommendedTracksData {
+    #[serde(rename = "dailySongs", default)]
+    pub daily_songs: Vec<Song>,
+    #[serde(rename = "recommendReasons", default)]
+    pub recommend_reasons: Vec<RecommendationReason>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecommendationReason {
+    #[serde(rename = "songId")]
+    pub song_id: u64,
+    pub reason: Option<String>,
+    #[serde(rename = "reasonId")]
+    pub reason_id: Option<Value>,
+    #[serde(rename = "targetUrl")]
+    pub target_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecommendedPlaylistsEnvelope {
+    #[serde(default)]
+    pub recommend: Vec<PlaylistDetail>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistDetail {
     pub id: u64,
     pub name: String,
     pub description: Option<String>,
-    #[serde(rename = "coverImgUrl")]
+    #[serde(rename = "coverImgUrl", alias = "picUrl")]
     pub cover_img_url: Option<String>,
     pub creator: Option<PlaylistCreator>,
     #[serde(rename = "trackCount")]
@@ -78,6 +109,8 @@ pub(crate) struct PlaylistDetail {
     pub special_type: Option<i64>,
     #[serde(rename = "playCount")]
     pub play_count: Option<u64>,
+    pub copywriter: Option<String>,
+    pub alg: Option<String>,
     #[serde(rename = "trackIds", default)]
     pub track_ids: Vec<PlaylistTrackId>,
 }
