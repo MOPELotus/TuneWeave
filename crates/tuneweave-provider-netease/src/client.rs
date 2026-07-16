@@ -15,6 +15,7 @@ use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
+use url::Url;
 
 use crate::crypto::{
     build_xeapi_plaintext, decrypt_eapi_response, decrypt_xeapi_public_key, encode_form,
@@ -25,6 +26,7 @@ const DEFAULT_BASE_URL: &str = "https://interface.music.163.com";
 const DEFAULT_XEAPI_BASE_URL: &str = "https://interface3.music.163.com";
 const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
 const IMAGE_UPLOAD_BASE_URL: &str = "https://nosup-hz1.127.net/yyimgs";
+const CLOUD_UPLOAD_LBS_URL: &str = "https://wanproxy.127.net/lbs";
 const DEFAULT_USER_AGENT: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
 const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
@@ -432,6 +434,60 @@ impl NeteaseClient {
     pub async fn update_account_avatar(&self, image_id: Value) -> Result<NeteaseResponse> {
         self.request_eapi("/api/user/avatar/upload/v1", json!({ "imgid": image_id }))
             .await
+    }
+
+    pub async fn cloud_upload_servers(&self, bucket: &str) -> Result<NeteaseResponse> {
+        let mut url = Url::parse(CLOUD_UPLOAD_LBS_URL).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("invalid NetEase cloud LBS URL: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        url.query_pairs_mut()
+            .append_pair("version", "1.0")
+            .append_pair("bucketname", bucket);
+        let response = self.http.get(url).send().await.map_err(request_error)?;
+        parse_response(response).await
+    }
+
+    pub async fn upload_cloud_audio(
+        &self,
+        upload_url: &str,
+        token: &str,
+        md5: &str,
+        content_type: &str,
+        data: &[u8],
+    ) -> Result<NeteaseResponse> {
+        validate_cloud_upload_url(upload_url)?;
+        let token = token.parse::<header::HeaderValue>().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase returned an invalid cloud upload token",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let md5 = md5.parse::<header::HeaderValue>().map_err(|_| {
+            TuneWeaveError::invalid_request("cloud audio MD5 is not a valid HTTP header")
+                .with_platform(Platform::Netease)
+        })?;
+        let content_type = content_type.parse::<header::HeaderValue>().map_err(|_| {
+            TuneWeaveError::invalid_request("cloud audio content type is not a valid HTTP header")
+                .with_platform(Platform::Netease)
+        })?;
+        let response = self
+            .http
+            .post(upload_url)
+            .timeout(Duration::from_secs(300))
+            .header("x-nos-token", token)
+            .header("Content-MD5", md5)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, data.len())
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(request_error)?;
+        parse_response(response).await
     }
 
     pub async fn request_linuxapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
@@ -902,6 +958,39 @@ fn validate_api_path(path: &str, protocol: &str) -> Result<()> {
     )
 }
 
+fn validate_cloud_upload_url(upload_url: &str) -> Result<()> {
+    let url = Url::parse(upload_url).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned an invalid cloud upload URL",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let host = url.host_str().unwrap_or_default();
+    let query_pairs = url.query_pairs().collect::<Vec<_>>();
+    let query = query_pairs.iter().cloned().collect::<BTreeMap<_, _>>();
+    let valid_query = query_pairs.len() == 3
+        && query.len() == 3
+        && query.get("offset").is_some_and(|value| value == "0")
+        && query.get("complete").is_some_and(|value| value == "true")
+        && query.get("version").is_some_and(|value| value == "1.0");
+    if !matches!(url.scheme(), "http" | "https")
+        || !host.ends_with(".127.net")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+        || !valid_query
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud upload URL is outside the allowed NOS destination",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
+}
+
 fn encrypted_response_requested(payload: &Map<String, Value>) -> bool {
     match payload.get("e_r") {
         Some(Value::Bool(value)) => *value,
@@ -1158,6 +1247,31 @@ mod tests {
         assert!(!encrypted_response_requested(
             json!({ "e_r": false }).as_object().expect("object")
         ));
+    }
+
+    #[test]
+    fn cloud_upload_urls_are_restricted_to_exact_nos_destinations() {
+        for valid in [
+            "http://nosup-jd1.127.net/bucket/folder%2Fsong?offset=0&complete=true&version=1.0",
+            "https://nosup-hz1.127.net/bucket/song?version=1.0&complete=true&offset=0",
+        ] {
+            validate_cloud_upload_url(valid).expect("valid NOS upload URL");
+        }
+
+        for invalid in [
+            "ftp://nosup-jd1.127.net/bucket/song?offset=0&complete=true&version=1.0",
+            "https://127.net/bucket/song?offset=0&complete=true&version=1.0",
+            "https://nosup-jd1.127.net.evil.test/bucket/song?offset=0&complete=true&version=1.0",
+            "https://user@nosup-jd1.127.net/bucket/song?offset=0&complete=true&version=1.0",
+            "https://nosup-jd1.127.net:8443/bucket/song?offset=0&complete=true&version=1.0",
+            "https://nosup-jd1.127.net/bucket/song?offset=0&complete=true",
+            "https://nosup-jd1.127.net/bucket/song?offset=0&offset=0&complete=true&version=1.0",
+            "https://nosup-jd1.127.net/bucket/song?offset=1&complete=true&version=1.0",
+            "https://nosup-jd1.127.net/bucket/song?offset=0&complete=true&version=1.0#fragment",
+        ] {
+            let error = validate_cloud_upload_url(invalid).expect_err("invalid NOS upload URL");
+            assert_eq!(error.code, ErrorCode::UpstreamError, "{invalid}");
+        }
     }
 
     #[tokio::test]

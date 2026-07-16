@@ -50,6 +50,26 @@ pub(crate) struct ImageUploadAllocation {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct CloudUploadAllocationEnvelope {
+    pub result: CloudUploadAllocation,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloudUploadAllocation {
+    #[serde(rename = "objectKey")]
+    pub object_key: String,
+    pub token: String,
+    #[serde(rename = "resourceId")]
+    pub resource_id: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloudUploadServersEnvelope {
+    #[serde(default)]
+    pub upload: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct BannerEnvelope {
     #[serde(default)]
     pub banners: Vec<Value>,

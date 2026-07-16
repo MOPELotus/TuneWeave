@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
@@ -14,7 +15,8 @@ use tuneweave_core::{
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
+    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, CloudUploadCompleteRequest,
+    CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, CreatorSummary, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
@@ -28,6 +30,7 @@ use tuneweave_core::{
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
     User, Video, VideoKind,
 };
+use url::Url;
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
@@ -41,16 +44,19 @@ use crate::{
         ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
         ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
         ArtistVideoRecord, ArtistVideosEnvelope, AudioMatchEnvelope, AudioQuality, BannerEnvelope,
-        BroadcastTaxonomyEnvelope, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem,
-        DimensionChartDetailEnvelope, DimensionChartTrackItem, DimensionChartTracksEnvelope,
-        ImageUploadAllocationEnvelope, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        BroadcastTaxonomyEnvelope, CloudUploadAllocationEnvelope, CloudUploadServersEnvelope,
+        DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
+        DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
+        DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
+        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope,
+        PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
+
+const CLOUD_UPLOAD_BUCKET: &str = "jd-musicrep-privatecloud-audio-public";
 
 #[derive(Clone)]
 pub struct NeteaseProvider {
@@ -327,6 +333,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountArtistNewWorks,
             Capability::AccountArtistNewTracksPlayAll,
             Capability::AccountAvatarWrite,
+            Capability::AccountCloudDirectUpload,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -1593,6 +1600,136 @@ impl MusicProvider for NeteaseProvider {
         )
     }
 
+    async fn cloud_upload_ticket(
+        &self,
+        request: &CloudUploadTicketRequest,
+    ) -> Result<CloudUploadTicket> {
+        let descriptor = validate_cloud_upload_ticket_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "cloud upload")?;
+
+        let check_response = client
+            .request_eapi(
+                "/api/cloud/upload/check",
+                json!({
+                    "bitrate": request.bitrate.to_string(),
+                    "ext": "",
+                    "length": request.file_size,
+                    "md5": descriptor.md5,
+                    "songId": "0",
+                    "version": 1
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &check_response.body, "cloud upload")?;
+        let check_response = check_response.body;
+
+        let allocation_response = client
+            .request_weapi(
+                "/api/nos/token/alloc",
+                json!({
+                    "bucket": CLOUD_UPLOAD_BUCKET,
+                    "ext": descriptor.extension,
+                    "filename": descriptor.allocation_filename,
+                    "local": false,
+                    "nos_product": 3,
+                    "type": "audio",
+                    "md5": descriptor.md5
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &allocation_response.body, "cloud upload token")?;
+        let allocation: CloudUploadAllocationEnvelope = parse_body(allocation_response.body)?;
+        validate_cloud_upload_allocation(&allocation)?;
+
+        let servers_response = client.cloud_upload_servers(CLOUD_UPLOAD_BUCKET).await?;
+        let servers_raw = servers_response.body.clone();
+        let servers: CloudUploadServersEnvelope = parse_body(servers_response.body)?;
+        let server = servers.upload.first().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase did not return a cloud upload server",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let upload_url =
+            build_cloud_upload_url(server, CLOUD_UPLOAD_BUCKET, &allocation.result.object_key)?;
+        let resource_id = json_scalar_string(&allocation.result.resource_id).ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase cloud upload allocation did not contain a resource id",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let upload_required = check_response
+            .get("needUpload")
+            .and_then(json_bool)
+            .unwrap_or(true);
+        let provisional_track_id = check_response.get("songId").and_then(json_scalar_string);
+        let mut upload_headers = BTreeMap::new();
+        upload_headers.insert("Content-Length".to_owned(), request.file_size.to_string());
+        upload_headers.insert("Content-MD5".to_owned(), descriptor.md5.clone());
+        upload_headers.insert("Content-Type".to_owned(), descriptor.content_type.clone());
+        upload_headers.insert("x-nos-token".to_owned(), allocation.result.token.clone());
+        let mut extensions = Extensions::new();
+        extensions.insert("check_response".to_owned(), check_response);
+        extensions.insert(
+            "allocation".to_owned(),
+            json!({
+                "bucket": CLOUD_UPLOAD_BUCKET,
+                "object_key": allocation.result.object_key,
+                "resource_id": resource_id,
+                "extension": descriptor.extension,
+                "filename": descriptor.allocation_filename
+            }),
+        );
+        extensions.insert("upload_servers_response".to_owned(), servers_raw);
+        Ok(CloudUploadTicket {
+            upload_required,
+            provisional_track_id,
+            resource_id,
+            upload_method: "POST".to_owned(),
+            upload_url,
+            upload_headers,
+            extensions,
+        })
+    }
+
+    async fn complete_cloud_upload(
+        &self,
+        request: &CloudUploadCompleteRequest,
+    ) -> Result<CloudUploadResult> {
+        let descriptor = validate_cloud_upload_complete_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "cloud upload completion")?;
+        let info_response = client
+            .request_eapi(
+                "/api/upload/cloud/info/v2",
+                json!({
+                    "md5": descriptor.md5,
+                    "songid": descriptor.provisional_track_id,
+                    "filename": descriptor.filename,
+                    "song": descriptor.song_name,
+                    "album": descriptor.album,
+                    "artist": descriptor.artist,
+                    "bitrate": request.bitrate.to_string(),
+                    "resourceId": descriptor.resource_id
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &info_response.body, "cloud upload completion")?;
+        let info_response = info_response.body;
+        let track_id = info_response
+            .get("songId")
+            .and_then(json_scalar_string)
+            .unwrap_or_else(|| descriptor.provisional_track_id.to_owned());
+        let publish_response = client
+            .request_eapi("/api/cloud/pub/v2", json!({ "songid": track_id }))
+            .await?;
+        ensure_account_access(&client, &publish_response.body, "cloud publication")?;
+        map_cloud_upload_result(track_id, None, None, info_response, publish_response.body)
+    }
+
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
         let uri = validate_platform_api_request(request)?;
         let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
@@ -2471,6 +2608,250 @@ fn validate_image_upload(request: &ImageUploadRequest) -> Result<(&str, &str)> {
         );
     }
     Ok((filename, content_type))
+}
+
+#[derive(Debug)]
+struct CloudUploadDescriptor {
+    md5: String,
+    filename: String,
+    allocation_filename: String,
+    extension: String,
+    content_type: String,
+}
+
+#[derive(Debug)]
+struct CloudUploadCompleteDescriptor {
+    provisional_track_id: String,
+    resource_id: String,
+    md5: String,
+    filename: String,
+    song_name: String,
+    artist: String,
+    album: String,
+}
+
+fn validate_cloud_upload_ticket_request(
+    request: &CloudUploadTicketRequest,
+) -> Result<CloudUploadDescriptor> {
+    if request.file_size == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud audio file_size must be greater than zero",
+        )
+        .with_platform(Platform::Netease));
+    }
+    cloud_upload_descriptor(
+        &request.md5,
+        &request.filename,
+        request.content_type.as_deref(),
+    )
+}
+
+fn validate_cloud_upload_complete_request(
+    request: &CloudUploadCompleteRequest,
+) -> Result<CloudUploadCompleteDescriptor> {
+    let provisional_track_id =
+        required_cloud_value("provisional_track_id", &request.provisional_track_id)?;
+    let resource_id = required_cloud_value("resource_id", &request.resource_id)?;
+    let descriptor = cloud_upload_descriptor(&request.md5, &request.filename, None)?;
+    let fallback_name = cloud_filename_stem(&descriptor.filename);
+    Ok(CloudUploadCompleteDescriptor {
+        provisional_track_id,
+        resource_id,
+        md5: descriptor.md5,
+        filename: descriptor.filename,
+        song_name: optional_cloud_metadata(request.song_name.as_deref()).unwrap_or(fallback_name),
+        artist: optional_cloud_metadata(request.artist.as_deref())
+            .unwrap_or_else(|| "未知艺术家".to_owned()),
+        album: optional_cloud_metadata(request.album.as_deref())
+            .unwrap_or_else(|| "未知专辑".to_owned()),
+    })
+}
+
+fn cloud_upload_descriptor(
+    md5: &str,
+    filename: &str,
+    content_type: Option<&str>,
+) -> Result<CloudUploadDescriptor> {
+    let md5 = md5.trim().to_ascii_lowercase();
+    if md5.len() != 32 || !md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud audio md5 must contain exactly 32 hexadecimal characters",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let filename = filename.trim();
+    if filename.is_empty()
+        || filename.len() > 255
+        || filename
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "cloud audio filename must be a safe basename of at most 255 bytes",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let extension = filename
+        .rsplit_once('.')
+        .map_or("mp3", |(_, extension)| extension)
+        .trim()
+        .to_ascii_lowercase();
+    let extension = if extension.is_empty()
+        || extension.len() > 10
+        || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        "mp3".to_owned()
+    } else {
+        extension
+    };
+    let allocation_filename = cloud_filename_stem(filename)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| if character == '.' { '_' } else { character })
+        .collect::<String>();
+    let allocation_filename = if allocation_filename.is_empty() {
+        "unknown".to_owned()
+    } else {
+        allocation_filename
+    };
+    let content_type = content_type
+        .map(str::trim)
+        .filter(|content_type| !content_type.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| cloud_audio_content_type(&extension).to_owned());
+    if content_type.chars().any(|character| character.is_control()) {
+        return Err(
+            TuneWeaveError::invalid_request("cloud audio content type is invalid")
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok(CloudUploadDescriptor {
+        md5,
+        filename: filename.to_owned(),
+        allocation_filename,
+        extension,
+        content_type,
+    })
+}
+
+fn required_cloud_value(name: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "cloud upload {name} cannot be empty"
+        ))
+        .with_platform(Platform::Netease));
+    }
+    Ok(value.to_owned())
+}
+
+fn optional_cloud_metadata(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn cloud_filename_stem(filename: &str) -> String {
+    filename
+        .rsplit_once('.')
+        .map_or(filename, |(stem, _)| stem)
+        .to_owned()
+}
+
+fn cloud_audio_content_type(extension: &str) -> &'static str {
+    match extension {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "m4a" | "mp4" => "audio/mp4",
+        "ogg" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "aac" => "audio/aac",
+        _ => "application/octet-stream",
+    }
+}
+
+fn validate_cloud_upload_allocation(allocation: &CloudUploadAllocationEnvelope) -> Result<()> {
+    if allocation.result.object_key.trim().is_empty()
+        || allocation.result.token.trim().is_empty()
+        || json_scalar_string(&allocation.result.resource_id).is_none()
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud upload allocation is incomplete",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
+}
+
+fn build_cloud_upload_url(server: &str, bucket: &str, object_key: &str) -> Result<String> {
+    let url = Url::parse(server).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned an invalid cloud upload server",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let host = url.host_str().unwrap_or_default();
+    if !matches!(url.scheme(), "http" | "https")
+        || !host.ends_with(".127.net")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+        || object_key.trim().is_empty()
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase cloud upload server is outside the allowed NOS destination",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let object_key = utf8_percent_encode(object_key, NON_ALPHANUMERIC);
+    Ok(format!(
+        "{}/{bucket}/{object_key}?offset=0&complete=true&version=1.0",
+        url.origin().ascii_serialization()
+    ))
+}
+
+fn require_authenticated_client(client: &NeteaseClient, operation: &str) -> Result<()> {
+    if client.is_authenticated() {
+        return Ok(());
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::AuthenticationRequired,
+        format!("NetEase {operation} requires a logged-in session"),
+    )
+    .with_platform(Platform::Netease))
+}
+
+fn map_cloud_upload_result(
+    track_id: String,
+    upload_required: Option<bool>,
+    uploaded: Option<bool>,
+    info_response: Value,
+    publish_response: Value,
+) -> Result<CloudUploadResult> {
+    let track_ref = ResourceRef::new(Platform::Netease, track_id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid cloud track id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("info_response".to_owned(), info_response);
+    extensions.insert("publish_response".to_owned(), publish_response);
+    Ok(CloudUploadResult {
+        track_ref: Some(track_ref),
+        upload_required,
+        uploaded,
+        published: true,
+        extensions,
+    })
 }
 
 fn validate_image_allocation(response: &ImageUploadAllocationEnvelope) -> Result<()> {
@@ -6979,6 +7360,141 @@ mod tests {
         assert_eq!(unauthenticated.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn cloud_upload_ticket_normalizes_reference_file_fields() {
+        let mut request = CloudUploadTicketRequest::new(
+            "0123456789ABCDEF0123456789ABCDEF",
+            42,
+            " Track.Name .FLAC ",
+        );
+        request.content_type = Some("audio/x-flac".to_owned());
+        let descriptor =
+            validate_cloud_upload_ticket_request(&request).expect("valid cloud upload ticket");
+        assert_eq!(descriptor.md5, "0123456789abcdef0123456789abcdef");
+        assert_eq!(descriptor.filename, "Track.Name .FLAC");
+        assert_eq!(descriptor.allocation_filename, "Track_Name");
+        assert_eq!(descriptor.extension, "flac");
+        assert_eq!(descriptor.content_type, "audio/x-flac");
+    }
+
+    #[test]
+    fn cloud_upload_ticket_rejects_invalid_file_fields() {
+        let mut zero_size =
+            CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 0, "song.mp3");
+        let bad_md5 = CloudUploadTicketRequest::new("not-md5", 1, "song.mp3");
+        let bad_filename =
+            CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 1, "../song.mp3");
+        zero_size.content_type = Some("audio/mpeg".to_owned());
+        let mut bad_content_type =
+            CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 1, "song.mp3");
+        bad_content_type.content_type = Some("audio/mpeg\r\nx-secret: value".to_owned());
+
+        for request in [zero_size, bad_md5, bad_filename, bad_content_type] {
+            let error = validate_cloud_upload_ticket_request(&request)
+                .expect_err("invalid cloud upload ticket");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn cloud_upload_completion_uses_reference_metadata_defaults() {
+        let request = CloudUploadCompleteRequest {
+            provisional_track_id: " 123 ".to_owned(),
+            resource_id: " resource ".to_owned(),
+            md5: "0123456789ABCDEF0123456789ABCDEF".to_owned(),
+            filename: "反方向的钟.flac".to_owned(),
+            song_name: Some("   ".to_owned()),
+            artist: None,
+            album: None,
+            bitrate: 999_000,
+            account: None,
+        };
+        let descriptor =
+            validate_cloud_upload_complete_request(&request).expect("valid completion request");
+        assert_eq!(descriptor.provisional_track_id, "123");
+        assert_eq!(descriptor.resource_id, "resource");
+        assert_eq!(descriptor.song_name, "反方向的钟");
+        assert_eq!(descriptor.artist, "未知艺术家");
+        assert_eq!(descriptor.album, "未知专辑");
+    }
+
+    #[test]
+    fn cloud_upload_allocation_builds_a_scoped_nos_destination() {
+        let allocation = CloudUploadAllocationEnvelope {
+            result: crate::dto::CloudUploadAllocation {
+                object_key: "folder/song 1".to_owned(),
+                token: "upload-secret".to_owned(),
+                resource_id: json!(456),
+            },
+        };
+        validate_cloud_upload_allocation(&allocation).expect("valid allocation");
+        let upload_url = build_cloud_upload_url(
+            "http://nosup-jd1.127.net/",
+            CLOUD_UPLOAD_BUCKET,
+            &allocation.result.object_key,
+        )
+        .expect("valid NOS destination");
+        assert_eq!(
+            upload_url,
+            "http://nosup-jd1.127.net/jd-musicrep-privatecloud-audio-public/folder%2Fsong%201?offset=0&complete=true&version=1.0"
+        );
+
+        let error = build_cloud_upload_url(
+            "https://nosup-jd1.127.net.evil.test",
+            CLOUD_UPLOAD_BUCKET,
+            "song",
+        )
+        .expect_err("foreign NOS destination");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn maps_cloud_upload_completion_to_a_unified_track_reference() {
+        let result = map_cloud_upload_result(
+            "123".to_owned(),
+            Some(true),
+            Some(true),
+            json!({ "code": 200, "songId": 123 }),
+            json!({ "code": 200 }),
+        )
+        .expect("cloud upload result");
+        assert_eq!(
+            result.track_ref.expect("track reference").to_string(),
+            "netease:123"
+        );
+        assert_eq!(result.upload_required, Some(true));
+        assert_eq!(result.uploaded, Some(true));
+        assert!(result.published);
+        assert_eq!(result.extensions["publish_response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    async fn cloud_upload_transactions_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let ticket =
+            CloudUploadTicketRequest::new("0123456789abcdef0123456789abcdef", 42, "song.mp3");
+        let ticket_error = MusicProvider::cloud_upload_ticket(&provider, &ticket)
+            .await
+            .expect_err("anonymous cloud upload ticket");
+        assert_eq!(ticket_error.code, ErrorCode::AuthenticationRequired);
+
+        let completion = CloudUploadCompleteRequest {
+            provisional_track_id: "123".to_owned(),
+            resource_id: "resource".to_owned(),
+            md5: "0123456789abcdef0123456789abcdef".to_owned(),
+            filename: "song.mp3".to_owned(),
+            song_name: None,
+            artist: None,
+            album: None,
+            bitrate: 999_000,
+            account: None,
+        };
+        let completion_error = MusicProvider::complete_cloud_upload(&provider, &completion)
+            .await
+            .expect_err("anonymous cloud upload completion");
+        assert_eq!(completion_error.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn artist_mv_catalog_rejects_cursor_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
@@ -7282,6 +7798,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
         assert!(capabilities.contains(&Capability::AccountArtistNewWorks));
         assert!(capabilities.contains(&Capability::AccountArtistNewTracksPlayAll));
+        assert!(capabilities.contains(&Capability::AccountCloudDirectUpload));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
