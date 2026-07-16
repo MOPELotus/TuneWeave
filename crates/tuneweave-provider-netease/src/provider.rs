@@ -23,8 +23,9 @@ use tuneweave_core::{
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
-    CommentReactionKind, CommentReactionListRequest, CommentReactionPage, CommentReplyReference,
-    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
+    CommentReactionKind, CommentReactionListRequest, CommentReactionMutationRequest,
+    CommentReactionMutationResult, CommentReactionPage, CommentReplyReference, CommentSort,
+    CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
     CommentThreadStatsRequest, CommentWriteRequest, CreatorSummary, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -363,6 +364,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::CommentWrite,
             Capability::CommentsRead,
             Capability::CommentReactionsRead,
+            Capability::CommentReactionsWrite,
             Capability::CommentThreadStats,
             Capability::PlatformApi,
             Capability::PlatformBatch,
@@ -2032,6 +2034,18 @@ impl MusicProvider for NeteaseProvider {
         map_netease_comment_reaction_page(request, response.body)
     }
 
+    async fn set_comment_reaction(
+        &self,
+        request: &CommentReactionMutationRequest,
+    ) -> Result<CommentReactionMutationResult> {
+        let (path, payload) = netease_comment_reaction_mutation_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "comment reaction writing")?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "comment reaction writing")?;
+        map_netease_comment_reaction_mutation(request, response.body)
+    }
+
     async fn comment_thread_stats(
         &self,
         request: &CommentThreadStatsRequest,
@@ -2220,6 +2234,38 @@ fn comment_reaction_cursor(field: &str, value: Option<&str>) -> Result<String> {
         || Ok("-1".to_owned()),
         |value| required_comment_id(field, value),
     )
+}
+
+fn netease_comment_reaction_mutation_request(
+    request: &CommentReactionMutationRequest,
+) -> Result<(&'static str, Value)> {
+    if request.kind != CommentReactionKind::Like {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase comment like protocol only accepts like reactions",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "kind": request.kind, "allowed": ["like"] })));
+    }
+    if request.target_user_ref.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase comment likes do not accept target_user_ref",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    let comment_id = required_comment_id("comment_id", &request.comment_id)?;
+    let path = if request.active {
+        "/api/v1/comment/like"
+    } else {
+        "/api/v1/comment/unlike"
+    };
+    Ok((
+        path,
+        json!({
+            "threadId": thread_id,
+            "commentId": comment_id
+        }),
+    ))
 }
 
 fn netease_comment_thread_stats_request(
@@ -2894,6 +2940,22 @@ fn map_netease_comment_hug(raw: Value) -> Result<CommentReaction> {
         kind: CommentReactionKind::Hug,
         user,
         content,
+        extensions,
+    })
+}
+
+fn map_netease_comment_reaction_mutation(
+    request: &CommentReactionMutationRequest,
+    response: Value,
+) -> Result<CommentReactionMutationResult> {
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentReactionMutationResult {
+        target: request.target.clone(),
+        comment_id: request.comment_id.trim().to_owned(),
+        kind: request.kind,
+        active: request.active,
+        target_user_ref: request.target_user_ref.clone(),
         extensions,
     })
 }
@@ -7933,6 +7995,142 @@ mod tests {
     }
 
     #[test]
+    fn comment_like_requests_cover_every_resource_and_both_action_branches() {
+        let cases = [
+            (CommentTargetKind::Track, "29178366", "R_SO_4_29178366"),
+            (CommentTargetKind::Mv, "5436712", "R_MV_5_5436712"),
+            (CommentTargetKind::Playlist, "705123491", "A_PL_0_705123491"),
+            (CommentTargetKind::Album, "32311", "R_AL_3_32311"),
+            (
+                CommentTargetKind::RadioEpisode,
+                "794062371",
+                "A_DJ_1_794062371",
+            ),
+            (
+                CommentTargetKind::Video,
+                "89ADDE33C0AAE8EC14B99F6750DB954D",
+                "R_VI_62_89ADDE33C0AAE8EC14B99F6750DB954D",
+            ),
+            (
+                CommentTargetKind::Event,
+                "A_EV_2_6559519868_32953014",
+                "A_EV_2_6559519868_32953014",
+            ),
+            (CommentTargetKind::RadioStation, "362", "A_DR_14_362"),
+        ];
+        for (kind, id, thread_id) in cases {
+            for (active, expected_path) in [
+                (true, "/api/v1/comment/like"),
+                (false, "/api/v1/comment/unlike"),
+            ] {
+                let request = CommentReactionMutationRequest {
+                    target: CommentTarget::new(
+                        ResourceRef::new(Platform::Netease, id).expect("valid reaction target"),
+                        kind,
+                    ),
+                    comment_id: "12840183".to_owned(),
+                    kind: CommentReactionKind::Like,
+                    active,
+                    target_user_ref: None,
+                    account: Some("personal".to_owned()),
+                };
+                let (path, payload) = netease_comment_reaction_mutation_request(&request)
+                    .expect("build comment like request");
+                assert_eq!(path, expected_path, "{kind:?} {active}");
+                assert_eq!(payload["threadId"], thread_id, "{kind:?} {active}");
+                assert_eq!(payload["commentId"], "12840183", "{kind:?} {active}");
+
+                let result = map_netease_comment_reaction_mutation(
+                    &request,
+                    json!({"code": 200, "data": {}}),
+                )
+                .expect("map comment like result");
+                assert_eq!(result.target, request.target);
+                assert_eq!(result.comment_id, "12840183");
+                assert_eq!(result.kind, CommentReactionKind::Like);
+                assert_eq!(result.active, active);
+                assert_eq!(result.extensions["response"]["code"], 200);
+            }
+        }
+    }
+
+    #[test]
+    fn comment_like_requests_reject_wrong_reactions_users_fields_and_targets() {
+        let base = CommentReactionMutationRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "29178366").expect("valid reaction target"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "12840183".to_owned(),
+            kind: CommentReactionKind::Like,
+            active: true,
+            target_user_ref: None,
+            account: None,
+        };
+        let cases = [
+            CommentReactionMutationRequest {
+                kind: CommentReactionKind::Hug,
+                ..base.clone()
+            },
+            CommentReactionMutationRequest {
+                target_user_ref: Some(
+                    ResourceRef::new(Platform::Netease, "285516405").expect("valid target user"),
+                ),
+                ..base.clone()
+            },
+            CommentReactionMutationRequest {
+                comment_id: " ".to_owned(),
+                ..base.clone()
+            },
+            CommentReactionMutationRequest {
+                target: CommentTarget::new(
+                    ResourceRef::new(Platform::Qq, "29178366").expect("valid foreign target"),
+                    CommentTargetKind::Track,
+                ),
+                ..base.clone()
+            },
+            CommentReactionMutationRequest {
+                target: CommentTarget::new(
+                    ResourceRef::new(Platform::Netease, "6559519868")
+                        .expect("valid incomplete event target"),
+                    CommentTargetKind::Event,
+                ),
+                ..base
+            },
+        ];
+        for request in cases {
+            assert_eq!(
+                netease_comment_reaction_mutation_request(&request)
+                    .expect_err("invalid like request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_likes_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for active in [true, false] {
+            let request = CommentReactionMutationRequest {
+                target: CommentTarget::new(
+                    ResourceRef::new(Platform::Netease, "29178366").expect("valid reaction target"),
+                    CommentTargetKind::Track,
+                ),
+                comment_id: "12840183".to_owned(),
+                kind: CommentReactionKind::Like,
+                active,
+                target_user_ref: None,
+                account: None,
+            };
+            let error = MusicProvider::set_comment_reaction(&provider, &request)
+                .await
+                .expect_err("anonymous comment reaction must fail before network access");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[test]
     fn comment_thread_stats_requests_cover_all_internal_types_and_empty_batches() {
         let cases = [
             (CommentTargetKind::Track, "185809", "4"),
@@ -11349,6 +11547,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::CommentWrite));
         assert!(capabilities.contains(&Capability::CommentsRead));
         assert!(capabilities.contains(&Capability::CommentReactionsRead));
+        assert!(capabilities.contains(&Capability::CommentReactionsWrite));
         assert!(capabilities.contains(&Capability::CommentThreadStats));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
