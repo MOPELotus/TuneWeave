@@ -17,10 +17,10 @@ use crate::{
     CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaStream, MembershipSummary, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, Page,
+    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
@@ -558,6 +558,13 @@ pub trait MusicProvider: Send + Sync {
             outcomes,
             extensions: Extensions::new(),
         })
+    }
+
+    async fn download(&self, _track: &Track, _request: &StreamRequest) -> Result<MediaDownload> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AudioDownload,
+        ))
     }
 
     async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {

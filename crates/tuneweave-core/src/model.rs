@@ -1768,6 +1768,28 @@ pub struct MediaStream {
     pub attempts: Vec<ResolutionAttempt>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MediaDownload {
+    #[serde(rename = "ref")]
+    pub track_ref: ResourceRef,
+    pub platform: Platform,
+    pub available: bool,
+    pub url: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    pub expires_at: Option<String>,
+    pub format: Option<String>,
+    pub codec: Option<String>,
+    pub bitrate: Option<u64>,
+    pub size: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub requested_quality: Quality,
+    pub actual_quality: Quality,
+    pub platform_code: Option<i64>,
+    pub fee: Option<i64>,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderDescriptor {
     pub platform: Platform,
@@ -2059,6 +2081,37 @@ mod tests {
         assert_eq!(value["outcomes"][0]["status"], "permission_denied");
         assert_eq!(value["outcomes"][0]["error_code"], "permission_denied");
         assert!(value["outcomes"][0]["stream"].is_null());
+    }
+
+    #[test]
+    fn download_contract_keeps_unavailable_results_and_exact_quality_explicit() {
+        let download = MediaDownload {
+            track_ref: ResourceRef::new(Platform::Netease, "2709812973")
+                .expect("valid download track reference"),
+            platform: Platform::Netease,
+            available: false,
+            url: None,
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: None,
+            codec: None,
+            bitrate: Some(0),
+            size: Some(0),
+            duration_ms: Some(0),
+            requested_quality: Quality::Spatial,
+            actual_quality: Quality::Auto,
+            platform_code: Some(-110),
+            fee: Some(0),
+            message: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(download).expect("serialize media download");
+        assert_eq!(value["ref"], "netease:2709812973");
+        assert_eq!(value["available"], false);
+        assert!(value["url"].is_null());
+        assert_eq!(value["requested_quality"], "spatial");
+        assert_eq!(value["actual_quality"], "auto");
+        assert_eq!(value["platform_code"], -110);
     }
 
     #[test]
