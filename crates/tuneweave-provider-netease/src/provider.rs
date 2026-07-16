@@ -13,10 +13,10 @@ use tuneweave_core::{
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, ErrorCode, Extensions, LyricContributor,
     Lyrics, MediaStream, Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError,
-    PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -285,6 +285,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
+            Capability::PlatformApi,
         ])
     }
 
@@ -935,6 +936,99 @@ impl MusicProvider for NeteaseProvider {
         let status = self.client_for(Some(&account))?.session_status().await?;
         Ok(map_session_profile(&account, status))
     }
+
+    async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
+        let uri = validate_platform_api_request(request)?;
+        let protocol = NeteaseApiProtocol::parse(request.protocol.as_deref())?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = match protocol {
+            NeteaseApiProtocol::Eapi => client.request_eapi(uri, request.data.clone()).await?,
+            NeteaseApiProtocol::Weapi => client.request_weapi(uri, request.data.clone()).await?,
+            NeteaseApiProtocol::Api => client.request_api(uri, request.data.clone()).await?,
+            NeteaseApiProtocol::Linuxapi => {
+                client.request_linuxapi(uri, request.data.clone()).await?
+            }
+            NeteaseApiProtocol::Xeapi => client.request_xeapi(uri, request.data.clone()).await?,
+        };
+        ensure_platform_api_success(&response.body)?;
+        Ok(response.body)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NeteaseApiProtocol {
+    Eapi,
+    Weapi,
+    Api,
+    Linuxapi,
+    Xeapi,
+}
+
+impl NeteaseApiProtocol {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("eapi") => Ok(Self::Eapi),
+            Some("weapi") => Ok(Self::Weapi),
+            Some("api") => Ok(Self::Api),
+            Some("linuxapi") => Ok(Self::Linuxapi),
+            Some("xeapi") => Ok(Self::Xeapi),
+            Some(value) => Err(TuneWeaveError::invalid_request(format!(
+                "unsupported NetEase API protocol: {value}"
+            ))
+            .with_platform(Platform::Netease)
+            .with_details(json!({
+                "protocol": value,
+                "supported": ["eapi", "weapi", "api", "linuxapi", "xeapi"]
+            }))),
+        }
+    }
+}
+
+fn validate_platform_api_request(request: &PlatformApiRequest) -> Result<&str> {
+    let uri = request.uri.trim();
+    if uri != request.uri || !uri.starts_with("/api/") || uri.len() == "/api/".len() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase extension API uri must start with /api/ and name an endpoint",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if uri.contains(['\r', '\n', '#', '\\']) || uri.contains("://") {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase extension API uri contains a forbidden character",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let path = uri.split_once('?').map_or(uri, |(path, _)| path);
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase extension API uri cannot contain dot path segments",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let data = request.data.as_object().ok_or_else(|| {
+        TuneWeaveError::invalid_request("NetEase extension API data must be a JSON object")
+            .with_platform(Platform::Netease)
+    })?;
+    if data.contains_key("cookie") {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase extension API does not accept Cookie data; select a stored account alias",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(uri)
+}
+
+fn ensure_platform_api_success(body: &Value) -> Result<()> {
+    let code = body["code"]
+        .as_i64()
+        .or_else(|| body["code"].as_str().and_then(|code| code.parse().ok()));
+    if code.is_none_or(|code| matches!(code, 200 | 201 | 302 | 400 | 502 | 800..=803)) {
+        return Ok(());
+    }
+    ensure_success(body)
 }
 
 async fn authenticated_user_id(client: &NeteaseClient, account: &str) -> Result<String> {
@@ -2805,6 +2899,71 @@ mod tests {
         assert!(capabilities.contains(&Capability::DigitalAlbumDetail));
         assert!(capabilities.contains(&Capability::DigitalAlbumList));
         assert!(capabilities.contains(&Capability::DigitalAlbumCharts));
+        assert!(capabilities.contains(&Capability::PlatformApi));
+    }
+
+    #[test]
+    fn validates_netease_extension_api_protocols_and_request_boundaries() {
+        assert_eq!(
+            NeteaseApiProtocol::parse(None).expect("default protocol"),
+            NeteaseApiProtocol::Eapi
+        );
+        assert_eq!(
+            NeteaseApiProtocol::parse(Some("linuxapi")).expect("LinuxAPI"),
+            NeteaseApiProtocol::Linuxapi
+        );
+        assert_eq!(
+            NeteaseApiProtocol::parse(Some("xeapi")).expect("XEAPI"),
+            NeteaseApiProtocol::Xeapi
+        );
+        assert_eq!(
+            NeteaseApiProtocol::parse(Some("unknown"))
+                .expect_err("unknown protocol")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let valid = PlatformApiRequest::new(
+            "/api/search/get?source=tuneweave",
+            json!({ "s": "TuneWeave" }),
+        );
+        assert_eq!(
+            validate_platform_api_request(&valid).expect("valid request"),
+            "/api/search/get?source=tuneweave"
+        );
+        for uri in [
+            "https://example.com/api/search/get",
+            "/api/../login",
+            "/api/search/get#fragment",
+            " /api/search/get",
+        ] {
+            let request = PlatformApiRequest::new(uri, json!({}));
+            assert_eq!(
+                validate_platform_api_request(&request)
+                    .expect_err("unsafe uri")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let cookie =
+            PlatformApiRequest::new("/api/search/get", json!({ "cookie": "MUSIC_U=raw-secret" }));
+        assert_eq!(
+            validate_platform_api_request(&cookie)
+                .expect_err("raw Cookie injection")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn platform_api_preserves_reference_special_business_codes() {
+        for code in [200, 201, 302, 400, 502, 800, 801, 802, 803] {
+            ensure_platform_api_success(&json!({ "code": code }))
+                .expect("reference special code remains a raw response");
+        }
+        let error = ensure_platform_api_success(&json!({ "code": 401, "msg": "login" }))
+            .expect_err("authentication failure");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -3187,6 +3346,23 @@ mod tests {
         assert_eq!(detail.id, first.id);
         assert!(!detail.name.is_empty());
         assert!(!detail.artists.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_platform_api_supports_every_reference_protocol() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi"] {
+            let mut request = PlatformApiRequest::new(
+                "/api/search/get",
+                json!({ "s": "TuneWeave", "type": 1, "limit": 1, "offset": 0 }),
+            );
+            request.protocol = Some(protocol.to_owned());
+            let body = MusicProvider::platform_api(&provider, &request)
+                .await
+                .unwrap_or_else(|error| panic!("{protocol} request failed: {error}"));
+            assert_eq!(body["code"], 200, "{protocol} response");
+        }
     }
 
     #[tokio::test]
