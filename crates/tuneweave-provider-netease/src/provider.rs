@@ -30,14 +30,15 @@ use crate::{
         AlbumStatsEnvelope, ArtistAlbumsEnvelope, ArtistDescriptionEnvelope, ArtistDetailEnvelope,
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
         ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
-        ArtistNewTracksEnvelope, ArtistNewVideoItem, ArtistNewVideosEnvelope,
-        ArtistNewWorksEnvelope, ArtistVideoCreator, ArtistVideoRecord, ArtistVideosEnvelope,
-        AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
-        DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser,
-        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
-        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
+        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistVideoCreator, ArtistVideoRecord,
+        ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
+        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
+        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope,
     },
 };
 
@@ -298,6 +299,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountArtistNewVideos,
             Capability::AccountArtistNewTracks,
             Capability::AccountArtistNewWorks,
+            Capability::AccountArtistNewTracksPlayAll,
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
@@ -905,6 +907,25 @@ impl MusicProvider for NeteaseProvider {
         let raw_response = response.body.clone();
         let response: ArtistNewWorksEnvelope = parse_body(response.body)?;
         map_artist_new_works_response(response, raw_response, request, limit, before_ms)
+    }
+
+    async fn account_artist_new_tracks_play_all(
+        &self,
+        account: Option<&str>,
+    ) -> Result<Page<Track>> {
+        let account = account.unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let response = client
+            .request_eapi("/api/sub/artist/new/works/song/playall", json!({}))
+            .await?;
+        ensure_account_access(
+            &client,
+            &response.body,
+            "followed artist new tracks play-all",
+        )?;
+        let raw_response = response.body.clone();
+        let response: ArtistNewTracksPlayAllEnvelope = parse_body(response.body)?;
+        map_artist_new_tracks_play_all_response(response, raw_response)
     }
 
     async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
@@ -2631,6 +2652,38 @@ fn map_artist_new_works_response(
     })
 }
 
+fn map_artist_new_tracks_play_all_response(
+    response: ArtistNewTracksPlayAllEnvelope,
+    raw_response: Value,
+) -> Result<Page<Track>> {
+    let items = response
+        .data
+        .songs
+        .into_iter()
+        .map(|raw| {
+            let song: Song = parse_body(raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track
+                .extensions
+                .insert("artist_new_track_play_all".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: 50,
+            offset: 0,
+            total: response.data.count,
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
 fn map_artist_work_update(raw: Value, default_source_type: u32) -> Result<ArtistWorkUpdate> {
     let source_type = raw["sourceType"]
         .as_u64()
@@ -3945,6 +3998,42 @@ mod tests {
     }
 
     #[test]
+    fn maps_followed_artist_new_tracks_play_all_snapshot() {
+        let raw = json!({
+            "code": 200,
+            "data": {
+                "count": 1,
+                "songList": [
+                    {
+                        "id": 2099001,
+                        "name": "新歌",
+                        "artists": [{ "id": 6452, "name": "周杰伦" }],
+                        "album": { "id": 3099001, "name": "新专辑" },
+                        "duration": 208000,
+                        "mvid": 0
+                    }
+                ]
+            }
+        });
+        let response: ArtistNewTracksPlayAllEnvelope =
+            serde_json::from_value(raw.clone()).expect("play-all fixture");
+
+        let page = map_artist_new_tracks_play_all_response(response, raw)
+            .expect("map new tracks play-all");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:2099001");
+        assert_eq!(page.items[0].name, "新歌");
+        assert_eq!(
+            page.items[0].extensions["artist_new_track_play_all"]["album"]["id"],
+            3099001
+        );
+        assert_eq!(page.pagination.limit, 50);
+        assert_eq!(page.pagination.total, Some(1));
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_artist_albums_and_cursor_metadata() {
         let response: ArtistAlbumsEnvelope = serde_json::from_value(json!({
             "artist": { "id": 6452, "name": "周杰伦", "albumSize": 42 },
@@ -4521,6 +4610,15 @@ mod tests {
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[tokio::test]
+    async fn followed_artist_new_tracks_play_all_requires_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_artist_new_tracks_play_all(&provider, Some("collector"))
+            .await
+            .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[test]
     fn maps_netease_lyrics_and_contributors() {
         let lyrics: LyricsEnvelope = serde_json::from_value(json!({
@@ -4680,6 +4778,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountArtistNewVideos));
         assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
         assert!(capabilities.contains(&Capability::AccountArtistNewWorks));
+        assert!(capabilities.contains(&Capability::AccountArtistNewTracksPlayAll));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
@@ -5316,6 +5415,23 @@ mod tests {
             .expect("live followed artist new works");
         assert!(page.items.len() <= 2);
         assert!(page.pagination.extensions.contains_key("response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NETEASE_COOKIE for a live logged-in account"]
+    async fn live_account_followed_artist_new_tracks_play_all() {
+        let cookie = std::env::var("NETEASE_COOKIE").expect("NETEASE_COOKIE must be set");
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            cookie: Some(cookie),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let page = MusicProvider::account_artist_new_tracks_play_all(&provider, None)
+            .await
+            .expect("live followed artist new tracks play-all");
+        assert!(page.items.len() <= 50);
+        assert!(page.items.iter().all(|track| !track.name.is_empty()));
+        assert!(!page.pagination.has_more);
     }
 
     #[tokio::test]

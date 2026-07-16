@@ -262,6 +262,18 @@ pub(crate) struct ArtistNewWorksData {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewTracksPlayAllEnvelope {
+    pub data: ArtistNewTracksPlayAllData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewTracksPlayAllData {
+    pub count: Option<u64>,
+    #[serde(rename = "songList", default)]
+    pub songs: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ArtistDetailEnvelope {
     pub data: ArtistDetailData,
 }
