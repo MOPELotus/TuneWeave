@@ -37,13 +37,14 @@ use tuneweave_core::{
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
     RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant, SubscriptionResult,
+    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow,
+    TuneWeaveError, User, Video, VideoKind,
 };
 use url::Url;
 
@@ -348,6 +349,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
+            Capability::AudioStreamBatch,
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
@@ -1475,42 +1477,38 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
-        if track.platform != Platform::Netease
-            || track.resource_ref.platform() != Platform::Netease
-            || track.resource_ref.id() != track.id
-        {
-            return Err(TuneWeaveError::invalid_request(
-                "NetEase provider can only resolve NetEase tracks",
+        let client = self.client_for(request.account.as_deref())?;
+        let batch = request_netease_streams(&client, std::slice::from_ref(track), request).await?;
+        let outcome = batch.outcomes.into_iter().next().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase returned an empty stream batch",
             )
             .with_platform(Platform::Netease)
-            .with_details(json!({ "track_ref": track.resource_ref })));
+            .with_details(json!(batch.extensions))
+        })?;
+        if let Some(stream) = outcome.stream {
+            return Ok(stream);
         }
-        let id = parse_numeric_id("track", &track.id)?;
+        Err(TuneWeaveError::new(
+            outcome.error_code.unwrap_or(ErrorCode::UpstreamError),
+            outcome
+                .error
+                .unwrap_or_else(|| "NetEase did not return a playable stream".to_owned()),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!(outcome.extensions)))
+    }
+
+    async fn streams(&self, tracks: &[Track], request: &StreamRequest) -> Result<StreamBatch> {
+        if tracks.is_empty() {
+            return Ok(StreamBatch {
+                outcomes: Vec::new(),
+                extensions: Extensions::new(),
+            });
+        }
         let client = self.client_for(request.account.as_deref())?;
-        let response = client
-            .request_eapi(
-                "/api/song/enhance/player/url",
-                json!({
-                    "ids": Value::Array(vec![json!(id.to_string())]).to_string(),
-                    "br": requested_bitrate(request.quality)
-                }),
-            )
-            .await?;
-        ensure_success(&response.body)?;
-        let response: StreamEnvelope = parse_body(response.body)?;
-        let stream = response
-            .data
-            .into_iter()
-            .find(|stream| stream.id == id)
-            .ok_or_else(|| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    "NetEase omitted the requested stream result",
-                )
-                .with_platform(Platform::Netease)
-                .with_details(json!({ "id": id }))
-            })?;
-        map_stream(track, request, stream, client.is_authenticated())
+        request_netease_streams(&client, tracks, request).await
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -5140,6 +5138,207 @@ fn account_store_error() -> TuneWeaveError {
     .with_platform(Platform::Netease)
 }
 
+async fn request_netease_streams(
+    client: &NeteaseClient,
+    tracks: &[Track],
+    request: &StreamRequest,
+) -> Result<StreamBatch> {
+    let ids = tracks
+        .iter()
+        .map(validate_netease_stream_track)
+        .collect::<Result<Vec<_>>>()?;
+    let (variant, path, payload, level) = netease_stream_request(&ids, request);
+    let response = match variant {
+        StreamVariant::Legacy => client.request_api(path, payload).await?,
+        StreamVariant::Modern => client.request_xeapi(path, payload).await?,
+        StreamVariant::Default => unreachable!("default stream variant is resolved above"),
+    };
+    map_netease_stream_batch(
+        tracks,
+        request,
+        client.is_authenticated(),
+        variant,
+        path,
+        level,
+        response.body,
+    )
+}
+
+fn map_netease_stream_batch(
+    tracks: &[Track],
+    request: &StreamRequest,
+    authenticated: bool,
+    variant: StreamVariant,
+    path: &str,
+    level: Option<&str>,
+    response: Value,
+) -> Result<StreamBatch> {
+    ensure_success(&response)?;
+    let ids = tracks
+        .iter()
+        .map(validate_netease_stream_track)
+        .collect::<Result<Vec<_>>>()?;
+    let raw_response = response.clone();
+    let raw_items = response
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase stream response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let envelope: StreamEnvelope = parse_body(response)?;
+    let outcomes = tracks
+        .iter()
+        .zip(ids)
+        .map(|(track, id)| {
+            let raw = raw_items
+                .iter()
+                .find(|item| item.get("id").and_then(json_u64) == Some(id))
+                .cloned();
+            let Some(stream) = envelope.data.iter().find(|stream| stream.id == id).cloned() else {
+                return stream_outcome_error(
+                    track,
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase omitted a requested stream result",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "id": id })),
+                    raw,
+                );
+            };
+            match map_stream(track, request, stream, authenticated) {
+                Ok(stream) => StreamOutcome {
+                    track_ref: track.resource_ref.clone(),
+                    status: ResolutionStatus::Success,
+                    stream: Some(stream),
+                    error_code: None,
+                    error: None,
+                    extensions: raw
+                        .map(|raw| Extensions::from([("response_item".to_owned(), raw)]))
+                        .unwrap_or_default(),
+                },
+                Err(error) => stream_outcome_error(track, error, raw),
+            }
+        })
+        .collect();
+    let mut extensions = Extensions::from([
+        ("variant".to_owned(), json!(variant)),
+        ("request_path".to_owned(), json!(path)),
+        ("response".to_owned(), raw_response),
+    ]);
+    if let Some(level) = level {
+        extensions.insert("level".to_owned(), json!(level));
+    }
+    Ok(StreamBatch {
+        outcomes,
+        extensions,
+    })
+}
+
+fn validate_netease_stream_track(track: &Track) -> Result<u64> {
+    if track.platform != Platform::Netease
+        || track.resource_ref.platform() != Platform::Netease
+        || track.resource_ref.id() != track.id
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase provider can only resolve consistent NetEase tracks",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "track_ref": track.resource_ref })));
+    }
+    parse_numeric_id("track", &track.id)
+}
+
+fn netease_stream_request(
+    ids: &[u64],
+    request: &StreamRequest,
+) -> (StreamVariant, &'static str, Value, Option<&'static str>) {
+    match request.variant {
+        StreamVariant::Legacy => (
+            StreamVariant::Legacy,
+            "/api/song/enhance/player/url",
+            json!({
+                "ids": Value::Array(ids.iter().map(|id| json!(id.to_string())).collect())
+                    .to_string(),
+                "br": requested_bitrate(request.quality)
+            }),
+            None,
+        ),
+        StreamVariant::Default | StreamVariant::Modern => {
+            let level = netease_stream_level(request.quality);
+            let mut payload = json!({
+                "ids": format!(
+                    "[{}]",
+                    ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+                ),
+                "level": level,
+                "encodeType": "flac"
+            });
+            if level == "sky" {
+                payload["immerseType"] = json!("c51");
+            }
+            (
+                StreamVariant::Modern,
+                "/api/song/enhance/player/url/v1",
+                payload,
+                Some(level),
+            )
+        }
+    }
+}
+
+const fn netease_stream_level(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Auto | Quality::High => "exhigh",
+        Quality::Low | Quality::Standard => "standard",
+        Quality::Higher => "higher",
+        Quality::Lossless => "lossless",
+        Quality::Hires => "hires",
+        Quality::Surround => "jyeffect",
+        Quality::Spatial => "sky",
+        Quality::Dolby => "dolby",
+        Quality::Master => "jymaster",
+    }
+}
+
+fn stream_outcome_error(track: &Track, error: TuneWeaveError, raw: Option<Value>) -> StreamOutcome {
+    let mut extensions = Extensions::from([("details".to_owned(), error.details)]);
+    if let Some(raw) = raw {
+        extensions.insert("response_item".to_owned(), raw);
+    }
+    StreamOutcome {
+        track_ref: track.resource_ref.clone(),
+        status: netease_stream_error_status(error.code),
+        stream: None,
+        error_code: Some(error.code),
+        error: Some(error.message),
+        extensions,
+    }
+}
+
+const fn netease_stream_error_status(code: ErrorCode) -> ResolutionStatus {
+    match code {
+        ErrorCode::AuthenticationRequired => ResolutionStatus::AuthenticationRequired,
+        ErrorCode::PermissionDenied => ResolutionStatus::PermissionDenied,
+        ErrorCode::MatchRejected => ResolutionStatus::NoMatch,
+        ErrorCode::CapabilityNotSupported
+        | ErrorCode::PlatformUnavailable
+        | ErrorCode::ResourceNotFound => ResolutionStatus::Unavailable,
+        ErrorCode::InvalidRequest
+        | ErrorCode::Conflict
+        | ErrorCode::RateLimited
+        | ErrorCode::UpstreamError
+        | ErrorCode::UpstreamTimeout
+        | ErrorCode::InternalError => ResolutionStatus::UpstreamError,
+    }
+}
+
 fn map_stream(
     track: &Track,
     request: &StreamRequest,
@@ -5261,20 +5460,28 @@ fn stream_unavailable(stream: &StreamData, authenticated: bool) -> TuneWeaveErro
 fn requested_bitrate(quality: Quality) -> u64 {
     match quality {
         Quality::Low | Quality::Standard => 128_000,
+        Quality::Higher => 192_000,
         Quality::High => 320_000,
-        Quality::Auto | Quality::Lossless | Quality::Hires | Quality::Spatial | Quality::Master => {
-            999_000
-        }
+        Quality::Auto
+        | Quality::Lossless
+        | Quality::Hires
+        | Quality::Surround
+        | Quality::Spatial
+        | Quality::Dolby
+        | Quality::Master => 999_000,
     }
 }
 
 fn stream_quality(level: Option<&str>, bitrate: Option<u64>) -> Quality {
     match level.unwrap_or_default().to_ascii_lowercase().as_str() {
         "standard" => Quality::Standard,
-        "higher" | "exhigh" => Quality::High,
+        "higher" => Quality::Higher,
+        "exhigh" => Quality::High,
         "lossless" => Quality::Lossless,
         "hires" => Quality::Hires,
-        "jyeffect" | "sky" | "dolby" => Quality::Spatial,
+        "jyeffect" => Quality::Surround,
+        "sky" => Quality::Spatial,
+        "dolby" => Quality::Dolby,
         "jymaster" => Quality::Master,
         _ => bitrate.map_or(Quality::Auto, quality_for_bitrate),
     }
@@ -5289,8 +5496,9 @@ fn quality_for_bitrate(bitrate: u64) -> Quality {
     match bitrate {
         0 => Quality::Auto,
         1..=96_000 => Quality::Low,
-        96_001..=192_000 => Quality::Standard,
-        192_001..=500_000 => Quality::High,
+        96_001..=128_000 => Quality::Standard,
+        128_001..=256_000 => Quality::Higher,
+        256_001..=500_000 => Quality::High,
         500_001..=1_500_000 => Quality::Lossless,
         1_500_001.. => Quality::Hires,
     }
@@ -11843,6 +12051,7 @@ mod tests {
             entitlement.available_qualities,
             vec![
                 Quality::Standard,
+                Quality::Higher,
                 Quality::High,
                 Quality::Lossless,
                 Quality::Hires
@@ -13010,6 +13219,7 @@ mod tests {
         );
         let request = StreamRequest {
             quality: Quality::High,
+            variant: StreamVariant::Modern,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -13037,6 +13247,204 @@ mod tests {
             stream
                 .expires_at
                 .is_some_and(|expires| expires.ends_with('Z'))
+        );
+    }
+
+    #[test]
+    fn modern_stream_requests_cover_every_reference_level_and_sky_payload() {
+        for (quality, level) in [
+            (Quality::Standard, "standard"),
+            (Quality::Higher, "higher"),
+            (Quality::High, "exhigh"),
+            (Quality::Lossless, "lossless"),
+            (Quality::Hires, "hires"),
+            (Quality::Surround, "jyeffect"),
+            (Quality::Spatial, "sky"),
+            (Quality::Dolby, "dolby"),
+            (Quality::Master, "jymaster"),
+        ] {
+            let request = StreamRequest {
+                quality,
+                variant: StreamVariant::Modern,
+                account: None,
+            };
+            let (variant, path, payload, mapped_level) =
+                netease_stream_request(&[1_969_519_579, 33_894_312], &request);
+            assert_eq!(variant, StreamVariant::Modern, "{quality:?}");
+            assert_eq!(path, "/api/song/enhance/player/url/v1", "{quality:?}");
+            assert_eq!(payload["ids"], "[1969519579,33894312]", "{quality:?}");
+            assert_eq!(payload["level"], level, "{quality:?}");
+            assert_eq!(payload["encodeType"], "flac", "{quality:?}");
+            assert_eq!(mapped_level, Some(level), "{quality:?}");
+            if quality == Quality::Spatial {
+                assert_eq!(payload["immerseType"], "c51");
+            } else {
+                assert!(payload.get("immerseType").is_none(), "{quality:?}");
+            }
+        }
+
+        let request = StreamRequest {
+            quality: Quality::Auto,
+            variant: StreamVariant::Default,
+            account: None,
+        };
+        let (variant, _, payload, level) = netease_stream_request(&[123], &request);
+        assert_eq!(variant, StreamVariant::Modern);
+        assert_eq!(payload["level"], "exhigh");
+        assert_eq!(level, Some("exhigh"));
+    }
+
+    #[test]
+    fn legacy_stream_request_preserves_reference_batch_bitrate_protocol() {
+        let request = StreamRequest {
+            quality: Quality::High,
+            variant: StreamVariant::Legacy,
+            account: Some("legacy-user".to_owned()),
+        };
+        let (variant, path, payload, level) =
+            netease_stream_request(&[1_969_519_579, 33_894_312], &request);
+        assert_eq!(variant, StreamVariant::Legacy);
+        assert_eq!(path, "/api/song/enhance/player/url");
+        assert_eq!(payload["ids"], r#"["1969519579","33894312"]"#);
+        assert_eq!(payload["br"], 320_000);
+        assert_eq!(level, None);
+    }
+
+    #[test]
+    fn stream_batch_preserves_input_order_duplicates_failures_and_full_response() {
+        let first = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("first track reference"),
+            "first",
+        );
+        let second = Track::new(
+            ResourceRef::new(Platform::Netease, "456").expect("second track reference"),
+            "second",
+        );
+        let request = StreamRequest {
+            quality: Quality::High,
+            variant: StreamVariant::Modern,
+            account: None,
+        };
+        let response = json!({
+            "code": 200,
+            "data": [
+                {
+                    "id": 456,
+                    "url": null,
+                    "br": 320000,
+                    "size": 0,
+                    "code": 200,
+                    "type": null,
+                    "level": "exhigh",
+                    "encodeType": null,
+                    "fee": 1,
+                    "freeTrialInfo": null
+                },
+                {
+                    "id": 123,
+                    "url": "https://example.test/123.flac",
+                    "br": 320000,
+                    "size": 1024,
+                    "code": 200,
+                    "expi": 1200,
+                    "type": "flac",
+                    "level": "exhigh",
+                    "encodeType": "flac",
+                    "time": 258000,
+                    "fee": 0,
+                    "freeTrialInfo": null
+                }
+            ]
+        });
+        let batch = map_netease_stream_batch(
+            &[first.clone(), second, first],
+            &request,
+            false,
+            StreamVariant::Modern,
+            "/api/song/enhance/player/url/v1",
+            Some("exhigh"),
+            response,
+        )
+        .expect("map stream batch");
+        assert_eq!(batch.outcomes.len(), 3);
+        assert_eq!(batch.outcomes[0].track_ref.to_string(), "netease:123");
+        assert_eq!(batch.outcomes[0].status, ResolutionStatus::Success);
+        assert_eq!(
+            batch.outcomes[0]
+                .stream
+                .as_ref()
+                .map(|stream| stream.url.as_str()),
+            Some("https://example.test/123.flac")
+        );
+        assert_eq!(batch.outcomes[1].track_ref.to_string(), "netease:456");
+        assert_eq!(
+            batch.outcomes[1].status,
+            ResolutionStatus::AuthenticationRequired
+        );
+        assert_eq!(
+            batch.outcomes[1].error_code,
+            Some(ErrorCode::AuthenticationRequired)
+        );
+        assert_eq!(batch.outcomes[2].track_ref.to_string(), "netease:123");
+        assert_eq!(batch.outcomes[2].status, ResolutionStatus::Success);
+        assert_eq!(batch.extensions["variant"], "modern");
+        assert_eq!(
+            batch.extensions["request_path"],
+            "/api/song/enhance/player/url/v1"
+        );
+        assert_eq!(batch.extensions["level"], "exhigh");
+        assert_eq!(batch.extensions["response"]["code"], 200);
+        assert_eq!(batch.outcomes[0].extensions["response_item"]["id"], 123);
+    }
+
+    #[test]
+    fn stream_batch_reports_omitted_items_and_rejects_bad_tracks_or_shapes() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("track reference"),
+            "test",
+        );
+        let request = StreamRequest {
+            quality: Quality::High,
+            variant: StreamVariant::Modern,
+            account: None,
+        };
+        let batch = map_netease_stream_batch(
+            std::slice::from_ref(&track),
+            &request,
+            false,
+            StreamVariant::Modern,
+            "/api/song/enhance/player/url/v1",
+            Some("exhigh"),
+            json!({"code": 200, "data": []}),
+        )
+        .expect("map omitted stream item");
+        assert_eq!(batch.outcomes[0].status, ResolutionStatus::UpstreamError);
+        assert_eq!(batch.outcomes[0].error_code, Some(ErrorCode::UpstreamError));
+
+        assert_eq!(
+            map_netease_stream_batch(
+                std::slice::from_ref(&track),
+                &request,
+                false,
+                StreamVariant::Modern,
+                "/api/song/enhance/player/url/v1",
+                Some("exhigh"),
+                json!({"code": 200})
+            )
+            .expect_err("missing stream data array")
+            .code,
+            ErrorCode::UpstreamError
+        );
+
+        let qq_track = Track::new(
+            ResourceRef::new(Platform::Qq, "123").expect("QQ track reference"),
+            "test",
+        );
+        assert_eq!(
+            validate_netease_stream_track(&qq_track)
+                .expect_err("cross-platform track")
+                .code,
+            ErrorCode::InvalidRequest
         );
     }
 
@@ -13113,6 +13521,7 @@ mod tests {
         );
         let request = StreamRequest {
             quality: Quality::Lossless,
+            variant: StreamVariant::Modern,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -15027,6 +15436,7 @@ mod tests {
                 &track,
                 &StreamRequest {
                     quality: Quality::High,
+                    variant: StreamVariant::Modern,
                     account: None,
                 },
             )
@@ -15035,6 +15445,115 @@ mod tests {
         assert!(stream.url.starts_with("http"));
         assert_eq!(stream.resolved_track.to_string(), "netease:2709812973");
         assert!(stream.bitrate.is_some_and(|bitrate| bitrate > 0));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_modern_stream_covers_every_reference_level() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "live stream level fixture",
+        );
+        for (quality, level) in [
+            (Quality::Standard, "standard"),
+            (Quality::Higher, "higher"),
+            (Quality::High, "exhigh"),
+            (Quality::Lossless, "lossless"),
+            (Quality::Hires, "hires"),
+            (Quality::Surround, "jyeffect"),
+            (Quality::Spatial, "sky"),
+            (Quality::Dolby, "dolby"),
+            (Quality::Master, "jymaster"),
+        ] {
+            let batch = MusicProvider::streams(
+                &provider,
+                std::slice::from_ref(&track),
+                &StreamRequest {
+                    quality,
+                    variant: StreamVariant::Modern,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {level} stream request failed: {error}"));
+            assert_eq!(batch.outcomes.len(), 1, "{level}");
+            assert_eq!(batch.outcomes[0].track_ref, track.resource_ref, "{level}");
+            assert_eq!(batch.extensions["variant"], "modern", "{level}");
+            assert_eq!(batch.extensions["level"], level, "{level}");
+            assert_eq!(batch.extensions["response"]["code"], 200, "{level}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_modern_stream_batch_preserves_input_order_and_duplicates() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let first = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("first track reference"),
+            "first live batch track",
+        );
+        let second = Track::new(
+            ResourceRef::new(Platform::Netease, "1969519579").expect("second track reference"),
+            "second live batch track",
+        );
+        let batch = MusicProvider::streams(
+            &provider,
+            &[first.clone(), second.clone(), first.clone()],
+            &StreamRequest {
+                quality: Quality::High,
+                variant: StreamVariant::Modern,
+                account: None,
+            },
+        )
+        .await
+        .expect("live modern stream batch");
+        assert_eq!(batch.outcomes.len(), 3);
+        assert_eq!(batch.outcomes[0].track_ref, first.resource_ref);
+        assert_eq!(batch.outcomes[1].track_ref, second.resource_ref);
+        assert_eq!(batch.outcomes[2].track_ref, first.resource_ref);
+        assert_eq!(batch.extensions["response"]["code"], 200);
+        assert_eq!(
+            batch.extensions["request_path"],
+            "/api/song/enhance/player/url/v1"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_legacy_stream_batch_uses_raw_api_and_bitrate() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let tracks = [
+            Track::new(
+                ResourceRef::new(Platform::Netease, "2709812973").expect("first track reference"),
+                "first legacy stream track",
+            ),
+            Track::new(
+                ResourceRef::new(Platform::Netease, "1969519579").expect("second track reference"),
+                "second legacy stream track",
+            ),
+        ];
+        let batch = MusicProvider::streams(
+            &provider,
+            &tracks,
+            &StreamRequest {
+                quality: Quality::High,
+                variant: StreamVariant::Legacy,
+                account: None,
+            },
+        )
+        .await
+        .expect("live legacy stream batch");
+        assert_eq!(batch.outcomes.len(), 2);
+        assert_eq!(batch.outcomes[0].track_ref, tracks[0].resource_ref);
+        assert_eq!(batch.outcomes[1].track_ref, tracks[1].resource_ref);
+        assert_eq!(batch.extensions["variant"], "legacy");
+        assert_eq!(
+            batch.extensions["request_path"],
+            "/api/song/enhance/player/url"
+        );
+        assert_eq!(batch.extensions["response"]["code"], 200);
+        assert!(!batch.extensions.contains_key("level"));
     }
 
     #[tokio::test]

@@ -873,7 +873,7 @@ pub(crate) struct StreamEnvelope {
     pub data: Vec<StreamData>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct StreamData {
     pub id: u64,
     pub url: Option<String>,
@@ -892,7 +892,7 @@ pub(crate) struct StreamData {
     pub free_trial_info: Option<FreeTrialInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct FreeTrialInfo {
     pub start: Option<u64>,
     pub end: Option<u64>,
