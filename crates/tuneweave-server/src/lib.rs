@@ -30,17 +30,18 @@ use tuneweave_core::{
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
     CommentReaction, CommentReactionKind, CommentReactionListRequest, CommentReactionPage,
-    CommentSort, CommentTarget, CommentTargetKind, CommentWriteRequest, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, Extensions, ImageUploadRequest, ImageUploadResult, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStatsBatch,
+    CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
+    Extensions, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
+    SearchItem, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -222,6 +223,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
         .route("/playlists/{reference}/tracks", get(playlist_tracks))
+        .route(
+            "/resources/{kind}/comments/stats",
+            get(comment_thread_stats),
+        )
         .route(
             "/resources/{kind}/{reference}/comments",
             get(comment_list).post(comment_create),
@@ -2411,6 +2416,51 @@ async fn cloud_match(
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct CommentThreadStatsQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    ids: Option<String>,
+    id: Option<String>,
+}
+
+async fn comment_thread_stats(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    Query(params): Query<CommentThreadStatsQuery>,
+) -> Result<Json<ApiResponse<CommentThreadStatsBatch>>, ApiError> {
+    let platform = search_platform(&state, params.platform.as_deref())?;
+    let kind = parse_comment_target_kind(&kind)?;
+    let ids = optional_trimmed(params.ids)
+        .or_else(|| optional_trimmed(params.id))
+        .unwrap_or_default();
+    let resource_refs = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            ResourceRef::new(platform, id).map_err(|error| {
+                TuneWeaveError::invalid_request(format!("invalid comment stats id: {error}"))
+                    .with_details(json!({ "id": id, "platform": platform }))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let batch = provider
+        .comment_thread_stats(&CommentThreadStatsRequest {
+            kind,
+            resource_refs,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(batch).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct CommentListQuery {
     account: Option<String>,
     view: Option<String>,
@@ -3824,8 +3874,8 @@ mod tests {
     use tower::ServiceExt;
     use tuneweave_core::{
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
-        BannerTargetKind, CommentMutationAction, CommentReplyReference, CreatorSummary,
-        DimensionChartTrackEntry, MusicProvider, Page, PageMeta, ProviderQrStart,
+        BannerTargetKind, CommentMutationAction, CommentReplyReference, CommentThreadStats,
+        CreatorSummary, DimensionChartTrackEntry, MusicProvider, Page, PageMeta, ProviderQrStart,
         RadioCatalogOption, Result, SearchQuery, StreamRequest,
     };
 
@@ -3917,6 +3967,7 @@ mod tests {
                 Capability::CommentWrite,
                 Capability::CommentsRead,
                 Capability::CommentReactionsRead,
+                Capability::CommentThreadStats,
                 Capability::PlatformApi,
                 Capability::PlatformBatch,
             ])
@@ -5234,6 +5285,41 @@ mod tests {
             })
         }
 
+        async fn comment_thread_stats(
+            &self,
+            request: &CommentThreadStatsRequest,
+        ) -> Result<CommentThreadStatsBatch> {
+            let stats = request
+                .resource_refs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, resource_ref)| CommentThreadStats {
+                    target: CommentTarget::new(resource_ref.clone(), request.kind),
+                    requested_ref: Some(resource_ref),
+                    liked: Some(false),
+                    like_count: Some(36 + index as u64),
+                    comment_count: Some(68_334 + index as u64),
+                    comment_count_text: Some("6万+".to_owned()),
+                    share_count: Some(27_153 + index as u64),
+                    comment_upgraded: Some(false),
+                    musician_comment_count: Some(0),
+                    latest_liked_users: vec![sample_user("2121989064")],
+                    comments: vec![sample_comment("3160990055", "最近评论")],
+                    extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+                })
+                .collect();
+            Ok(CommentThreadStatsBatch {
+                kind: request.kind,
+                requested_refs: request.resource_refs.clone(),
+                stats,
+                extensions: Extensions::from([
+                    ("provider".to_owned(), json!("mock")),
+                    ("request".to_owned(), json!(request)),
+                ]),
+            })
+        }
+
         async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
             Ok(json!({
                 "code": 200,
@@ -5699,6 +5785,82 @@ mod tests {
                 .code,
             tuneweave_core::ErrorCode::InvalidRequest
         );
+    }
+
+    #[tokio::test]
+    async fn comment_thread_stats_accept_reference_batches_and_preserve_requested_refs() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/comments/stats?platform=netease&ids=185809,%20347230&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["kind"], "track");
+        assert_eq!(response["data"]["requested_refs"][0], "netease:185809");
+        assert_eq!(response["data"]["requested_refs"][1], "netease:347230");
+        assert_eq!(response["data"]["stats"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            response["data"]["stats"][0]["target"]["ref"],
+            "netease:185809"
+        );
+        assert_eq!(
+            response["data"]["stats"][0]["requested_ref"],
+            "netease:185809"
+        );
+        assert_eq!(response["data"]["stats"][0]["comment_count"], 68_334);
+        assert_eq!(
+            response["data"]["stats"][0]["latest_liked_users"][0]["ref"],
+            "netease:2121989064"
+        );
+        assert_eq!(
+            response["data"]["stats"][0]["comments"][0]["id"],
+            "3160990055"
+        );
+        assert_eq!(response["data"]["extensions"]["provider"], "mock");
+        assert_eq!(
+            response["data"]["extensions"]["request"]["resource_refs"][1],
+            "netease:347230"
+        );
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn comment_thread_stats_support_single_id_fallback_numeric_types_and_empty_lists() {
+        let (status, single) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/0/comments/stats?platform=netease&ids=&id=185809",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["kind"], "track");
+        assert_eq!(single["data"]["stats"].as_array().map(Vec::len), Some(1));
+        assert_eq!(single["data"]["requested_refs"][0], "netease:185809");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, empty) = json_response_from(
+            test_app_with_provider(),
+            "/v1/resources/track/comments/stats?platform=netease",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            empty["data"]["requested_refs"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(empty["data"]["stats"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn comment_thread_stats_reject_unknown_platforms_and_resource_types() {
+        for path in [
+            "/v1/resources/article/comments/stats?platform=netease&ids=185809",
+            "/v1/resources/track/comments/stats?platform=unknown&ids=185809",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[test]
