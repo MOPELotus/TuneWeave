@@ -4,11 +4,11 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=12`、`partial=7`、`implemented=16`、`verified=29`。
+当前共 64 个验收单元：`pending=11`、`partial=7`、`implemented=16`、`verified=30`。
 
-- 完整实现率：`(implemented + verified) / 64 = 45 / 64 = 70.31%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 52 / 64 = 81.25%`。
-- 完整联网验收率：`verified / 64 = 29 / 64 = 45.31%`。
+- 完整实现率：`(implemented + verified) / 64 = 46 / 64 = 71.88%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 53 / 64 = 82.81%`。
+- 完整联网验收率：`verified / 64 = 30 / 64 = 46.88%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
@@ -20,7 +20,7 @@
 | S04 | 搜索与发现 | Web、移动端及 PC 搜索建议 | `verified` | `search_suggest/search_suggest_pc` 已验收 |
 | S05 | 搜索与发现 | 多重匹配与本地歌曲匹配 | `verified` | `search_multimatch/search_match` 命中和空结果均已验收 |
 | S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收 |
-| S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `pending` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 等未接入 |
+| S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `verified` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 三类目录、四地区歌手榜及榜单曲目均已真实 HTTP 验收 |
 | S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `pending` | `personalized*` 模块族未接入 |
 | S09 | 搜索与发现 | 每日歌曲及歌单推荐 | `partial` | `recommend_songs` 已验证，`recommend_resource` 等登录成功态未验收 |
 | S10 | 搜索与发现 | 音频指纹识别 | `implemented` | 无命中真实路径及映射已验证，待有效指纹成功命中 |

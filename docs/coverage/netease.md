@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=303`、`partial=5`、`implemented=35`、`verified=64`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=299`、`partial=5`、`implemented=35`、`verified=68`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -334,10 +334,10 @@
 | `topic_detail` | `/topic/detail` | `pending` | — |
 | `topic_detail_event_hot` | `/topic/detail/event/hot` | `pending` | — |
 | `topic_sublist` | `/topic/sublist` | `pending` | — |
-| `toplist` | `/toplist` | `pending` | — |
-| `toplist_artist` | `/toplist/artist` | `pending` | — |
-| `toplist_detail` | `/toplist/detail` | `pending` | — |
-| `toplist_detail_v2` | `/toplist/detail/v2` | `pending` | — |
+| `toplist` | `/toplist` | `verified` | `GET /v1/charts?view=overview`（统一 `ChartCatalog`，完整保留榜单介绍与特殊榜单原文；2026-07-17 匿名真实 HTTP 返回 1 组、62 个普通音乐榜单，上游 `code=200`） |
+| `toplist_artist` | `/toplist/artist` | `verified` | `GET /v1/charts/artists`（统一 `ArtistChart`，支持 `area=chinese/western/korean/japanese` 及参考 `type=1/2/3/4`，固定 100 位快照并保留分数和上期名次；2026-07-17 provider 持久化联网测试及真实 HTTP 四分支全部通过，榜首依次为林俊杰、Justin Bieber、BIGBANG、初音ミク） |
+| `toplist_detail` | `/toplist/detail` | `verified` | `GET /v1/charts?view=summary`（默认经典内容摘要，榜单及无 ID 的曲名/歌手预览进入稳定字段，歌手榜和奖励榜原文不丢失；2026-07-17 匿名真实 HTTP 返回 62 个榜单、12 条预览，上游 `code=200`） |
+| `toplist_detail_v2` | `/toplist/detail/v2` | `verified` | `GET /v1/charts?view=modern`（完整映射分组、可播放/H5 目标、真实歌曲引用、当前/上期名次与封面；2026-07-17 匿名真实 HTTP 返回 7 组、49 个目录项、45 条排名预览，上游 `code=200`；另以 `/v1/charts/netease:19723756/tracks?limit=2` 验证飙升榜共 99 首并返回前 2 首） |
 | `ugc_album_get` | `/ugc/album/get` | `pending` | — |
 | `ugc_artist_get` | `/ugc/artist/get` | `pending` | — |
 | `ugc_artist_search` | `/ugc/artist/search` | `pending` | — |
