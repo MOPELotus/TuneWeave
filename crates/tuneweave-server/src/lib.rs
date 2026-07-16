@@ -15,11 +15,11 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistStats, AuthChallengeRequest,
-    AuthState, Capability, ChallengeMethod, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
+    ArtistListRequest, ArtistStats, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, Lyrics, MediaStream, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
     StreamResolver, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
@@ -170,6 +170,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts/digital-albums", get(digital_album_chart))
+        .route("/artists", get(artists))
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
@@ -804,6 +805,45 @@ async fn playlist_tracks(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ArtistListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    #[serde(rename = "type", alias = "category")]
+    category: Option<String>,
+    area: Option<String>,
+    initial: Option<String>,
+}
+
+async fn artists(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistListParams>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let mut request = ArtistListRequest::new(limit, offset);
+    request.account.clone_from(&account);
+    request.category = parse_artist_category(params.category.as_deref())?;
+    request.area = parse_artist_area(params.area.as_deref())?;
+    request.initial = optional_trimmed(params.initial);
+    let page = provider.artists(&request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -1574,6 +1614,36 @@ fn parse_history_period(value: Option<&str>) -> Result<PlaybackHistoryPeriod, Tu
     }
 }
 
+fn parse_artist_category(value: Option<&str>) -> Result<ArtistCategory, TuneWeaveError> {
+    match value.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(ArtistCategory::All),
+        "male" => Ok(ArtistCategory::Male),
+        "female" => Ok(ArtistCategory::Female),
+        "group" | "band" => Ok(ArtistCategory::Group),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported artist type: {value}"))
+                .with_details(json!({ "allowed": ["all", "male", "female", "group"] })),
+        ),
+    }
+}
+
+fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> {
+    match value.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(ArtistArea::All),
+        "chinese" => Ok(ArtistArea::Chinese),
+        "western" => Ok(ArtistArea::Western),
+        "japanese" => Ok(ArtistArea::Japanese),
+        "korean" => Ok(ArtistArea::Korean),
+        "other" => Ok(ArtistArea::Other),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported artist area: {value}"))
+                .with_details(json!({
+                    "allowed": ["all", "chinese", "western", "japanese", "korean", "other"]
+                })),
+        ),
+    }
+}
+
 fn parse_digital_album_chart_period(
     value: Option<&str>,
 ) -> Result<DigitalAlbumChartPeriod, TuneWeaveError> {
@@ -1763,6 +1833,7 @@ mod tests {
                 Capability::DigitalAlbumCharts,
                 Capability::ArtistDetail,
                 Capability::ArtistStats,
+                Capability::ArtistList,
                 Capability::ArtistAlbums,
                 Capability::ArtistFans,
                 Capability::PlaylistRead,
@@ -1948,6 +2019,32 @@ mod tests {
 
         async fn artist_stats(&self, id: &str, _account: Option<&str>) -> Result<ArtistStats> {
             Ok(sample_artist_stats(id))
+        }
+
+        async fn artists(&self, request: &ArtistListRequest) -> Result<Page<Artist>> {
+            let mut artist = sample_artist("178059");
+            artist
+                .extensions
+                .insert("category".to_owned(), json!(request.category));
+            artist
+                .extensions
+                .insert("area".to_owned(), json!(request.area));
+            if let Some(initial) = &request.initial {
+                artist
+                    .extensions
+                    .insert("initial".to_owned(), json!(initial));
+            }
+            Ok(Page {
+                items: vec![artist],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Default::default(),
+                },
+            })
         }
 
         async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
@@ -2599,6 +2696,34 @@ mod tests {
         assert_eq!(artist["data"]["track_count"], 568);
         assert_eq!(artist["meta"]["platform"], "netease");
         assert_eq!(artist["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn artist_catalog_uses_unified_filters_and_pagination() {
+        let (status, artists) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists?platform=netease&account=collector&type=male&area=western&initial=b&limit=2&offset=10",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artists["data"][0]["ref"], "netease:178059");
+        assert_eq!(artists["data"][0]["extensions"]["category"], "male");
+        assert_eq!(artists["data"][0]["extensions"]["area"], "western");
+        assert_eq!(artists["data"][0]["extensions"]["initial"], "b");
+        assert_eq!(artists["meta"]["platform"], "netease");
+        assert_eq!(artists["meta"]["account"], "collector");
+        assert_eq!(artists["meta"]["pagination"]["limit"], 2);
+        assert_eq!(artists["meta"]["pagination"]["offset"], 10);
+        assert_eq!(artists["meta"]["pagination"]["next_offset"], 11);
+        assert_eq!(artists["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_catalog_rejects_unknown_cross_platform_filters() {
+        let (status, response) =
+            json_response_from(test_app_with_provider(), "/v1/artists?type=solo&area=mars").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
