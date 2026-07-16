@@ -10,9 +10,10 @@ use crate::{
     DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest,
     ImageUploadResult, Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, Result, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
+    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User,
+    Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -71,6 +72,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::RadioStationDetail,
+        ))
+    }
+
+    async fn radio_stations(
+        &self,
+        _request: &RadioStationListRequest,
+    ) -> Result<Page<RadioStation>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RadioStationList,
         ))
     }
 

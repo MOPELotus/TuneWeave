@@ -264,6 +264,34 @@ impl RadioStation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RadioStationCursor {
+    pub id: String,
+    pub score: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RadioStationListRequest {
+    pub limit: u32,
+    pub category_id: Option<String>,
+    pub region_id: Option<String>,
+    pub cursor: Option<RadioStationCursor>,
+    pub account: Option<String>,
+}
+
+impl RadioStationListRequest {
+    #[must_use]
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            category_id: None,
+            region_id: None,
+            cursor: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
     pub offset: u32,
@@ -1055,6 +1083,26 @@ mod tests {
         assert_eq!(station.id, "362");
         assert_eq!(station.region.as_deref(), Some("上海"));
         assert_eq!(station.subscribed, Some(false));
+    }
+
+    #[test]
+    fn radio_station_list_request_keeps_filter_and_cursor_ids_opaque() {
+        let mut request = RadioStationListRequest::new(20);
+        request.category_id = Some("music:featured".to_owned());
+        request.region_id = Some("region:network".to_owned());
+        request.cursor = Some(RadioStationCursor {
+            id: "station:172".to_owned(),
+            score: 1542,
+        });
+        request.account = Some("radio-user".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize radio station list request");
+        assert_eq!(value["limit"], 20);
+        assert_eq!(value["category_id"], "music:featured");
+        assert_eq!(value["region_id"], "region:network");
+        assert_eq!(value["cursor"]["id"], "station:172");
+        assert_eq!(value["cursor"]["score"], 1542);
+        assert_eq!(value["account"], "radio-user");
     }
 
     #[test]

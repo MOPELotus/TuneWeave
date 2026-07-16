@@ -13,6 +13,7 @@ pub enum Capability {
     Banners,
     RadioTaxonomy,
     RadioStationDetail,
+    RadioStationList,
     TrackDetail,
     AlbumDetail,
     AlbumList,
@@ -64,10 +65,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn radio_station_detail_uses_the_stable_discovery_name() {
+    fn radio_station_capabilities_use_stable_discovery_names() {
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
             serde_json::json!("radio_station_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::RadioStationList).expect("serialize capability"),
+            serde_json::json!("radio_station_list")
         );
     }
 }
