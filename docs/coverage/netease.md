@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=383`、`partial=7`、`implemented=8`、`verified=6`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=381`、`partial=7`、`implemented=9`、`verified=7`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -237,8 +237,8 @@
 | `radio_sport_get` | `/radio/sport/get` | `pending` | — |
 | `rebind` | `/rebind` | `pending` | — |
 | `recent_listen_list` | `/recent/listen/list` | `pending` | — |
-| `recommend_resource` | `/recommend/resource` | `pending` | — |
-| `recommend_songs` | `/recommend/songs` | `pending` | — |
+| `recommend_resource` | `/recommend/resource` | `implemented` | `GET /v1/recommendations/playlists`（2026-07-16 匿名 HTTP 实测为 401/上游 301；待真实账户验证内容路径） |
+| `recommend_songs` | `/recommend/songs` | `verified` | `GET /v1/recommendations/tracks`（含 `afresh`→`refresh`；2026-07-16 匿名 HTTP 实测返回 30 首并保留推荐理由） |
 | `recommend_songs_dislike` | `/recommend/songs/dislike` | `pending` | — |
 | `record_recent_album` | `/record/recent/album` | `pending` | — |
 | `record_recent_dj` | `/record/recent/dj` | `pending` | — |

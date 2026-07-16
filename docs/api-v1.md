@@ -213,7 +213,7 @@
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/charts` | `platform?` | `Playlist[]`，其中榜单仍用歌单模型表示 |
 | GET | `/v1/charts/{ref}/tracks` | 分页 | `Track[]` |
-| GET | `/v1/recommendations/tracks` | `platform?`、`account?`、分页 | `Track[]` |
+| GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`refresh?`、分页 | `Track[]`；推荐理由保存在 `extensions.recommendation` |
 | GET | `/v1/recommendations/playlists` | `platform?`、`account?`、分页 | `Playlist[]` |
 
 ### 媒体与跨平台解析
