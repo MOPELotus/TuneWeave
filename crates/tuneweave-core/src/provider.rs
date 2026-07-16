@@ -183,6 +183,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn artist_top_tracks(&self, _id: &str, _account: Option<&str>) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistTopTracks,
+        ))
+    }
+
     async fn set_artist_subscription(
         &self,
         _id: &str,
