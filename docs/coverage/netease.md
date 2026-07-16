@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=336`、`partial=6`、`implemented=23`、`verified=39`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=334`、`partial=6`、`implemented=25`、`verified=39`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -65,8 +65,8 @@
 | `cloud_import` | `/cloud/import` | `pending` | — |
 | `cloud_lyric_get` | `/cloud/lyric/get` | `pending` | — |
 | `cloud_match` | `/cloud/match` | `pending` | — |
-| `cloud_upload_complete` | `/cloud/upload/complete` | `pending` | — |
-| `cloud_upload_token` | `/cloud/upload/token` | `pending` | — |
+| `cloud_upload_complete` | `/cloud/upload/complete` | `implemented` | `POST /v1/account/cloud/uploads/complete`（以 `platform/account` 选择隔离登录态，统一接收 `provisional_track_id/resource_id/md5/filename/song_name/artist/album/bitrate`，并兼容参考字段 `songId/resourceId/song`；完整实现 EAPI `/api/upload/cloud/info/v2` 登记与 `/api/cloud/pub/v2` 发布两段事务，曲名缺省时取文件主名，歌手/专辑缺省时分别使用“未知艺术家/未知专辑”，统一返回最终曲目引用并保留两段原始响应；请求边界、元数据默认值、成功映射、账户前置和 HTTP 别名均有离线测试；2026-07-16 匿名真实 HTTP 验证在发起上游登记前稳定返回 401 `authentication_required`，待真实账户验证成功发布） |
+| `cloud_upload_token` | `/cloud/upload/token` | `implemented` | `POST /v1/account/cloud/uploads/ticket`（统一接收 `md5/file_size/filename/bitrate/content_type` 并兼容 `fileSize/contentType`；依次执行 EAPI `/api/cloud/upload/check`、WeAPI `/api/nos/token/alloc` 与真实 LBS 服务发现，完整返回 `needUpload/songId/resourceId` 对应字段、受限 NOS 上传 URL、方法及所需请求头；对象键按路径段编码，上传目标严格限制为无凭据、无自定义端口的 `http(s)://*.127.net` 和精确 `offset=0&complete=true&version=1.0` 参数，拒绝外域、重复参数与目标注入；NOS token 只存在于直传所需响应头映射，Debug 和扩展原文均不泄漏；协议构造、文件/MD5/码率边界、域名白名单、token 脱敏、统一 HTTP 字段及错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在申请 token 前稳定返回 401 `authentication_required`，待真实账户验证票据与原始音频直传成功态） |
 | `cloudsearch` | `/cloudsearch` | `pending` | — |
 | `comment` | `/comment` | `pending` | — |
 | `comment_album` | `/comment/album` | `pending` | — |
