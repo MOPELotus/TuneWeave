@@ -17,6 +17,7 @@ cbc.workspace = true
 ecb.workspace = true
 flate2.workspace = true
 hex.workspace = true
+lofty.workspace = true
 md-5.workspace = true
 num-bigint.workspace = true
 percent-encoding.workspace = true
