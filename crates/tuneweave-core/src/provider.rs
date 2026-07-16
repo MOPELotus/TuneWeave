@@ -8,12 +8,13 @@ use crate::{
     ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest,
     AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
     Banner, BannerListRequest, Capability, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, ImageUploadRequest, ImageUploadResult,
-    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TuneWeaveError, User, Video,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page,
+    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, Result, SearchQuery, StreamRequest, SubscriptionResult, Track,
+    TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -179,6 +180,23 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::DigitalAlbumCharts,
+        ))
+    }
+
+    async fn dimension_chart(&self, _request: &DimensionChartRequest) -> Result<DimensionChart> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DimensionCharts,
+        ))
+    }
+
+    async fn dimension_chart_tracks(
+        &self,
+        _request: &DimensionChartRequest,
+    ) -> Result<DimensionChartTrackSnapshot> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DimensionCharts,
         ))
     }
 

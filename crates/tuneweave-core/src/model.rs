@@ -827,6 +827,78 @@ pub struct DigitalAlbumChartEntry {
     pub extensions: Extensions,
 }
 
+/// Identifies one platform-defined chart dimension, such as a city or style.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DimensionChartRequest {
+    pub chart_code: String,
+    pub target_id: String,
+    pub target_type: String,
+    pub account: Option<String>,
+}
+
+impl DimensionChartRequest {
+    #[must_use]
+    pub fn new(
+        chart_code: impl Into<String>,
+        target_id: impl Into<String>,
+        target_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            chart_code: chart_code.into(),
+            target_id: target_id.into(),
+            target_type: target_type.into(),
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DimensionChart {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub chart_code: String,
+    pub target_id: String,
+    pub target_type: String,
+    pub name: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub updated_at_ms: Option<u64>,
+    pub play_count: Option<u64>,
+    pub share_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub supports_comments: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DimensionChartTrackEntry {
+    pub rank: u32,
+    pub previous_rank: Option<u32>,
+    pub rank_change: Option<i64>,
+    pub track: Track,
+    pub reason: Option<String>,
+    pub reason_id: Option<String>,
+    pub score: Option<f64>,
+    pub ratio: Option<f64>,
+    pub collected: Option<bool>,
+    pub extensions: Extensions,
+}
+
+/// A complete, non-paginated snapshot returned by a dimension chart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DimensionChartTrackSnapshot {
+    pub chart_ref: ResourceRef,
+    pub chart_code: String,
+    pub target_id: String,
+    pub target_type: String,
+    pub entries: Vec<DimensionChartTrackEntry>,
+    pub period_label: Option<String>,
+    pub groups: BTreeMap<String, String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     #[serde(rename = "ref")]
@@ -1203,6 +1275,47 @@ mod tests {
             serde_json::to_value(request.kind).expect("serialize kind"),
             "album"
         );
+    }
+
+    #[test]
+    fn dimension_chart_snapshot_keeps_dimension_and_rank_semantics() {
+        let request = DimensionChartRequest::new("CITY_SONG_CHART", "110000", "CITY");
+        assert_eq!(request.chart_code, "CITY_SONG_CHART");
+        assert_eq!(request.target_id, "110000");
+        assert_eq!(request.target_type, "CITY");
+
+        let chart_ref = ResourceRef::new(Platform::Netease, "CITY_SONG_CHART#110000@CITY#")
+            .expect("valid chart reference");
+        let snapshot = DimensionChartTrackSnapshot {
+            chart_ref,
+            chart_code: "CITY_SONG_CHART".to_owned(),
+            target_id: "110000".to_owned(),
+            target_type: "CITY".to_owned(),
+            entries: vec![DimensionChartTrackEntry {
+                rank: 1,
+                previous_rank: Some(4),
+                rank_change: Some(3),
+                track: Track::new(
+                    ResourceRef::new(Platform::Netease, "210049").expect("valid track reference"),
+                    "布拉格广场",
+                ),
+                reason: Some("本周热度上升".to_owned()),
+                reason_id: Some("city-popular".to_owned()),
+                score: None,
+                ratio: None,
+                collected: Some(false),
+                extensions: Extensions::new(),
+            }],
+            period_label: Some("本周".to_owned()),
+            groups: BTreeMap::from([("CITY".to_owned(), "城市".to_owned())]),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(snapshot).expect("serialize chart snapshot");
+        assert_eq!(value["chart_ref"], "netease:CITY_SONG_CHART#110000@CITY#");
+        assert_eq!(value["entries"][0]["previous_rank"], 4);
+        assert_eq!(value["entries"][0]["rank_change"], 3);
+        assert_eq!(value["entries"][0]["track"]["ref"], "netease:210049");
     }
 
     #[test]
