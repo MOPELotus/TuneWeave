@@ -9,8 +9,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
-    ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistStats,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistBiographySection, ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview,
+    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest,
     AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
@@ -32,15 +32,15 @@ use crate::{
         ArtistDynamicEnvelope, ArtistFanProfile, ArtistFansEnvelope, ArtistFollowCountEnvelope,
         ArtistListEnvelope, ArtistListItem, ArtistMvItem, ArtistMvsEnvelope,
         ArtistNewTracksEnvelope, ArtistNewTracksPlayAllEnvelope, ArtistNewVideoItem,
-        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistSublistEnvelope,
-        ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator, ArtistVideoRecord,
-        ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        ArtistNewVideosEnvelope, ArtistNewWorksEnvelope, ArtistOverviewEnvelope,
+        ArtistSublistEnvelope, ArtistTopTracksEnvelope, ArtistTracksEnvelope, ArtistVideoCreator,
+        ArtistVideoRecord, ArtistVideosEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -283,6 +283,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
             Capability::ArtistDetail,
+            Capability::ArtistOverview,
             Capability::ArtistStats,
             Capability::ArtistList,
             Capability::ArtistAlbums,
@@ -623,6 +624,18 @@ impl MusicProvider for NeteaseProvider {
         let description: ArtistDescriptionEnvelope = parse_body(description_raw.clone())?;
 
         map_artist(detail, description, detail_raw, description_raw)
+    }
+
+    async fn artist_overview(&self, id: &str, account: Option<&str>) -> Result<ArtistOverview> {
+        let id = parse_numeric_id("artist", id)?;
+        let client = self.client_for(account)?;
+        let response = client
+            .request_weapi(&format!("/api/v1/artist/{id}"), json!({}))
+            .await?;
+        ensure_success(&response.body)?;
+        let raw_response = response.body.clone();
+        let response: ArtistOverviewEnvelope = parse_body(response.body)?;
+        map_artist_overview(response, raw_response)
     }
 
     async fn artist_stats(&self, id: &str, account: Option<&str>) -> Result<ArtistStats> {
@@ -3176,6 +3189,35 @@ fn map_artist(
     })
 }
 
+fn map_artist_overview(
+    response: ArtistOverviewEnvelope,
+    raw_response: Value,
+) -> Result<ArtistOverview> {
+    let mut artist = map_artist_list_item(response.artist.clone())?;
+    artist.extensions.remove("catalog_item");
+    artist
+        .extensions
+        .insert("overview_artist".to_owned(), response.artist);
+    let featured_tracks = response
+        .hot_songs
+        .into_iter()
+        .map(|raw| {
+            let song: Song = parse_body(raw.clone())?;
+            let mut track = map_song(song, None)?;
+            track.extensions.insert("overview_track".to_owned(), raw);
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(ArtistOverview {
+        artist,
+        featured_tracks,
+        has_more_tracks: response.more.unwrap_or(false),
+        extensions,
+    })
+}
+
 fn map_artist_stats(
     id: u64,
     stats: ArtistDynamicEnvelope,
@@ -4554,6 +4596,67 @@ mod tests {
     }
 
     #[test]
+    fn maps_legacy_artist_overview_without_collapsing_featured_tracks() {
+        let raw = json!({
+            "artist": {
+                "id": 6452,
+                "name": "周杰伦",
+                "alias": ["Jay Chou"],
+                "briefDesc": "歌手简介",
+                "img1v1Url": "https://example.test/avatar.jpg",
+                "picUrl": "https://example.test/cover.jpg",
+                "albumSize": 44,
+                "musicSize": 568,
+                "mvSize": 9,
+                "followed": false,
+                "publishTime": 1_784_000_000_000_u64
+            },
+            "hotSongs": [
+                {
+                    "id": 210049,
+                    "name": "布拉格广场",
+                    "alia": [],
+                    "ar": [
+                        {"id": 7217, "name": "蔡依林"},
+                        {"id": 6452, "name": "周杰伦"}
+                    ],
+                    "al": {"id": 18877, "name": "看我72变"},
+                    "dt": 294600,
+                    "mv": 186004,
+                    "fee": 1,
+                    "st": 0,
+                    "copyright": 2
+                }
+            ],
+            "more": true,
+            "code": 200
+        });
+        let response: ArtistOverviewEnvelope =
+            serde_json::from_value(raw.clone()).expect("artist overview fixture");
+
+        let overview = map_artist_overview(response, raw).expect("map artist overview");
+
+        assert_eq!(overview.artist.resource_ref.to_string(), "netease:6452");
+        assert_eq!(overview.artist.name, "周杰伦");
+        assert_eq!(overview.artist.track_count, Some(568));
+        assert_eq!(
+            overview.artist.extensions["overview_artist"]["publishTime"],
+            1_784_000_000_000_u64
+        );
+        assert_eq!(
+            overview.featured_tracks[0].resource_ref.to_string(),
+            "netease:210049"
+        );
+        assert_eq!(overview.featured_tracks[0].artists.len(), 2);
+        assert_eq!(
+            overview.featured_tracks[0].extensions["overview_track"]["copyright"],
+            2
+        );
+        assert!(overview.has_more_tracks);
+        assert_eq!(overview.extensions["response"]["code"], 200);
+    }
+
+    #[test]
     fn maps_netease_artist_dynamic_stats_and_keeps_the_raw_response() {
         let raw = json!({
             "code": 200,
@@ -4928,6 +5031,10 @@ mod tests {
             .await
             .expect_err("invalid artist detail id");
         assert_eq!(artist_detail_error.code, ErrorCode::InvalidRequest);
+        let artist_overview_error = MusicProvider::artist_overview(&provider, "invalid", None)
+            .await
+            .expect_err("invalid artist overview id");
+        assert_eq!(artist_overview_error.code, ErrorCode::InvalidRequest);
         let artist_stats_error = MusicProvider::artist_stats(&provider, "invalid", None)
             .await
             .expect_err("invalid artist stats id");
@@ -5917,6 +6024,26 @@ mod tests {
         assert!(artist.track_count.is_some_and(|count| count > 0));
         assert!(artist.extensions.contains_key("detail_response"));
         assert!(artist.extensions.contains_key("description_response"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_overview() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let overview = MusicProvider::artist_overview(&provider, "6452", None)
+            .await
+            .expect("live artist overview");
+        assert_eq!(overview.artist.resource_ref.to_string(), "netease:6452");
+        assert_eq!(overview.artist.name, "周杰伦");
+        assert_eq!(overview.featured_tracks.len(), 50);
+        assert!(
+            overview
+                .featured_tracks
+                .iter()
+                .all(|track| track.artists.iter().any(|artist| artist.name == "周杰伦"))
+        );
+        assert!(overview.has_more_tracks);
+        assert!(overview.extensions.contains_key("response"));
     }
 
     #[tokio::test]
