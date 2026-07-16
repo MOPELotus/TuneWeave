@@ -133,6 +133,48 @@ impl DigitalAlbumListRequest {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DigitalAlbumChartPeriod {
+    #[default]
+    Daily,
+    Week,
+    Year,
+    Total,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DigitalAlbumChartKind {
+    #[default]
+    Album,
+    Single,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DigitalAlbumChartRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub period: DigitalAlbumChartPeriod,
+    pub kind: DigitalAlbumChartKind,
+    pub year: Option<u16>,
+}
+
+impl DigitalAlbumChartRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            period: DigitalAlbumChartPeriod::Daily,
+            kind: DigitalAlbumChartKind::Album,
+            year: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackHistoryPeriod {
     #[default]
@@ -267,6 +309,14 @@ pub struct DigitalAlbum {
     pub sale_count: Option<u64>,
     pub track_count: Option<u64>,
     pub tags: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DigitalAlbumChartEntry {
+    pub rank: u32,
+    pub rank_change: Option<i64>,
+    pub product: DigitalAlbum,
     pub extensions: Extensions,
 }
 
@@ -461,5 +511,22 @@ mod tests {
         let value = serde_json::to_value(money).expect("serialize money");
         assert_eq!(value["amount"], 22.0);
         assert_eq!(value["currency"], "CNY");
+    }
+
+    #[test]
+    fn digital_album_chart_request_uses_public_api_defaults() {
+        let request = DigitalAlbumChartRequest::new(20, 0);
+
+        assert_eq!(request.period, DigitalAlbumChartPeriod::Daily);
+        assert_eq!(request.kind, DigitalAlbumChartKind::Album);
+        assert_eq!(request.year, None);
+        assert_eq!(
+            serde_json::to_value(request.period).expect("serialize period"),
+            "daily"
+        );
+        assert_eq!(
+            serde_json::to_value(request.kind).expect("serialize kind"),
+            "album"
+        );
     }
 }

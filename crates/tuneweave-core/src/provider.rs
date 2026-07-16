@@ -4,10 +4,11 @@ use async_trait::async_trait;
 
 use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AuthChallengeRequest, Capability,
-    DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
-    SearchQuery, StreamRequest, Track, TrackEntitlement, TuneWeaveError,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
+    RecommendationRequest, Result, SearchQuery, StreamRequest, Track, TrackEntitlement,
+    TuneWeaveError,
 };
 
 /// A dynamically registered music platform adapter.
@@ -98,6 +99,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::DigitalAlbumList,
+        ))
+    }
+
+    async fn digital_album_chart(
+        &self,
+        _request: &DigitalAlbumChartRequest,
+    ) -> Result<Page<DigitalAlbumChartEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DigitalAlbumCharts,
         ))
     }
 

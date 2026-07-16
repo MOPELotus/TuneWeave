@@ -19,11 +19,12 @@ pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
     Album, AlbumListRequest, AlbumStats, AlbumSummary, ArtistSummary, DigitalAlbum,
-    DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics, MediaStream, Money, Page,
-    PageMeta, PageRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, ProviderDescriptor, Quality, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest, Track,
-    TrackEntitlement, TrialWindow,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics,
+    MediaStream, Money, Page, PageMeta, PageRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RecommendationRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
+    Track, TrackEntitlement, TrialWindow,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
