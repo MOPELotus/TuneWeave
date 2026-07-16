@@ -42,9 +42,10 @@ use tuneweave_core::{
     ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
     RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
     SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchQuery,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver, SubscriptionResult,
+    Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -184,6 +185,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(search))
         .route("/search/default", get(search_default))
         .route("/search/trending", get(search_trending))
+        .route("/search/suggestions", get(search_suggestions))
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
@@ -433,6 +435,17 @@ struct SearchTrendingParams {
     detail: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchSuggestionParams {
+    #[serde(alias = "keywords", alias = "keyword")]
+    q: Option<String>,
+    #[serde(alias = "type")]
+    client: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
 async fn search_default(
     State(state): State<AppState>,
     params: Result<Query<SearchDefaultParams>, QueryRejection>,
@@ -465,6 +478,35 @@ async fn search_trending(
     let list = provider
         .trending_searches(&SearchTrendingRequest {
             detail,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(list)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn search_suggestions(
+    State(state): State<AppState>,
+    params: Result<Query<SearchSuggestionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SearchSuggestionList>>, ApiError> {
+    let params = query_params(params)?;
+    let query = params
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
+    let client = parse_search_suggestion_client(params.client.as_deref())?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .search_suggestions(&SearchSuggestionRequest {
+            query: query.to_owned(),
+            client,
             account: Some(account.clone()),
         })
         .await?;
@@ -4009,6 +4051,20 @@ fn parse_search_trending_detail(
     }
 }
 
+fn parse_search_suggestion_client(
+    value: Option<&str>,
+) -> Result<SearchSuggestionClient, TuneWeaveError> {
+    match value.unwrap_or("web").trim().to_ascii_lowercase().as_str() {
+        "web" => Ok(SearchSuggestionClient::Web),
+        "mobile" | "keyword" => Ok(SearchSuggestionClient::Mobile),
+        "pc" => Ok(SearchSuggestionClient::Pc),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported search suggestion client: {value}"
+        ))
+        .with_details(json!({ "allowed": ["web", "mobile", "pc"] }))),
+    }
+}
+
 fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveError> {
     match value.unwrap_or("pc").trim().to_ascii_lowercase().as_str() {
         "pc" | "0" => Ok(BannerClient::Pc),
@@ -4161,6 +4217,7 @@ mod tests {
                 Capability::SearchVoices,
                 Capability::SearchDefault,
                 Capability::SearchTrending,
+                Capability::SearchSuggestions,
                 Capability::AudioRecognition,
                 Capability::Banners,
                 Capability::RadioTaxonomy,
@@ -4315,6 +4372,39 @@ mod tests {
                     target_url: None,
                     extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
                 }],
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            })
+        }
+
+        async fn search_suggestions(
+            &self,
+            request: &SearchSuggestionRequest,
+        ) -> Result<SearchSuggestionList> {
+            let suggestion = tuneweave_core::SearchSuggestion {
+                keyword: request.query.clone(),
+                kind: Some(SearchKind::Track),
+                display_text: (request.client == SearchSuggestionClient::Pc)
+                    .then(|| "歌曲".to_owned()),
+                icon_url: None,
+                resource: (request.client == SearchSuggestionClient::Web)
+                    .then(|| SearchItem::Track(sample_track("1357375695"))),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            };
+            Ok(SearchSuggestionList {
+                query: request.query.clone(),
+                client: request.client,
+                suggestions: vec![suggestion],
+                recommendations: (request.client == SearchSuggestionClient::Pc)
+                    .then(|| tuneweave_core::SearchSuggestion {
+                        keyword: format!("{} Beyond", request.query),
+                        kind: None,
+                        display_text: None,
+                        icon_url: None,
+                        resource: None,
+                        extensions: Extensions::new(),
+                    })
+                    .into_iter()
+                    .collect(),
                 extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
             })
         }
@@ -6212,6 +6302,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn search_suggestions_share_web_mobile_and_pc_clients_on_one_endpoint() {
+        for (path, client, has_resource, recommendation_count) in [
+            (
+                "/v1/search/suggestions?q=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&client=web&account=search-user",
+                "web",
+                true,
+                0,
+            ),
+            (
+                "/v1/search/suggestions?keywords=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&type=mobile&account=search-user",
+                "mobile",
+                false,
+                0,
+            ),
+            (
+                "/v1/search/suggestions?keyword=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA&client=pc&account=search-user",
+                "pc",
+                false,
+                1,
+            ),
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::OK, "{client}");
+            assert_eq!(response["data"]["query"], "海阔天空", "{client}");
+            assert_eq!(response["data"]["client"], client, "{client}");
+            assert_eq!(
+                response["data"]["suggestions"][0]["keyword"], "海阔天空",
+                "{client}"
+            );
+            assert_eq!(
+                response["data"]["suggestions"][0]["resource"].is_object(),
+                has_resource,
+                "{client}"
+            );
+            assert_eq!(
+                response["data"]["recommendations"].as_array().map(Vec::len),
+                Some(recommendation_count),
+                "{client}"
+            );
+            assert_eq!(response["meta"]["account"], "search-user");
+        }
+
+        let (status, defaulted) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search/suggestions?q=%E6%B5%B7%E9%98%94%E5%A4%A9%E7%A9%BA",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["data"]["client"], "web");
+        assert_eq!(defaulted["meta"]["platform"], "netease");
+        assert_eq!(defaulted["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_reject_missing_query_unknown_client_platform_and_fields() {
+        for path in [
+            "/v1/search/suggestions",
+            "/v1/search/suggestions?q=%20%20",
+            "/v1/search/suggestions?q=test&client=unknown",
+            "/v1/search/suggestions?q=test&platform=unknown",
+            "/v1/search/suggestions?q=test&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
     #[test]
     fn search_kind_parser_accepts_unified_and_reference_names() {
         for (value, expected) in [
@@ -6269,6 +6428,27 @@ mod tests {
         assert_eq!(
             parse_search_trending_detail(Some("unknown"))
                 .expect_err("unsupported trending detail")
+                .code,
+            tuneweave_core::ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn search_suggestion_client_parser_accepts_unified_and_reference_names() {
+        for (value, expected) in [
+            ("web", SearchSuggestionClient::Web),
+            ("mobile", SearchSuggestionClient::Mobile),
+            ("keyword", SearchSuggestionClient::Mobile),
+            ("pc", SearchSuggestionClient::Pc),
+        ] {
+            assert_eq!(
+                parse_search_suggestion_client(Some(value)).expect(value),
+                expected
+            );
+        }
+        assert_eq!(
+            parse_search_suggestion_client(Some("unknown"))
+                .expect_err("unsupported suggestion client")
                 .code,
             tuneweave_core::ErrorCode::InvalidRequest
         );
