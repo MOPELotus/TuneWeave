@@ -19,10 +19,10 @@ pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
     Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea, ArtistBiographySection,
-    ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistStats, ArtistSummary,
-    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
-    ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, CreatorSummary, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, CreatorSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics,
     MediaStream, Money, Page, PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality,

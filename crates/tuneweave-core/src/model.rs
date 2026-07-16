@@ -450,6 +450,14 @@ pub struct Artist {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistOverview {
+    pub artist: Artist,
+    pub featured_tracks: Vec<Track>,
+    pub has_more_tracks: bool,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
     pub count: u64,
@@ -864,11 +872,25 @@ mod tests {
             extensions: Extensions::new(),
         };
 
-        let value = serde_json::to_value(artist).expect("serialize artist");
+        let value = serde_json::to_value(&artist).expect("serialize artist");
         assert_eq!(value["ref"], "netease:6452");
         assert_eq!(value["platform"], "netease");
         assert_eq!(value["biography_sections"][0]["title"], "人物简介");
         assert_eq!(value["track_count"], 568);
+
+        let overview = ArtistOverview {
+            artist,
+            featured_tracks: vec![Track::new(
+                ResourceRef::new(Platform::Netease, "210049").expect("valid track reference"),
+                "布拉格广场",
+            )],
+            has_more_tracks: true,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(overview).expect("serialize artist overview");
+        assert_eq!(value["artist"]["ref"], "netease:6452");
+        assert_eq!(value["featured_tracks"][0]["ref"], "netease:210049");
+        assert_eq!(value["has_more_tracks"], true);
     }
 
     #[test]
