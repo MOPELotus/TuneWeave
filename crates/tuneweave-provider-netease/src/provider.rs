@@ -38,7 +38,8 @@ use tuneweave_core::{
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
     ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchVariant, StreamRequest, SubscriptionResult, Track,
+    SearchOpaqueItem, SearchQuery, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
     User, Video, VideoKind,
 };
@@ -310,6 +311,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchMixed,
             Capability::SearchVoices,
             Capability::SearchDefault,
+            Capability::SearchTrending,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -459,6 +461,21 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_eapi(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_default_search_keyword(response.body)
+    }
+
+    async fn trending_searches(
+        &self,
+        request: &SearchTrendingRequest,
+    ) -> Result<SearchTrendingList> {
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload, use_weapi) = netease_trending_search_request(request.detail);
+        let response = if use_weapi {
+            client.request_weapi(path, payload).await?
+        } else {
+            client.request_eapi(path, payload).await?
+        };
+        ensure_success(&response.body)?;
+        map_netease_trending_searches(request.detail, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7183,6 +7200,94 @@ const fn netease_search_kind_from_type(value: u64) -> Option<SearchKind> {
     }
 }
 
+fn netease_trending_search_request(detail: SearchTrendingDetail) -> (&'static str, Value, bool) {
+    match detail {
+        SearchTrendingDetail::Brief => ("/api/search/hot", json!({ "type": 1111 }), false),
+        SearchTrendingDetail::Full => ("/api/hotsearchlist/get", json!({}), true),
+    }
+}
+
+fn map_netease_trending_searches(
+    detail: SearchTrendingDetail,
+    response: Value,
+) -> Result<SearchTrendingList> {
+    let raw_entries = match detail {
+        SearchTrendingDetail::Brief => response.pointer("/result/hots"),
+        SearchTrendingDetail::Full => response.get("data"),
+    }
+    .and_then(Value::as_array)
+    .cloned()
+    .ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase trending search response is missing its entries array",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "detail": detail, "response": response }))
+    })?;
+    let entries = raw_entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let keyword_field = match detail {
+                SearchTrendingDetail::Brief => "first",
+                SearchTrendingDetail::Full => "searchWord",
+            };
+            let keyword = raw
+                .get(keyword_field)
+                .and_then(json_scalar_string)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase trending search entry is missing its keyword",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "detail": detail, "entry": raw }))
+                })?;
+            let description_field = match detail {
+                SearchTrendingDetail::Brief => "third",
+                SearchTrendingDetail::Full => "content",
+            };
+            let description = raw
+                .get(description_field)
+                .and_then(json_scalar_string)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            let score = (detail == SearchTrendingDetail::Full)
+                .then(|| raw.get("score").and_then(json_u64))
+                .flatten();
+            let icon_type = raw.get("iconType").and_then(json_i64);
+            let icon_url = search_trending_url(&raw, "iconUrl");
+            let target_url = search_trending_url(&raw, "url");
+            Ok(SearchTrendingEntry {
+                rank: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+                keyword,
+                description,
+                score,
+                icon_type,
+                icon_url,
+                target_url,
+                extensions: Extensions::from([("response".to_owned(), raw)]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SearchTrendingList {
+        detail,
+        entries,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+fn search_trending_url(raw: &Value, field: &str) -> Option<String> {
+    raw.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -7647,6 +7752,86 @@ mod tests {
     }
 
     #[test]
+    fn trending_searches_match_brief_eapi_and_full_weapi_protocols() {
+        let (path, payload, use_weapi) =
+            netease_trending_search_request(SearchTrendingDetail::Brief);
+        assert_eq!(path, "/api/search/hot");
+        assert_eq!(payload, json!({"type": 1111}));
+        assert!(!use_weapi);
+
+        let brief = map_netease_trending_searches(
+            SearchTrendingDetail::Brief,
+            json!({
+                "code": 200,
+                "result": {"hots": [
+                    {"first": "薛之谦", "second": 1, "third": null, "iconType": 1},
+                    {"first": "周旋", "second": 1, "third": "热门", "iconType": 1}
+                ]}
+            }),
+        )
+        .expect("map brief trending searches");
+        assert_eq!(brief.detail, SearchTrendingDetail::Brief);
+        assert_eq!(brief.entries.len(), 2);
+        assert_eq!(brief.entries[0].rank, 1);
+        assert_eq!(brief.entries[0].keyword, "薛之谦");
+        assert_eq!(brief.entries[0].score, None);
+        assert_eq!(brief.entries[1].description.as_deref(), Some("热门"));
+        assert_eq!(brief.extensions["response"]["code"], 200);
+
+        let (path, payload, use_weapi) =
+            netease_trending_search_request(SearchTrendingDetail::Full);
+        assert_eq!(path, "/api/hotsearchlist/get");
+        assert_eq!(payload, json!({}));
+        assert!(use_weapi);
+
+        let full = map_netease_trending_searches(
+            SearchTrendingDetail::Full,
+            json!({
+                "code": 200,
+                "data": [{
+                    "searchWord": "薛之谦",
+                    "score": 107509,
+                    "content": "歌手热搜",
+                    "iconType": 4,
+                    "iconUrl": "https://example.test/hot.png",
+                    "url": "https://example.test/search"
+                }]
+            }),
+        )
+        .expect("map full trending searches");
+        assert_eq!(full.detail, SearchTrendingDetail::Full);
+        assert_eq!(full.entries[0].score, Some(107_509));
+        assert_eq!(full.entries[0].description.as_deref(), Some("歌手热搜"));
+        assert_eq!(full.entries[0].icon_type, Some(4));
+        assert_eq!(
+            full.entries[0].icon_url.as_deref(),
+            Some("https://example.test/hot.png")
+        );
+        assert_eq!(
+            full.entries[0].target_url.as_deref(),
+            Some("https://example.test/search")
+        );
+    }
+
+    #[test]
+    fn trending_searches_reject_missing_arrays_and_keywords() {
+        for (detail, response) in [
+            (SearchTrendingDetail::Brief, json!({"code": 200})),
+            (
+                SearchTrendingDetail::Full,
+                json!({"code": 200, "data": [{"score": 1}]}),
+            ),
+        ] {
+            assert_eq!(
+                map_netease_trending_searches(detail, response)
+                    .expect_err("malformed trending search response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -7973,6 +8158,7 @@ mod tests {
             assert!(capabilities.contains(&capability), "{capability:?}");
         }
         assert!(capabilities.contains(&Capability::SearchDefault));
+        assert!(capabilities.contains(&Capability::SearchTrending));
     }
 
     #[test]
@@ -12822,6 +13008,33 @@ mod tests {
         assert!(!prompt.keyword.is_empty());
         assert!(!prompt.display_text.is_empty());
         assert_eq!(prompt.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_trending_searches_cover_brief_and_full_catalogs() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for (detail, minimum_entries) in [
+            (SearchTrendingDetail::Brief, 10),
+            (SearchTrendingDetail::Full, 20),
+        ] {
+            let list = MusicProvider::trending_searches(
+                &provider,
+                &SearchTrendingRequest {
+                    detail,
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {detail:?} trending searches failed: {error}"));
+            assert_eq!(list.detail, detail);
+            assert!(list.entries.len() >= minimum_entries);
+            assert!(list.entries.iter().all(|entry| !entry.keyword.is_empty()));
+            assert_eq!(list.extensions["response"]["code"], 200);
+            if detail == SearchTrendingDetail::Full {
+                assert!(list.entries.iter().any(|entry| entry.score.is_some()));
+            }
+        }
     }
 
     #[tokio::test]
