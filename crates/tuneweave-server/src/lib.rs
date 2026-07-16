@@ -36,17 +36,18 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
+    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
     LocalTrackMatchResult, Lyrics, MediaStream, MembershipSummary, PageRequest, PasswordFormat,
     PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamResolver,
-    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
+    RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
+    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
+    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -197,6 +198,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/audio/recognize", post(audio_recognize))
+        .route(
+            "/tracks/streams",
+            get(track_streams_get).post(track_streams_post),
+        )
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route("/albums", get(albums))
@@ -1503,6 +1508,38 @@ impl StreamControls {
         }
         request
     }
+
+    fn starts_with_origin(&self, origin_platform: Platform) -> bool {
+        match &self.routing {
+            StreamRouting::Standard {
+                preferred_platform, ..
+            } => preferred_platform.is_none_or(|platform| platform == origin_platform),
+            StreamRouting::Unblock { source } => source.unwrap_or(Platform::Qq) == origin_platform,
+        }
+    }
+
+    fn fallback_enabled(&self) -> bool {
+        match self.routing {
+            StreamRouting::Standard { fallback, .. } => fallback,
+            StreamRouting::Unblock { .. } => true,
+        }
+    }
+
+    fn provider_request(&self, platform: Platform) -> StreamRequest {
+        let account_platform = match self.routing {
+            StreamRouting::Standard {
+                preferred_platform, ..
+            } => preferred_platform.unwrap_or(platform),
+            StreamRouting::Unblock { source } => source.unwrap_or(Platform::Qq),
+        };
+        StreamRequest {
+            quality: self.quality,
+            variant: self.variant,
+            account: (account_platform == platform)
+                .then(|| self.account.clone())
+                .flatten(),
+        }
+    }
 }
 
 fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls, TuneWeaveError> {
@@ -1573,6 +1610,461 @@ async fn track_stream(
     }
 
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamBatchParams {
+    refs: Option<String>,
+    #[serde(alias = "id")]
+    ids: Option<String>,
+    platform: Option<String>,
+    #[serde(alias = "level")]
+    quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
+    playback_platform: Option<String>,
+    fallback: Option<String>,
+    fallback_platforms: Option<String>,
+    unblock: Option<String>,
+    source: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StreamReferenceInput {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StreamBooleanInput {
+    Boolean(bool),
+    String(String),
+    Integer(i64),
+}
+
+impl StreamBooleanInput {
+    fn into_parameter(self) -> String {
+        match self {
+            Self::Boolean(value) => value.to_string(),
+            Self::String(value) => value,
+            Self::Integer(value) => value.to_string(),
+        }
+    }
+}
+
+impl StreamReferenceInput {
+    fn into_values(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamBatchBody {
+    refs: Option<StreamReferenceInput>,
+    #[serde(alias = "id")]
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    #[serde(alias = "level")]
+    quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
+    playback_platform: Option<String>,
+    fallback: Option<StreamBooleanInput>,
+    fallback_platforms: Option<String>,
+    unblock: Option<StreamBooleanInput>,
+    source: Option<String>,
+    account: Option<String>,
+}
+
+async fn track_streams_get(
+    State(state): State<AppState>,
+    params: Result<Query<StreamBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<StreamBatch>>, ApiError> {
+    let params = query_params(params)?;
+    let references = parse_stream_batch_references(
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        state.default_platform,
+    )?;
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: params.quality.as_deref(),
+        variant: params.variant.as_deref(),
+        playback_platform: params.playback_platform.as_deref(),
+        fallback: params.fallback.as_deref(),
+        fallback_platforms: params.fallback_platforms.as_deref(),
+        unblock: params.unblock.as_deref(),
+        source: params.source.as_deref(),
+        account: params.account.as_deref(),
+    })?;
+    Ok(Json(
+        stream_batch_response(&state, references, controls).await,
+    ))
+}
+
+async fn track_streams_post(
+    State(state): State<AppState>,
+    body: Result<Json<StreamBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<StreamBatch>>, ApiError> {
+    let body = json_body(body)?;
+    let references = parse_stream_batch_references(
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        state.default_platform,
+    )?;
+    let fallback = body.fallback.map(StreamBooleanInput::into_parameter);
+    let unblock = body.unblock.map(StreamBooleanInput::into_parameter);
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: body.quality.as_deref(),
+        variant: body.variant.as_deref(),
+        playback_platform: body.playback_platform.as_deref(),
+        fallback: fallback.as_deref(),
+        fallback_platforms: body.fallback_platforms.as_deref(),
+        unblock: unblock.as_deref(),
+        source: body.source.as_deref(),
+        account: body.account.as_deref(),
+    })?;
+    Ok(Json(
+        stream_batch_response(&state, references, controls).await,
+    ))
+}
+
+fn parse_stream_batch_references(
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    default_platform: Platform,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    let (kind, values) = match (refs, ids) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "refs and ids cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["refs", "ids"] })));
+        }
+        (None, None) => {
+            return Err(TuneWeaveError::invalid_request(
+                "one of refs or ids must be provided",
+            ));
+        }
+        (Some(values), None) => {
+            if platform.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "platform can only be used with ids",
+                ));
+            }
+            ("refs", split_stream_batch_values("refs", values)?)
+        }
+        (None, Some(values)) => ("ids", split_stream_batch_values("ids", values)?),
+    };
+    if kind == "refs" {
+        values.into_iter().map(parse_reference).collect()
+    } else {
+        let platform = platform.map_or(Ok(default_platform), parse_platform_parameter)?;
+        values
+            .into_iter()
+            .map(|id| {
+                ResourceRef::new(platform, &id).map_err(|error| {
+                    TuneWeaveError::invalid_request(format!("invalid stream id: {error}"))
+                        .with_details(json!({ "id": id, "platform": platform }))
+                })
+            })
+            .collect()
+    }
+}
+
+fn split_stream_batch_values(
+    name: &str,
+    values: Vec<String>,
+) -> Result<Vec<String>, TuneWeaveError> {
+    let mut parsed = Vec::new();
+    for value in values {
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "{name} must not contain empty items"
+                ))
+                .with_details(json!({ "parameter": name })));
+            }
+            parsed.push(item.to_owned());
+        }
+    }
+    if parsed.is_empty() {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{name} must not be empty"
+        )));
+    }
+    Ok(parsed)
+}
+
+async fn stream_batch_response(
+    state: &AppState,
+    references: Vec<ResourceRef>,
+    controls: StreamControls,
+) -> ApiResponse<StreamBatch> {
+    let platform = references
+        .first()
+        .map(ResourceRef::platform)
+        .filter(|platform| {
+            references
+                .iter()
+                .all(|reference| reference.platform() == *platform)
+        });
+    let account = controls.account.clone();
+    let batch = resolve_stream_batch(state, &references, &controls).await;
+    let mut response = ApiResponse::new(batch);
+    if let Some(platform) = platform {
+        response = response.with_platform(platform);
+    }
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    response
+}
+
+async fn resolve_stream_batch(
+    state: &AppState,
+    references: &[ResourceRef],
+    controls: &StreamControls,
+) -> StreamBatch {
+    let mut outcomes = vec![None; references.len()];
+    let mut direct_groups = BTreeMap::<Platform, Vec<(usize, Track)>>::new();
+    for (index, reference) in references.iter().enumerate() {
+        if controls.starts_with_origin(reference.platform()) {
+            if state.registry.contains(reference.platform()) {
+                direct_groups
+                    .entry(reference.platform())
+                    .or_default()
+                    .push((
+                        index,
+                        Track::new(reference.clone(), reference.id().to_owned()),
+                    ));
+            } else {
+                let error = TuneWeaveError::platform_unavailable(reference.platform());
+                outcomes[index] = Some(stream_outcome_from_error(reference, &error));
+            }
+        } else {
+            outcomes[index] = Some(resolve_stream_reference(state, reference, controls).await);
+        }
+    }
+
+    let mut provider_batches = BTreeMap::<String, Value>::new();
+    for (platform, entries) in direct_groups {
+        let Some(provider) = state.registry.get(platform) else {
+            continue;
+        };
+        let request = controls.provider_request(platform);
+        let tracks = entries
+            .iter()
+            .map(|(_, track)| track.clone())
+            .collect::<Vec<_>>();
+        match provider.streams(&tracks, &request).await {
+            Ok(batch) => {
+                provider_batches.insert(platform.to_string(), json!(batch.extensions));
+                for (position, (index, track)) in entries.into_iter().enumerate() {
+                    let initial = if let Some(outcome) = batch.outcomes.get(position) {
+                        normalize_direct_stream_outcome(track, &request, outcome.clone())
+                    } else {
+                        let error = TuneWeaveError::new(
+                            ErrorCode::UpstreamError,
+                            "provider omitted a requested stream outcome",
+                        )
+                        .with_platform(platform)
+                        .with_details(json!({
+                            "position": position,
+                            "track_ref": track.resource_ref
+                        }));
+                        stream_outcome_from_error(&track.resource_ref, &error)
+                    };
+                    outcomes[index] =
+                        Some(resolve_failed_stream_outcome(state, initial, controls).await);
+                }
+            }
+            Err(error) => {
+                provider_batches.insert(
+                    platform.to_string(),
+                    json!({
+                        "error_code": error.code,
+                        "error": error.message,
+                        "details": error.details
+                    }),
+                );
+                for (index, track) in entries {
+                    let initial = stream_outcome_from_error(&track.resource_ref, &error);
+                    outcomes[index] =
+                        Some(resolve_failed_stream_outcome(state, initial, controls).await);
+                }
+            }
+        }
+    }
+
+    let outcomes = outcomes
+        .into_iter()
+        .enumerate()
+        .map(|(index, outcome)| {
+            outcome.unwrap_or_else(|| {
+                let error = TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "stream batch outcome was not populated",
+                )
+                .with_details(json!({ "position": index }));
+                stream_outcome_from_error(&references[index], &error)
+            })
+        })
+        .collect();
+    StreamBatch {
+        outcomes,
+        extensions: Extensions::from([
+            ("requested_refs".to_owned(), json!(references)),
+            ("provider_batches".to_owned(), json!(provider_batches)),
+            ("quality".to_owned(), json!(controls.quality)),
+            ("variant".to_owned(), json!(controls.variant)),
+            ("fallback".to_owned(), json!(controls.fallback_enabled())),
+        ]),
+    }
+}
+
+fn normalize_direct_stream_outcome(
+    track: Track,
+    request: &StreamRequest,
+    mut outcome: StreamOutcome,
+) -> StreamOutcome {
+    if outcome.track_ref != track.resource_ref {
+        let error = TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned a stream outcome for the wrong track",
+        )
+        .with_platform(track.platform)
+        .with_details(json!({
+            "expected": track.resource_ref,
+            "actual": outcome.track_ref,
+            "outcome": outcome
+        }));
+        return stream_outcome_from_error(&track.resource_ref, &error);
+    }
+    let Some(stream) = outcome.stream.as_mut() else {
+        if outcome.status == ResolutionStatus::Success {
+            let error = TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "provider marked a stream outcome successful without a stream",
+            )
+            .with_platform(track.platform)
+            .with_details(json!({ "track_ref": track.resource_ref }));
+            return stream_outcome_from_error(&track.resource_ref, &error);
+        }
+        return outcome;
+    };
+    if outcome.status != ResolutionStatus::Success {
+        let error = TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned a stream together with a failed outcome",
+        )
+        .with_platform(track.platform)
+        .with_details(json!({ "track_ref": track.resource_ref, "status": outcome.status }));
+        return stream_outcome_from_error(&track.resource_ref, &error);
+    }
+    stream.origin_track = Some(track.resource_ref.clone());
+    stream.resolved_track = track.resource_ref.clone();
+    stream.resolved_platform = track.platform;
+    stream.match_score = Some(1.0);
+    if stream.attempts.is_empty() {
+        stream.attempts.push(ResolutionAttempt {
+            platform: track.platform,
+            account: request.account.clone(),
+            candidate: Some(track.resource_ref.clone()),
+            match_score: Some(1.0),
+            status: ResolutionStatus::Success,
+            error: None,
+        });
+    }
+    outcome.error_code = None;
+    outcome.error = None;
+    outcome
+}
+
+async fn resolve_failed_stream_outcome(
+    state: &AppState,
+    initial: StreamOutcome,
+    controls: &StreamControls,
+) -> StreamOutcome {
+    if initial.status == ResolutionStatus::Success || !controls.fallback_enabled() {
+        return initial;
+    }
+    let initial_value = serde_json::to_value(&initial)
+        .unwrap_or_else(|error| json!({ "serialization_error": error.to_string() }));
+    let mut resolved = resolve_stream_reference(state, &initial.track_ref, controls).await;
+    resolved
+        .extensions
+        .insert("initial_outcome".to_owned(), initial_value);
+    resolved
+}
+
+async fn resolve_stream_reference(
+    state: &AppState,
+    reference: &ResourceRef,
+    controls: &StreamControls,
+) -> StreamOutcome {
+    let provider = match state.registry.require(reference.platform()) {
+        Ok(provider) => provider,
+        Err(error) => return stream_outcome_from_error(reference, &error),
+    };
+    let origin = match provider.track(reference.id(), None).await {
+        Ok(track) => track,
+        Err(error) => return stream_outcome_from_error(reference, &error),
+    };
+    match state
+        .resolver
+        .resolve(&origin, &controls.resolve_request(reference.platform()))
+        .await
+    {
+        Ok(stream) => StreamOutcome {
+            track_ref: reference.clone(),
+            status: ResolutionStatus::Success,
+            stream: Some(stream),
+            error_code: None,
+            error: None,
+            extensions: Extensions::new(),
+        },
+        Err(error) => stream_outcome_from_error(reference, &error),
+    }
+}
+
+fn stream_outcome_from_error(reference: &ResourceRef, error: &TuneWeaveError) -> StreamOutcome {
+    StreamOutcome {
+        track_ref: reference.clone(),
+        status: stream_error_status(error.code),
+        stream: None,
+        error_code: Some(error.code),
+        error: Some(error.message.clone()),
+        extensions: Extensions::from([("details".to_owned(), error.details.clone())]),
+    }
+}
+
+const fn stream_error_status(code: ErrorCode) -> ResolutionStatus {
+    match code {
+        ErrorCode::AuthenticationRequired => ResolutionStatus::AuthenticationRequired,
+        ErrorCode::PermissionDenied => ResolutionStatus::PermissionDenied,
+        ErrorCode::MatchRejected => ResolutionStatus::NoMatch,
+        ErrorCode::CapabilityNotSupported
+        | ErrorCode::PlatformUnavailable
+        | ErrorCode::ResourceNotFound => ResolutionStatus::Unavailable,
+        ErrorCode::InvalidRequest
+        | ErrorCode::Conflict
+        | ErrorCode::RateLimited
+        | ErrorCode::UpstreamError
+        | ErrorCode::UpstreamTimeout
+        | ErrorCode::InternalError => ResolutionStatus::UpstreamError,
+    }
 }
 
 async fn playlist(
@@ -4643,6 +5135,7 @@ mod tests {
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
+                Capability::AudioStreamBatch,
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
@@ -8470,6 +8963,135 @@ mod tests {
         assert_eq!(json["data"]["attempts"][1]["platform"], "netease");
         assert_eq!(json["data"]["attempts"][1]["status"], "success");
         assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn track_stream_batch_get_preserves_order_duplicates_and_netease_aliases() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/streams?id=2709812973,1969519579,2709812973&platform=netease&level=jyeffect&backend=v1&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["outcomes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            json["data"]["outcomes"][0]["track_ref"],
+            "netease:2709812973"
+        );
+        assert_eq!(
+            json["data"]["outcomes"][1]["track_ref"],
+            "netease:1969519579"
+        );
+        assert_eq!(
+            json["data"]["outcomes"][2]["track_ref"],
+            "netease:2709812973"
+        );
+        for outcome in json["data"]["outcomes"].as_array().expect("outcomes") {
+            assert_eq!(outcome["status"], "success");
+            assert_eq!(outcome["stream"]["requested_quality"], "surround");
+            assert_eq!(
+                outcome["stream"]["headers"]["x-test-stream-variant"],
+                "modern"
+            );
+            assert_eq!(
+                outcome["stream"]["attempts"].as_array().map(Vec::len),
+                Some(1)
+            );
+        }
+        assert_eq!(json["data"]["extensions"]["quality"], "surround");
+        assert_eq!(json["data"]["extensions"]["variant"], "modern");
+        assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn track_stream_batch_post_supports_mixed_refs_and_per_item_errors() {
+        let body = json!({
+            "refs": ["netease:1", "qq:2", "netease:1"],
+            "quality": "high",
+            "variant": "legacy",
+            "fallback": false
+        });
+        serde_json::from_value::<StreamBatchBody>(body.clone()).expect("parse stream batch body");
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/tracks/streams",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["outcomes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["data"]["outcomes"][0]["status"], "success");
+        assert_eq!(json["data"]["outcomes"][1]["track_ref"], "qq:2");
+        assert_eq!(json["data"]["outcomes"][1]["status"], "unavailable");
+        assert_eq!(
+            json["data"]["outcomes"][1]["error_code"],
+            "platform_unavailable"
+        );
+        assert_eq!(json["data"]["outcomes"][2]["track_ref"], "netease:1");
+        assert_eq!(json["data"]["outcomes"][2]["status"], "success");
+        assert_eq!(json["meta"]["platform"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn track_stream_batch_unblock_uses_the_unified_resolver() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/streams?ids=2709812973&platform=netease&unblock=true&source=qq&account=green-vip&level=sky&backend=v1&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let outcome = &json["data"]["outcomes"][0];
+        assert_eq!(outcome["status"], "success");
+        assert_eq!(outcome["stream"]["requested_quality"], "spatial");
+        assert_eq!(
+            outcome["stream"]["attempts"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(outcome["stream"]["attempts"][0]["platform"], "qq");
+        assert_eq!(outcome["stream"]["attempts"][0]["account"], "green-vip");
+        assert_eq!(outcome["stream"]["attempts"][1]["platform"], "netease");
+        assert_eq!(json["data"]["extensions"]["fallback"], true);
+        assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn track_stream_batch_rejects_ambiguous_or_malformed_get_inputs() {
+        for path in [
+            "/v1/tracks/streams",
+            "/v1/tracks/streams?refs=netease:1&ids=1",
+            "/v1/tracks/streams?refs=netease:1&platform=netease",
+            "/v1/tracks/streams?refs=netease:1,,netease:2",
+            "/v1/tracks/streams?refs=invalid",
+            "/v1/tracks/streams?ids=1&platform=unknown",
+            "/v1/tracks/streams?ids=1&unblock=true&playback_platform=qq",
+            "/v1/tracks/streams?ids=1&unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn track_stream_batch_rejects_ambiguous_or_malformed_post_inputs() {
+        for body in [
+            json!({}),
+            json!({ "refs": ["netease:1"], "ids": ["1"] }),
+            json!({ "refs": [] }),
+            json!({ "ids": ["1"], "platform": "unknown" }),
+            json!({ "ids": ["1"], "unknown": true }),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/tracks/streams",
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{body}");
+        }
     }
 
     #[tokio::test]
