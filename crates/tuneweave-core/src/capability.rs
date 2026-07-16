@@ -74,6 +74,7 @@ pub enum Capability {
     MusicPartner,
     CommentWrite,
     CommentsRead,
+    CommentReactionsRead,
     PlatformApi,
     PlatformBatch,
 }
@@ -121,6 +122,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::CommentsRead).expect("serialize comments capability"),
             serde_json::json!("comments_read")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::CommentReactionsRead)
+                .expect("serialize comment reactions capability"),
+            serde_json::json!("comment_reactions_read")
         );
     }
 }

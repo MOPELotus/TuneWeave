@@ -656,6 +656,69 @@ pub struct CommentPage {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentReactionKind {
+    Like,
+    Hug,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommentReactionListRequest {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub target_user_ref: ResourceRef,
+    pub kind: CommentReactionKind,
+    pub limit: u32,
+    pub page: u32,
+    pub cursor: Option<String>,
+    pub id_cursor: Option<String>,
+    pub account: Option<String>,
+}
+
+impl CommentReactionListRequest {
+    #[must_use]
+    pub const fn new(
+        target: CommentTarget,
+        comment_id: String,
+        target_user_ref: ResourceRef,
+        kind: CommentReactionKind,
+        limit: u32,
+    ) -> Self {
+        Self {
+            target,
+            comment_id,
+            target_user_ref,
+            kind,
+            limit,
+            page: 1,
+            cursor: None,
+            id_cursor: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentReaction {
+    pub kind: CommentReactionKind,
+    pub user: User,
+    pub content: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommentReactionPage {
+    pub target: CommentTarget,
+    pub comment_id: String,
+    pub target_user_ref: ResourceRef,
+    pub kind: CommentReactionKind,
+    pub reactions: Vec<CommentReaction>,
+    pub current_comment: Option<Comment>,
+    pub pagination: PageMeta,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumListRequest {
     pub limit: u32,
@@ -2136,5 +2199,72 @@ mod tests {
             serde_json::to_value(request.sort).expect("serialize comment sort"),
             serde_json::json!("time")
         );
+    }
+
+    #[test]
+    fn comment_reaction_pages_keep_users_kind_and_dual_cursors_explicit() {
+        let target = CommentTarget::new(
+            ResourceRef::new(Platform::Netease, "863481066").expect("valid track reference"),
+            CommentTargetKind::Track,
+        );
+        let target_user_ref =
+            ResourceRef::new(Platform::Netease, "285516405").expect("valid user reference");
+        let mut request = CommentReactionListRequest::new(
+            target.clone(),
+            "1167145843".to_owned(),
+            target_user_ref.clone(),
+            CommentReactionKind::Hug,
+            2,
+        );
+        request.cursor = Some("04-八月-2020 17:46:25:000".to_owned());
+        request.id_cursor = Some("362576849".to_owned());
+
+        let user = User {
+            resource_ref: ResourceRef::new(Platform::Netease, "2121989064")
+                .expect("valid reacting user reference"),
+            platform: Platform::Netease,
+            id: "2121989064".to_owned(),
+            name: "清梦初仄".to_owned(),
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+            signature: None,
+            followed: Some(false),
+            mutual: None,
+            extensions: Extensions::new(),
+        };
+        let page = CommentReactionPage {
+            target,
+            comment_id: request.comment_id.clone(),
+            target_user_ref,
+            kind: CommentReactionKind::Hug,
+            reactions: vec![CommentReaction {
+                kind: CommentReactionKind::Hug,
+                user,
+                content: Some("给了 Puddin_of_Harley_Quinn 一个抱抱".to_owned()),
+                extensions: Extensions::new(),
+            }],
+            current_comment: None,
+            pagination: PageMeta {
+                limit: 2,
+                offset: 0,
+                total: Some(150),
+                next_offset: Some(2),
+                has_more: true,
+                extensions: Extensions::from([
+                    ("next_cursor".to_owned(), serde_json::json!("cursor")),
+                    ("next_id_cursor".to_owned(), serde_json::json!(362576849)),
+                ]),
+            },
+            extensions: Extensions::new(),
+        };
+
+        let request = serde_json::to_value(request).expect("serialize reaction request");
+        assert_eq!(request["kind"], "hug");
+        assert_eq!(request["target_user_ref"], "netease:285516405");
+        assert_eq!(request["id_cursor"], "362576849");
+
+        let page = serde_json::to_value(page).expect("serialize reaction page");
+        assert_eq!(page["kind"], "hug");
+        assert_eq!(page["reactions"][0]["user"]["ref"], "netease:2121989064");
+        assert_eq!(page["pagination"]["total"], 150);
     }
 }

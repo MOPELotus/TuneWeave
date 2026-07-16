@@ -11,15 +11,15 @@ use crate::{
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
     CommentDeleteRequest, CommentListRequest, CommentMutationResult, CommentPage,
-    CommentWriteRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, Result, SearchItem, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video,
+    CommentReactionListRequest, CommentReactionPage, CommentWriteRequest, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
+    DimensionChartRequest, DimensionChartTrackSnapshot, ImageUploadRequest, ImageUploadResult,
+    Lyrics, MediaStream, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, Result, SearchItem, SearchKind,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
 };
 
 /// A dynamically registered music platform adapter.
@@ -629,6 +629,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::CommentsRead,
+        ))
+    }
+
+    async fn comment_reactions(
+        &self,
+        _request: &CommentReactionListRequest,
+    ) -> Result<CommentReactionPage> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CommentReactionsRead,
         ))
     }
 
