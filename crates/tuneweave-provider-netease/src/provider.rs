@@ -20,9 +20,10 @@ use tuneweave_core::{
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, SubscriptionResult, Track,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoKind,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery,
+    StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, TuneWeaveError, User,
+    Video, VideoKind,
 };
 
 use crate::{
@@ -280,6 +281,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::Banners,
             Capability::RadioTaxonomy,
             Capability::RadioStationDetail,
+            Capability::RadioStationList,
             Capability::TrackDetail,
             Capability::AlbumDetail,
             Capability::AlbumList,
@@ -460,6 +462,19 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_success(&response.body)?;
         map_radio_station_response(response.body)
+    }
+
+    async fn radio_stations(
+        &self,
+        request: &RadioStationListRequest,
+    ) -> Result<Page<RadioStation>> {
+        let payload = netease_radio_station_list_payload(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_eapi("/api/voice/broadcast/channel/list", payload)
+            .await?;
+        ensure_success(&response.body)?;
+        map_radio_station_list_response(response.body, request.limit.max(1))
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1924,6 +1939,121 @@ fn map_radio_catalog_option(raw: Value, kind: &str) -> Result<RadioCatalogOption
         name,
         extensions,
     })
+}
+
+fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Result<Value> {
+    let category_id = request
+        .category_id
+        .as_deref()
+        .map(|id| parse_numeric_id("broadcast category", id).map(|id| id.to_string()))
+        .transpose()?
+        .unwrap_or_else(|| "0".to_owned());
+    let region_id = request
+        .region_id
+        .as_deref()
+        .map(|id| parse_numeric_id("broadcast region", id).map(|id| id.to_string()))
+        .transpose()?
+        .unwrap_or_else(|| "0".to_owned());
+    let (last_id, score) = match &request.cursor {
+        Some(cursor) => (
+            parse_numeric_id("broadcast station cursor", &cursor.id)?.to_string(),
+            cursor.score.to_string(),
+        ),
+        None => ("0".to_owned(), "-1".to_owned()),
+    };
+    Ok(json!({
+        "categoryId": category_id,
+        "regionId": region_id,
+        "limit": request.limit.max(1).to_string(),
+        "lastId": last_id,
+        "score": score
+    }))
+}
+
+fn map_radio_station_list_response(body: Value, limit: u32) -> Result<Page<RadioStation>> {
+    let data = body
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase broadcast station catalog did not contain data",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": body.clone() }))
+        })?;
+    let raw_items = data
+        .get("list")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase broadcast station catalog did not contain a list",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": body.clone() }))
+        })?;
+    let total = data.get("total").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    });
+    let upstream_has_more = data.get("hasMore").and_then(json_bool).unwrap_or(false);
+    let next_cursor = if upstream_has_more {
+        let last = raw_items.last().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase broadcast station catalog has more items but no cursor source",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": body.clone() }))
+        })?;
+        let id = radio_scalar_field(last, &["id", "channelId"])
+            .ok_or_else(|| radio_station_cursor_error("id", last))?;
+        let score = last
+            .get("score")
+            .and_then(json_i64)
+            .ok_or_else(|| radio_station_cursor_error("score", last))?;
+        Some(RadioStationCursor { id, score })
+    } else {
+        None
+    };
+    let items = raw_items
+        .into_iter()
+        .map(|raw| {
+            let mut station = map_radio_station_fields(&raw, &raw, None)?;
+            station
+                .extensions
+                .insert("broadcast_station".to_owned(), raw);
+            Ok(station)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    if let Some(cursor) = &next_cursor {
+        extensions.insert("next_cursor".to_owned(), json!(cursor));
+    }
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: next_cursor.is_some(),
+            extensions,
+        },
+    })
+}
+
+fn radio_station_cursor_error(field: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase broadcast station cursor did not contain a {field}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "station": raw }))
 }
 
 fn netease_radio_collection_payload(limit: u32, offset: u32) -> Value {
@@ -4628,6 +4758,87 @@ mod tests {
     }
 
     #[test]
+    fn maps_filtered_broadcast_station_catalog_and_cursor() {
+        let request = RadioStationListRequest {
+            limit: 20,
+            category_id: Some("1".to_owned()),
+            region_id: Some("407".to_owned()),
+            cursor: Some(RadioStationCursor {
+                id: "172".to_owned(),
+                score: 1542,
+            }),
+            account: Some("radio-user".to_owned()),
+        };
+        assert_eq!(
+            netease_radio_station_list_payload(&request).expect("build station catalog request"),
+            json!({
+                "categoryId": "1",
+                "regionId": "407",
+                "limit": "20",
+                "lastId": "172",
+                "score": "1542"
+            })
+        );
+
+        let page = map_radio_station_list_response(
+            json!({
+                "code": 200,
+                "data": {
+                    "hasMore": true,
+                    "total": 843,
+                    "list": [
+                        {
+                            "id": 175,
+                            "name": "河北音乐广播",
+                            "coverUrl": "https://example.test/175.jpg",
+                            "regionName": "河北",
+                            "score": 1492,
+                            "source": "QT",
+                            "subed": false
+                        },
+                        {
+                            "id": 14,
+                            "name": "河北交通广播",
+                            "coverUrl": "https://example.test/14.jpg",
+                            "regionName": "河北",
+                            "score": "1472",
+                            "source": "QT"
+                        }
+                    ]
+                }
+            }),
+            20,
+        )
+        .expect("map broadcast station catalog");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:175");
+        assert_eq!(page.items[0].subscribed, Some(false));
+        assert_eq!(page.items[1].region.as_deref(), Some("河北"));
+        assert_eq!(page.pagination.limit, 20);
+        assert_eq!(page.pagination.offset, 0);
+        assert_eq!(page.pagination.total, Some(843));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["next_cursor"]["id"], "14");
+        assert_eq!(page.pagination.extensions["next_cursor"]["score"], 1472);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+
+        let error = map_radio_station_list_response(
+            json!({
+                "code": 200,
+                "data": {
+                    "hasMore": true,
+                    "list": [{ "id": 14, "name": "缺少游标分值" }]
+                }
+            }),
+            20,
+        )
+        .expect_err("missing cursor score");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
     fn maps_collected_broadcast_stations_and_preserves_pagination() {
         assert_eq!(
             netease_radio_collection_payload(25, 50),
@@ -5997,6 +6208,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcast_station_catalog_validates_filters_and_cursor_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for request in [
+            RadioStationListRequest {
+                category_id: Some("invalid".to_owned()),
+                ..RadioStationListRequest::new(20)
+            },
+            RadioStationListRequest {
+                region_id: Some("invalid".to_owned()),
+                ..RadioStationListRequest::new(20)
+            },
+            RadioStationListRequest {
+                cursor: Some(RadioStationCursor {
+                    id: "invalid".to_owned(),
+                    score: 1,
+                }),
+                ..RadioStationListRequest::new(20)
+            },
+        ] {
+            let error = MusicProvider::radio_stations(&provider, &request)
+                .await
+                .expect_err("invalid broadcast station catalog parameter");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[tokio::test]
     async fn album_ids_are_validated_before_network_access() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let radio_error = MusicProvider::radio_station(&provider, "invalid", None)
@@ -6437,6 +6675,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PlatformBatch));
         assert!(capabilities.contains(&Capability::RadioTaxonomy));
         assert!(capabilities.contains(&Capability::RadioStationDetail));
+        assert!(capabilities.contains(&Capability::RadioStationList));
     }
 
     #[test]
@@ -7013,6 +7252,55 @@ mod tests {
         );
         assert_eq!(station.subscribed, None);
         assert_eq!(station.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_broadcast_station_catalog_filters_and_cursor() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+
+        let mut category_request = RadioStationListRequest::new(20);
+        category_request.category_id = Some("1".to_owned());
+        let first = MusicProvider::radio_stations(&provider, &category_request)
+            .await
+            .expect("live music broadcast station catalog");
+        assert!(!first.items.is_empty());
+        assert!(first.pagination.has_more);
+        assert_eq!(first.pagination.extensions["response"]["code"], 200);
+        let cursor: RadioStationCursor =
+            serde_json::from_value(first.pagination.extensions["next_cursor"].clone())
+                .expect("live station cursor");
+
+        let first_ids = first
+            .items
+            .iter()
+            .map(|station| station.id.as_str())
+            .collect::<BTreeSet<_>>();
+        category_request.cursor = Some(cursor);
+        let second = MusicProvider::radio_stations(&provider, &category_request)
+            .await
+            .expect("live second broadcast station catalog page");
+        assert!(!second.items.is_empty());
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|station| !first_ids.contains(station.id.as_str()))
+        );
+
+        let mut region_request = RadioStationListRequest::new(20);
+        region_request.region_id = Some("407".to_owned());
+        let network = MusicProvider::radio_stations(&provider, &region_request)
+            .await
+            .expect("live network station region");
+        assert_eq!(network.pagination.total, Some(4));
+        assert!(!network.pagination.has_more);
+        assert!(
+            network
+                .items
+                .iter()
+                .all(|station| station.region.as_deref() == Some("网络台"))
+        );
     }
 
     #[tokio::test]
