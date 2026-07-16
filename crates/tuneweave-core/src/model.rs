@@ -227,6 +227,23 @@ pub struct AlbumStats {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackEntitlement {
+    pub track_ref: ResourceRef,
+    pub playable: Option<bool>,
+    pub downloadable: Option<bool>,
+    pub play_bitrate: Option<u64>,
+    pub download_bitrate: Option<u64>,
+    pub max_play_bitrate: Option<u64>,
+    pub max_download_bitrate: Option<u64>,
+    pub play_quality: Option<Quality>,
+    pub download_quality: Option<Quality>,
+    pub available_qualities: Vec<Quality>,
+    pub fee: Option<i64>,
+    pub paid: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Money {
     pub amount: f64,
     pub currency: String,

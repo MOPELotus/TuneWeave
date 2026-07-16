@@ -7,7 +7,7 @@ use crate::{
     DigitalAlbum, DigitalAlbumListRequest, Lyrics, MediaStream, Page, PageRequest,
     PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
     ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
-    SearchQuery, StreamRequest, Track, TuneWeaveError,
+    SearchQuery, StreamRequest, Track, TrackEntitlement, TuneWeaveError,
 };
 
 /// A dynamically registered music platform adapter.
@@ -70,6 +70,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AlbumStats,
+        ))
+    }
+
+    async fn album_track_entitlements(
+        &self,
+        _id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<TrackEntitlement>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AlbumTrackEntitlements,
         ))
     }
 

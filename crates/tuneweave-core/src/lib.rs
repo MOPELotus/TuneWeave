@@ -22,7 +22,8 @@ pub use model::{
     DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics, MediaStream, Money, Page,
     PageMeta, PageRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
     Playlist, ProviderDescriptor, Quality, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow,
+    ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest, Track,
+    TrackEntitlement, TrialWindow,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
