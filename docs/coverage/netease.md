@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=308`、`partial=5`、`implemented=33`、`verified=61`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=306`、`partial=5`、`implemented=35`、`verified=61`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -308,10 +308,10 @@
 | `song_purchased` | `/song/purchased` | `pending` | — |
 | `song_red_count` | `/song/red/count` | `pending` | — |
 | `song_singledownlist` | `/song/singledownlist` | `pending` | — |
-| `song_url` | `/song/url` | `verified` | `GET /v1/tracks/{ref}/stream`（旧码率接口） |
-| `song_url_match` | `/song/url/match` | `pending` | — |
+| `song_url` | `/song/url` | `verified` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（`variant/backend=legacy`；完整接受统一 `bitrate` 和参考 `br`，任意无符号 bit/s 原样进入 `/api/song/enhance/player/url`，省略时按音质映射默认码率；批量 `id/ids` 保留顺序与重复项并以逐项结果表达失败，完整上游响应只保存一次；2026-07-17 真实二进制 HTTP 以 `br=192123` 请求两首歌曲，上游 `code=200`、两项均成功并按平台档位返回 192000 bit/s，路径与变体分别确认为旧版 API/legacy） |
+| `song_url_match` | `/song/url/match` | `implemented` | `GET /v1/tracks/{ref}/stream?unblock=true&source=...`、批量端点同参数（复用统一严格匹配解析器而不引入第二套 URL 匹配；支持选择任意平台注册来源，省略时按 QQ/酷狗/酷我/咪咕顺序后回原平台，账号绑定首个目标，返回完整尝试轨迹；离线已验证来源选择、冲突拒绝、账户归属和批量逐项结果；2026-07-17 真实二进制 HTTP 验证当前未注册 QQ 时明确记录 `qq:unavailable` 后 `netease:success`，待 QQ Basic 接入后验证真实跨平台成功 URL） |
 | `song_url_ncmget` | `/song/url/ncmget` | `pending` | — |
-| `song_url_v1` | `/song/url/v1` | `pending` | — |
+| `song_url_v1` | `/song/url/v1` | `implemented` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（缺省或 `variant/backend=modern|v1` 固定 XEAPI `/api/song/enhance/player/url/v1`，精确提交数字 ID 列表、`level`、`encodeType=flac`，`sky` 额外提交 `immerseType=c51`；完整支持 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster` 九档及统一别名，批量保序、保重复、逐项失败且完整响应不重复；`unblock/source` 分支复用统一回退；2026-07-17 真实二进制 HTTP 对九档逐项验证均为上游 `code=200` 和成功流，三项含重复 ID 的 GET/POST 批量均按原顺序成功；跨平台成功态待对应 provider Basic 接入） |
 | `song_url_v1_302` | `/song/url/v1/302` | `pending` | — |
 | `song_wiki_summary` | `/song/wiki/summary` | `pending` | — |
 | `starpick_comments_summary` | `/starpick/comments/summary` | `pending` | — |
