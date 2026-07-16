@@ -23,6 +23,38 @@ pub(crate) struct TrackEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AlbumEnvelope {
+    pub album: AlbumDetail,
+    #[serde(default)]
+    pub songs: Vec<Song>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AlbumDetail {
+    pub id: u64,
+    pub name: String,
+    #[serde(default, alias = "alias")]
+    pub alia: Vec<String>,
+    #[serde(default)]
+    pub artists: Vec<Artist>,
+    pub description: Option<String>,
+    #[serde(rename = "picUrl")]
+    pub pic_url: Option<String>,
+    #[serde(rename = "publishTime")]
+    pub publish_time: Option<u64>,
+    pub size: Option<u64>,
+    pub company: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    #[serde(rename = "subType")]
+    pub sub_type: Option<String>,
+    pub paid: Option<bool>,
+    #[serde(rename = "onSale")]
+    pub on_sale: Option<bool>,
+    pub mark: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistEnvelope {
     pub playlist: Option<PlaylistDetail>,
 }

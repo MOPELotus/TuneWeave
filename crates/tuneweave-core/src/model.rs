@@ -150,6 +150,24 @@ pub struct AlbumSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Album {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub artists: Vec<ArtistSummary>,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub published_at: Option<String>,
+    pub track_count: Option<u64>,
+    pub company: Option<String>,
+    pub kind: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     #[serde(rename = "ref")]
     pub resource_ref: ResourceRef,

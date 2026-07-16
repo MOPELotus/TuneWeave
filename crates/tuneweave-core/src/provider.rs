@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    AccountProfile, AuthChallengeRequest, Capability, Lyrics, MediaStream, Page, PageRequest,
-    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
+    AccountProfile, Album, AuthChallengeRequest, Capability, Lyrics, MediaStream, Page,
+    PageRequest, PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryRequest,
+    Playlist, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RecommendationRequest, Result,
     SearchQuery, StreamRequest, Track, TuneWeaveError,
 };
 
@@ -41,6 +41,20 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackDetail,
+        ))
+    }
+
+    async fn album(&self, _id: &str, _account: Option<&str>) -> Result<Album> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AlbumDetail,
+        ))
+    }
+
+    async fn album_tracks(&self, _id: &str, _request: &PageRequest) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AlbumDetail,
         ))
     }
 

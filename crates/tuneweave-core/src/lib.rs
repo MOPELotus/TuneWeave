@@ -18,10 +18,10 @@ pub use capability::Capability;
 pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
-    AlbumSummary, ArtistSummary, Extensions, LyricContributor, Lyrics, MediaStream, Page, PageMeta,
-    PageRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    ProviderDescriptor, Quality, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow,
+    Album, AlbumSummary, ArtistSummary, Extensions, LyricContributor, Lyrics, MediaStream, Page,
+    PageMeta, PageRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, ProviderDescriptor, Quality, RecommendationRequest, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

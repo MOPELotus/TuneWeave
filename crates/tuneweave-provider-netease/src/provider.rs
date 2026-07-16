@@ -8,21 +8,22 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream, MusicProvider,
-    Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
-    Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RecommendationRequest, ResourceRef,
-    Result, SearchKind, SearchQuery, StreamRequest, Track, TrialWindow, TuneWeaveError,
+    AccountProfile, Album, AlbumSummary, ArtistSummary, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, ErrorCode, Extensions, LyricContributor, Lyrics, MediaStream,
+    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RecommendationRequest, ResourceRef, Result, SearchKind, SearchQuery, StreamRequest, Track,
+    TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseClient, NeteaseConfig,
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
-        AudioQuality, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        AlbumDetail, AlbumEnvelope, AudioQuality, LikedTracksEnvelope, LyricText, LyricUser,
+        LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope,
+        Privilege, RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
         SearchEnvelope, Song, StreamData, StreamEnvelope, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
@@ -257,6 +258,7 @@ impl MusicProvider for NeteaseProvider {
         BTreeSet::from([
             Capability::SearchTracks,
             Capability::TrackDetail,
+            Capability::AlbumDetail,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -347,6 +349,26 @@ impl MusicProvider for NeteaseProvider {
         })?;
         let privilege = privileges.remove(&song.id);
         map_song(song, privilege)
+    }
+
+    async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
+        let id = parse_numeric_id("album", id)?;
+        let client = self.client_for(account)?;
+        let response = fetch_album_content(&client, id).await?;
+        map_album(response.album)
+    }
+
+    async fn album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let id = parse_numeric_id("album", id)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = fetch_album_content(&client, id).await?;
+        let limit = request.limit.clamp(1, 100);
+        let (songs, pagination) = select_page(response.songs, limit, request.offset);
+        let items = songs
+            .into_iter()
+            .map(|song| map_song(song, None))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Page { items, pagination })
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -704,6 +726,14 @@ async fn authenticated_user_id(client: &NeteaseClient, account: &str) -> Result<
         )
         .with_platform(Platform::Netease)
     })
+}
+
+async fn fetch_album_content(client: &NeteaseClient, id: u64) -> Result<AlbumEnvelope> {
+    let response = client
+        .request_weapi(&format!("/api/v1/album/{id}"), json!({}))
+        .await?;
+    ensure_success(&response.body)?;
+    parse_body(response.body)
 }
 
 async fn fetch_tracks_by_ids(client: &NeteaseClient, ids: &[u64]) -> Result<Vec<Track>> {
@@ -1241,6 +1271,59 @@ fn map_playlist(playlist: PlaylistDetail) -> Result<Playlist> {
     })
 }
 
+fn map_album(album: AlbumDetail) -> Result<Album> {
+    let resource_ref =
+        ResourceRef::new(Platform::Netease, album.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid album id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let artists = album
+        .artists
+        .into_iter()
+        .map(
+            |artist| -> std::result::Result<ArtistSummary, ParseResourceRefError> {
+                Ok(ArtistSummary {
+                    resource_ref: Some(ResourceRef::new(Platform::Netease, artist.id.to_string())?),
+                    name: artist.name,
+                })
+            },
+        )
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid album artist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "sub_type", album.sub_type);
+    insert_extension(&mut extensions, "paid", album.paid);
+    insert_extension(&mut extensions, "on_sale", album.on_sale);
+    insert_extension(&mut extensions, "mark", album.mark);
+    insert_extension(&mut extensions, "publish_time_ms", album.publish_time);
+    Ok(Album {
+        resource_ref,
+        platform: Platform::Netease,
+        id: album.id.to_string(),
+        name: album.name,
+        aliases: album.alia,
+        artists,
+        description: album.description.unwrap_or_default(),
+        cover_url: album.pic_url,
+        published_at: album
+            .publish_time
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        track_count: album.size,
+        company: album.company,
+        kind: album.kind,
+        extensions,
+    })
+}
+
 fn insert_extension<T: serde::Serialize>(
     extensions: &mut Extensions,
     name: &str,
@@ -1530,6 +1613,47 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_album_to_the_unified_model() {
+        let album: AlbumDetail = serde_json::from_value(json!({
+            "id": 18915,
+            "name": "Jay",
+            "alias": ["周杰伦首专"],
+            "artists": [{"id": 6452, "name": "周杰伦"}],
+            "description": "周杰伦首张专辑",
+            "picUrl": "https://example.test/jay.jpg",
+            "publishTime": 968428800000_u64,
+            "size": 10,
+            "company": "杰威尔",
+            "type": "专辑",
+            "subType": "录音室版",
+            "paid": false,
+            "onSale": true,
+            "mark": 0
+        }))
+        .expect("album fixture");
+        let album = map_album(album).expect("map album");
+        assert_eq!(album.resource_ref.to_string(), "netease:18915");
+        assert_eq!(album.artists[0].name, "周杰伦");
+        assert_eq!(album.track_count, Some(10));
+        assert_eq!(album.extensions["sub_type"], "录音室版");
+        assert!(album.published_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn album_ids_are_validated_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let detail_error = MusicProvider::album(&provider, "invalid", None)
+            .await
+            .expect_err("invalid album id");
+        assert_eq!(detail_error.code, ErrorCode::InvalidRequest);
+        let tracks_error =
+            MusicProvider::album_tracks(&provider, "invalid", &PageRequest::new(30, 0))
+                .await
+                .expect_err("invalid album tracks id");
+        assert_eq!(tracks_error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn maps_netease_lyrics_and_contributors() {
         let lyrics: LyricsEnvelope = serde_json::from_value(json!({
             "lrc": {"version": 12, "lyric": "[00:01.00]素胚勾勒出青花"},
@@ -1687,6 +1811,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
+        assert!(capabilities.contains(&Capability::AlbumDetail));
     }
 
     #[tokio::test]
@@ -2029,6 +2154,23 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert!(page.pagination.total.is_some_and(|total| total >= 2));
         assert!(page.items.iter().all(|track| !track.artists.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_album_and_tracks() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let album = MusicProvider::album(&provider, "18915", None)
+            .await
+            .expect("live album detail");
+        assert_eq!(album.resource_ref.to_string(), "netease:18915");
+        assert!(!album.name.is_empty());
+        let tracks = MusicProvider::album_tracks(&provider, "18915", &PageRequest::new(2, 0))
+            .await
+            .expect("live album tracks");
+        assert_eq!(tracks.items.len(), 2);
+        assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
+        assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
     }
 
     #[tokio::test]
