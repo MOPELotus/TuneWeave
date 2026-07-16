@@ -24,14 +24,14 @@ use tuneweave_core::{
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
     CommentReactionKind, CommentReactionListRequest, CommentReactionMutationRequest,
-    CommentReactionMutationResult, CommentReactionPage, CommentReplyReference, CommentSort,
-    CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
-    CommentThreadStatsRequest, CommentWriteRequest, CreatorSummary, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream, Money,
-    MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    CommentReactionMutationResult, CommentReactionPage, CommentReplyReference,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStats, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
+    DimensionChartRequest, DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode,
+    Extensions, ImageUploadRequest, ImageUploadResult, LyricContributor, Lyrics, MediaStream,
+    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
     PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderQrPoll,
     ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
@@ -365,6 +365,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::CommentsRead,
             Capability::CommentReactionsRead,
             Capability::CommentReactionsWrite,
+            Capability::CommentReportsWrite,
             Capability::CommentThreadStats,
             Capability::PlatformApi,
             Capability::PlatformBatch,
@@ -2046,6 +2047,15 @@ impl MusicProvider for NeteaseProvider {
         map_netease_comment_reaction_mutation(request, response.body)
     }
 
+    async fn report_comment(&self, request: &CommentReportRequest) -> Result<CommentReportResult> {
+        let (path, payload) = netease_comment_report_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "comment reporting")?;
+        let response = client.request_eapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "comment reporting")?;
+        map_netease_comment_report(request, response.body)
+    }
+
     async fn comment_thread_stats(
         &self,
         request: &CommentThreadStatsRequest,
@@ -2264,6 +2274,32 @@ fn netease_comment_reaction_mutation_request(
         json!({
             "threadId": thread_id,
             "commentId": comment_id
+        }),
+    ))
+}
+
+fn netease_comment_report_request(request: &CommentReportRequest) -> Result<(&'static str, Value)> {
+    if request.target.kind != CommentTargetKind::Track {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase comment reports only accept track comment targets",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "kind": request.target.kind, "allowed": ["track"] })));
+    }
+    let thread_id = netease_comment_thread_id(&request.target)?;
+    let comment_id = required_comment_id("comment_id", &request.comment_id)?;
+    if request.reason.trim().is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("comment report reason cannot be empty")
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok((
+        "/api/report/reportcomment",
+        json!({
+            "threadId": thread_id,
+            "commentId": comment_id,
+            "reason": request.reason
         }),
     ))
 }
@@ -2956,6 +2992,21 @@ fn map_netease_comment_reaction_mutation(
         kind: request.kind,
         active: request.active,
         target_user_ref: request.target_user_ref.clone(),
+        extensions,
+    })
+}
+
+fn map_netease_comment_report(
+    request: &CommentReportRequest,
+    response: Value,
+) -> Result<CommentReportResult> {
+    let mut extensions = Extensions::new();
+    extensions.insert("response".to_owned(), response);
+    Ok(CommentReportResult {
+        target: request.target.clone(),
+        comment_id: request.comment_id.trim().to_owned(),
+        reason: request.reason.clone(),
+        submitted: true,
         extensions,
     })
 }
@@ -8131,6 +8182,97 @@ mod tests {
     }
 
     #[test]
+    fn comment_report_request_matches_reference_song_only_eapi_payload() {
+        let request = CommentReportRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "2058263032").expect("valid report target"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "123456789".to_owned(),
+            reason: "人身攻击".to_owned(),
+            account: Some("personal".to_owned()),
+        };
+        let (path, payload) =
+            netease_comment_report_request(&request).expect("build comment report request");
+        assert_eq!(path, "/api/report/reportcomment");
+        assert_eq!(payload["threadId"], "R_SO_4_2058263032");
+        assert_eq!(payload["commentId"], "123456789");
+        assert_eq!(payload["reason"], "人身攻击");
+
+        let result = map_netease_comment_report(&request, json!({"code": 200}))
+            .expect("map comment report response");
+        assert_eq!(result.target, request.target);
+        assert_eq!(result.comment_id, "123456789");
+        assert_eq!(result.reason, "人身攻击");
+        assert!(result.submitted);
+        assert_eq!(result.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn comment_report_rejects_non_track_foreign_and_empty_fields() {
+        let base = CommentReportRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "2058263032").expect("valid report target"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "123456789".to_owned(),
+            reason: "人身攻击".to_owned(),
+            account: None,
+        };
+        let cases = [
+            CommentReportRequest {
+                target: CommentTarget::new(
+                    ResourceRef::new(Platform::Netease, "705123491")
+                        .expect("valid playlist reference"),
+                    CommentTargetKind::Playlist,
+                ),
+                ..base.clone()
+            },
+            CommentReportRequest {
+                target: CommentTarget::new(
+                    ResourceRef::new(Platform::Qq, "2058263032").expect("valid foreign reference"),
+                    CommentTargetKind::Track,
+                ),
+                ..base.clone()
+            },
+            CommentReportRequest {
+                comment_id: " ".to_owned(),
+                ..base.clone()
+            },
+            CommentReportRequest {
+                reason: " \t".to_owned(),
+                ..base
+            },
+        ];
+        for request in cases {
+            assert_eq!(
+                netease_comment_report_request(&request)
+                    .expect_err("invalid comment report")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_reports_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = CommentReportRequest {
+            target: CommentTarget::new(
+                ResourceRef::new(Platform::Netease, "2058263032").expect("valid report target"),
+                CommentTargetKind::Track,
+            ),
+            comment_id: "123456789".to_owned(),
+            reason: "人身攻击".to_owned(),
+            account: None,
+        };
+        let error = MusicProvider::report_comment(&provider, &request)
+            .await
+            .expect_err("anonymous comment report must fail before network access");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn comment_thread_stats_requests_cover_all_internal_types_and_empty_batches() {
         let cases = [
             (CommentTargetKind::Track, "185809", "4"),
@@ -11548,6 +11690,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::CommentsRead));
         assert!(capabilities.contains(&Capability::CommentReactionsRead));
         assert!(capabilities.contains(&Capability::CommentReactionsWrite));
+        assert!(capabilities.contains(&Capability::CommentReportsWrite));
         assert!(capabilities.contains(&Capability::CommentThreadStats));
         assert!(capabilities.contains(&Capability::PlatformApi));
         assert!(capabilities.contains(&Capability::PlatformBatch));
