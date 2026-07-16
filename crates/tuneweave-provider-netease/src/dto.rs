@@ -203,6 +203,7 @@ pub(crate) struct ArtistNewVideosData {
 pub(crate) struct ArtistNewVideoItem {
     pub id: Option<Value>,
     pub name: Option<String>,
+    #[serde(alias = "imgurl")]
     pub cover: Option<String>,
     #[serde(rename = "playCount")]
     pub play_count: Option<u64>,
@@ -219,7 +220,7 @@ pub(crate) struct ArtistNewVideoItem {
     pub mv_id: Option<Value>,
     #[serde(rename = "mvName")]
     pub mv_name: Option<String>,
-    #[serde(rename = "mvCoverUrl")]
+    #[serde(rename = "mvCoverUrl", alias = "imgurl16v9")]
     pub mv_cover_url: Option<String>,
     pub duration: Option<u64>,
     #[serde(rename = "publishTime")]
@@ -241,6 +242,21 @@ pub(crate) struct ArtistNewTracksData {
     pub has_more: Option<bool>,
     #[serde(rename = "newSongCount")]
     pub new_song_count: Option<u64>,
+    #[serde(rename = "newWorks", default)]
+    pub new_works: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewWorksEnvelope {
+    pub data: ArtistNewWorksData,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtistNewWorksData {
+    #[serde(rename = "hasMore")]
+    pub has_more: Option<bool>,
+    #[serde(rename = "latestVisitTime")]
+    pub latest_visit_time: Option<u64>,
     #[serde(rename = "newWorks", default)]
     pub new_works: Vec<Value>,
 }
