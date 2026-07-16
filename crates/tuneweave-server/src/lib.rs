@@ -32,17 +32,18 @@ use tuneweave_core::{
     CommentReaction, CommentReactionKind, CommentReactionListRequest,
     CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
     CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest, DigitalAlbum,
-    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, Extensions, ImageUploadRequest, ImageUploadResult, Lyrics,
-    MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolveRequest, ResourceRef, SearchItem, SearchKind, SearchQuery, StreamResolver,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
+    Extensions, ImageUploadRequest, ImageUploadResult, Lyrics, MediaStream, PageRequest,
+    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType,
+    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolveRequest, ResourceRef,
+    SearchItem, SearchKind, SearchQuery, StreamResolver, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoKind,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -257,6 +258,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
+        .route("/auth/country-codes", get(auth_country_calling_codes))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
@@ -1707,6 +1709,33 @@ struct AuthQrPollData {
     state: AuthState,
     message: Option<String>,
     profile: Option<AccountProfile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CountryCallingCodesQuery {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn auth_country_calling_codes(
+    State(state): State<AppState>,
+    params: Result<Query<CountryCallingCodesQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<CountryCallingCodeGroup>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let groups = provider
+        .country_calling_codes(&CountryCallingCodeListRequest {
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(groups)
+            .with_platform(platform)
+            .with_account(account),
+    ))
 }
 
 async fn auth_qr_poll(
@@ -4066,6 +4095,7 @@ mod tests {
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
+                Capability::CountryCallingCodes,
                 Capability::ChallengeValidation,
                 Capability::PrincipalStatus,
                 Capability::SessionManagement,
@@ -5085,6 +5115,23 @@ mod tests {
                 message: (!valid).then(|| "invalid challenge code".to_owned()),
                 extensions,
             })
+        }
+
+        async fn country_calling_codes(
+            &self,
+            request: &CountryCallingCodeListRequest,
+        ) -> Result<Vec<CountryCallingCodeGroup>> {
+            Ok(vec![CountryCallingCodeGroup {
+                label: "常用".to_owned(),
+                entries: vec![tuneweave_core::CountryCallingCode {
+                    calling_code: "86".to_owned(),
+                    region_code: "CN".to_owned(),
+                    name: "中国".to_owned(),
+                    english_name: "China".to_owned(),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+            }])
         }
 
         async fn auth_principal_status(
@@ -7224,6 +7271,45 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn country_calling_codes_use_selected_platform_account_and_unified_fields() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/auth/country-codes?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"][0]["label"], "常用");
+        assert_eq!(response["data"][0]["entries"][0]["calling_code"], "86");
+        assert_eq!(response["data"][0]["entries"][0]["region_code"], "CN");
+        assert_eq!(response["data"][0]["entries"][0]["name"], "中国");
+        assert_eq!(response["data"][0]["entries"][0]["english_name"], "China");
+        assert_eq!(
+            response["data"][0]["entries"][0]["extensions"]["account"],
+            "personal"
+        );
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "personal");
+
+        let (status, defaulted) =
+            json_response_from(test_app_with_provider(), "/v1/auth/country-codes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["meta"]["platform"], "netease");
+        assert_eq!(defaulted["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn country_calling_codes_reject_unknown_platforms_and_query_fields() {
+        for path in [
+            "/v1/auth/country-codes?platform=unknown",
+            "/v1/auth/country-codes?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
