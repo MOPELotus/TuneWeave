@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=373`、`partial=7`、`implemented=9`、`verified=15`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=372`、`partial=7`、`implemented=9`、`verified=16`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -22,7 +22,7 @@
 | `album_list_style` | `/album/list/style` | `verified` | `GET /v1/digital-albums?catalog=style`（`ZH/EA` 统一区域值映射到上游 `Z_H/E_A`；2026-07-16 HTTP 实测返回 2 项并保留销量与购买状态） |
 | `album_new` | `/album/new` | `verified` | `GET /v1/albums?catalog=new`（`area` 筛选；2026-07-16 匿名 HTTP 实测返回 2 项、总数 500） |
 | `album_newest` | `/album/newest` | `verified` | `GET /v1/albums?catalog=newest`（2026-07-16 匿名 HTTP 实测首页共 12 项，统一分页返回前 2 项） |
-| `album_privilege` | `/album/privilege` | `pending` | — |
+| `album_privilege` | `/album/privilege` | `verified` | `GET /v1/albums/{ref}/track-entitlements`（2026-07-16 匿名 HTTP 实测 `netease:168223858` 共 10 项，首项 `netease:2058263030` 可播 320 kbps、最高 999 kbps，并保留无损及 Hi-Res 权益） |
 | `album_songsaleboard` | `/album/songsaleboard` | `pending` | — |
 | `album_sub` | `/album/sub` | `pending` | — |
 | `album_sublist` | `/album/sublist` | `pending` | — |
