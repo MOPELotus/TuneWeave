@@ -143,6 +143,13 @@
 }
 ```
 
+B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用带资源类型的引用避免 ID 冲突：
+
+- `bilibili:season:3629748` 表示公开合集/Season；上游身份同时保留 `season_id` 与所有者 `mid`。
+- `bilibili:favorite:2883236382` 表示收藏夹；上游身份同时保留 `media_id/fid` 与所有者 `mid`。
+
+两类资源都通过 `GET /v1/playlists/{ref}` 和 `GET /v1/playlists/{ref}/tracks` 访问。公开内容通常不需要账户；私有收藏夹由 `account` 选择 B 站登录态。由于 TuneWeave 的主要用途是音乐播放，列表中的 B 站视频会规范化为可播放的 `Track`，并在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid`、`extensions.bvid`、`extensions.cid` 中保留完整视频身份；原始视频详情仍通过 `/v1/videos/{ref}` 读取。
+
 ### Stream
 
 ```json
@@ -208,7 +215,7 @@
 | GET | `/v1/artists/{ref}/tracks` | 分页 | `Track[]` |
 | GET | `/v1/artists/{ref}/albums` | 分页 | `Album[]` |
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist` |
-| GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]` |
+| GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]`；B 站合集/收藏夹视频按可播放音频内容归一并保留 `video_ref` |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/charts` | `platform?` | `Playlist[]`，其中榜单仍用歌单模型表示 |

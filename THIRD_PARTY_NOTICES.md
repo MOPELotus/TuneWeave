@@ -68,6 +68,18 @@ independent implementation of observed request and response behavior.
 - Used for: Bilibili identifier parsing, metadata, multipart video, DASH audio
   and video track, authentication, and request header behavior research.
 
+## bilibili-plugins/bilibili-api-collect
+
+- Source: https://github.com/bilibili-plugins/bilibili-api-collect
+- Reviewed commit: `cfc5fddcc8a94b74d91970bb5b4eaeb349addc47`
+- License: Creative Commons Attribution-NonCommercial 4.0 International
+- Used for: Bilibili public protocol documentation research, including account,
+  user-space collection/season, favorites-folder, catalog, and write behavior.
+
+The documentation remains under CC BY-NC 4.0. TuneWeave does not copy, bundle,
+or redistribute its text or source; the Rust implementation independently
+implements the documented request and response protocol.
+
 ## TuneWeave license texts
 
 TuneWeave is available under either MIT or Apache-2.0 at the user's option.
