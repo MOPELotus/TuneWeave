@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=347`、`partial=7`、`implemented=19`、`verified=31`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=346`、`partial=7`、`implemented=19`、`verified=32`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -48,7 +48,7 @@
 | `audio_match` | `/audio/match` | `implemented` | `POST /v1/audio/recognize`（统一 `platform/account/fingerprint/duration_seconds` 输入，兼容参考项目 `audioFP/duration` 字段；多候选曲目、命中起点、查询 ID、无匹配原因和完整上游响应均已映射；离线成功命中样本、输入边界及 HTTP 端点测试已完成；2026-07-16 匿名 HTTP 实测无匹配路径返回 `code=200`、空 `matches`、`no_match_reason=10` 与真实查询 ID，待有效音频指纹验证真实成功命中） |
 | `avatar_upload` | `/avatar/upload` | `implemented` | `PUT /v1/account/avatar`（统一以 `platform/account/filename` 查询参数、`Content-Type: image/*` 和原始图片请求体写入，最大 20 MiB；完整实现 WeAPI 申请 `yyimgs` NOS 凭据、原始字节上传及 EAPI 提交 `imgId` 三段流程，统一返回 URL/图片 ID，NOS token 不进入响应或日志；兼容 `imgSize/imgX/imgY` 参数并明确记录参考实现未实际应用裁剪；离线映射、认证前置、参数别名、大小边界、标准错误包络及 token 防泄漏测试已完成；2026-07-16 匿名 HTTP 实测在 NOS 分配前稳定返回 401 `authentication_required`，待真实账户验证最终写入） |
 | `banner` | `/banner` | `verified` | `GET /v1/banners`（完整支持 `client=pc/android/iphone/ipad`，并兼容参考项目 `type=0/1/2/3`；图片、标题、横幅 ID、跳转 URL、独家标志及歌曲/专辑/歌手/歌单/MV/网页/未知目标进入稳定字段，监测和广告等完整原文保留在 `extensions.banner`；2026-07-16 适配器与统一 HTTP 均逐分支联网实测成功，PC 7 项、Android 8 项、iPhone 8 项、iPad 6 项，首项目标分别正确映射为网页或 `netease:384808686` 专辑） |
-| `batch` | `/batch` | `pending` | — |
+| `batch` | `/batch` | `verified` | `GET/POST /v1/extensions/netease/batch`（完整保留任意 `/api/...` 子请求及逐项原始响应，支持参考 GET 查询键、POST 顶层动态键和 `requests` 结构化容器；对象值自动序列化为上游真实要求的 JSON 文本，预序列化字符串原样保留；完整支持 `eapi/weapi/api/linuxapi/xeapi`、`crypto/protocol`、`e_r/encrypted_response` 与 `account`，逐路径限制固定网易云域名并拒绝 Cookie、域名、代理、请求头和 IP 等传输注入；2026-07-16 适配器及统一 HTTP 对五种协议均联网实测顶层/子请求 `code=200`，每种取得 7 条横幅，参考 GET 形态加 `e_r=true` 亦成功解密并返回 7 条，不存在的账户别名实测为 401） |
 | `broadcast_category_region_get` | `/broadcast/category/region/get` | `pending` | — |
 | `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `pending` | — |
 | `broadcast_channel_currentinfo` | `/broadcast/channel/currentinfo` | `pending` | — |
