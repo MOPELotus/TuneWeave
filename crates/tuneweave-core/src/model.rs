@@ -248,6 +248,52 @@ impl RecommendationRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistCategory {
+    #[default]
+    All,
+    Male,
+    Female,
+    Group,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistArea {
+    #[default]
+    All,
+    Chinese,
+    Western,
+    Japanese,
+    Korean,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+    pub category: ArtistCategory,
+    pub area: ArtistArea,
+    pub initial: Option<String>,
+}
+
+impl ArtistListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            account: None,
+            category: ArtistCategory::All,
+            area: ArtistArea::All,
+            initial: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistSummary {
     #[serde(rename = "ref")]
@@ -676,6 +722,23 @@ mod tests {
         assert_eq!(value["platform"], "netease");
         assert_eq!(value["biography_sections"][0]["title"], "人物简介");
         assert_eq!(value["track_count"], 568);
+    }
+
+    #[test]
+    fn artist_list_request_uses_cross_platform_filter_defaults() {
+        let request = ArtistListRequest::new(30, 0);
+
+        assert_eq!(request.category, ArtistCategory::All);
+        assert_eq!(request.area, ArtistArea::All);
+        assert_eq!(request.initial, None);
+        assert_eq!(
+            serde_json::to_value(ArtistCategory::Group).expect("serialize artist category"),
+            "group"
+        );
+        assert_eq!(
+            serde_json::to_value(ArtistArea::Western).expect("serialize artist area"),
+            "western"
+        );
     }
 
     #[test]

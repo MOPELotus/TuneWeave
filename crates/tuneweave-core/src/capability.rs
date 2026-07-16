@@ -20,6 +20,7 @@ pub enum Capability {
     DigitalAlbumCharts,
     ArtistDetail,
     ArtistStats,
+    ArtistList,
     ArtistAlbums,
     ArtistFans,
     PlaylistRead,

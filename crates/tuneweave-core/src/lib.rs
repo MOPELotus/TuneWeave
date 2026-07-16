@@ -18,14 +18,14 @@ pub use capability::Capability;
 pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
-    Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistBiographySection,
-    ArtistContentCount, ArtistStats, ArtistSummary, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics, MediaStream, Money, Page,
-    PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality, RecommendationRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind, SearchQuery, StreamRequest,
-    SubscriptionResult, Track, TrackEntitlement, TrialWindow, User,
+    Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea, ArtistBiographySection,
+    ArtistCategory, ArtistContentCount, ArtistListRequest, ArtistStats, ArtistSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, Extensions, LyricContributor, Lyrics,
+    MediaStream, Money, Page, PageMeta, PageRequest, PlatformApiRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, ProviderDescriptor, Quality,
+    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, SearchKind,
+    SearchQuery, StreamRequest, SubscriptionResult, Track, TrackEntitlement, TrialWindow, User,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
