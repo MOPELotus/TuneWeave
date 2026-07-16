@@ -179,6 +179,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/fans", get(artist_fans))
         .route("/artists/{reference}/videos", get(artist_videos))
         .route("/artists/{reference}/tracks", get(artist_tracks))
+        .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
         .route(
             "/account/library/albums/{reference}",
             put(album_subscribe).delete(album_unsubscribe),
@@ -1082,6 +1083,27 @@ async fn artist_tracks(
     request.account.clone_from(&account);
     request.order = parse_artist_track_order(params.order.as_deref())?;
     let page = provider.artist_tracks(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn artist_top_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .artist_top_tracks(reference.id(), account.as_deref())
+        .await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -2149,6 +2171,7 @@ mod tests {
                 Capability::ArtistFans,
                 Capability::ArtistVideos,
                 Capability::ArtistTracks,
+                Capability::ArtistTopTracks,
                 Capability::ArtistSubscriptionWrite,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
@@ -2439,6 +2462,22 @@ mod tests {
                     total: Some(566),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn artist_top_tracks(&self, id: &str, _account: Option<&str>) -> Result<Page<Track>> {
+            let mut track = sample_track("185809");
+            track.extensions.insert("artist_id".to_owned(), json!(id));
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: 50,
+                    offset: 0,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
                     extensions: Default::default(),
                 },
             })
@@ -3270,6 +3309,25 @@ mod tests {
         assert_eq!(response["error"]["code"], "invalid_request");
         assert_eq!(response["error"]["details"]["allowed"][0], "hot");
         assert_eq!(response["error"]["details"]["allowed"][1], "time");
+    }
+
+    #[tokio::test]
+    async fn artist_top_tracks_are_exposed_as_a_fixed_snapshot() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/netease:6452/top-tracks?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:185809");
+        assert_eq!(tracks["data"][0]["extensions"]["artist_id"], "6452");
+        assert_eq!(tracks["meta"]["platform"], "netease");
+        assert_eq!(tracks["meta"]["account"], "collector");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 50);
+        assert_eq!(tracks["meta"]["pagination"]["offset"], 0);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 1);
+        assert_eq!(tracks["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(tracks["meta"]["pagination"]["has_more"], false);
     }
 
     #[tokio::test]
