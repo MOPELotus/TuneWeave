@@ -24,13 +24,13 @@ use crate::{
     NeteaseLoginResult, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseSessionStatus,
     dto::{
         AlbumDetail, AlbumEntitlementsEnvelope, AlbumEnvelope, AlbumListEnvelope,
-        AlbumStatsEnvelope, AudioQuality, DigitalAlbumChartEnvelope, DigitalAlbumChartItem,
-        DigitalAlbumEnvelope, DigitalAlbumListEnvelope, DigitalAlbumListItem, LikedTracksEnvelope,
-        LyricText, LyricUser, LyricsEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope,
+        AlbumStatsEnvelope, ArtistAlbumsEnvelope, AudioQuality, DigitalAlbumChartEnvelope,
+        DigitalAlbumChartItem, DigitalAlbumEnvelope, DigitalAlbumListEnvelope,
+        DigitalAlbumListItem, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
     },
 };
 
@@ -272,6 +272,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumDetail,
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
+            Capability::ArtistAlbums,
             Capability::PlaylistRead,
             Capability::Lyrics,
             Capability::AudioStream,
@@ -579,6 +580,25 @@ impl MusicProvider for NeteaseProvider {
             .collect::<Result<Vec<_>>>()?;
         let (items, pagination) = select_page(items, limit, request.offset);
         Ok(Page { items, pagination })
+    }
+
+    async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
+        let id = parse_numeric_id("artist", id)?;
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client
+            .request_weapi(
+                &format!("/api/artist/albums/{id}"),
+                json!({
+                    "limit": limit,
+                    "offset": request.offset,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: ArtistAlbumsEnvelope = parse_body(response.body)?;
+        map_artist_albums_response(response, limit, request.offset)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1845,6 +1865,41 @@ fn map_album_list_item(raw: Value) -> Result<Album> {
     Ok(album)
 }
 
+fn map_artist_albums_response(
+    response: ArtistAlbumsEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Album>> {
+    let items = response
+        .albums
+        .into_iter()
+        .map(map_artist_album_item)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response.more.unwrap_or(consumed == limit);
+    let mut extensions = Extensions::new();
+    insert_extension(&mut extensions, "artist", response.artist);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: response.total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_artist_album_item(raw: Value) -> Result<Album> {
+    let album: AlbumDetail = parse_body(raw.clone())?;
+    let mut album = map_album(album)?;
+    album.extensions.insert("artist_album_item".to_owned(), raw);
+    Ok(album)
+}
+
 fn map_album_stats(id: u64, stats: AlbumStatsEnvelope) -> Result<AlbumStats> {
     let album_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
         TuneWeaveError::new(
@@ -2440,6 +2495,46 @@ mod tests {
     }
 
     #[test]
+    fn maps_netease_artist_albums_and_cursor_metadata() {
+        let response: ArtistAlbumsEnvelope = serde_json::from_value(json!({
+            "artist": { "id": 6452, "name": "周杰伦", "albumSize": 42 },
+            "hotAlbums": [
+                {
+                    "id": 18915,
+                    "name": "Jay",
+                    "artists": [{ "id": 6452, "name": "周杰伦" }],
+                    "picUrl": "https://example.test/jay.jpg",
+                    "publishTime": 968428800000_u64,
+                    "size": 10,
+                    "copyrightId": 1007
+                },
+                {
+                    "id": 18914,
+                    "name": "范特西",
+                    "artists": [{ "id": 6452, "name": "周杰伦" }],
+                    "size": 10
+                }
+            ],
+            "more": true
+        }))
+        .expect("artist albums fixture");
+        let page = map_artist_albums_response(response, 2, 5).expect("map artist albums");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:18915");
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(
+            page.items[0].extensions["artist_album_item"]["copyrightId"],
+            1007
+        );
+        assert_eq!(page.pagination.offset, 5);
+        assert_eq!(page.pagination.total, None);
+        assert_eq!(page.pagination.next_offset, Some(7));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["artist"]["albumSize"], 42);
+    }
+
+    #[test]
     fn maps_netease_album_dynamic_stats_to_the_unified_model() {
         let stats: AlbumStatsEnvelope = serde_json::from_value(json!({
             "commentCount": 1989,
@@ -2730,6 +2825,11 @@ mod tests {
                 .await
                 .expect_err("invalid album entitlement id");
         assert_eq!(entitlement_error.code, ErrorCode::InvalidRequest);
+        let artist_error =
+            MusicProvider::artist_albums(&provider, "invalid", &PageRequest::new(30, 0))
+                .await
+                .expect_err("invalid artist id");
+        assert_eq!(artist_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -3400,6 +3500,25 @@ mod tests {
         assert_eq!(tracks.items.len(), 2);
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
         assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_artist_albums() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page = MusicProvider::artist_albums(&provider, "6452", &PageRequest::new(5, 0))
+            .await
+            .expect("live artist albums");
+        assert_eq!(page.items.len(), 5);
+        assert!(page.items.iter().all(|album| !album.name.is_empty()));
+        assert!(
+            page.items
+                .iter()
+                .all(|album| album.artists.iter().any(|artist| artist.name == "周杰伦"))
+        );
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(5));
+        assert_eq!(page.pagination.extensions["artist"]["id"], 6452);
     }
 
     #[tokio::test]

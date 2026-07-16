@@ -37,6 +37,15 @@ pub(crate) struct AlbumListEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ArtistAlbumsEnvelope {
+    #[serde(rename = "hotAlbums", default)]
+    pub albums: Vec<Value>,
+    pub more: Option<bool>,
+    pub total: Option<u64>,
+    pub artist: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SubscribedAlbumsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,
