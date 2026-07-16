@@ -1357,6 +1357,102 @@ pub struct Video {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoResourceKind {
+    #[default]
+    Mv,
+    Video,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoDetailRequest {
+    pub kind: VideoResourceKind,
+    pub account: Option<String>,
+}
+
+impl VideoDetailRequest {
+    #[must_use]
+    pub fn new(kind: VideoResourceKind) -> Self {
+        Self {
+            kind,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoResolution {
+    pub resolution: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub size: Option<u64>,
+    pub format: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoDetail {
+    pub kind: VideoResourceKind,
+    pub video: Video,
+    pub resolutions: Vec<VideoResolution>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoStats {
+    pub video_ref: ResourceRef,
+    pub kind: VideoResourceKind,
+    pub liked: Option<bool>,
+    pub like_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub share_count: Option<u64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoStreamRequest {
+    pub kind: VideoResourceKind,
+    pub resolution: u32,
+    pub account: Option<String>,
+}
+
+impl VideoStreamRequest {
+    pub const DEFAULT_RESOLUTION: u32 = 1080;
+
+    #[must_use]
+    pub fn new(kind: VideoResourceKind, resolution: u32) -> Self {
+        Self {
+            kind,
+            resolution,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoStream {
+    pub video_ref: ResourceRef,
+    pub platform: Platform,
+    pub available: bool,
+    pub url: Option<String>,
+    pub backup_urls: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub expires_at: Option<String>,
+    pub format: Option<String>,
+    pub codec: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub size: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub requested_resolution: u32,
+    pub actual_resolution: Option<u32>,
+    pub platform_code: Option<i64>,
+    pub fee: Option<i64>,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlbumSummary {
     #[serde(rename = "ref")]
@@ -2630,6 +2726,59 @@ mod tests {
         assert_eq!(value["creators"][0]["ref"], "netease:6452");
         assert_eq!(value["duration_ms"], 266_000);
         assert_eq!(value["subscribed"], false);
+    }
+
+    #[test]
+    fn video_detail_stats_and_stream_contracts_keep_mv_semantics_explicit() {
+        let reference =
+            ResourceRef::new(Platform::Netease, "22695250").expect("valid video reference");
+        let detail_request = VideoDetailRequest::new(VideoResourceKind::Mv);
+        assert_eq!(detail_request.kind, VideoResourceKind::Mv);
+
+        let stream_request = VideoStreamRequest::new(
+            VideoResourceKind::Mv,
+            VideoStreamRequest::DEFAULT_RESOLUTION,
+        );
+        assert_eq!(stream_request.resolution, 1080);
+        let stream = VideoStream {
+            video_ref: reference.clone(),
+            platform: Platform::Netease,
+            available: true,
+            url: Some("https://example.test/video.mp4".to_owned()),
+            backup_urls: Vec::new(),
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: Some("mp4".to_owned()),
+            codec: None,
+            width: None,
+            height: Some(1080),
+            size: Some(177_950_120),
+            duration_ms: Some(266_000),
+            requested_resolution: 1080,
+            actual_resolution: Some(1080),
+            platform_code: Some(200),
+            fee: Some(0),
+            message: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(stream).expect("serialize video stream");
+        assert_eq!(value["video_ref"], "netease:22695250");
+        assert_eq!(value["available"], true);
+        assert_eq!(value["requested_resolution"], 1080);
+        assert_eq!(value["actual_resolution"], 1080);
+
+        let stats = VideoStats {
+            video_ref: reference,
+            kind: VideoResourceKind::Mv,
+            liked: Some(false),
+            like_count: Some(4_662),
+            comment_count: Some(675),
+            share_count: Some(1_399),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(stats).expect("serialize video stats");
+        assert_eq!(value["kind"], "mv");
+        assert_eq!(value["like_count"], 4_662);
     }
 
     #[test]

@@ -26,7 +26,8 @@ use crate::{
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
     StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, Video,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -362,6 +363,27 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistVideos,
+        ))
+    }
+
+    async fn video(&self, _id: &str, _request: &VideoDetailRequest) -> Result<VideoDetail> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoDetail,
+        ))
+    }
+
+    async fn video_stats(&self, _id: &str, _request: &VideoDetailRequest) -> Result<VideoStats> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoStats,
+        ))
+    }
+
+    async fn video_stream(&self, _id: &str, _request: &VideoStreamRequest) -> Result<VideoStream> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoStream,
         ))
     }
 

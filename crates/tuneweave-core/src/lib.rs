@@ -50,7 +50,8 @@ pub use model::{
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant, SubscriptionResult,
     Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, Video,
-    VideoKind,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

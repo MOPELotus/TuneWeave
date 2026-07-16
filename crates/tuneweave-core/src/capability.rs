@@ -55,6 +55,8 @@ pub enum Capability {
     AudioStream,
     AudioStreamBatch,
     AudioDownload,
+    VideoDetail,
+    VideoStats,
     VideoStream,
     QrLogin,
     PasswordLogin,
@@ -148,6 +150,20 @@ mod tests {
             serde_json::to_value(Capability::ArtistCharts)
                 .expect("serialize artist charts capability"),
             serde_json::json!("artist_charts")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoDetail)
+                .expect("serialize video detail capability"),
+            serde_json::json!("video_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoStats).expect("serialize video stats capability"),
+            serde_json::json!("video_stats")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoStream)
+                .expect("serialize video stream capability"),
+            serde_json::json!("video_stream")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),
