@@ -15,7 +15,7 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AccountProfile, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
+    AccountProfile, Album, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Lyrics,
     MediaStream, PageRequest, PasswordFormat, PasswordLoginRequest, Platform, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PrincipalType, ProviderRegistry,
     Quality, RecommendationRequest, ResolveRequest, ResourceRef, SearchKind, SearchQuery,
@@ -156,6 +156,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
         .route("/tracks/{reference}", get(track))
+        .route("/albums/{reference}", get(album))
+        .route("/albums/{reference}/tracks", get(album_tracks))
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists/{reference}", get(playlist))
@@ -335,6 +337,65 @@ async fn track(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+async fn album(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Album>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let album = provider.album(reference.id(), account).await?;
+    let mut response = ApiResponse::new(album).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn album_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+        .map(str::to_owned);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .album_tracks(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -1206,6 +1267,7 @@ mod tests {
             BTreeSet::from([
                 Capability::SearchTracks,
                 Capability::TrackDetail,
+                Capability::AlbumDetail,
                 Capability::PlaylistRead,
                 Capability::Lyrics,
                 Capability::AudioStream,
@@ -1236,6 +1298,23 @@ mod tests {
 
         async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
             Ok(sample_track(id))
+        }
+
+        async fn album(&self, id: &str, _account: Option<&str>) -> Result<Album> {
+            Ok(sample_album(id))
+        }
+
+        async fn album_tracks(&self, _id: &str, request: &PageRequest) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![sample_track("185809")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                },
+            })
         }
 
         async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
@@ -1491,6 +1570,27 @@ mod tests {
         }
     }
 
+    fn sample_album(id: &str) -> Album {
+        Album {
+            resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
+            platform: Platform::Netease,
+            id: id.to_owned(),
+            name: "Jay".to_owned(),
+            aliases: Vec::new(),
+            artists: vec![ArtistSummary {
+                resource_ref: None,
+                name: "周杰伦".to_owned(),
+            }],
+            description: "周杰伦首张专辑".to_owned(),
+            cover_url: None,
+            published_at: None,
+            track_count: Some(10),
+            company: None,
+            kind: Some("album".to_owned()),
+            extensions: Default::default(),
+        }
+    }
+
     fn sample_history(id: &str) -> PlaybackHistoryEntry {
         PlaybackHistoryEntry {
             track: sample_track(id),
@@ -1585,6 +1685,26 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["ref"], "netease:185809");
         assert_eq!(json["data"]["artists"][0]["name"], "周杰伦");
+    }
+
+    #[tokio::test]
+    async fn album_detail_and_tracks_use_reference_platform_and_pagination() {
+        let (status, album) =
+            json_response_from(test_app_with_provider(), "/v1/albums/netease:18915").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(album["data"]["ref"], "netease:18915");
+        assert_eq!(album["data"]["artists"][0]["name"], "周杰伦");
+        assert_eq!(album["meta"]["platform"], "netease");
+
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/albums/netease:18915/tracks?limit=5&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:185809");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 5);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 1);
     }
 
     #[tokio::test]
