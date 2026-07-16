@@ -14,7 +14,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
 use url::Url;
 
 use crate::crypto::{
@@ -45,6 +45,7 @@ pub struct NeteaseConfig {
     pub timeout: Duration,
     pub user_agent: String,
     pub web_user_agent: String,
+    pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl Default for NeteaseConfig {
@@ -57,6 +58,7 @@ impl Default for NeteaseConfig {
             timeout: Duration::from_secs(15),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             web_user_agent: DEFAULT_WEB_USER_AGENT.to_owned(),
+            credential_store: None,
         }
     }
 }

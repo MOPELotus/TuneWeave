@@ -1,9 +1,11 @@
-use std::{env, error::Error, net::SocketAddr};
+use std::{env, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use tuneweave_core::{Platform, ProviderRegistry};
+use tuneweave_core::{
+    AccountCredentialStore, FileAccountCredentialStore, Platform, ProviderRegistry,
+};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_server::{AppState, build_router};
 
@@ -17,11 +19,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let bind = env::var("TUNEWEAVE_BIND").unwrap_or_else(|_| "127.0.0.1:7832".to_owned());
     let address: SocketAddr = bind.parse()?;
+    let data_dir = env::var_os("TUNEWEAVE_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".local").join("data"));
+    let credential_store: Arc<dyn AccountCredentialStore> =
+        Arc::new(FileAccountCredentialStore::new(data_dir.join("accounts")));
     let mut registry = ProviderRegistry::new();
     let netease_config = NeteaseConfig {
         cookie: env::var("TUNEWEAVE_NETEASE_COOKIE")
             .ok()
             .filter(|cookie| !cookie.trim().is_empty()),
+        credential_store: Some(credential_store),
         ..NeteaseConfig::default()
     };
     registry.register(NeteaseProvider::new(netease_config)?)?;

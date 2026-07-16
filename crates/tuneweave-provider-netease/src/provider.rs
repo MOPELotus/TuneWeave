@@ -12,10 +12,10 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, Artist, ArtistArea,
-    ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry,
-    ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    AccountCredentialStore, AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary,
+    Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea,
+    ArtistChartEntry, ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview,
+    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
@@ -50,10 +50,11 @@ use tuneweave_core::{
     SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
     SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -86,19 +87,25 @@ use crate::{
 };
 
 const CLOUD_UPLOAD_BUCKET: &str = "jd-musicrep-privatecloud-audio-public";
+const NETEASE_CREDENTIAL_KIND: &str = "cookie";
 
 #[derive(Clone)]
 pub struct NeteaseProvider {
     client: NeteaseClient,
     accounts: Arc<RwLock<BTreeMap<String, NeteaseClient>>>,
+    credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl NeteaseProvider {
     pub fn new(config: NeteaseConfig) -> Result<Self> {
-        Ok(Self {
+        let credential_store = config.credential_store.clone();
+        let provider = Self {
             client: NeteaseClient::new(config)?,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
-        })
+            credential_store,
+        };
+        provider.restore_sessions()?;
+        Ok(provider)
     }
 
     #[must_use]
@@ -106,6 +113,7 @@ impl NeteaseProvider {
         Self {
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
+            credential_store: None,
         }
     }
 
@@ -220,8 +228,11 @@ impl NeteaseProvider {
     pub async fn logout_account(&self, account: &str) -> Result<bool> {
         let account = normalize_account_label(Some(account))?.to_owned();
         let client = self.client_for(Some(&account))?;
-        client.logout().await?;
-        self.remove_session(&account)
+        let remote_logout = client.logout().await;
+        let removed = self.remove_session(&account)?;
+        remote_logout
+            .map_err(|error| error.with_details(json!({ "local_session_removed": removed })))?;
+        Ok(removed)
     }
 
     fn persist_login(
@@ -277,13 +288,20 @@ impl NeteaseProvider {
 
     fn install_session(&self, account: &str, cookie: String) -> Result<()> {
         let account = normalize_account_label(Some(account))?.to_owned();
-        if !crate::client::has_authenticated_cookie(Some(cookie.as_str())) {
-            return Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                "NetEase session cookie does not contain MUSIC_U",
-            )
-            .with_platform(Platform::Netease));
+        validate_session_cookie(&cookie)?;
+        if let Some(store) = &self.credential_store {
+            store.put(&StoredAccountCredential::new(
+                Platform::Netease,
+                &account,
+                NETEASE_CREDENTIAL_KIND,
+                &cookie,
+            )?)?;
         }
+        self.install_session_in_memory(account, cookie)
+    }
+
+    fn install_session_in_memory(&self, account: String, cookie: String) -> Result<()> {
+        validate_session_cookie(&cookie)?;
         self.accounts
             .write()
             .map_err(|_| account_store_error())?
@@ -291,16 +309,41 @@ impl NeteaseProvider {
         Ok(())
     }
 
+    fn restore_sessions(&self) -> Result<()> {
+        let Some(store) = &self.credential_store else {
+            return Ok(());
+        };
+        for credential in store.load_platform(Platform::Netease)? {
+            if credential.kind != NETEASE_CREDENTIAL_KIND {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!(
+                        "unsupported NetEase account credential kind: {}",
+                        credential.kind
+                    ),
+                )
+                .with_platform(Platform::Netease));
+            }
+            let account = normalize_account_label(Some(&credential.account))?.to_owned();
+            self.install_session_in_memory(account, credential.into_secret())?;
+        }
+        Ok(())
+    }
+
     fn remove_session(&self, account: &str) -> Result<bool> {
         let account = normalize_account_label(Some(account))?;
+        let persisted = self
+            .credential_store
+            .as_ref()
+            .map_or(Ok(false), |store| store.remove(Platform::Netease, account))?;
         let mut accounts = self.accounts.write().map_err(|_| account_store_error())?;
         let removed = accounts.remove(account).is_some();
         if account == "default" {
-            let had_default = removed || self.client.is_authenticated();
+            let had_default = persisted || removed || self.client.is_authenticated();
             accounts.insert(account.to_owned(), self.client.without_cookie());
             return Ok(had_default);
         }
-        Ok(removed)
+        Ok(persisted || removed)
     }
 
     async fn playlist_detail(&self, client: &NeteaseClient, id: u64) -> Result<PlaylistDetail> {
@@ -6201,6 +6244,17 @@ fn account_store_error() -> TuneWeaveError {
     .with_platform(Platform::Netease)
 }
 
+fn validate_session_cookie(cookie: &str) -> Result<()> {
+    if crate::client::has_authenticated_cookie(Some(cookie)) {
+        return Ok(());
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::AuthenticationRequired,
+        "NetEase session cookie does not contain MUSIC_U",
+    )
+    .with_platform(Platform::Netease))
+}
+
 async fn request_netease_streams(
     client: &NeteaseClient,
     tracks: &[Track],
@@ -10314,6 +10368,36 @@ fn parse_body<T: DeserializeOwned>(body: Value) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TEST_CREDENTIAL_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+
+    struct TestCredentialDirectory(std::path::PathBuf);
+
+    impl TestCredentialDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tuneweave-netease-credential-store-{}-{}",
+                std::process::id(),
+                TEST_CREDENTIAL_DIRECTORY_SEQUENCE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("create credential test directory");
+            Self(path)
+        }
+
+        fn store(&self) -> Arc<dyn AccountCredentialStore> {
+            Arc::new(tuneweave_core::FileAccountCredentialStore::new(&self.0))
+        }
+    }
+
+    impl Drop for TestCredentialDirectory {
+        fn drop(&mut self) {
+            if self.0.starts_with(std::env::temp_dir()) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
 
     fn fixture_song() -> Song {
         serde_json::from_value(json!({
@@ -16640,6 +16724,84 @@ mod tests {
                 .expect("remove account session")
         );
         assert!(provider.client_for(Some("green-diamond")).is_err());
+    }
+
+    #[test]
+    fn account_sessions_persist_across_provider_restarts_and_remain_isolated() {
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build persistent provider");
+        provider
+            .install_session("personal", "MUSIC_U=personal-session".to_owned())
+            .expect("persist personal session");
+        provider
+            .install_session("premium/账号", "MUSIC_U=premium-session".to_owned())
+            .expect("persist premium session");
+        drop(provider);
+
+        let restored = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("restore persistent provider");
+        for account in ["personal", "premium/账号"] {
+            assert!(
+                restored
+                    .client_for(Some(account))
+                    .expect("restored account client")
+                    .is_authenticated(),
+                "{account}"
+            );
+        }
+        assert!(
+            restored
+                .remove_session("personal")
+                .expect("remove persisted personal session")
+        );
+        drop(restored);
+
+        let after_removal = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store),
+            ..NeteaseConfig::default()
+        })
+        .expect("restore provider after removal");
+        assert!(after_removal.client_for(Some("personal")).is_err());
+        assert!(
+            after_removal
+                .client_for(Some("premium/账号"))
+                .expect("remaining persisted account")
+                .is_authenticated()
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_removes_the_local_persisted_session_when_upstream_is_unavailable() {
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let config = NeteaseConfig {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            timeout: std::time::Duration::from_millis(100),
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        };
+        let provider = NeteaseProvider::new(config.clone()).expect("build persistent provider");
+        provider
+            .install_session("personal", "MUSIC_U=personal-session".to_owned())
+            .expect("persist account session");
+
+        let error = provider
+            .logout_account("personal")
+            .await
+            .expect_err("upstream logout is unavailable");
+        assert_eq!(error.details["local_session_removed"], true);
+        drop(provider);
+
+        let restored = NeteaseProvider::new(config).expect("restore provider after local logout");
+        assert!(restored.client_for(Some("personal")).is_err());
     }
 
     #[test]

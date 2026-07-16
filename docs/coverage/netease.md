@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=277`、`partial=5`、`implemented=53`、`verified=72`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=277`、`partial=5`、`implemented=45`、`verified=80`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -27,7 +27,7 @@
 | `album_privilege` | `/album/privilege` | `verified` | `GET /v1/albums/{ref}/track-entitlements`（2026-07-16 匿名 HTTP 实测 `netease:168223858` 共 10 项，首项 `netease:2058263030` 可播 320 kbps、最高 999 kbps，并保留无损及 Hi-Res 权益） |
 | `album_songsaleboard` | `/album/songsaleboard` | `verified` | `GET /v1/charts/digital-albums`（完整支持 `daily/week/year/total` 与数字专辑/数字单曲；2026-07-16 HTTP 实测 2025 年数字单曲榜共 10 项，首项 `netease:83848829`《好想爱这个世界啊》，销量 316218） |
 | `album_sub` | `/album/sub` | `implemented` | `PUT/DELETE /v1/account/library/albums/{ref}`（收藏与取消收藏路径均已实现；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证成功写入） |
-| `album_sublist` | `/album/sublist` | `implemented` | `GET /v1/account/library/albums`（分页、收藏时间与 `paidCount` 等元数据已完整映射；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证内容成功态） |
+| `album_sublist` | `/album/sublist` | `verified` | `GET /v1/account/library/albums`（分页、收藏时间与 `paidCount` 等元数据已完整映射；2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
 | `api` | `/api` | `verified` | `POST /v1/extensions/netease/api`（仅允许固定网易云域名与 `/api/...` 路径，登录态由 `account` 别名选择；完整支持默认 EAPI 及 `weapi/api/linuxapi/xeapi`，拒绝原始 Cookie、域名、代理和请求头覆盖；2026-07-16 五种协议均以搜索请求联网实测成功，另实测 XEAPI 公钥注册/加密响应及 `e_r=true` EAPI 响应解密） |
 | `artist_album` | `/artist/album` | `verified` | `GET /v1/artists/{ref}/albums`（统一分页并保留歌手级元数据与单项原始字段；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 5 张周杰伦专辑，首项 `netease:274336916`《即兴曲》，`has_more=true`、`next_offset=5`） |
 | `artist_desc` | `/artist/desc` | `verified` | `GET /v1/artists/{ref}`（与 `/artist/detail` 合并为统一 `Artist`，映射简介及分段传记，并在扩展字段保留专题原始响应；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦简介、6 段传记及 3 项专题数据） |
@@ -37,13 +37,13 @@
 | `artist_follow_count` | `/artist/follow/count` | `verified` | `GET /v1/artists/{ref}/stats`（统一粉丝总数和账户关注态，日增量等附加字段保留完整响应；2026-07-16 匿名 HTTP 实测 `netease:2116` 返回 `follower_count=13704933`、`followed=false`，统一值与上游 `fansCnt/isFollow` 一致） |
 | `artist_list` | `/artist/list` | `verified` | `GET /v1/artists`（统一 `type=all/male/female/group`、六类 `area` 与 `initial=a..z/hot/other`，条目映射为 `Artist` 并保留完整目录字段；2026-07-16 匿名 HTTP 实测 `type=male&area=western&initial=b&limit=2` 返回 Bruno Mars 与 bbno$，首项 50 张专辑/959 首歌曲，`next_offset=2`、`has_more=true`） |
 | `artist_mv` | `/artist/mv` | `verified` | `GET /v1/artists/{ref}/videos?type=mv`（统一为分页 `Video[]`，映射创作者、16:9 封面、时长、发布日期、播放数和收藏态，并保留完整 MV 与响应时间；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 2 项，首项 `netease:22695250`《任性 (5525 Live版)》、266000 ms、100726 播放，`next_offset=2`、`has_more=true`） |
-| `artist_new_mv` | `/artist/new/mv` | `implemented` | `GET /v1/account/following/artists/new-videos`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一映射为 `Video[]` 并保留完整响应；离线成功态映射、端点和登录别名测试已完成；2026-07-16 匿名 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
-| `artist_new_song` | `/artist/new/song` | `implemented` | `GET /v1/account/following/artists/new-tracks`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一为 `Track[]`，保留新曲总数及完整歌曲原文；离线成功态映射、端点和登录别名测试已完成；2026-07-16 匿名 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
+| `artist_new_mv` | `/artist/new/mv` | `verified` | `GET /v1/account/following/artists/new-videos`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一映射为 `Video[]` 并保留完整响应；2026-07-17 持久化真实账户 HTTP 实测返回 1 项） |
+| `artist_new_song` | `/artist/new/song` | `verified` | `GET /v1/account/following/artists/new-tracks`（以 `platform/account` 选择登录态，`before` 以作品块翻页；兼容当前上游 `songLists` 分组并按块顺序展开为 `Track[]`，保留新曲总数、作品块计数及完整原文；2026-07-17 持久化真实账户 HTTP 实测 5 个作品块展开为 7 首歌曲） |
 | `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `implemented` | `GET /v1/account/following/artists/new-works`（完整支持 `before/source_type/first_request`，以 `ArtistWorkUpdate` 区分歌曲、MV 和未知来源，未知结构完整保留；离线已验证歌曲分支、未知来源兼容和端点参数；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容及更多 `sourceType` 样本） |
 | `artist_new_song_playall` | `/artist/new/song/playall` | `implemented` | `GET /v1/account/following/artists/new-tracks/play-all`（固定返回最近至多 50 首 `Track[]` 和上游 `count`，完整歌曲字段保留在扩展；离线成功态映射、账户端点和能力发现测试已完成；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
 | `artist_songs` | `/artist/songs` | `verified` | `GET /v1/artists/{ref}/tracks`（完整支持 `order=hot/time`、分页及 `account` 登录态选择，统一为 `Track[]` 并在 `extensions.artist_track` 保留完整歌曲原文；2026-07-16 真实上游与统一 HTTP 均实测成功，`/v1/artists/netease:6452/tracks?order=time&limit=2` 首项为 `netease:2712553851`《即兴曲》，总数 566、`next_offset=2`、`has_more=true`） |
 | `artist_sub` | `/artist/sub` | `implemented` | `PUT/DELETE /v1/account/following/artists/{ref}`（关注与取消关注共用统一 `SubscriptionResult`，登录态由引用平台和 `account` 别名选择，完整上游响应保留在扩展；请求构造、成功态映射、非法 ID、账户别名及 HTTP 端点测试已完成；2026-07-16 匿名 WeAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功写入及回滚） |
-| `artist_sublist` | `/artist/sublist` | `implemented` | `GET /v1/account/following/artists`（统一为分页 `Artist[]`，支持 `platform/account/limit/offset`，名称、别名、封面及作品计数进入稳定字段，关注时间和完整歌手原文保留在 `extensions.following_item`；离线成功态映射、账户别名和 HTTP 端点测试已完成；2026-07-16 匿名 WeAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
+| `artist_sublist` | `/artist/sublist` | `verified` | `GET /v1/account/following/artists`（统一为分页 `Artist[]`，支持 `platform/account/limit/offset`，名称、别名、封面及作品计数进入稳定字段，关注时间和完整歌手原文保留在 `extensions.following_item`；2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
 | `artist_top_song` | `/artist/top/song` | `verified` | `GET /v1/artists/{ref}/top-tracks`（固定热门 50 首快照，不接收伪分页参数；歌曲与独立权益按 ID 合并为统一 `Track[]`，`has_more=false`，单项原文和完整响应均保留；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 50 首，首项 `netease:210049`《布拉格广场》（蔡依林 / 周杰伦），`total=50`、`next_offset=null`） |
 | `artist_video` | `/artist/video` | `verified` | `GET /v1/artists/{ref}/videos?type=all`（统一为游标分页 `Video[]`，映射标题、创作者、封面、时长、发布时间和播放数，原始 Mlog 资源完整保留；2026-07-16 匿名 HTTP 实测 `netease:2116` 连续两页各返回 2 项，游标由 `2` 前进至 `4` 且资源无重复，首项 `netease:34702399`《K歌之王 AIR (Day Version / Lyric Video / China Version)》） |
 | `artists` | `/artists` | `verified` | `GET /v1/artists/{ref}/overview`（统一为 `ArtistOverview`，明确分离歌手摘要、50 首精选 `Track[]` 和 `has_more_tracks`，不与 `/artist/list` 或完整曲目目录误合并；歌手、曲目及完整响应原文分别保留；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦、568 首总曲目计数、50 首精选，首项 `netease:210049`《布拉格广场》，`has_more_tracks=true`） |
@@ -166,7 +166,7 @@
 | `login_qr_create` | `/login/qr/create` | `partial` | `POST /v1/auth/qr`（返回 URL，暂不生成图片） |
 | `login_qr_key` | `/login/qr/key` | `partial` | `POST /v1/auth/qr`（创建已验证） |
 | `login_refresh` | `/login/refresh` | `implemented` | `POST /v1/auth/session/refresh`（待真实账户验证） |
-| `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证） |
+| `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证；2026-07-17 真实二维码确认后返回已认证，并在服务重启后从 `platform/account` 持久化存储恢复） |
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
 | `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖） |
 | `lyric_new` | `/lyric/new` | `verified` | `GET /v1/tracks/{ref}/lyrics` |
@@ -239,7 +239,7 @@
 | `radio_sport_get` | `/radio/sport/get` | `pending` | — |
 | `rebind` | `/rebind` | `pending` | — |
 | `recent_listen_list` | `/recent/listen/list` | `pending` | — |
-| `recommend_resource` | `/recommend/resource` | `implemented` | `GET /v1/recommendations/playlists`（2026-07-16 匿名 HTTP 实测为 401/上游 301；待真实账户验证内容路径） |
+| `recommend_resource` | `/recommend/resource` | `verified` | `GET /v1/recommendations/playlists`（2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
 | `recommend_songs` | `/recommend/songs` | `verified` | `GET /v1/recommendations/tracks`（含 `afresh`→`refresh`；2026-07-16 匿名 HTTP 实测返回 30 首并保留推荐理由） |
 | `recommend_songs_dislike` | `/recommend/songs/dislike` | `pending` | — |
 | `record_recent_album` | `/record/recent/album` | `pending` | — |
@@ -288,7 +288,7 @@
 | `simi_song` | `/simi/song` | `pending` | — |
 | `simi_user` | `/simi/user` | `pending` | — |
 | `song_chorus` | `/song/chorus` | `pending` | — |
-| `song_cloud_download` | `/song/cloud/download` | `implemented` | `GET /v1/account/cloud/tracks/{ref}/download`、`GET /v1/account/cloud/tracks/{ref}/download/redirect`（以完整网易云云盘引用和隔离账户取源文件；严格复刻上游 EAPI 路径中的既有拼写 `/api/cloud/dowonload` 及 `songId` 载荷，统一映射 URL、文件大小、MD5、过期时间和码率；重定向在专用源文件 URL 缺失时只回退到同平台同账户普通取流，不跨账户；对象/数组响应、不可用地址、错误 ID、账户传播和 302 分支均有离线测试，待真实账户云盘文件验证） |
+| `song_cloud_download` | `/song/cloud/download` | `implemented` | `GET /v1/account/cloud/tracks/{ref}/download`、`GET /v1/account/cloud/tracks/{ref}/download/redirect`（以完整网易云云盘引用和隔离账户取源文件；严格复刻上游 EAPI 路径中的既有拼写 `/api/cloud/dowonload` 及 `songId` 载荷，统一映射 URL、文件大小、MD5、过期时间和码率；重定向在专用源文件 URL 缺失时只回退到同平台同账户普通取流，不跨账户；对象/数组响应、不可用地址、错误 ID、账户传播和 302 分支均有离线测试；2026-07-17 持久化真实账户及现有云盘引用实测仍返回 401 `authentication_required`/上游 301，待修复 EAPI 会话头） |
 | `song_copyright_rcmd` | `/song/copyright/rcmd` | `pending` | — |
 | `song_creators` | `/song/creators` | `pending` | — |
 | `song_detail` | `/song/detail` | `verified` | `GET /v1/tracks/{ref}` |
@@ -345,13 +345,13 @@
 | `ugc_mv_get` | `/ugc/mv/get` | `pending` | — |
 | `ugc_song_get` | `/ugc/song/get` | `pending` | — |
 | `ugc_user_devote` | `/ugc/user/devote` | `pending` | — |
-| `user_account` | `/user/account` | `partial` | `GET /v1/account`（统一资料映射，待真实账户验证） |
+| `user_account` | `/user/account` | `partial` | `GET /v1/account`（2026-07-17 持久化真实账户及服务重启后均返回已认证统一资料；缺少的完整用户资料由 `user_detail/user_detail_new` 条目继续追踪） |
 | `user_audio` | `/user/audio` | `pending` | — |
 | `user_binding` | `/user/binding` | `pending` | — |
 | `user_bindingcellphone` | `/user/bindingcellphone` | `pending` | — |
-| `user_cloud` | `/user/cloud` | `implemented` | `GET /v1/account/cloud/tracks`（以 `platform/account/limit/offset` 选择隔离会话，WeAPI `/api/v1/cloud/get`；统一返回 `CloudTrack` 分页，稳定保留云盘引用、内嵌歌曲、文件名/大小/类型、码率、MD5、加入时间、匹配歌曲引用和存储统计，完整原始条目及响应保留在扩展；分页、缺失字段、引用与认证前置均有离线测试，待真实账户内容验证） |
+| `user_cloud` | `/user/cloud` | `verified` | `GET /v1/account/cloud/tracks`（以 `platform/account/limit/offset` 选择隔离会话，WeAPI `/api/v1/cloud/get`；统一返回 `CloudTrack` 分页，稳定保留云盘引用、内嵌歌曲、文件名/大小/类型、码率、MD5、加入时间、匹配歌曲引用和存储统计，完整原始条目及响应保留在扩展；2026-07-17 持久化真实账户在进程重启前后均实测返回 5 项） |
 | `user_cloud_del` | `/user/cloud/del` | `implemented` | `DELETE /v1/account/cloud/tracks`（JSON `refs` 或 `ids`，支持 `platform/account`、完整引用推断、保序与重复项；WeAPI `/api/cloud/del` 严格保留参考实现的单元素数组载荷 `songIds: [ids.join(",")]`，拒绝跨平台混合和引用冲突；协议、选择器、认证前置及结果映射均有离线测试，待真实账户删除后回滚验证） |
-| `user_cloud_detail` | `/user/cloud/detail` | `implemented` | `GET/POST /v1/account/cloud/tracks/details`（`refs` 或 `ids`，完整引用可推断平台，原始 ID 使用显式或默认平台；WeAPI `/api/v1/cloud/get/byids` 按 `songIds` 数组请求，统一结果保持输入顺序和重复项，并复用完整 `CloudTrack` 映射；查询/JSON 两种输入、冲突与混合平台拒绝、缺失条目和认证前置均有离线测试，待真实账户详情验证） |
+| `user_cloud_detail` | `/user/cloud/detail` | `verified` | `GET/POST /v1/account/cloud/tracks/details`（`refs` 或 `ids`，完整引用可推断平台，原始 ID 使用显式或默认平台；WeAPI `/api/v1/cloud/get/byids` 按 `songIds` 数组请求，统一结果保持输入顺序和重复项，并复用完整 `CloudTrack` 映射；2026-07-17 持久化真实账户以列表返回的统一引用实测详情成功） |
 | `user_comment_history` | `/user/comment/history` | `pending` | — |
 | `user_detail` | `/user/detail` | `pending` | — |
 | `user_detail_new` | `/user/detail/new` | `pending` | — |
@@ -363,10 +363,10 @@
 | `user_level` | `/user/level` | `pending` | — |
 | `user_medal` | `/user/medal` | `pending` | — |
 | `user_mutualfollow_get` | `/user/mutualfollow/get` | `pending` | — |
-| `user_playlist` | `/user/playlist` | `implemented` | `GET /v1/account/playlists`（待真实账户验证） |
+| `user_playlist` | `/user/playlist` | `implemented` | `GET /v1/account/playlists`（2026-07-17 持久化真实账户内容成功返回，但请求 `limit=5` 时上游仍返回完整列表；待收口并验证真实分页契约） |
 | `user_playlist_collect` | `/user/playlist/collect` | `pending` | — |
 | `user_playlist_create` | `/user/playlist/create` | `pending` | — |
-| `user_record` | `/user/record` | `implemented` | `GET /v1/account/history`、`GET /v1/users/{ref}/history`（`all_time/week`；已验证匿名权限错误映射，待真实账户验证） |
+| `user_record` | `/user/record` | `verified` | `GET /v1/account/history`、`GET /v1/users/{ref}/history`（`all_time/week`；2026-07-17 持久化真实账户实测全部历史返回 5 项，周历史成功返回空列表） |
 | `user_replacephone` | `/user/replacephone` | `pending` | — |
 | `user_social_status` | `/user/social/status` | `pending` | — |
 | `user_social_status_edit` | `/user/social/status/edit` | `pending` | — |

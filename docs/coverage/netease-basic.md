@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=7`、`partial=7`、`implemented=20`、`verified=30`。
+当前共 64 个验收单元：`pending=7`、`partial=6`、`implemented=18`、`verified=33`。
 
-- 完整实现率：`(implemented + verified) / 64 = 50 / 64 = 78.13%`。
+- 完整实现率：`(implemented + verified) / 64 = 51 / 64 = 79.69%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 57 / 64 = 89.06%`。
-- 完整联网验收率：`verified / 64 = 30 / 64 = 46.88%`。
+- 完整联网验收率：`verified / 64 = 33 / 64 = 51.56%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：L11/L12 云盘读写、源文件下载和直接播放代码链已经收口，真实账户事务验收仍排队等待凭据；主线进入 C10/C11/P10 播客、电台节目与声音内容链路，不因暂缺凭据阻塞其余 Basic 实现。
+当前剩余功能排序以完整播放体验为准：L11/L12 云盘代码链已经收口，真实账户已验证持久化重启、列表和详情；源文件下载仍暴露 EAPI 登录态缺口，写操作还需只操作 TuneWeave 自建测试资产并完整回滚。该协议缺口修复后，主线继续 C10/C11/P10 播客、电台节目与声音内容链路。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -24,7 +24,7 @@
 | S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收 |
 | S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `verified` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 三类目录、四地区歌手榜及榜单曲目均已真实 HTTP 验收 |
 | S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `pending` | `personalized*` 模块族未接入 |
-| S09 | 搜索与发现 | 每日歌曲及歌单推荐 | `partial` | `recommend_songs` 已验证，`recommend_resource` 等登录成功态未验收 |
+| S09 | 搜索与发现 | 每日歌曲及歌单推荐 | `verified` | `recommend_songs` 已验证；2026-07-17 持久化真实账户实测 `recommend_resource` 返回 5 项 |
 | S10 | 搜索与发现 | 音频指纹识别 | `implemented` | 无命中真实路径及映射已验证，待有效指纹成功命中 |
 | C01 | 内容展示 | 歌曲详情 | `verified` | `song_detail` 与统一 `Track` 已验收 |
 | C02 | 内容展示 | 普通专辑目录、详情、曲目和动态统计 | `verified` | `album*` 常规展示链已验收 |
@@ -55,22 +55,22 @@
 | A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `implemented` | 完整代码和认证前置已覆盖，自动测试不主动发送短信 |
 | A05 | 账户与身份 | 邮箱/账号密码登录 | `implemented` | `login` 已实现并脱敏，待真实账户成功态 |
 | A06 | 账户与身份 | 手机号密码登录 | `implemented` | `login_cellphone` 密码分支已实现，待真实账户成功态 |
-| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `partial` | key/URL/waiting 已覆盖；二维码图片及真实确认态仍缺 |
+| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `partial` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据落盘和无扫码重启恢复；统一响应仍缺可直接消费的二维码图片 |
 | A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收 |
 | A09 | 账户与身份 | 会话刷新及退出 | `implemented` | `login_refresh/logout` 已实现，待真实账户验收 |
-| A10 | 账户与身份 | 当前账户资料 | `partial` | `user_account` 统一映射已有，待登录成功态和缺失资料模块 |
+| A10 | 账户与身份 | 当前账户资料 | `partial` | 2026-07-17 持久化真实账户的当前资料成功态已验收；`user_detail/user_detail_new` 仍未接入 |
 | L01 | 个人音乐库 | 喜欢歌曲 ID 及统一歌曲列表 | `implemented` | `likelist` 已实现，待真实账户内容 |
-| L02 | 个人音乐库 | 收藏/取消收藏专辑及专辑收藏列表 | `implemented` | `album_sub/album_sublist` 已实现，待真实账户写入回滚 |
+| L02 | 个人音乐库 | 收藏/取消收藏专辑及专辑收藏列表 | `implemented` | 2026-07-17 真实账户收藏列表返回 5 项；收藏/取消收藏写入回滚仍待验收 |
 | L03 | 个人音乐库 | 收藏/取消收藏广播电台及收藏列表 | `implemented` | `broadcast_sub/broadcast_channel_collect_list` 已实现，待真实账户 |
-| L04 | 个人音乐库 | 关注/取消关注歌手及关注列表 | `implemented` | `artist_sub/artist_sublist` 已实现，待真实账户 |
-| L05 | 个人音乐库 | 当前账户歌单列表 | `implemented` | `user_playlist` 已实现，待真实账户内容 |
+| L04 | 个人音乐库 | 关注/取消关注歌手及关注列表 | `implemented` | 2026-07-17 真实账户关注列表返回 5 项；关注/取消关注写入回滚仍待验收 |
+| L05 | 个人音乐库 | 当前账户歌单列表 | `implemented` | 2026-07-17 真实账户内容成功返回，但请求 `limit=5` 时上游仍返回完整列表，需先收口分页契约 |
 | L06 | 个人音乐库 | 创建、编辑、删除歌单及增删/排序歌曲 | `implemented` | `playlist_create/delete/update/name/desc/tags/cover`、普通歌曲增删及 512 重试、VIDEO 歌单增删、歌曲顺序和账户歌单顺序均已接入统一 HTTP；离线协议/认证前置完整，待真实账户事务写入与回滚 |
-| L07 | 个人音乐库 | 全部/周播放历史 | `implemented` | `user_record` 已实现，待真实账户内容 |
+| L07 | 个人音乐库 | 全部/周播放历史 | `verified` | 2026-07-17 持久化真实账户实测全部历史返回 5 项，周历史成功返回空列表 |
 | L08 | 个人音乐库 | 每日推荐歌曲 | `verified` | `recommend_songs` 匿名可用真实路径已验收 |
-| L09 | 个人音乐库 | 每日推荐歌单 | `implemented` | `recommend_resource` 已实现，待真实账户内容 |
+| L09 | 个人音乐库 | 每日推荐歌单 | `verified` | 2026-07-17 持久化真实账户实测返回 5 项 |
 | L10 | 个人音乐库 | 私人 FM、跳过/不喜欢反馈和模式 | `pending` | `personal_fm/personal_fm_mode/recommend_songs_dislike` 未接入 |
 | L11 | 个人音乐库 | 云盘上传、直传事务、导入、匹配和歌词 | `implemented` | 完整代码及认证前置已覆盖，待真实账户字节写入与回滚 |
-| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `implemented` | `user_cloud/user_cloud_detail/user_cloud_del/song_cloud_download` 已接入统一列表、详情、删除、专用下载和重定向；保留分页、存储、文件、匹配引用与原始条目，普通播放/下载也会把选定账户传入元数据和取流；认证前置与协议分支已离线覆盖，待真实账户验证内容、删除回滚、源文件下载和播放 |
+| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `implemented` | 2026-07-17 持久化真实账户在重启前后均成功读取云盘列表，详情按统一引用成功返回；源文件 EAPI 下载仍返回 401 `authentication_required`，删除回滚和直接播放仍待验收 |
 | F01 | 平台基础协议 | EAPI 请求、响应解密与错误映射 | `verified` | 通用 API 与真实搜索已验收 |
 | F02 | 平台基础协议 | WeAPI 双层 AES/RSA 请求 | `verified` | 通用 API 与真实搜索已验收 |
 | F03 | 平台基础协议 | 未加密 API 请求 | `verified` | 通用 API 与真实搜索已验收 |
