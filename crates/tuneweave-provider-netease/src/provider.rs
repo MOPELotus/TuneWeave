@@ -43,18 +43,18 @@ use tuneweave_core::{
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, PrincipalType, ProviderQrPoll, ProviderQrStart,
-    Quality, RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef,
-    Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode, PodcastEpisodeListRequest,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -405,6 +405,9 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationDetail,
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
+            Capability::PodcastDetail,
+            Capability::PodcastEpisodeList,
+            Capability::PodcastEpisodeDetail,
             Capability::TrackDetail,
             Capability::TrackAvailability,
             Capability::AlbumDetail,
@@ -760,6 +763,35 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "broadcast station subscription")?;
         map_radio_station_subscription_result(id, subscribed, response.body)
+    }
+
+    async fn podcast(&self, id: &str, account: Option<&str>) -> Result<Podcast> {
+        let id = parse_numeric_id("podcast", id)?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_podcast_request(id);
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_response(response.body)
+    }
+
+    async fn podcast_episodes(
+        &self,
+        id: &str,
+        request: &PodcastEpisodeListRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        let id = parse_numeric_id("podcast", id)?;
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = netease_podcast_episodes_request(id, request, limit);
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_episodes(response.body, limit, request.offset)
+    }
+
+    async fn podcast_episode(&self, id: &str, account: Option<&str>) -> Result<PodcastEpisode> {
+        let id = parse_numeric_id("podcast episode", id)?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_podcast_episode_request(id);
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_episode_response(response.body)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -4185,6 +4217,30 @@ fn netease_radio_station_subscription_payload(id: u64, subscribed: bool) -> Valu
     })
 }
 
+fn netease_podcast_request(id: u64) -> (&'static str, Value) {
+    ("/api/djradio/v2/get", json!({ "id": id }))
+}
+
+fn netease_podcast_episodes_request(
+    id: u64,
+    request: &PodcastEpisodeListRequest,
+    limit: u32,
+) -> (&'static str, Value) {
+    (
+        "/api/dj/program/byradio",
+        json!({
+            "radioId": id,
+            "limit": limit,
+            "offset": request.offset,
+            "asc": request.ascending
+        }),
+    )
+}
+
+fn netease_podcast_episode_request(id: u64) -> (&'static str, Value) {
+    ("/api/dj/program/detail", json!({ "id": id }))
+}
+
 fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Result<Value> {
     let category_id = request
         .category_id
@@ -4523,6 +4579,238 @@ fn radio_station_item_error(field: &str, raw: &Value) -> TuneWeaveError {
     )
     .with_platform(Platform::Netease)
     .with_details(json!({ "item": raw }))
+}
+
+fn map_netease_podcast_response(body: Value) -> Result<Podcast> {
+    ensure_success(&body)?;
+    let raw = body
+        .get("data")
+        .filter(|data| data.is_object())
+        .cloned()
+        .ok_or_else(|| podcast_item_error("podcast data", &body))?;
+    let mut podcast = map_netease_podcast(raw)?;
+    podcast.extensions.insert("response".to_owned(), body);
+    Ok(podcast)
+}
+
+fn map_netease_podcast(raw: Value) -> Result<Podcast> {
+    let id = raw
+        .get("id")
+        .and_then(json_scalar_string)
+        .ok_or_else(|| podcast_item_error("id", &raw))?;
+    let name = radio_text_field(&raw, &["name", "title"])
+        .ok_or_else(|| podcast_item_error("name", &raw))?;
+    let reference = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid podcast id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "item": raw }))
+    })?;
+    let mut podcast = Podcast::new(reference, name);
+    podcast.description = radio_text_field(&raw, &["desc", "description"]).unwrap_or_default();
+    podcast.cover_url = radio_text_field(&raw, &["picUrl", "coverUrl"]);
+    podcast.creator = map_podcast_creator(raw.get("dj"))?;
+    podcast.category = radio_text_field(&raw, &["category", "categoryName"]);
+    podcast.secondary_category = radio_text_field(&raw, &["secondCategory", "secondCategoryName"]);
+    podcast.episode_count = podcast_u64_field(&raw, &["programCount", "episodeCount"]);
+    podcast.subscriber_count = podcast_u64_field(&raw, &["subCount", "subscriberCount"]);
+    podcast.play_count = podcast_u64_field(&raw, &["playCount", "listenerCount"]);
+    podcast.subscribed = radio_bool_field(&raw, &["subed", "subscribed"]);
+    podcast.paid = podcast_paid_field(&raw, &["radioFeeType", "feeScope"]);
+    podcast.purchased = radio_bool_field(&raw, &["buyed", "purchased"]);
+    podcast.created_at = podcast_u64_field(&raw, &["createTime"])
+        .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
+    podcast.extensions.insert("podcast".to_owned(), raw);
+    Ok(podcast)
+}
+
+fn map_netease_podcast_episodes(
+    body: Value,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<PodcastEpisode>> {
+    ensure_success(&body)?;
+    let raw_items = body
+        .get("programs")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("programs array", &body))?;
+    let items = raw_items
+        .into_iter()
+        .map(map_netease_podcast_episode)
+        .collect::<Result<Vec<_>>>()?;
+    let total = body.get("count").and_then(json_u64);
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let upstream_more = body.get("more").and_then(json_bool);
+    let has_more = upstream_more
+        .unwrap_or_else(|| total.is_some_and(|total| u64::from(next_offset) < total))
+        && consumed > 0;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([("response".to_owned(), body)]),
+        },
+    })
+}
+
+fn map_netease_podcast_episode_response(body: Value) -> Result<PodcastEpisode> {
+    ensure_success(&body)?;
+    let raw = body
+        .get("program")
+        .filter(|program| program.is_object())
+        .cloned()
+        .ok_or_else(|| podcast_item_error("program", &body))?;
+    let mut episode = map_netease_podcast_episode(raw)?;
+    episode.extensions.insert("response".to_owned(), body);
+    Ok(episode)
+}
+
+fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
+    let id = raw
+        .get("id")
+        .and_then(json_scalar_string)
+        .ok_or_else(|| podcast_item_error("program id", &raw))?;
+    let name = radio_text_field(&raw, &["name", "title"])
+        .ok_or_else(|| podcast_item_error("program name", &raw))?;
+    let reference = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid podcast episode id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "item": raw }))
+    })?;
+    let podcast_ref = raw
+        .get("radio")
+        .and_then(|radio| radio.get("id"))
+        .and_then(json_scalar_string)
+        .map(|id| ResourceRef::new(Platform::Netease, id))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid episode podcast id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "item": raw }))
+        })?;
+    let main_track_id = raw.get("mainTrackId").and_then(json_scalar_string);
+    let mut audio = raw
+        .get("mainSong")
+        .filter(|song| song.is_object())
+        .cloned()
+        .map(parse_body::<Song>)
+        .transpose()?
+        .map(|song| map_song(song, None))
+        .transpose()?;
+    if let (Some(main_track_id), Some(audio)) = (main_track_id.as_deref(), audio.as_ref())
+        && audio.id != main_track_id
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase podcast episode contains conflicting audio track ids",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "episode_id": id,
+            "main_track_id": main_track_id,
+            "song_id": audio.id
+        })));
+    }
+    if audio.is_none()
+        && let Some(main_track_id) = main_track_id
+    {
+        let audio_ref = ResourceRef::new(Platform::Netease, main_track_id).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid episode audio id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let mut fallback = Track::new(audio_ref, name.clone());
+        fallback.duration_ms = podcast_u64_field(&raw, &["duration"]);
+        audio = Some(fallback);
+    }
+
+    let mut episode = PodcastEpisode::new(reference, name);
+    episode.podcast_ref = podcast_ref;
+    episode.description =
+        radio_text_field(&raw, &["description", "programDesc"]).unwrap_or_default();
+    episode.cover_url = radio_text_field(&raw, &["coverUrl", "blurCoverUrl"]);
+    episode.creator = map_podcast_creator(raw.get("dj"))?;
+    episode.duration_ms = podcast_u64_field(&raw, &["duration"])
+        .or_else(|| audio.as_ref().and_then(|audio| audio.duration_ms));
+    episode.audio = audio;
+    episode.published_at = podcast_u64_field(&raw, &["createTime", "scheduledPublishTime"])
+        .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
+    episode.serial_number = podcast_u64_field(&raw, &["serialNum", "seqNo"]);
+    episode.listener_count = podcast_u64_field(&raw, &["listenerCount", "playCount"]);
+    episode.liked_count = podcast_u64_field(&raw, &["likedCount"]);
+    episode.comment_count = podcast_u64_field(&raw, &["commentCount"]);
+    episode.share_count = podcast_u64_field(&raw, &["shareCount"]);
+    episode.subscribed = radio_bool_field(&raw, &["subscribed"]);
+    episode.has_lyrics = radio_bool_field(&raw, &["existLyric"]);
+    episode.paid = podcast_paid_field(&raw, &["programFeeType", "feeScope"]);
+    episode.purchased = radio_bool_field(&raw, &["buyed", "buyedNew", "purchased"]);
+    episode.extensions.insert("program".to_owned(), raw);
+    Ok(episode)
+}
+
+fn map_podcast_creator(raw: Option<&Value>) -> Result<Option<CreatorSummary>> {
+    let Some(raw) = raw.filter(|raw| raw.is_object()) else {
+        return Ok(None);
+    };
+    let Some(name) = radio_text_field(raw, &["nickname", "name"]) else {
+        return Ok(None);
+    };
+    let resource_ref = raw
+        .get("userId")
+        .or_else(|| raw.get("id"))
+        .and_then(json_scalar_string)
+        .map(|id| ResourceRef::new(Platform::Netease, id))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid podcast creator id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    Ok(Some(CreatorSummary {
+        resource_ref,
+        name,
+        avatar_url: radio_text_field(raw, &["avatarUrl"]),
+    }))
+}
+
+fn podcast_u64_field(raw: &Value, fields: &[&str]) -> Option<u64> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_u64))
+}
+
+fn podcast_paid_field(raw: &Value, fields: &[&str]) -> Option<bool> {
+    fields
+        .iter()
+        .find_map(|field| raw.get(field).and_then(json_i64))
+        .map(|fee_type| fee_type > 0)
+}
+
+fn podcast_item_error(field: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase podcast response did not contain {field}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": raw }))
 }
 
 fn json_i64(value: &Value) -> Option<i64> {
@@ -10424,6 +10712,47 @@ mod tests {
         .expect("valid fixture")
     }
 
+    fn fixture_podcast_program(id: u64, podcast_id: u64, audio_id: u64) -> Value {
+        json!({
+            "id": id,
+            "name": "一期节目",
+            "description": "节目介绍",
+            "coverUrl": "https://example.test/episode.jpg",
+            "duration": 258_000,
+            "createTime": 1_704_067_200_000_u64,
+            "serialNum": 42,
+            "listenerCount": 1_234,
+            "likedCount": 12,
+            "commentCount": 3,
+            "shareCount": 4,
+            "subscribed": false,
+            "existLyric": true,
+            "programFeeType": 0,
+            "buyed": false,
+            "mainTrackId": audio_id,
+            "mainSong": {
+                "id": audio_id,
+                "name": "一期节目音频",
+                "alias": [],
+                "artists": [{"id": 32_953_014, "name": "主播"}],
+                "album": {
+                    "id": 0,
+                    "name": "代码时间",
+                    "picUrl": "https://example.test/episode.jpg"
+                },
+                "duration": 258_000,
+                "status": 0,
+                "lMusic": {"bitrate": 128_000}
+            },
+            "dj": {
+                "userId": 32_953_014,
+                "nickname": "主播",
+                "avatarUrl": "https://example.test/avatar.jpg"
+            },
+            "radio": {"id": podcast_id, "name": "代码时间"}
+        })
+    }
+
     fn fixture_cloud_item(cloud_id: &str, source_id: u64) -> Value {
         json!({
             "songId": cloud_id,
@@ -12747,6 +13076,149 @@ mod tests {
                 .code,
             ErrorCode::UpstreamError
         );
+    }
+
+    #[test]
+    fn podcast_requests_match_all_three_reference_modules() {
+        assert_eq!(
+            netease_podcast_request(336_355_127),
+            ("/api/djradio/v2/get", json!({"id": 336_355_127}))
+        );
+
+        let mut request = PodcastEpisodeListRequest::new(25, 50);
+        request.ascending = true;
+        request.account = Some("podcast-user".to_owned());
+        assert_eq!(
+            netease_podcast_episodes_request(336_355_127, &request, 25),
+            (
+                "/api/dj/program/byradio",
+                json!({
+                    "radioId": 336_355_127,
+                    "limit": 25,
+                    "offset": 50,
+                    "asc": true
+                })
+            )
+        );
+        assert_eq!(
+            netease_podcast_episode_request(1_367_665_101),
+            ("/api/dj/program/detail", json!({"id": 1_367_665_101}))
+        );
+    }
+
+    #[test]
+    fn maps_podcast_detail_and_episode_catalog_without_collapsing_audio_identity() {
+        let podcast = map_netease_podcast_response(json!({
+            "code": 200,
+            "data": {
+                "id": 336_355_127,
+                "name": "代码时间",
+                "desc": "面向开发者的播客",
+                "picUrl": "https://example.test/podcast.jpg",
+                "dj": {
+                    "userId": 32_953_014,
+                    "nickname": "主播",
+                    "avatarUrl": "https://example.test/avatar.jpg"
+                },
+                "category": "科技",
+                "secondCategory": "互联网",
+                "programCount": 120,
+                "subCount": 4_567,
+                "playCount": 98_765,
+                "subed": true,
+                "radioFeeType": 0,
+                "buyed": false,
+                "createTime": 1_704_067_200_000_u64,
+                "futureField": "preserved"
+            }
+        }))
+        .expect("map podcast detail");
+        assert_eq!(podcast.resource_ref.to_string(), "netease:336355127");
+        assert_eq!(podcast.description, "面向开发者的播客");
+        assert_eq!(podcast.creator.expect("podcast creator").name, "主播");
+        assert_eq!(podcast.category.as_deref(), Some("科技"));
+        assert_eq!(podcast.secondary_category.as_deref(), Some("互联网"));
+        assert_eq!(podcast.episode_count, Some(120));
+        assert_eq!(podcast.subscriber_count, Some(4_567));
+        assert_eq!(podcast.play_count, Some(98_765));
+        assert_eq!(podcast.subscribed, Some(true));
+        assert_eq!(podcast.paid, Some(false));
+        assert_eq!(podcast.purchased, Some(false));
+        assert_eq!(podcast.extensions["podcast"]["futureField"], "preserved");
+        assert_eq!(podcast.extensions["response"]["code"], 200);
+
+        let program = fixture_podcast_program(1_367_665_101, 336_355_127, 2_603_965_162);
+        let page = map_netease_podcast_episodes(
+            json!({
+                "code": 200,
+                "count": 12,
+                "more": true,
+                "programs": [program.clone()]
+            }),
+            1,
+            5,
+        )
+        .expect("map podcast episode catalog");
+        assert_eq!(page.items.len(), 1);
+        let episode = &page.items[0];
+        assert_eq!(episode.resource_ref.to_string(), "netease:1367665101");
+        assert_eq!(
+            episode
+                .podcast_ref
+                .as_ref()
+                .expect("podcast reference")
+                .to_string(),
+            "netease:336355127"
+        );
+        let audio = episode.audio.as_ref().expect("episode audio track");
+        assert_eq!(audio.resource_ref.to_string(), "netease:2603965162");
+        assert_ne!(episode.resource_ref, audio.resource_ref);
+        assert_eq!(audio.name, "一期节目音频");
+        assert_eq!(episode.duration_ms, Some(258_000));
+        assert_eq!(episode.serial_number, Some(42));
+        assert_eq!(episode.listener_count, Some(1_234));
+        assert_eq!(episode.liked_count, Some(12));
+        assert_eq!(episode.comment_count, Some(3));
+        assert_eq!(episode.share_count, Some(4));
+        assert_eq!(episode.subscribed, Some(false));
+        assert_eq!(episode.has_lyrics, Some(true));
+        assert_eq!(episode.paid, Some(false));
+        assert_eq!(episode.purchased, Some(false));
+        assert_eq!(episode.extensions["program"]["id"], 1_367_665_101_u64);
+        assert_eq!(page.pagination.total, Some(12));
+        assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+
+        let episode = map_netease_podcast_episode_response(json!({
+            "code": 200,
+            "program": program
+        }))
+        .expect("map podcast episode detail");
+        assert_eq!(episode.resource_ref.to_string(), "netease:1367665101");
+        assert_eq!(episode.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn podcast_mapping_rejects_missing_arrays_and_conflicting_audio_ids() {
+        for result in [
+            map_netease_podcast_response(json!({"code": 200})).map(|_| ()),
+            map_netease_podcast_episodes(json!({"code": 200}), 20, 0).map(|_| ()),
+            map_netease_podcast_episode_response(json!({"code": 200})).map(|_| ()),
+        ] {
+            assert_eq!(
+                result.expect_err("missing podcast response shape").code,
+                ErrorCode::UpstreamError
+            );
+        }
+
+        let mut program = fixture_podcast_program(1_367_665_101, 336_355_127, 2_603_965_162);
+        program["mainSong"]["id"] = json!(2_603_965_163_u64);
+        let error = map_netease_podcast_episode(program)
+            .expect_err("conflicting program and audio track ids");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.details["main_track_id"], "2603965162");
+        assert_eq!(error.details["song_id"], "2603965163");
     }
 
     #[test]
@@ -16888,6 +17360,9 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioStationDetail));
         assert!(capabilities.contains(&Capability::RadioStationList));
         assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
+        assert!(capabilities.contains(&Capability::PodcastDetail));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeList));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
     }
 
     #[test]
@@ -17545,6 +18020,43 @@ mod tests {
                 .iter()
                 .any(|region| region.id == "407" && region.name == "网络台")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_podcast_detail_programs_and_episode() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let podcast = MusicProvider::podcast(&provider, "336355127", None)
+            .await
+            .expect("live public podcast detail");
+        assert_eq!(podcast.resource_ref.to_string(), "netease:336355127");
+        assert!(!podcast.name.is_empty());
+        assert!(podcast.episode_count.is_some_and(|count| count > 0));
+
+        let episodes = MusicProvider::podcast_episodes(
+            &provider,
+            "336355127",
+            &PodcastEpisodeListRequest::new(2, 0),
+        )
+        .await
+        .expect("live public podcast episodes");
+        assert_eq!(episodes.items.len(), 2);
+        assert!(episodes.pagination.total.is_some_and(|total| total >= 2));
+        assert!(episodes.items.iter().all(|episode| {
+            episode
+                .podcast_ref
+                .as_ref()
+                .is_some_and(|reference| reference.to_string() == "netease:336355127")
+        }));
+        assert!(episodes.items.iter().all(|episode| episode.audio.is_some()));
+
+        let episode_id = episodes.items[0].id.clone();
+        let episode = MusicProvider::podcast_episode(&provider, &episode_id, None)
+            .await
+            .expect("live public podcast episode detail");
+        assert_eq!(episode.id, episode_id);
+        assert!(episode.audio.is_some());
+        assert_eq!(episode.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
