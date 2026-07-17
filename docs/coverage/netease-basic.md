@@ -4,11 +4,11 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=5`、`partial=8`、`implemented=16`、`verified=35`。
+当前共 64 个验收单元：`pending=5`、`partial=7`、`implemented=16`、`verified=36`。
 
-- 完整实现率：`(implemented + verified) / 64 = 51 / 64 = 79.69%`。
+- 完整实现率：`(implemented + verified) / 64 = 52 / 64 = 81.25%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 59 / 64 = 92.19%`。
-- 完整联网验收率：`verified / 64 = 35 / 64 = 54.69%`。
+- 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
@@ -55,7 +55,7 @@
 | A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `implemented` | 完整代码和认证前置已覆盖，自动测试不主动发送短信 |
 | A05 | 账户与身份 | 邮箱/账号密码登录 | `implemented` | `login` 已实现并脱敏，待真实账户成功态 |
 | A06 | 账户与身份 | 手机号密码登录 | `implemented` | `login_cellphone` 密码分支已实现，待真实账户成功态 |
-| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `partial` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据落盘和无扫码重启恢复；统一响应仍缺可直接消费的二维码图片 |
+| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
 | A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收 |
 | A09 | 账户与身份 | 会话刷新及退出 | `implemented` | 2026-07-17 真实账户刷新、凭据代际替换和重启恢复均已验收；退出会删除登录态，留待需要重新扫码时受控验证 |
 | A10 | 账户与身份 | 当前账户资料 | `partial` | 2026-07-17 持久化真实账户的当前资料成功态已验收；`user_detail/user_detail_new` 仍未接入 |

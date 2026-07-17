@@ -8183,7 +8183,10 @@ mod tests {
             Ok(ProviderQrStart {
                 provider_transaction_id: "provider-qr-key".to_owned(),
                 url: "https://example.test/qr".to_owned(),
-                image_data_url: None,
+                image_data_url: Some(
+                    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="
+                        .to_owned(),
+                ),
                 expires_at: None,
             })
         }
@@ -12072,6 +12075,11 @@ mod tests {
         assert!(transaction_id.starts_with("tw-auth-"));
         assert!(!transaction_id.contains("provider-qr-key"));
         assert_eq!(start["data"]["url"], "https://example.test/qr");
+        assert!(
+            start["data"]["image_data_url"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("data:image/svg+xml;base64,"))
+        );
 
         let path = format!("/v1/auth/qr/{transaction_id}");
         let (status, poll) = json_response_from(app, &path).await;

@@ -6,9 +6,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use lofty::{file::TaggedFileExt, probe::Probe, tag::Accessor};
 use md5::{Digest, Md5};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use qrcode::{QrCode, render::svg};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
@@ -2004,8 +2006,8 @@ impl MusicProvider for NeteaseProvider {
         let login = NeteaseProvider::create_qr_login(self).await?;
         Ok(ProviderQrStart {
             provider_transaction_id: login.key,
+            image_data_url: Some(qr_image_data_url(&login.url)?),
             url: login.url,
-            image_data_url: None,
             expires_at: None,
         })
     }
@@ -2720,6 +2722,26 @@ impl MusicProvider for NeteaseProvider {
         ensure_platform_api_success(&response.body)?;
         Ok(response.body)
     }
+}
+
+fn qr_image_data_url(url: &str) -> Result<String> {
+    let code = QrCode::new(url.as_bytes()).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase QR login URL could not be encoded as an image",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let image = code
+        .render::<svg::Color>()
+        .min_dimensions(320, 320)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        BASE64.encode(image.as_bytes())
+    ))
 }
 
 fn netease_comment_write_request(
@@ -10716,6 +10738,22 @@ fn parse_body<T: DeserializeOwned>(body: Value) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qr_login_image_is_a_self_contained_svg_data_url() {
+        let data_url = qr_image_data_url("orpheus://orpheus/pub/login?codekey=test-key")
+            .expect("encode QR image");
+        let encoded = data_url
+            .strip_prefix("data:image/svg+xml;base64,")
+            .expect("SVG data URL");
+        let image = BASE64.decode(encoded).expect("base64 SVG");
+        let image = String::from_utf8(image).expect("UTF-8 SVG");
+        assert!(image.starts_with("<?xml"));
+        assert!(image.contains("<svg"));
+        assert!(image.contains("width=\""));
+        assert!(image.contains("height=\""));
+        assert!(!image.contains("test-key"));
+    }
 
     static TEST_CREDENTIAL_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);

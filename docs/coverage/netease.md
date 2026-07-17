@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=274`、`partial=5`、`implemented=38`、`verified=90`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=274`、`partial=3`、`implemented=38`、`verified=92`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -163,8 +163,8 @@
 | `login` | `/login` | `implemented` | `POST /v1/auth/password`（邮箱，待真实账户验证） |
 | `login_cellphone` | `/login/cellphone` | `implemented` | `POST /v1/auth/password` / challenge verify（待真实账户验证） |
 | `login_qr_check` | `/login/qr/check` | `partial` | `GET /v1/auth/qr/{transaction_id}`（waiting 已验证，确认态待账户实测） |
-| `login_qr_create` | `/login/qr/create` | `partial` | `POST /v1/auth/qr`（返回 URL，暂不生成图片） |
-| `login_qr_key` | `/login/qr/key` | `partial` | `POST /v1/auth/qr`（创建已验证） |
+| `login_qr_create` | `/login/qr/create` | `verified` | `POST /v1/auth/qr`（2026-07-17 真实 HTTP 创建返回可扫码 URL 及自包含 SVG data URL；二维码图片不依赖外部渲染服务） |
+| `login_qr_key` | `/login/qr/key` | `verified` | `POST /v1/auth/qr`（2026-07-17 真实 HTTP 验证上游 key 创建成功；响应只暴露 TuneWeave 随机事务 ID，不泄露上游 key） |
 | `login_refresh` | `/login/refresh` | `verified` | `POST /v1/auth/session/refresh`（2026-07-17 持久化真实账户 HTTP 实测返回已认证；新 Cookie 原子替换为单一代际，服务重启后会话及 EAPI 云盘下载继续成功） |
 | `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证；2026-07-17 真实二维码确认后返回已认证，并在服务重启后从 `platform/account` 持久化存储恢复） |
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
