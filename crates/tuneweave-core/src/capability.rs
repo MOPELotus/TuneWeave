@@ -27,6 +27,8 @@ pub enum Capability {
     RadioStationDetail,
     RadioStationList,
     RadioStationSubscriptionWrite,
+    PodcastCategories,
+    PodcastList,
     PodcastDetail,
     PodcastEpisodeList,
     PodcastEpisodeDetail,
@@ -185,6 +187,14 @@ mod tests {
             serde_json::to_value(Capability::RadioStationSubscriptionWrite)
                 .expect("serialize capability"),
             serde_json::json!("radio_station_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastCategories).expect("serialize capability"),
+            serde_json::json!("podcast_categories")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastList).expect("serialize capability"),
+            serde_json::json!("podcast_list")
         );
         assert_eq!(
             serde_json::to_value(Capability::PodcastDetail).expect("serialize capability"),

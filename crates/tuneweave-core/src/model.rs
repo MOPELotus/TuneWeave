@@ -674,6 +674,55 @@ impl RadioStationListRequest {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCategory {
+    pub id: String,
+    pub name: String,
+    pub icon_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastTaxonomy {
+    pub categories: Vec<PodcastCategory>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastCatalog {
+    #[default]
+    Featured,
+    Hot,
+    CategoryFeatured,
+    CategoryHot,
+    Personalized,
+    TodayPreferred,
+    Paid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastListRequest {
+    pub catalog: PodcastCatalog,
+    pub category_id: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastListRequest {
+    #[must_use]
+    pub const fn new(catalog: PodcastCatalog, limit: u32, offset: u32) -> Self {
+        Self {
+            catalog,
+            category_id: None,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
 /// An on-demand spoken-audio show. This is intentionally separate from a live radio station.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Podcast {
@@ -2530,6 +2579,35 @@ mod tests {
         assert_eq!(value["ref"], "netease:1367665101");
         assert_eq!(value["podcast_ref"], "netease:336355127");
         assert_eq!(value["audio"]["ref"], "netease:478446370");
+    }
+
+    #[test]
+    fn podcast_catalog_contract_keeps_discovery_modes_and_category_ids_explicit() {
+        let category = PodcastCategory {
+            id: "2001".to_owned(),
+            name: "创作与翻唱".to_owned(),
+            icon_url: Some("https://example.test/category.png".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(category).expect("serialize podcast category");
+        assert_eq!(value["id"], "2001");
+        assert_eq!(value["icon_url"], "https://example.test/category.png");
+
+        let taxonomy = PodcastTaxonomy {
+            categories: vec![serde_json::from_value(value).expect("deserialize category")],
+            extensions: Extensions::new(),
+        };
+        assert_eq!(taxonomy.categories.len(), 1);
+
+        let mut request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 30, 60);
+        request.category_id = Some("2001".to_owned());
+        request.account = Some("spoken-word".to_owned());
+        let value = serde_json::to_value(request).expect("serialize podcast list request");
+        assert_eq!(value["catalog"], "category_hot");
+        assert_eq!(value["category_id"], "2001");
+        assert_eq!(value["limit"], 30);
+        assert_eq!(value["offset"], 60);
+        assert_eq!(value["account"], "spoken-word");
     }
 
     #[test]
