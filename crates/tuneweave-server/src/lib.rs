@@ -48,16 +48,17 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode,
-    PodcastEpisodeListRequest, PodcastEpisodeStream, PrincipalType, ProviderRegistry, Quality,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PrincipalType,
+    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -211,6 +212,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
         .route("/episodes/{reference}", get(podcast_episode))
+        .route("/episodes/{reference}/lyrics", get(podcast_episode_lyrics))
         .route("/episodes/{reference}/stream", get(podcast_episode_stream))
         .route(
             "/episodes/{reference}/stream/redirect",
@@ -1008,6 +1010,32 @@ async fn podcast_episode(
         .podcast_episode(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(episode).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastEpisodeLyricsParams {
+    account: Option<String>,
+}
+
+async fn podcast_episode_lyrics(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PodcastEpisodeLyricsParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeLyrics>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let lyrics = provider
+        .podcast_episode_lyrics(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(lyrics).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -6700,6 +6728,7 @@ mod tests {
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeStream,
+                Capability::PodcastEpisodeLyrics,
                 Capability::TrackDetail,
                 Capability::TrackAvailability,
                 Capability::AlbumDetail,
@@ -7118,6 +7147,42 @@ mod tests {
                     .insert("account".to_owned(), json!(account));
             }
             Ok(episode)
+        }
+
+        async fn podcast_episode_lyrics(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<PodcastEpisodeLyrics> {
+            let episode = sample_podcast_episode(id, "336355127", "2603965162");
+            let episode_ref = episode.resource_ref.clone();
+            let audio_ref = episode
+                .audio
+                .as_ref()
+                .expect("sample episode audio")
+                .resource_ref
+                .clone();
+            Ok(PodcastEpisodeLyrics {
+                episode_ref,
+                audio_ref: Some(audio_ref.clone()),
+                lyrics: Lyrics {
+                    track_ref: audio_ref,
+                    plain: Some("[00:00.000]节目转写".to_owned()),
+                    translated: None,
+                    romanized: None,
+                    word_synced: Some(
+                        json!({
+                            "duration": 258_000,
+                            "sents": [{"beg": 0, "end": 1_000, "name": "节目转写"}]
+                        })
+                        .to_string(),
+                    ),
+                    format: "netease_voice_json".to_owned(),
+                    contributors: Vec::new(),
+                    extensions: Extensions::from([("available".to_owned(), json!(true))]),
+                },
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
         }
 
         async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -10334,6 +10399,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_episode_lyrics_keep_episode_audio_and_transcript_formats_separate() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes/netease:1367665101/lyrics?account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:1367665101");
+        assert_eq!(json["data"]["audio_ref"], "netease:2603965162");
+        assert_eq!(json["data"]["lyrics"]["track_ref"], "netease:2603965162");
+        assert_eq!(json["data"]["lyrics"]["plain"], "[00:00.000]节目转写");
+        assert_eq!(json["data"]["lyrics"]["format"], "netease_voice_json");
+        let transcript: Value = serde_json::from_str(
+            json["data"]["lyrics"]["word_synced"]
+                .as_str()
+                .expect("word-synced transcript"),
+        )
+        .expect("valid transcript JSON");
+        assert_eq!(transcript["duration"], 258_000);
+        assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_episode_catalog_accepts_reference_aliases_account_and_pagination() {
         let (status, json) = json_response_from(
             test_app_with_provider(),
@@ -10366,6 +10456,8 @@ mod tests {
         for path in [
             "/v1/podcasts/336355127",
             "/v1/episodes/1367665101",
+            "/v1/episodes/1367665101/lyrics",
+            "/v1/episodes/netease:1367665101/lyrics?unknown=true",
             "/v1/podcasts/netease:336355127/episodes?limit=0",
             "/v1/podcasts/netease:336355127/episodes?limit=101",
             "/v1/podcasts/netease:336355127/episodes?offset=invalid",

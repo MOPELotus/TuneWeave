@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=274`、`partial=3`、`implemented=38`、`verified=92`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=273`、`partial=3`、`implemented=38`、`verified=93`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -400,7 +400,7 @@
 | `vip_timemachine` | `/vip/timemachine` | `pending` | — |
 | `voice_delete` | `/voice/delete` | `pending` | — |
 | `voice_detail` | `/voice/detail` | `pending` | — |
-| `voice_lyric` | `/voice/lyric` | `pending` | — |
+| `voice_lyric` | `/voice/lyric` | `verified` | `GET /v1/episodes/{ref}/lyrics`（EAPI `/api/voice/lyric/get`；节目与音频引用分离，受限下载网易媒体域名的完整 JSON 转写并生成句段 LRC，逐词/说话人原文保留于 `word_synced`；2026-07-17 provider 与真实 HTTP 实测 `2058695201` 返回 675 段、约 1.6 MB 转写，`1367665101` 正确保留 `data=null` 无歌词成功态） |
 | `voice_upload` | `/voice/upload` | `pending` | — |
 | `voicelist_detail` | `/voicelist/detail` | `pending` | — |
 | `voicelist_list` | `/voicelist/list` | `pending` | — |

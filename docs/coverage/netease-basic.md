@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=5`、`partial=7`、`implemented=16`、`verified=36`。
+当前共 64 个验收单元：`pending=4`、`partial=8`、`implemented=16`、`verified=36`。
 
 - 完整实现率：`(implemented + verified) / 64 = 52 / 64 = 81.25%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 59 / 64 = 92.19%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 60 / 64 = 93.75%`。
 - 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。主线已进入 C10/C11/P10 播客、电台节目与声音内容链路：播客详情、节目列表、节目详情、节目 JSON 取流及 302 已验收，下一步补声音歌词和常用分类/推荐目录。
+当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。主线已进入 C10/C11/P10 播客、电台节目与声音内容链路：详情、节目目录、节目播放/302 及声音逐词转写已经验收，下一步补常用分类、推荐、热门目录和声音歌单。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -36,7 +36,7 @@
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收 |
 | C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_detail/dj_program/dj_program_detail` 已通过 provider 与真实统一 HTTP 验收；分类、推荐、热门及其他常规目录仍待接入 |
-| C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `pending` | `voice_*`、`voicelist_*` 未接入 |
+| C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `partial` | `voice_lyric` 已通过 provider 与真实统一 HTTP 验收，覆盖 675 段非空转写和 `data=null`；`voice_detail`、`voicelist_*` 等详情与目录仍待接入 |
 | C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `partial` | 会员摘要已验证，`user_detail/user_detail_new` 未接入，账户资料待登录验收 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |
 | P02 | 播放与权益 | 旧版歌曲播放 URL 与精确 `br` | `verified` | `song_url` 单/批量和任意码率已真实验收 |
@@ -47,7 +47,7 @@
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `partial` | `vip_info` 已验证，`vip_info_v2` 及完整权益仍缺 |
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `pending` | `ad_get/ad_listening_rights_gain` 等未接入 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `implemented` | MV 四档真实播放地址和 302 已验收；站内视频离线成功与真实空 URL 业务态已覆盖，待当前有效视频 ID 的可播放成功态 |
-| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；2026-07-17 provider 与真实统一 HTTP 验证节目流成功，`voice_*` 声音播放仍待接入 |
+| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；声音逐词转写已接入且真实验证，`voice_detail` 与声音歌单目录/播放仍待接入 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
