@@ -25,14 +25,15 @@ use crate::{
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
-    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
-    VideoStream, VideoStreamRequest,
+    PlaylistUpdateRequest, Podcast, PodcastEpisode, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeStream, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -188,6 +189,53 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::RadioStationSubscriptionWrite,
+        ))
+    }
+
+    async fn podcast(&self, _id: &str, _account: Option<&str>) -> Result<Podcast> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastDetail,
+        ))
+    }
+
+    async fn podcast_episodes(
+        &self,
+        _id: &str,
+        _request: &PodcastEpisodeListRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeList,
+        ))
+    }
+
+    async fn podcast_episode(&self, _id: &str, _account: Option<&str>) -> Result<PodcastEpisode> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeDetail,
+        ))
+    }
+
+    async fn podcast_episode_stream(
+        &self,
+        _id: &str,
+        _request: &StreamRequest,
+    ) -> Result<PodcastEpisodeStream> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeStream,
+        ))
+    }
+
+    async fn podcast_episode_lyrics(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<PodcastEpisodeLyrics> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeLyrics,
         ))
     }
 

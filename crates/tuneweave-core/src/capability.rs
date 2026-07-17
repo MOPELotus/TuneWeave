@@ -27,6 +27,11 @@ pub enum Capability {
     RadioStationDetail,
     RadioStationList,
     RadioStationSubscriptionWrite,
+    PodcastDetail,
+    PodcastEpisodeList,
+    PodcastEpisodeDetail,
+    PodcastEpisodeStream,
+    PodcastEpisodeLyrics,
     TrackDetail,
     TrackAvailability,
     AlbumDetail,
@@ -180,6 +185,26 @@ mod tests {
             serde_json::to_value(Capability::RadioStationSubscriptionWrite)
                 .expect("serialize capability"),
             serde_json::json!("radio_station_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastDetail).expect("serialize capability"),
+            serde_json::json!("podcast_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeList).expect("serialize capability"),
+            serde_json::json!("podcast_episode_list")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeDetail).expect("serialize capability"),
+            serde_json::json!("podcast_episode_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeStream).expect("serialize capability"),
+            serde_json::json!("podcast_episode_stream")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeLyrics).expect("serialize capability"),
+            serde_json::json!("podcast_episode_lyrics")
         );
         assert_eq!(
             serde_json::to_value(Capability::ChallengeValidation).expect("serialize capability"),

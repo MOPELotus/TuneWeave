@@ -674,6 +674,147 @@ impl RadioStationListRequest {
     }
 }
 
+/// An on-demand spoken-audio show. This is intentionally separate from a live radio station.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Podcast {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub creator: Option<CreatorSummary>,
+    pub category: Option<String>,
+    pub secondary_category: Option<String>,
+    pub episode_count: Option<u64>,
+    pub subscriber_count: Option<u64>,
+    pub play_count: Option<u64>,
+    pub subscribed: Option<bool>,
+    pub paid: Option<bool>,
+    pub purchased: Option<bool>,
+    pub created_at: Option<String>,
+    pub extensions: Extensions,
+}
+
+impl Podcast {
+    #[must_use]
+    pub fn new(resource_ref: ResourceRef, name: impl Into<String>) -> Self {
+        Self {
+            platform: resource_ref.platform(),
+            id: resource_ref.id().to_owned(),
+            resource_ref,
+            name: name.into(),
+            description: String::new(),
+            cover_url: None,
+            creator: None,
+            category: None,
+            secondary_category: None,
+            episode_count: None,
+            subscriber_count: None,
+            play_count: None,
+            subscribed: None,
+            paid: None,
+            purchased: None,
+            created_at: None,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisode {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub podcast_ref: Option<ResourceRef>,
+    pub name: String,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub creator: Option<CreatorSummary>,
+    pub audio: Option<Track>,
+    pub duration_ms: Option<u64>,
+    pub published_at: Option<String>,
+    pub serial_number: Option<u64>,
+    pub listener_count: Option<u64>,
+    pub liked_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub share_count: Option<u64>,
+    pub subscribed: Option<bool>,
+    pub has_lyrics: Option<bool>,
+    pub paid: Option<bool>,
+    pub purchased: Option<bool>,
+    pub extensions: Extensions,
+}
+
+impl PodcastEpisode {
+    #[must_use]
+    pub fn new(resource_ref: ResourceRef, name: impl Into<String>) -> Self {
+        Self {
+            platform: resource_ref.platform(),
+            id: resource_ref.id().to_owned(),
+            resource_ref,
+            podcast_ref: None,
+            name: name.into(),
+            description: String::new(),
+            cover_url: None,
+            creator: None,
+            audio: None,
+            duration_ms: None,
+            published_at: None,
+            serial_number: None,
+            listener_count: None,
+            liked_count: None,
+            comment_count: None,
+            share_count: None,
+            subscribed: None,
+            has_lyrics: None,
+            paid: None,
+            purchased: None,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub ascending: bool,
+    pub account: Option<String>,
+}
+
+impl PodcastEpisodeListRequest {
+    #[must_use]
+    pub const fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            ascending: false,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeStream {
+    #[serde(rename = "ref")]
+    pub episode_ref: ResourceRef,
+    pub audio_ref: ResourceRef,
+    pub stream: MediaStream,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeLyrics {
+    #[serde(rename = "ref")]
+    pub episode_ref: ResourceRef,
+    pub audio_ref: Option<ResourceRef>,
+    pub lyrics: Lyrics,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -2364,6 +2505,42 @@ mod tests {
         assert_eq!(value["cursor"]["id"], "station:172");
         assert_eq!(value["cursor"]["score"], 1542);
         assert_eq!(value["account"], "radio-user");
+    }
+
+    #[test]
+    fn podcast_and_episode_keep_show_audio_and_stream_identity_distinct() {
+        let podcast_ref =
+            ResourceRef::new(Platform::Netease, "336355127").expect("valid podcast reference");
+        let episode_ref =
+            ResourceRef::new(Platform::Netease, "1367665101").expect("valid episode reference");
+        let audio_ref =
+            ResourceRef::new(Platform::Netease, "478446370").expect("valid audio reference");
+        let podcast = Podcast::new(podcast_ref.clone(), "代码时间");
+        let mut episode = PodcastEpisode::new(episode_ref.clone(), "一期节目");
+        episode.podcast_ref = Some(podcast_ref.clone());
+        episode.audio = Some(Track::new(audio_ref.clone(), "一期节目"));
+
+        assert_eq!(podcast.resource_ref, podcast_ref);
+        assert_eq!(episode.resource_ref, episode_ref);
+        assert_eq!(
+            episode.audio.as_ref().map(|audio| &audio.resource_ref),
+            Some(&audio_ref)
+        );
+        let value = serde_json::to_value(episode).expect("serialize podcast episode");
+        assert_eq!(value["ref"], "netease:1367665101");
+        assert_eq!(value["podcast_ref"], "netease:336355127");
+        assert_eq!(value["audio"]["ref"], "netease:478446370");
+    }
+
+    #[test]
+    fn podcast_episode_list_defaults_to_newest_first_without_hiding_account() {
+        let mut request = PodcastEpisodeListRequest::new(30, 60);
+        request.account = Some("spoken-word".to_owned());
+
+        assert_eq!(request.limit, 30);
+        assert_eq!(request.offset, 60);
+        assert!(!request.ascending);
+        assert_eq!(request.account.as_deref(), Some("spoken-word"));
     }
 
     #[test]
