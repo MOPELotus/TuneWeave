@@ -107,7 +107,7 @@
 | `dj_paygift` | `/dj/paygift` | `pending` | — |
 | `dj_personalize_recommend` | `/dj/personalize/recommend` | `pending` | — |
 | `dj_program` | `/dj/program` | `verified` | `GET /v1/podcasts/{ref}/episodes`（固定 WeAPI `/api/dj/program/byradio`，完整支持 `limit=1..100/offset/ascending` 并兼容参考 `asc`；统一 `PodcastEpisode` 明确分离节目 `ref`、所属 `podcast_ref` 与 `mainTrackId/mainSong` 对应的可播放 `audio.ref`，映射封面、主播、时长、发布时间、序号、收听/点赞/评论/分享数、歌词、订阅和付费态，分页保留 `count/more` 与完整响应；`mainTrackId` 和 `mainSong.id` 冲突时拒绝而不猜测；2026-07-17 provider 联网及真实二进制 HTTP 对 `netease:336355127` 请求 2 项成功，总数 36，首项节目 `netease:1367665101` 与音频 `netease:530692704` 保持独立，上游 `code=200`） |
-| `dj_program_detail` | `/dj/program/detail` | `verified` | `GET /v1/episodes/{ref}`（固定 WeAPI `/api/dj/program/detail` 和节目 `id`，复用节目目录的完整稳定映射及节目/音频身份一致性校验，详情原文与整份响应保存在扩展；2026-07-17 provider 显式联网测试及真实二进制 HTTP 验证节目 `netease:1367665101` 成功，所属播客为 `netease:336355127`、独立音频为 `netease:530692704`、上游 `code=200`） |
+| `dj_program_detail` | `/dj/program/detail` | `verified` | `GET /v1/episodes/{ref}`、`GET /v1/episodes/{ref}/stream` 及 `/stream/redirect`（固定 WeAPI `/api/dj/program/detail` 和节目 `id`，复用节目目录的完整稳定映射及节目/音频身份一致性校验；播放先取得独立 `audio.ref`，再复用统一歌曲的全部音质、VIP、账户、严格跨平台回退及 302 链，详情原文与整份响应保存在扩展；2026-07-17 provider 显式联网测试及真实二进制 HTTP 验证节目 `netease:1367665101` 成功，所属播客为 `netease:336355127`、独立音频为 `netease:530692704`、上游 `code=200`；JSON 流命中网易云且尝试状态为 `success`，重定向返回 302） |
 | `dj_program_toplist` | `/dj/program/toplist` | `pending` | — |
 | `dj_program_toplist_hours` | `/dj/program/toplist/hours` | `pending` | — |
 | `dj_radio_hot` | `/dj/radio/hot` | `pending` | — |

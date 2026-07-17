@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=6`、`partial=7`、`implemented=16`、`verified=35`。
+当前共 64 个验收单元：`pending=5`、`partial=8`、`implemented=16`、`verified=35`。
 
 - 完整实现率：`(implemented + verified) / 64 = 51 / 64 = 79.69%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 58 / 64 = 90.63%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 59 / 64 = 92.19%`。
 - 完整联网验收率：`verified / 64 = 35 / 64 = 54.69%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。主线已进入 C10/C11/P10 播客、电台节目与声音内容链路：播客详情、节目列表和节目详情已验收，下一步补目录分类、节目播放及声音歌词。
+当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。主线已进入 C10/C11/P10 播客、电台节目与声音内容链路：播客详情、节目列表、节目详情、节目 JSON 取流及 302 已验收，下一步补声音歌词和常用分类/推荐目录。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -47,7 +47,7 @@
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `partial` | `vip_info` 已验证，`vip_info_v2` 及完整权益仍缺 |
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `pending` | `ad_get/ad_listening_rights_gain` 等未接入 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `implemented` | MV 四档真实播放地址和 302 已验收；站内视频离线成功与真实空 URL 业务态已覆盖，待当前有效视频 ID 的可播放成功态 |
-| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `pending` | DJ/voice 音频播放链未接入 |
+| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；2026-07-17 provider 与真实统一 HTTP 验证节目流成功，`voice_*` 声音播放仍待接入 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |

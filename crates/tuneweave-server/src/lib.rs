@@ -48,8 +48,8 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode,
-    PodcastEpisodeListRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeStream, PrincipalType, ProviderRegistry, Quality,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
     SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
     SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
@@ -211,6 +211,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
         .route("/episodes/{reference}", get(podcast_episode))
+        .route("/episodes/{reference}/stream", get(podcast_episode_stream))
+        .route(
+            "/episodes/{reference}/stream/redirect",
+            get(podcast_episode_stream_redirect),
+        )
         .route("/audio/recognize", post(audio_recognize))
         .route(
             "/tracks/streams",
@@ -1826,6 +1831,88 @@ async fn track_stream(
     }
 
     Ok(Json(response))
+}
+
+async fn resolve_podcast_episode_stream(
+    state: &AppState,
+    reference: &ResourceRef,
+    controls: &StreamControls,
+) -> Result<PodcastEpisodeStream, TuneWeaveError> {
+    let origin_platform = reference.platform();
+    let origin_provider = state.registry.require(origin_platform)?;
+    let origin_request = controls.provider_request(origin_platform);
+    let episode = origin_provider
+        .podcast_episode(reference.id(), origin_request.account.as_deref())
+        .await?;
+    let audio = episode.audio.as_ref().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "podcast episode did not expose a playable audio resource",
+        )
+        .with_platform(origin_platform)
+        .with_details(json!({ "episode_ref": episode.resource_ref.to_string() }))
+    })?;
+    let episode_ref = episode.resource_ref.clone();
+    let audio_ref = audio.resource_ref.clone();
+    let stream = state
+        .resolver
+        .resolve(audio, &controls.resolve_request(origin_platform))
+        .await?;
+    Ok(PodcastEpisodeStream {
+        episode_ref,
+        audio_ref,
+        stream,
+        extensions: Extensions::from([("episode".to_owned(), json!(episode))]),
+    })
+}
+
+async fn podcast_episode_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<StreamParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeStream>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: params.quality.as_deref(),
+        variant: params.variant.as_deref(),
+        bitrate: params.bitrate.as_deref(),
+        playback_platform: params.playback_platform.as_deref(),
+        fallback: params.fallback.as_deref(),
+        fallback_platforms: params.fallback_platforms.as_deref(),
+        unblock: params.unblock.as_deref(),
+        source: params.source.as_deref(),
+        account: params.account.as_deref(),
+    })?;
+    let result = resolve_podcast_episode_stream(&state, &reference, &controls).await?;
+    let resolved_platform = result.stream.resolved_platform;
+    let mut response = ApiResponse::new(result).with_platform(resolved_platform);
+    if let Some(account) = controls.account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn podcast_episode_stream_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<StreamParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: params.quality.as_deref(),
+        variant: params.variant.as_deref(),
+        bitrate: params.bitrate.as_deref(),
+        playback_platform: params.playback_platform.as_deref(),
+        fallback: params.fallback.as_deref(),
+        fallback_platforms: params.fallback_platforms.as_deref(),
+        unblock: params.unblock.as_deref(),
+        source: params.source.as_deref(),
+        account: params.account.as_deref(),
+    })?;
+    let result = resolve_podcast_episode_stream(&state, &reference, &controls).await?;
+    Ok(download_redirect_response(&result.stream.url))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6612,6 +6699,7 @@ mod tests {
                 Capability::PodcastDetail,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeDetail,
+                Capability::PodcastEpisodeStream,
                 Capability::TrackDetail,
                 Capability::TrackAvailability,
                 Capability::AlbumDetail,
@@ -7024,6 +7112,11 @@ mod tests {
             episode
                 .extensions
                 .insert("account".to_owned(), json!(account));
+            if let Some(audio) = episode.audio.as_mut() {
+                audio
+                    .extensions
+                    .insert("account".to_owned(), json!(account));
+            }
             Ok(episode)
         }
 
@@ -10274,6 +10367,111 @@ mod tests {
             "/v1/podcasts/netease:336355127/episodes?limit=101",
             "/v1/podcasts/netease:336355127/episodes?offset=invalid",
             "/v1/podcasts/netease:336355127/episodes?ascending=newest",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_stream_reuses_unified_quality_account_and_fallback_controls() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes/netease:1367665101/stream?level=jyeffect&backend=v1&br=192123&account=podcast-user&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["ref"], "netease:1367665101");
+        assert_eq!(json["data"]["audio_ref"], "netease:2603965162");
+        assert_eq!(json["data"]["stream"]["origin_track"], "netease:2603965162");
+        assert_eq!(
+            json["data"]["stream"]["resolved_track"],
+            "netease:2603965162"
+        );
+        assert_eq!(json["data"]["stream"]["requested_quality"], "surround");
+        assert_eq!(json["data"]["stream"]["bitrate"], 192_123);
+        assert_eq!(
+            json["data"]["stream"]["headers"]["x-test-stream-variant"],
+            "modern"
+        );
+        assert_eq!(
+            json["data"]["stream"]["headers"]["x-test-origin-account"],
+            "podcast-user"
+        );
+        assert_eq!(
+            json["data"]["stream"]["attempts"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            json["data"]["extensions"]["episode"]["ref"],
+            "netease:1367665101"
+        );
+        assert_eq!(
+            json["data"]["extensions"]["episode"]["audio"]["ref"],
+            "netease:2603965162"
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+
+        let (status, fallback) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes/netease:1367665101/stream?unblock=true&source=qq&account=green-vip&level=sky&backend=modern",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fallback["data"]["audio_ref"], "netease:2603965162");
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(fallback["data"]["stream"]["attempts"][0]["platform"], "qq");
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][0]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][1]["platform"],
+            "netease"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][1]["status"],
+            "success"
+        );
+        assert_eq!(fallback["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_stream_redirects_and_rejects_invalid_controls() {
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/v1/episodes/netease:1367665101/stream/redirect?quality=high&fallback=false",
+                    )
+                    .body(Body::empty())
+                    .expect("build episode stream redirect request"),
+            )
+            .await
+            .expect("episode stream redirect request succeeds");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://example.test/audio.mp3")
+        );
+
+        for path in [
+            "/v1/episodes/1367665101/stream",
+            "/v1/episodes/netease:1367665101/stream?quality=future",
+            "/v1/episodes/netease:1367665101/stream?br=invalid",
+            "/v1/episodes/netease:1367665101/stream?unblock=true&playback_platform=qq",
+            "/v1/episodes/netease:1367665101/stream?unknown=true",
+            "/v1/episodes/netease:1367665101/stream/redirect?unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
