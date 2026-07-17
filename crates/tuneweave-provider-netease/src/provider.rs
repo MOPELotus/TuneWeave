@@ -45,19 +45,19 @@ use tuneweave_core::{
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCategory, PodcastEpisode,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastTaxonomy,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
+    PodcastEpisode, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastListRequest, PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -409,6 +409,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
             Capability::PodcastCategories,
+            Capability::PodcastList,
             Capability::PodcastDetail,
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeDetail,
@@ -776,6 +777,13 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_categories_request();
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_categories(response.body)
+    }
+
+    async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
+        let (path, payload) = netease_podcast_catalog_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_catalog_response(response.body, request)
     }
 
     async fn podcast(&self, id: &str, account: Option<&str>) -> Result<Podcast> {
@@ -4301,6 +4309,51 @@ fn netease_podcast_categories_request() -> (&'static str, Value) {
     ("/api/djradio/category/get", json!({}))
 }
 
+fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'static str, Value)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast catalog limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    match request.catalog {
+        PodcastCatalog::Hot => {
+            if request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase hot podcast catalog does not accept category_id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(
+                    json!({ "catalog": request.catalog, "category_id": request.category_id }),
+                ));
+            }
+            Ok((
+                "/api/djradio/hot/v1",
+                json!({ "limit": request.limit, "offset": request.offset }),
+            ))
+        }
+        catalog => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported NetEase podcast catalog: {}",
+            podcast_catalog_name(catalog)
+        ))
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "catalog": catalog, "allowed": ["hot"] }))),
+    }
+}
+
+const fn podcast_catalog_name(catalog: PodcastCatalog) -> &'static str {
+    match catalog {
+        PodcastCatalog::Featured => "featured",
+        PodcastCatalog::Hot => "hot",
+        PodcastCatalog::CategoryFeatured => "category_featured",
+        PodcastCatalog::CategoryHot => "category_hot",
+        PodcastCatalog::Personalized => "personalized",
+        PodcastCatalog::TodayPreferred => "today_preferred",
+        PodcastCatalog::Paid => "paid",
+    }
+}
+
 fn netease_podcast_request(id: u64) -> (&'static str, Value) {
     ("/api/djradio/v2/get", json!({ "id": id }))
 }
@@ -4712,6 +4765,43 @@ fn map_netease_podcast_category(raw: Value) -> Result<PodcastCategory> {
         name,
         icon_url,
         extensions: Extensions::from([("category".to_owned(), raw)]),
+    })
+}
+
+fn map_netease_podcast_catalog_response(
+    body: Value,
+    request: &PodcastListRequest,
+) -> Result<Page<Podcast>> {
+    ensure_success(&body)?;
+    let raw_items = body
+        .get("djRadios")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("djRadios array", &body))?;
+    let items = raw_items
+        .into_iter()
+        .map(map_netease_podcast)
+        .collect::<Result<Vec<_>>>()?;
+    let total = body.get("count").and_then(json_u64);
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let upstream_has_more = body.get("hasMore").and_then(json_bool);
+    let has_more = consumed > 0
+        && upstream_has_more
+            .unwrap_or_else(|| total.is_some_and(|total| u64::from(next_offset) < total));
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("catalog".to_owned(), json!(request.catalog)),
+                ("response".to_owned(), body),
+            ]),
+        },
     })
 }
 
@@ -11058,6 +11148,31 @@ mod tests {
         })
     }
 
+    fn fixture_podcast_radio(id: u64, name: &str) -> Value {
+        json!({
+            "id": id,
+            "name": name,
+            "desc": "播客介绍",
+            "picUrl": "https://example.test/podcast.jpg",
+            "dj": {
+                "userId": 32_953_014,
+                "nickname": "主播",
+                "avatarUrl": "https://example.test/avatar.jpg"
+            },
+            "category": "音乐播客",
+            "categoryId": 2,
+            "copywriter": "热门推荐语",
+            "createTime": 1_704_067_200_000_u64,
+            "feeScope": 0,
+            "playCount": 98_765,
+            "programCount": 120,
+            "radioFeeType": 0,
+            "rcmdtext": "推荐理由",
+            "subCount": 4_567,
+            "futureField": {"kept": true}
+        })
+    }
+
     fn fixture_cloud_item(cloud_id: &str, source_id: u64) -> Value {
         json!({
             "songId": cloud_id,
@@ -13389,6 +13504,12 @@ mod tests {
             netease_podcast_categories_request(),
             ("/api/djradio/category/get", json!({}))
         );
+        let mut hot_request = PodcastListRequest::new(PodcastCatalog::Hot, 20, 40);
+        hot_request.account = Some("podcast-user".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&hot_request).expect("hot podcast request"),
+            ("/api/djradio/hot/v1", json!({"limit": 20, "offset": 40}))
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -13416,6 +13537,27 @@ mod tests {
         assert_eq!(
             netease_podcast_episode_lyrics_request(1_367_665_101),
             ("/api/voice/lyric/get", json!({"programId": 1_367_665_101}))
+        );
+
+        for invalid in [
+            PodcastListRequest::new(PodcastCatalog::Hot, 0, 0),
+            PodcastListRequest::new(PodcastCatalog::Hot, 101, 0),
+            PodcastListRequest::new(PodcastCatalog::Featured, 20, 0),
+        ] {
+            assert_eq!(
+                netease_podcast_catalog_request(&invalid)
+                    .expect_err("invalid podcast catalog request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let mut category_hot = PodcastListRequest::new(PodcastCatalog::Hot, 20, 0);
+        category_hot.category_id = Some("2".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&category_hot)
+                .expect_err("hot catalog rejects category")
+                .code,
+            ErrorCode::InvalidRequest
         );
     }
 
@@ -13472,6 +13614,67 @@ mod tests {
             assert_eq!(
                 map_netease_podcast_categories(invalid)
                     .expect_err("invalid podcast taxonomy")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_hot_podcast_catalog_and_pagination_without_losing_radio_fields() {
+        let request = PodcastListRequest::new(PodcastCatalog::Hot, 2, 4);
+        let page = map_netease_podcast_catalog_response(
+            json!({
+                "code": 200,
+                "djRadios": [
+                    fixture_podcast_radio(336_355_127, "代码时间"),
+                    fixture_podcast_radio(350_080_795, "音乐电台")
+                ],
+                "count": 50,
+                "hasMore": true,
+                "futureTopLevel": "preserved"
+            }),
+            &request,
+        )
+        .expect("map hot podcast catalog");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:336355127");
+        assert_eq!(page.items[0].name, "代码时间");
+        assert_eq!(page.items[0].category.as_deref(), Some("音乐播客"));
+        assert_eq!(page.items[0].episode_count, Some(120));
+        assert_eq!(page.items[0].play_count, Some(98_765));
+        assert_eq!(page.items[0].subscriber_count, Some(4_567));
+        assert_eq!(
+            page.items[0].extensions["podcast"]["futureField"]["kept"],
+            true
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 4);
+        assert_eq!(page.pagination.total, Some(50));
+        assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["catalog"], "hot");
+        assert_eq!(
+            page.pagination.extensions["response"]["futureTopLevel"],
+            "preserved"
+        );
+
+        let empty = map_netease_podcast_catalog_response(
+            json!({"code": 200, "djRadios": [], "hasMore": true}),
+            &PodcastListRequest::new(PodcastCatalog::Hot, 20, 80),
+        )
+        .expect("empty hot podcast catalog");
+        assert!(!empty.pagination.has_more);
+        assert_eq!(empty.pagination.next_offset, None);
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "djRadios": [{"name": "缺少 ID"}]}),
+        ] {
+            assert_eq!(
+                map_netease_podcast_catalog_response(invalid, &request)
+                    .expect_err("invalid podcast catalog response")
                     .code,
                 ErrorCode::UpstreamError
             );
@@ -17870,6 +18073,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioStationList));
         assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
         assert!(capabilities.contains(&Capability::PodcastCategories));
+        assert!(capabilities.contains(&Capability::PodcastList));
         assert!(capabilities.contains(&Capability::PodcastDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
@@ -18546,6 +18750,24 @@ mod tests {
             !category.id.is_empty() && !category.name.is_empty() && category.icon_url.is_some()
         }));
         assert_eq!(taxonomy.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_hot_podcast_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = PodcastListRequest::new(PodcastCatalog::Hot, 2, 0);
+        let page = MusicProvider::podcasts(&provider, &request)
+            .await
+            .expect("live public hot podcasts");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|podcast| {
+            !podcast.id.is_empty() && !podcast.name.is_empty() && podcast.cover_url.is_some()
+        }));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert_eq!(page.pagination.extensions["catalog"], "hot");
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
