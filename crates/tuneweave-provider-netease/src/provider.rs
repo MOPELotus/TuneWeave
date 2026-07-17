@@ -15842,8 +15842,9 @@ mod tests {
     fn cloud_library_mapping_tolerates_nullable_song_artist_and_album_names() {
         let mut item = fixture_cloud_item("9001", 9001);
         item["simpleSong"]["name"] = Value::Null;
-        item["simpleSong"]["ar"] = json!([{"id": 0, "name": null}]);
-        item["simpleSong"]["al"] = json!({"id": 0, "name": null, "picUrl": null});
+        item["simpleSong"]["alia"] = Value::Null;
+        item["simpleSong"]["ar"] = Value::Null;
+        item["simpleSong"]["al"] = Value::Null;
 
         let cloud = map_netease_cloud_track(item).expect("map nullable cloud metadata");
         assert_eq!(cloud.track.name, "反方向的钟（云盘）");

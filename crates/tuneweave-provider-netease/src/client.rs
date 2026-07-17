@@ -82,6 +82,7 @@ pub struct NeteaseClient {
     web_user_agent: String,
     cookie: Option<String>,
     device_id: String,
+    web_client_id: String,
     xeapi_state: Arc<RwLock<XeapiState>>,
 }
 
@@ -222,6 +223,13 @@ impl NeteaseClient {
             REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let device_id = hex::encode(Md5::digest(seed.as_bytes()));
+        let web_client_id = format!(
+            "{}.{}.01.0",
+            (0..6)
+                .map(|_| char::from(b'a' + rand::random_range(0_u8..26)))
+                .collect::<String>(),
+            unix_time_millis()
+        );
 
         Ok(Self {
             http,
@@ -231,6 +239,7 @@ impl NeteaseClient {
             web_user_agent: config.web_user_agent,
             cookie: config.cookie,
             device_id,
+            web_client_id,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
         })
     }
@@ -314,11 +323,16 @@ impl NeteaseClient {
         let response = self
             .http
             .post(endpoint)
-            .header(header::REFERER, format!("{}/", self.web_base_url))
+            .header(header::REFERER, &self.web_base_url)
             .header(header::USER_AGENT, &self.web_user_agent)
             .header(
                 header::COOKIE,
-                weapi_cookie_header(self.cookie.as_deref(), &self.device_id),
+                weapi_cookie_header(
+                    self.cookie.as_deref(),
+                    &self.device_id,
+                    &self.web_client_id,
+                    path,
+                ),
             )
             .form(&[
                 ("params", encrypted.params),
@@ -520,7 +534,12 @@ impl NeteaseClient {
             .header(header::USER_AGENT, LINUXAPI_USER_AGENT)
             .header(
                 header::COOKIE,
-                weapi_cookie_header(self.cookie.as_deref(), &self.device_id),
+                weapi_cookie_header(
+                    self.cookie.as_deref(),
+                    &self.device_id,
+                    &self.web_client_id,
+                    path,
+                ),
             )
             .form(&[("eparams", encrypt_linuxapi(&plaintext))])
             .send()
@@ -1063,22 +1082,58 @@ fn encode_cookie_header(header: &EapiHeader<'_>) -> String {
         .join("; ")
 }
 
-fn weapi_cookie_header(cookie: Option<&str>, device_id: &str) -> String {
-    let mut cookies = BTreeMap::from([
-        ("appver".to_owned(), "3.1.17.204416".to_owned()),
-        ("deviceId".to_owned(), device_id.to_owned()),
-        ("os".to_owned(), "pc".to_owned()),
-        (
-            "osver".to_owned(),
-            "Microsoft-Windows-10-Professional-build-19045-64bit".to_owned(),
-        ),
-    ]);
+fn weapi_cookie_header(
+    cookie: Option<&str>,
+    device_id: &str,
+    web_client_id: &str,
+    path: &str,
+) -> String {
+    let mut cookies = BTreeMap::new();
     for part in cookie.unwrap_or_default().split(';') {
         insert_cookie_pair(&mut cookies, part);
     }
+    cookies.insert("__remember_me".to_owned(), "true".to_owned());
+    cookies.insert("ntes_kaola_ad".to_owned(), "1".to_owned());
+    let nuid = cookies
+        .entry("_ntes_nuid".to_owned())
+        .or_insert_with(|| hex::encode(rand::random::<[u8; 32]>()))
+        .clone();
+    cookies
+        .entry("_ntes_nnid".to_owned())
+        .or_insert_with(|| format!("{nuid},{}", unix_time_millis()));
+    cookies
+        .entry("WNMCID".to_owned())
+        .or_insert_with(|| web_client_id.to_owned());
+    cookies
+        .entry("WEVNSM".to_owned())
+        .or_insert_with(|| "1.0.0".to_owned());
+    cookies
+        .entry("appver".to_owned())
+        .or_insert_with(|| "3.1.17.204416".to_owned());
+    cookies
+        .entry("channel".to_owned())
+        .or_insert_with(|| "netease".to_owned());
+    cookies
+        .entry("deviceId".to_owned())
+        .or_insert_with(|| device_id.to_owned());
+    cookies
+        .entry("os".to_owned())
+        .or_insert_with(|| "pc".to_owned());
+    cookies
+        .entry("osver".to_owned())
+        .or_insert_with(|| "Microsoft-Windows-10-Professional-build-19045-64bit".to_owned());
+    if !path.contains("login") {
+        cookies.insert("NMTID".to_owned(), hex::encode(rand::random::<[u8; 16]>()));
+    }
     cookies
         .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
+        .map(|(name, value)| {
+            format!(
+                "{}={}",
+                utf8_percent_encode(&name, JAVASCRIPT_ENCODE_URI_COMPONENT),
+                utf8_percent_encode(&value, JAVASCRIPT_ENCODE_URI_COMPONENT)
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ")
 }
@@ -1217,13 +1272,23 @@ mod tests {
     #[test]
     fn weapi_cookie_header_keeps_session_values_and_device_defaults() {
         let cookie = weapi_cookie_header(
-            Some("MUSIC_U=account-session; __csrf=csrf-token; os=android"),
+            Some("MUSIC_U=account=session/+_; __csrf=csrf-token; os=android"),
             "device-id",
+            "client.1784194692000.01.0",
+            "/api/cloud/del",
         );
-        assert!(cookie.contains("MUSIC_U=account-session"));
+        assert!(cookie.contains("MUSIC_U=account%3Dsession%2F%2B_"));
         assert!(cookie.contains("__csrf=csrf-token"));
         assert!(cookie.contains("deviceId=device-id"));
         assert!(cookie.contains("os=android"));
+        assert!(cookie.contains("__remember_me=true"));
+        assert!(cookie.contains("ntes_kaola_ad=1"));
+        assert!(cookie.contains("WNMCID=client.1784194692000.01.0"));
+        assert!(cookie.contains("WEVNSM=1.0.0"));
+        assert!(cookie.contains("channel=netease"));
+        assert!(cookie.contains("_ntes_nuid="));
+        assert!(cookie.contains("_ntes_nnid="));
+        assert!(cookie.contains("NMTID="));
     }
 
     #[test]

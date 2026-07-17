@@ -10,6 +10,14 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn deserialize_nullable_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchEnvelope {
     pub result: SearchResult,
@@ -1122,9 +1130,17 @@ pub(crate) struct Song {
     pub id: u64,
     #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub name: String,
-    #[serde(default, alias = "alias")]
+    #[serde(
+        default,
+        alias = "alias",
+        deserialize_with = "deserialize_nullable_vec"
+    )]
     pub alia: Vec<String>,
-    #[serde(default, alias = "artists")]
+    #[serde(
+        default,
+        alias = "artists",
+        deserialize_with = "deserialize_nullable_vec"
+    )]
     pub ar: Vec<Artist>,
     #[serde(alias = "album")]
     pub al: Option<Album>,
