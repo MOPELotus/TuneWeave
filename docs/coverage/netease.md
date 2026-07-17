@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=277`、`partial=5`、`implemented=45`、`verified=80`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=277`、`partial=5`、`implemented=39`、`verified=86`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -39,8 +39,8 @@
 | `artist_mv` | `/artist/mv` | `verified` | `GET /v1/artists/{ref}/videos?type=mv`（统一为分页 `Video[]`，映射创作者、16:9 封面、时长、发布日期、播放数和收藏态，并保留完整 MV 与响应时间；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回 2 项，首项 `netease:22695250`《任性 (5525 Live版)》、266000 ms、100726 播放，`next_offset=2`、`has_more=true`） |
 | `artist_new_mv` | `/artist/new/mv` | `verified` | `GET /v1/account/following/artists/new-videos`（以 `platform/account` 选择登录态，`before` 毫秒时间戳翻页，统一映射为 `Video[]` 并保留完整响应；2026-07-17 持久化真实账户 HTTP 实测返回 1 项） |
 | `artist_new_song` | `/artist/new/song` | `verified` | `GET /v1/account/following/artists/new-tracks`（以 `platform/account` 选择登录态，`before` 以作品块翻页；兼容当前上游 `songLists` 分组并按块顺序展开为 `Track[]`，保留新曲总数、作品块计数及完整原文；2026-07-17 持久化真实账户 HTTP 实测 5 个作品块展开为 7 首歌曲） |
-| `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `implemented` | `GET /v1/account/following/artists/new-works`（完整支持 `before/source_type/first_request`，以 `ArtistWorkUpdate` 区分歌曲、MV 和未知来源，未知结构完整保留；离线已验证歌曲分支、未知来源兼容和端点参数；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容及更多 `sourceType` 样本） |
-| `artist_new_song_playall` | `/artist/new/song/playall` | `implemented` | `GET /v1/account/following/artists/new-tracks/play-all`（固定返回最近至多 50 首 `Track[]` 和上游 `count`，完整歌曲字段保留在扩展；离线成功态映射、账户端点和能力发现测试已完成；2026-07-16 匿名 EAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功内容） |
+| `artist_new_song_mv_list_v2` | `/artist/new/song/mv/list/v2` | `verified` | `GET /v1/account/following/artists/new-works`（完整支持 `before/source_type/first_request`，以 `ArtistWorkUpdate` 区分歌曲、MV 和未知来源，未知结构完整保留；2026-07-17 修正 EAPI 登录 Cookie 编码后，持久化真实账户 HTTP 实测展开返回 6 项） |
+| `artist_new_song_playall` | `/artist/new/song/playall` | `verified` | `GET /v1/account/following/artists/new-tracks/play-all`（固定返回最近至多 50 首 `Track[]` 和上游 `count`，完整歌曲字段保留在扩展；2026-07-17 修正 EAPI 登录 Cookie 编码后，持久化真实账户 HTTP 实测返回 50 项） |
 | `artist_songs` | `/artist/songs` | `verified` | `GET /v1/artists/{ref}/tracks`（完整支持 `order=hot/time`、分页及 `account` 登录态选择，统一为 `Track[]` 并在 `extensions.artist_track` 保留完整歌曲原文；2026-07-16 真实上游与统一 HTTP 均实测成功，`/v1/artists/netease:6452/tracks?order=time&limit=2` 首项为 `netease:2712553851`《即兴曲》，总数 566、`next_offset=2`、`has_more=true`） |
 | `artist_sub` | `/artist/sub` | `implemented` | `PUT/DELETE /v1/account/following/artists/{ref}`（关注与取消关注共用统一 `SubscriptionResult`，登录态由引用平台和 `account` 别名选择，完整上游响应保留在扩展；请求构造、成功态映射、非法 ID、账户别名及 HTTP 端点测试已完成；2026-07-16 匿名 WeAPI HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，待真实账户验证成功写入及回滚） |
 | `artist_sublist` | `/artist/sublist` | `verified` | `GET /v1/account/following/artists`（统一为分页 `Artist[]`，支持 `platform/account/limit/offset`，名称、别名、封面及作品计数进入稳定字段，关注时间和完整歌手原文保留在 `extensions.following_item`；2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
@@ -52,7 +52,7 @@
 | `banner` | `/banner` | `verified` | `GET /v1/banners`（完整支持 `client=pc/android/iphone/ipad`，并兼容参考项目 `type=0/1/2/3`；图片、标题、横幅 ID、跳转 URL、独家标志及歌曲/专辑/歌手/歌单/MV/网页/未知目标进入稳定字段，监测和广告等完整原文保留在 `extensions.banner`；2026-07-16 适配器与统一 HTTP 均逐分支联网实测成功，PC 7 项、Android 8 项、iPhone 8 项、iPad 6 项，首项目标分别正确映射为网页或 `netease:384808686` 专辑） |
 | `batch` | `/batch` | `verified` | `GET/POST /v1/extensions/netease/batch`（完整保留任意 `/api/...` 子请求及逐项原始响应，支持参考 GET 查询键、POST 顶层动态键和 `requests` 结构化容器；对象值自动序列化为上游真实要求的 JSON 文本，预序列化字符串原样保留；完整支持 `eapi/weapi/api/linuxapi/xeapi`、`crypto/protocol`、`e_r/encrypted_response` 与 `account`，逐路径限制固定网易云域名并拒绝 Cookie、域名、代理、请求头和 IP 等传输注入；2026-07-16 适配器及统一 HTTP 对五种协议均联网实测顶层/子请求 `code=200`，每种取得 7 条横幅，参考 GET 形态加 `e_r=true` 亦成功解密并返回 7 条，不存在的账户别名实测为 401） |
 | `broadcast_category_region_get` | `/broadcast/category/region/get` | `verified` | `GET /v1/radio/taxonomy`（统一为 `RadioTaxonomy`，分类与地区 ID 均保持平台不透明字符串，单项及完整响应原文保留在扩展中，可直接供后续广播电台列表筛选；支持 `platform/account` 选择且公开响应无需登录；2026-07-16 适配器与统一 HTTP 均联网实测成功，返回 12 个分类和 32 个地区，首项分别为 `1`“音乐台”与 `407`“网络台”，原始上游 `code=200`） |
-| `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `implemented` | `GET /v1/account/library/radio-stations`（以 `platform/account` 选择登录态，完整提交参考实现的 `contentType/timeReverseOrder/startDate/limit`，并补齐参考接口声明的 `offset` 分页；统一为 `RadioStation[]`，兼容对象及 JSON 字符串嵌套条目，收藏项、频道原文和完整分页响应分别保留在扩展中；离线成功态映射、缺失列表错误、账户别名隔离、端点与分页契约测试已完成；2026-07-16 匿名 provider 及统一 HTTP 实测稳定返回 401 `authentication_required` 与上游码 301，匿名注册接口另实测业务码 400、未取得可用 Cookie，待真实账户验证收藏内容成功态） |
+| `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `verified` | `GET /v1/account/library/radio-stations`（以 `platform/account` 选择登录态，完整提交参考实现的 `contentType/timeReverseOrder/startDate/limit`，并补齐参考接口声明的 `offset` 分页；统一为 `RadioStation[]`，兼容对象及 JSON 字符串嵌套条目，收藏项、频道原文和完整分页响应分别保留在扩展中；2026-07-17 持久化真实账户 HTTP 实测成功返回空收藏列表） |
 | `broadcast_channel_currentinfo` | `/broadcast/channel/currentinfo` | `verified` | `GET /v1/radio/stations/{ref}`（以资源引用选择平台、`account` 选择可选登录态，统一为 `RadioStation`；名称、封面、地区、当前节目与直播音频地址进入稳定字段，第三方频道/节目 ID、时间窗口及完整响应保留在扩展中，公开响应未给收藏态时严格保持 `null`；无符号整数 ID 在网络请求前校验；2026-07-16 provider 与统一 HTTP 均联网实测 `netease:362` 成功，返回“金山区广播电视台综合广播”、地区“上海”、可用的 `https://lhttp.qtfm.cn/live/4022/64k.mp3...` 音频地址及上游 `code=200`） |
 | `broadcast_channel_list` | `/broadcast/channel/list` | `verified` | `GET /v1/radio/stations`（完整支持 `categoryId/regionId/limit/lastId/score` 及 snake_case 别名；分类、地区和电台 ID 保持字符串，`lastId+score` 统一为成对游标并在分页扩展返回 `next_cursor`，两字段独立出现时分别补参考默认 `0/-1`；参考类型公开但实现忽略的 `offset` 仍被接收，并明确返回 `requested_offset` 与 `offset_applied=false`；首屏推荐插入导致返回数大于 `limit` 时不截断，完整频道和响应原文保留；2026-07-16 provider 与统一 HTTP 均联网实测：音乐分类 `categoryId=1` 首/二页各 20 项、总数 105、两页零重复，首屏下一游标 `{id:965,score:1139}`；网络台 `regionId=407` 返回 4/4 项且全部地区为“网络台”、`has_more=false`；`offset=100` 实测不改变上游首屏并正确标记未应用，上游均为 `code=200`） |
 | `broadcast_sub` | `/broadcast/sub` | `implemented` | `PUT/DELETE /v1/account/library/radio-stations/{ref}`（参考 `t=1` 的收藏分支完整映射为 `contentType=BROADCAST`、`cancelCollect=false`，其余 `t` 值的取消分支映射为 `cancelCollect=true`；统一端点以 HTTP 方法明确表达两种语义，电台 ID 在网络前校验，`account` 选择隔离登录态，统一返回 `SubscriptionResult` 并保留完整上游响应；离线请求构造、成功响应映射、非法 ID、缺失账户别名、PUT/DELETE 路由与响应契约均已测试；2026-07-16 provider 和统一 HTTP 对收藏/取消两条匿名路径均联网实测为 401 `authentication_required` 与上游码 301，待真实账户验证成功写入） |
@@ -144,7 +144,7 @@
 | `inner_version` | `/inner/version` | `pending` | — |
 | `lbs_city_code` | `/lbs/city/code` | `pending` | — |
 | `like` | `/like` | `pending` | — |
-| `likelist` | `/likelist` | `implemented` | `GET /v1/account/favorites/tracks`、`GET /v1/users/{ref}/favorites/tracks`（已验证匿名请求返回登录要求；待真实账户验证） |
+| `likelist` | `/likelist` | `verified` | `GET /v1/account/favorites/tracks`、`GET /v1/users/{ref}/favorites/tracks`（2026-07-17 持久化真实账户 HTTP 实测返回 5 项，喜欢 ID、歌曲详情和统一分页链路成功） |
 | `listen_data_realtime_report` | `/listen/data/realtime/report` | `pending` | — |
 | `listen_data_report` | `/listen/data/report` | `pending` | — |
 | `listen_data_song_play_rank` | `/listen/data/song/play/rank` | `pending` | — |
@@ -165,7 +165,7 @@
 | `login_qr_check` | `/login/qr/check` | `partial` | `GET /v1/auth/qr/{transaction_id}`（waiting 已验证，确认态待账户实测） |
 | `login_qr_create` | `/login/qr/create` | `partial` | `POST /v1/auth/qr`（返回 URL，暂不生成图片） |
 | `login_qr_key` | `/login/qr/key` | `partial` | `POST /v1/auth/qr`（创建已验证） |
-| `login_refresh` | `/login/refresh` | `implemented` | `POST /v1/auth/session/refresh`（待真实账户验证） |
+| `login_refresh` | `/login/refresh` | `verified` | `POST /v1/auth/session/refresh`（2026-07-17 持久化真实账户 HTTP 实测返回已认证；新 Cookie 原子替换为单一代际，服务重启后会话及 EAPI 云盘下载继续成功） |
 | `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证；2026-07-17 真实二维码确认后返回已认证，并在服务重启后从 `platform/account` 持久化存储恢复） |
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
 | `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖） |
@@ -288,7 +288,7 @@
 | `simi_song` | `/simi/song` | `pending` | — |
 | `simi_user` | `/simi/user` | `pending` | — |
 | `song_chorus` | `/song/chorus` | `pending` | — |
-| `song_cloud_download` | `/song/cloud/download` | `implemented` | `GET /v1/account/cloud/tracks/{ref}/download`、`GET /v1/account/cloud/tracks/{ref}/download/redirect`（以完整网易云云盘引用和隔离账户取源文件；严格复刻上游 EAPI 路径中的既有拼写 `/api/cloud/dowonload` 及 `songId` 载荷，统一映射 URL、文件大小、MD5、过期时间和码率；重定向在专用源文件 URL 缺失时只回退到同平台同账户普通取流，不跨账户；对象/数组响应、不可用地址、错误 ID、账户传播和 302 分支均有离线测试；2026-07-17 持久化真实账户及现有云盘引用实测仍返回 401 `authentication_required`/上游 301，待修复 EAPI 会话头） |
+| `song_cloud_download` | `/song/cloud/download` | `verified` | `GET /v1/account/cloud/tracks/{ref}/download`、`GET /v1/account/cloud/tracks/{ref}/download/redirect`（以完整网易云云盘引用和隔离账户取源文件；严格复刻上游 EAPI 路径中的既有拼写 `/api/cloud/dowonload` 及 `songId` 载荷；兼容历史 `data` 对象/数组与当前顶层 `code/name/size/url` 成功结构，统一映射 URL、大小及格式；2026-07-17 持久化真实账户在刷新和服务重启后实测源文件 200、重定向 302，云盘引用直接播放亦返回可用 URL） |
 | `song_copyright_rcmd` | `/song/copyright/rcmd` | `pending` | — |
 | `song_creators` | `/song/creators` | `pending` | — |
 | `song_detail` | `/song/detail` | `verified` | `GET /v1/tracks/{ref}` |

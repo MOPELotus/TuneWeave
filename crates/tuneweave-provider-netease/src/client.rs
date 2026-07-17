@@ -10,7 +10,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest, Md5};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -34,6 +34,16 @@ const LINUXAPI_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/5
 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36";
 const XEAPI_USER_AGENT: &str = "NeteaseMusic/9.1.65.240927161425(9001065);Dalvik/2.1.0 \
 (Linux; U; Android 14; 23013RK75C Build/UKQ1.230804.001)";
+const JAVASCRIPT_ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'!')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'*')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -1045,8 +1055,8 @@ fn encode_cookie_header(header: &EapiHeader<'_>) -> String {
         .map(|(name, value)| {
             format!(
                 "{}={}",
-                utf8_percent_encode(name, NON_ALPHANUMERIC),
-                utf8_percent_encode(value, NON_ALPHANUMERIC)
+                utf8_percent_encode(name, JAVASCRIPT_ENCODE_URI_COMPONENT),
+                utf8_percent_encode(value, JAVASCRIPT_ENCODE_URI_COMPONENT)
             )
         })
         .collect::<Vec<_>>()
@@ -1214,6 +1224,31 @@ mod tests {
         assert!(cookie.contains("__csrf=csrf-token"));
         assert!(cookie.contains("deviceId=device-id"));
         assert!(cookie.contains("os=android"));
+    }
+
+    #[test]
+    fn eapi_cookie_header_matches_javascript_encode_uri_component() {
+        let header = EapiHeader {
+            osver: "Windows 10",
+            device_id: "device_id",
+            os: "pc",
+            appver: "3.1.17.204416",
+            versioncode: "140",
+            mobilename: "",
+            buildver: "1784194692".to_owned(),
+            resolution: "1920x1080",
+            __csrf: "csrf_token",
+            channel: "netease",
+            request_id: "1784194692000_0001".to_owned(),
+            music_u: Some("token=_-!~*'() /+"),
+            music_a: None,
+        };
+        let cookie = encode_cookie_header(&header);
+
+        assert!(cookie.contains("__csrf=csrf_token"));
+        assert!(cookie.contains("deviceId=device_id"));
+        assert!(cookie.contains("MUSIC_U=token%3D_-!~*'()%20%2F%2B"));
+        assert!(!cookie.contains("%5F"));
     }
 
     #[test]

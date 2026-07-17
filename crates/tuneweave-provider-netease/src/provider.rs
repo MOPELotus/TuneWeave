@@ -5079,37 +5079,40 @@ fn map_netease_cloud_track_download(
 ) -> Result<MediaDownload> {
     ensure_success(&response)?;
     let raw_response = response.clone();
-    let data = response.get("data").ok_or_else(|| {
-        TuneWeaveError::new(
+    let item = if let Some(data) = response.get("data") {
+        if let Some(items) = data.as_array() {
+            items
+                .iter()
+                .find(|item| cloud_download_item_id(item).as_deref() == Some(id))
+                .or_else(|| (items.len() == 1).then(|| items.first()).flatten())
+                .cloned()
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase omitted the requested cloud download result",
+                    )
+                    .with_platform(Platform::Netease)
+                    .with_details(json!({ "id": id, "response": raw_response }))
+                })?
+        } else if data.is_object() {
+            data.clone()
+        } else {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase cloud download data has an unsupported shape",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "id": id, "response": raw_response })));
+        }
+    } else if response.get("url").is_some() || response.get("downloadUrl").is_some() {
+        response.clone()
+    } else {
+        return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
             "NetEase cloud download response is missing data",
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({ "response": response }))
-    })?;
-    let item = if let Some(items) = data.as_array() {
-        items
-            .iter()
-            .find(|item| cloud_download_item_id(item).as_deref() == Some(id))
-            .or_else(|| (items.len() == 1).then(|| items.first()).flatten())
-            .cloned()
-            .ok_or_else(|| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    "NetEase omitted the requested cloud download result",
-                )
-                .with_platform(Platform::Netease)
-                .with_details(json!({ "id": id, "response": raw_response }))
-            })?
-    } else if data.is_object() {
-        data.clone()
-    } else {
-        return Err(TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            "NetEase cloud download data has an unsupported shape",
-        )
-        .with_platform(Platform::Netease)
-        .with_details(json!({ "id": id, "response": raw_response })));
+        .with_details(json!({ "response": response })));
     };
     if let Some(returned_id) = cloud_download_item_id(&item)
         && returned_id != id
@@ -5133,7 +5136,7 @@ fn map_netease_cloud_track_download(
     let format = cloud_text_field(&item, &["fileType", "type"])
         .and_then(normalize_cloud_file_type)
         .or_else(|| {
-            cloud_text_field(&item, &["fileName", "filename"])
+            cloud_text_field(&item, &["fileName", "filename", "name"])
                 .as_deref()
                 .and_then(cloud_file_type_from_name)
         });
@@ -15944,6 +15947,22 @@ mod tests {
         assert!(!unavailable.available);
         assert!(unavailable.url.is_none());
         assert_eq!(unavailable.message.as_deref(), Some("unavailable"));
+
+        let top_level = map_netease_cloud_track_download(
+            "9001",
+            "/api/cloud/dowonload",
+            json!({
+                "code": 200,
+                "name": "cloud-song.MP3",
+                "size": "12345",
+                "url": "https://example.test/current-shape.mp3"
+            }),
+        )
+        .expect("map current top-level cloud download");
+        assert!(top_level.available);
+        assert_eq!(top_level.format.as_deref(), Some("mp3"));
+        assert_eq!(top_level.size, Some(12_345));
+        assert_eq!(top_level.platform_code, Some(200));
     }
 
     #[test]
