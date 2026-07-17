@@ -45,19 +45,19 @@ use tuneweave_core::{
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PrincipalType, ProviderQrPoll, ProviderQrStart,
-    Quality, RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef,
-    Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCategory, PodcastEpisode,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastTaxonomy,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -408,6 +408,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationDetail,
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
+            Capability::PodcastCategories,
             Capability::PodcastDetail,
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeDetail,
@@ -768,6 +769,13 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "broadcast station subscription")?;
         map_radio_station_subscription_result(id, subscribed, response.body)
+    }
+
+    async fn podcast_categories(&self, account: Option<&str>) -> Result<PodcastTaxonomy> {
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_podcast_categories_request();
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_categories(response.body)
     }
 
     async fn podcast(&self, id: &str, account: Option<&str>) -> Result<Podcast> {
@@ -4289,6 +4297,10 @@ fn netease_radio_station_subscription_payload(id: u64, subscribed: bool) -> Valu
     })
 }
 
+fn netease_podcast_categories_request() -> (&'static str, Value) {
+    ("/api/djradio/category/get", json!({}))
+}
+
 fn netease_podcast_request(id: u64) -> (&'static str, Value) {
     ("/api/djradio/v2/get", json!({ "id": id }))
 }
@@ -4655,6 +4667,52 @@ fn radio_station_item_error(field: &str, raw: &Value) -> TuneWeaveError {
     )
     .with_platform(Platform::Netease)
     .with_details(json!({ "item": raw }))
+}
+
+fn map_netease_podcast_categories(body: Value) -> Result<PodcastTaxonomy> {
+    ensure_success(&body)?;
+    let raw_categories = body
+        .get("categories")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("categories array", &body))?;
+    let categories = raw_categories
+        .into_iter()
+        .map(map_netease_podcast_category)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PodcastTaxonomy {
+        categories,
+        extensions: Extensions::from([("response".to_owned(), body)]),
+    })
+}
+
+fn map_netease_podcast_category(raw: Value) -> Result<PodcastCategory> {
+    let id = raw
+        .get("id")
+        .and_then(json_scalar_string)
+        .ok_or_else(|| podcast_item_error("category id", &raw))?;
+    let name = radio_text_field(&raw, &["name"])
+        .ok_or_else(|| podcast_item_error("category name", &raw))?;
+    let icon_url = radio_text_field(
+        &raw,
+        &[
+            "picWebUrl",
+            "pic96x96Url",
+            "pic84x84IdUrl",
+            "pic56x56Url",
+            "picUWPUrl",
+            "picIPadUrl",
+            "picMacUrl",
+            "picPCWhiteUrl",
+            "picPCBlackUrl",
+        ],
+    );
+    Ok(PodcastCategory {
+        id,
+        name,
+        icon_url,
+        extensions: Extensions::from([("category".to_owned(), raw)]),
+    })
 }
 
 fn map_netease_podcast_response(body: Value) -> Result<Podcast> {
@@ -13326,7 +13384,11 @@ mod tests {
     }
 
     #[test]
-    fn podcast_requests_match_all_four_reference_modules() {
+    fn podcast_requests_match_reference_modules() {
+        assert_eq!(
+            netease_podcast_categories_request(),
+            ("/api/djradio/category/get", json!({}))
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -13355,6 +13417,65 @@ mod tests {
             netease_podcast_episode_lyrics_request(1_367_665_101),
             ("/api/voice/lyric/get", json!({"programId": 1_367_665_101}))
         );
+    }
+
+    #[test]
+    fn maps_podcast_categories_with_stable_ids_icons_and_complete_extensions() {
+        let taxonomy = map_netease_podcast_categories(json!({
+            "code": 200,
+            "categories": [
+                {
+                    "id": 2,
+                    "name": " 音乐播客 ",
+                    "picWebUrl": "https://example.test/web.png",
+                    "pic96x96Url": "https://example.test/96.png",
+                    "picPCBlackUrl": "https://example.test/black.png",
+                    "futureField": {"kept": true}
+                },
+                {
+                    "id": "10001",
+                    "name": "有声书",
+                    "picWebUrl": "",
+                    "pic56x56Url": "https://example.test/56.png"
+                }
+            ],
+            "futureTopLevel": "preserved"
+        }))
+        .expect("map podcast taxonomy");
+
+        assert_eq!(taxonomy.categories.len(), 2);
+        assert_eq!(taxonomy.categories[0].id, "2");
+        assert_eq!(taxonomy.categories[0].name, "音乐播客");
+        assert_eq!(
+            taxonomy.categories[0].icon_url.as_deref(),
+            Some("https://example.test/web.png")
+        );
+        assert_eq!(
+            taxonomy.categories[0].extensions["category"]["futureField"]["kept"],
+            true
+        );
+        assert_eq!(taxonomy.categories[1].id, "10001");
+        assert_eq!(
+            taxonomy.categories[1].icon_url.as_deref(),
+            Some("https://example.test/56.png")
+        );
+        assert_eq!(
+            taxonomy.extensions["response"]["futureTopLevel"],
+            "preserved"
+        );
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "categories": [{"name": "缺少 ID"}]}),
+            json!({"code": 200, "categories": [{"id": 1, "name": "  "}]}),
+        ] {
+            assert_eq!(
+                map_netease_podcast_categories(invalid)
+                    .expect_err("invalid podcast taxonomy")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
@@ -17748,6 +17869,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioStationDetail));
         assert!(capabilities.contains(&Capability::RadioStationList));
         assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
+        assert!(capabilities.contains(&Capability::PodcastCategories));
         assert!(capabilities.contains(&Capability::PodcastDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
@@ -18410,6 +18532,20 @@ mod tests {
                 .iter()
                 .any(|region| region.id == "407" && region.name == "网络台")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_podcast_categories() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let taxonomy = MusicProvider::podcast_categories(&provider, None)
+            .await
+            .expect("live public podcast categories");
+        assert!(!taxonomy.categories.is_empty());
+        assert!(taxonomy.categories.iter().all(|category| {
+            !category.id.is_empty() && !category.name.is_empty() && category.icon_url.is_some()
+        }));
+        assert_eq!(taxonomy.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]
