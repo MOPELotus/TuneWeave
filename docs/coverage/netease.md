@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=277`、`partial=5`、`implemented=38`、`verified=87`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=274`、`partial=5`、`implemented=38`、`verified=90`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -97,7 +97,7 @@
 | `dj_category_excludehot` | `/dj/category/excludehot` | `pending` | — |
 | `dj_category_recommend` | `/dj/category/recommend` | `pending` | — |
 | `dj_catelist` | `/dj/catelist` | `pending` | — |
-| `dj_detail` | `/dj/detail` | `pending` | — |
+| `dj_detail` | `/dj/detail` | `verified` | `GET /v1/podcasts/{ref}`（统一为与直播 `RadioStation` 分离的 `Podcast`，资源引用决定平台、`account` 选择该平台可选持久登录态；固定 WeAPI `/api/djradio/v2/get` 和数字 `id`，稳定映射名称、介绍、封面、主播、主/次分类、节目/订阅/播放数、订阅态、付费/购买态及创建时间，单项原文与完整响应不丢失；缺失对象、非法 ID 和上游错误均稳定拒绝；2026-07-17 provider 显式联网测试及真实二进制统一 HTTP 验证 `netease:336355127` 返回“代码时间”、36 期节目和上游 `code=200`） |
 | `dj_difm_all_style_channel` | `/dj/difm/all/style/channel` | `pending` | — |
 | `dj_difm_channel_subscribe` | `/dj/difm/channel/subscribe` | `pending` | — |
 | `dj_difm_channel_unsubscribe` | `/dj/difm/channel/unsubscribe` | `pending` | — |
@@ -106,8 +106,8 @@
 | `dj_hot` | `/dj/hot` | `pending` | — |
 | `dj_paygift` | `/dj/paygift` | `pending` | — |
 | `dj_personalize_recommend` | `/dj/personalize/recommend` | `pending` | — |
-| `dj_program` | `/dj/program` | `pending` | — |
-| `dj_program_detail` | `/dj/program/detail` | `pending` | — |
+| `dj_program` | `/dj/program` | `verified` | `GET /v1/podcasts/{ref}/episodes`（固定 WeAPI `/api/dj/program/byradio`，完整支持 `limit=1..100/offset/ascending` 并兼容参考 `asc`；统一 `PodcastEpisode` 明确分离节目 `ref`、所属 `podcast_ref` 与 `mainTrackId/mainSong` 对应的可播放 `audio.ref`，映射封面、主播、时长、发布时间、序号、收听/点赞/评论/分享数、歌词、订阅和付费态，分页保留 `count/more` 与完整响应；`mainTrackId` 和 `mainSong.id` 冲突时拒绝而不猜测；2026-07-17 provider 联网及真实二进制 HTTP 对 `netease:336355127` 请求 2 项成功，总数 36，首项节目 `netease:1367665101` 与音频 `netease:530692704` 保持独立，上游 `code=200`） |
+| `dj_program_detail` | `/dj/program/detail` | `verified` | `GET /v1/episodes/{ref}`（固定 WeAPI `/api/dj/program/detail` 和节目 `id`，复用节目目录的完整稳定映射及节目/音频身份一致性校验，详情原文与整份响应保存在扩展；2026-07-17 provider 显式联网测试及真实二进制 HTTP 验证节目 `netease:1367665101` 成功，所属播客为 `netease:336355127`、独立音频为 `netease:530692704`、上游 `code=200`） |
 | `dj_program_toplist` | `/dj/program/toplist` | `pending` | — |
 | `dj_program_toplist_hours` | `/dj/program/toplist/hours` | `pending` | — |
 | `dj_radio_hot` | `/dj/radio/hot` | `pending` | — |

@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=7`、`partial=6`、`implemented=16`、`verified=35`。
+当前共 64 个验收单元：`pending=6`、`partial=7`、`implemented=16`、`verified=35`。
 
 - 完整实现率：`(implemented + verified) / 64 = 51 / 64 = 79.69%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 57 / 64 = 89.06%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 58 / 64 = 90.63%`。
 - 完整联网验收率：`verified / 64 = 35 / 64 = 54.69%`。
 
 这些百分比是 Basic 能力验收口径，不是 407 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：L12 云盘读取、下载、播放和删除链已经用 TuneWeave 自建音频完成事务回滚；L11 也已真实贯通代理上传、NOS 分配与写入、发布及同 MD5 导入，剩余匹配成功态和文件内嵌歌词成功态需要合适的可匹配测试素材。主线继续 C10/C11/P10 播客、电台节目与声音内容链路，并在取得合适素材时补齐 L11 的两个成功态。
+当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。主线已进入 C10/C11/P10 播客、电台节目与声音内容链路：播客详情、节目列表和节目详情已验收，下一步补目录分类、节目播放及声音歌词。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -35,7 +35,7 @@
 | C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成，独立目录/收藏列表仍缺 |
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收 |
-| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `pending` | `dj_*`、`program_*` 常规目录未接入 |
+| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_detail/dj_program/dj_program_detail` 已通过 provider 与真实统一 HTTP 验收；分类、推荐、热门及其他常规目录仍待接入 |
 | C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `pending` | `voice_*`、`voicelist_*` 未接入 |
 | C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `partial` | 会员摘要已验证，`user_detail/user_detail_new` 未接入，账户资料待登录验收 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |

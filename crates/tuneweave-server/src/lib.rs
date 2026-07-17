@@ -47,17 +47,17 @@ use tuneweave_core::{
     PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, PrincipalType,
-    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode,
+    PodcastEpisodeListRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -208,6 +208,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
+        .route("/podcasts/{reference}", get(podcast))
+        .route("/podcasts/{reference}/episodes", get(podcast_episodes))
+        .route("/episodes/{reference}", get(podcast_episode))
         .route("/audio/recognize", post(audio_recognize))
         .route(
             "/tracks/streams",
@@ -920,6 +923,86 @@ async fn radio_station(
     let provider = state.registry.require(platform)?;
     let station = provider.radio_station(reference.id(), account).await?;
     let mut response = ApiResponse::new(station).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn podcast(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<Podcast>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let podcast = provider.podcast(reference.id(), account.as_deref()).await?;
+    let mut response = ApiResponse::new(podcast).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PodcastEpisodeListParams {
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    #[serde(alias = "asc")]
+    ascending: Option<String>,
+}
+
+async fn podcast_episodes(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PodcastEpisodeListParams>,
+) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let ascending = parse_bool_parameter("ascending", params.ascending.as_deref(), false)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .podcast_episodes(
+            reference.id(),
+            &PodcastEpisodeListRequest {
+                limit,
+                offset,
+                ascending,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn podcast_episode(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<PodcastEpisode>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let episode = provider
+        .podcast_episode(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(episode).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -6526,6 +6609,9 @@ mod tests {
                 Capability::RadioStationDetail,
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
+                Capability::PodcastDetail,
+                Capability::PodcastEpisodeList,
+                Capability::PodcastEpisodeDetail,
                 Capability::TrackDetail,
                 Capability::TrackAvailability,
                 Capability::AlbumDetail,
@@ -6901,6 +6987,44 @@ mod tests {
                 subscribed,
                 extensions,
             })
+        }
+
+        async fn podcast(&self, id: &str, account: Option<&str>) -> Result<Podcast> {
+            let mut podcast = sample_podcast(id);
+            podcast
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(podcast)
+        }
+
+        async fn podcast_episodes(
+            &self,
+            id: &str,
+            request: &PodcastEpisodeListRequest,
+        ) -> Result<Page<PodcastEpisode>> {
+            let mut episode = sample_podcast_episode("1367665101", id, "2603965162");
+            episode
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            Ok(Page {
+                items: vec![episode],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(12),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([("request".to_owned(), json!(request))]),
+                },
+            })
+        }
+
+        async fn podcast_episode(&self, id: &str, account: Option<&str>) -> Result<PodcastEpisode> {
+            let mut episode = sample_podcast_episode(id, "336355127", "2603965162");
+            episode
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(episode)
         }
 
         async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -8608,6 +8732,63 @@ mod tests {
         station
     }
 
+    fn sample_podcast(id: &str) -> Podcast {
+        let mut podcast = Podcast::new(
+            ResourceRef::new(Platform::Netease, id).expect("valid test podcast reference"),
+            "代码时间",
+        );
+        podcast.description = "面向开发者的播客".to_owned();
+        podcast.cover_url = Some("https://example.test/podcast.jpg".to_owned());
+        podcast.creator = Some(CreatorSummary {
+            resource_ref: Some(
+                ResourceRef::new(Platform::Netease, "32953014")
+                    .expect("valid test podcast creator reference"),
+            ),
+            name: "主播".to_owned(),
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+        });
+        podcast.category = Some("科技".to_owned());
+        podcast.secondary_category = Some("互联网".to_owned());
+        podcast.episode_count = Some(120);
+        podcast.subscriber_count = Some(4_567);
+        podcast.play_count = Some(98_765);
+        podcast.subscribed = Some(true);
+        podcast.paid = Some(false);
+        podcast.purchased = Some(false);
+        podcast
+    }
+
+    fn sample_podcast_episode(id: &str, podcast_id: &str, audio_id: &str) -> PodcastEpisode {
+        let mut episode = PodcastEpisode::new(
+            ResourceRef::new(Platform::Netease, id).expect("valid test podcast episode reference"),
+            "一期节目",
+        );
+        episode.podcast_ref = Some(
+            ResourceRef::new(Platform::Netease, podcast_id)
+                .expect("valid test episode podcast reference"),
+        );
+        episode.description = "节目介绍".to_owned();
+        episode.cover_url = Some("https://example.test/episode.jpg".to_owned());
+        episode.creator = Some(CreatorSummary {
+            resource_ref: Some(
+                ResourceRef::new(Platform::Netease, "32953014")
+                    .expect("valid test episode creator reference"),
+            ),
+            name: "主播".to_owned(),
+            avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+        });
+        let mut audio = sample_track(audio_id);
+        audio.name = "一期节目音频".to_owned();
+        episode.audio = Some(audio);
+        episode.duration_ms = Some(258_000);
+        episode.serial_number = Some(42);
+        episode.listener_count = Some(1_234);
+        episode.has_lyrics = Some(true);
+        episode.paid = Some(false);
+        episode.purchased = Some(false);
+        episode
+    }
+
     fn sample_artist(id: &str) -> Artist {
         Artist {
             resource_ref: ResourceRef::new(Platform::Netease, id).expect("valid test reference"),
@@ -10024,6 +10205,80 @@ mod tests {
         );
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-listener");
+    }
+
+    #[tokio::test]
+    async fn podcast_and_episode_details_keep_show_program_and_audio_ids_separate() {
+        let (status, podcast) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/netease:336355127?account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(podcast["data"]["ref"], "netease:336355127");
+        assert_eq!(podcast["data"]["name"], "代码时间");
+        assert_eq!(podcast["data"]["episode_count"], 120);
+        assert_eq!(podcast["data"]["extensions"]["account"], "podcast-user");
+        assert_eq!(podcast["meta"]["platform"], "netease");
+        assert_eq!(podcast["meta"]["account"], "podcast-user");
+
+        let (status, episode) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes/netease:1367665101?account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(episode["data"]["ref"], "netease:1367665101");
+        assert_eq!(episode["data"]["podcast_ref"], "netease:336355127");
+        assert_eq!(episode["data"]["audio"]["ref"], "netease:2603965162");
+        assert_ne!(episode["data"]["ref"], episode["data"]["audio"]["ref"]);
+        assert_eq!(episode["data"]["extensions"]["account"], "podcast-user");
+        assert_eq!(episode["meta"]["platform"], "netease");
+        assert_eq!(episode["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_catalog_accepts_reference_aliases_account_and_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/netease:336355127/episodes?limit=25&offset=50&asc=1&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:1367665101");
+        assert_eq!(json["data"][0]["podcast_ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["audio"]["ref"], "netease:2603965162");
+        assert_eq!(json["data"][0]["extensions"]["account"], "podcast-user");
+        assert_eq!(json["meta"]["pagination"]["limit"], 25);
+        assert_eq!(json["meta"]["pagination"]["offset"], 50);
+        assert_eq!(json["meta"]["pagination"]["total"], 12);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 51);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["ascending"],
+            true
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["account"],
+            "podcast-user"
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_routes_reject_invalid_references_pagination_and_order() {
+        for path in [
+            "/v1/podcasts/336355127",
+            "/v1/episodes/1367665101",
+            "/v1/podcasts/netease:336355127/episodes?limit=0",
+            "/v1/podcasts/netease:336355127/episodes?limit=101",
+            "/v1/podcasts/netease:336355127/episodes?offset=invalid",
+            "/v1/podcasts/netease:336355127/episodes?ascending=newest",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]
