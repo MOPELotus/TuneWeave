@@ -44,17 +44,17 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode, PodcastEpisodeListRequest,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisodeStream, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -408,6 +408,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastDetail,
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeDetail,
+            Capability::PodcastEpisodeStream,
             Capability::TrackDetail,
             Capability::TrackAvailability,
             Capability::AlbumDetail,
@@ -792,6 +793,26 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_episode_request(id);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_episode_response(response.body)
+    }
+
+    async fn podcast_episode_stream(
+        &self,
+        id: &str,
+        request: &StreamRequest,
+    ) -> Result<PodcastEpisodeStream> {
+        let episode = self.podcast_episode(id, request.account.as_deref()).await?;
+        let stream = {
+            let audio = episode.audio.as_ref().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase podcast episode did not expose a playable audio track",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "episode_ref": episode.resource_ref.to_string() }))
+            })?;
+            self.stream(audio, request).await?
+        };
+        map_netease_podcast_episode_stream(episode, stream)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -4671,6 +4692,42 @@ fn map_netease_podcast_episode_response(body: Value) -> Result<PodcastEpisode> {
     let mut episode = map_netease_podcast_episode(raw)?;
     episode.extensions.insert("response".to_owned(), body);
     Ok(episode)
+}
+
+fn map_netease_podcast_episode_stream(
+    episode: PodcastEpisode,
+    stream: MediaStream,
+) -> Result<PodcastEpisodeStream> {
+    let episode_ref = episode.resource_ref.clone();
+    let audio_ref = episode
+        .audio
+        .as_ref()
+        .map(|audio| audio.resource_ref.clone())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase podcast episode did not expose a playable audio track",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "episode_ref": episode_ref }))
+        })?;
+    if audio_ref.platform() != Platform::Netease {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase podcast episode exposed an audio track from another platform",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "episode_ref": episode_ref,
+            "audio_ref": audio_ref
+        })));
+    }
+    Ok(PodcastEpisodeStream {
+        episode_ref,
+        audio_ref,
+        stream,
+        extensions: Extensions::from([("episode".to_owned(), json!(episode))]),
+    })
 }
 
 fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
@@ -13197,6 +13254,42 @@ mod tests {
         .expect("map podcast episode detail");
         assert_eq!(episode.resource_ref.to_string(), "netease:1367665101");
         assert_eq!(episode.extensions["response"]["code"], 200);
+
+        let request = StreamRequest::default();
+        let stream_data: StreamData = serde_json::from_value(json!({
+            "id": 2_603_965_162_u64,
+            "url": "https://example.test/podcast.mp3",
+            "br": 128_000,
+            "size": 4_096,
+            "code": 200,
+            "expi": 1_200,
+            "type": "mp3",
+            "level": "standard",
+            "encodeType": "mp3",
+            "time": 258_000,
+            "fee": 0
+        }))
+        .expect("valid podcast stream fixture");
+        let stream = map_stream(
+            episode.audio.as_ref().expect("episode audio"),
+            &request,
+            stream_data,
+            false,
+        )
+        .expect("map podcast audio stream");
+        let episode_stream =
+            map_netease_podcast_episode_stream(episode, stream).expect("map episode stream");
+        assert_eq!(episode_stream.episode_ref.to_string(), "netease:1367665101");
+        assert_eq!(episode_stream.audio_ref.to_string(), "netease:2603965162");
+        assert_eq!(
+            episode_stream
+                .stream
+                .origin_track
+                .expect("stream origin track")
+                .to_string(),
+            "netease:2603965162"
+        );
+        assert_eq!(episode_stream.extensions["episode"]["id"], "1367665101");
     }
 
     #[test]
@@ -17363,6 +17456,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
     }
 
     #[test]
@@ -18057,6 +18151,21 @@ mod tests {
         assert_eq!(episode.id, episode_id);
         assert!(episode.audio.is_some());
         assert_eq!(episode.extensions["response"]["code"], 200);
+
+        let stream = MusicProvider::podcast_episode_stream(
+            &provider,
+            &episode.id,
+            &StreamRequest::default(),
+        )
+        .await
+        .expect("live public podcast episode stream");
+        assert_eq!(stream.episode_ref, episode.resource_ref);
+        assert_eq!(
+            stream.audio_ref,
+            episode.audio.expect("episode audio").resource_ref
+        );
+        assert!(stream.stream.url.starts_with("http"));
+        assert_eq!(stream.stream.resolved_platform, Platform::Netease);
     }
 
     #[tokio::test]
