@@ -48,10 +48,10 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PrincipalType,
-    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastTaxonomy,
+    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
@@ -209,6 +209,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
+        .route("/podcasts/categories", get(podcast_categories))
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
         .route("/episodes/{reference}", get(podcast_episode))
@@ -930,6 +931,29 @@ async fn radio_station(
     let provider = state.registry.require(platform)?;
     let station = provider.radio_station(reference.id(), account).await?;
     let mut response = ApiResponse::new(station).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastCategoriesParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn podcast_categories(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastCategoriesParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PodcastTaxonomy>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let taxonomy = provider.podcast_categories(account.as_deref()).await?;
+    let mut response = ApiResponse::new(taxonomy).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -6677,8 +6701,8 @@ mod tests {
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
-        MusicProvider, Page, PageMeta, ProviderQrStart, RadioCatalogOption, Result, SearchQuery,
-        StreamRequest, VideoResolution,
+        MusicProvider, Page, PageMeta, PodcastCategory, ProviderQrStart, RadioCatalogOption,
+        Result, SearchQuery, StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -6724,6 +6748,7 @@ mod tests {
                 Capability::RadioStationDetail,
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
+                Capability::PodcastCategories,
                 Capability::PodcastDetail,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeDetail,
@@ -7112,6 +7137,24 @@ mod tests {
                 .extensions
                 .insert("account".to_owned(), json!(account));
             Ok(podcast)
+        }
+
+        async fn podcast_categories(&self, account: Option<&str>) -> Result<PodcastTaxonomy> {
+            Ok(PodcastTaxonomy {
+                categories: vec![PodcastCategory {
+                    id: "2".to_owned(),
+                    name: "音乐播客".to_owned(),
+                    icon_url: Some("https://example.test/podcast-category.png".to_owned()),
+                    extensions: Extensions::from([(
+                        "category".to_owned(),
+                        json!({"id": 2, "futureField": true}),
+                    )]),
+                }],
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    ("response".to_owned(), json!({"code": 200})),
+                ]),
+            })
         }
 
         async fn podcast_episodes(
@@ -10366,6 +10409,42 @@ mod tests {
         );
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-listener");
+    }
+
+    #[tokio::test]
+    async fn podcast_categories_use_selected_platform_account_and_preserve_extensions() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/categories?platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["categories"][0]["id"], "2");
+        assert_eq!(json["data"]["categories"][0]["name"], "音乐播客");
+        assert_eq!(
+            json["data"]["categories"][0]["icon_url"],
+            "https://example.test/podcast-category.png"
+        );
+        assert_eq!(
+            json["data"]["categories"][0]["extensions"]["category"]["futureField"],
+            true
+        );
+        assert_eq!(json["data"]["extensions"]["response"]["code"], 200);
+        assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_categories_reject_unknown_platforms_and_query_fields() {
+        for path in [
+            "/v1/podcasts/categories?platform=unknown",
+            "/v1/podcasts/categories?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]

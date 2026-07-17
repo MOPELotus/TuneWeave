@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=273`、`partial=3`、`implemented=38`、`verified=93`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=272`、`partial=3`、`implemented=38`、`verified=94`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -96,7 +96,7 @@
 | `dj_banner` | `/dj/banner` | `pending` | — |
 | `dj_category_excludehot` | `/dj/category/excludehot` | `pending` | — |
 | `dj_category_recommend` | `/dj/category/recommend` | `pending` | — |
-| `dj_catelist` | `/dj/catelist` | `pending` | — |
+| `dj_catelist` | `/dj/catelist` | `verified` | `GET /v1/podcasts/categories`（固定 WeAPI `/api/djradio/category/get` 空负载，`platform/account` 分别选择平台与持久账户别名；统一 `PodcastTaxonomy` 将数字或字符串分类 ID 归一为不透明字符串，映射名称并从网页、尺寸及客户端图标字段稳定回退，单项与顶层完整原文均保存在扩展；缺失分类数组、ID、名称、未知平台和查询字段均稳定拒绝；2026-07-17 provider 显式联网及真实二进制统一 HTTP 均返回上游 `code=200`、19 个分类，全部 ID/名称/图标有效，能力发现和未知参数 400 分支同时验收） |
 | `dj_detail` | `/dj/detail` | `verified` | `GET /v1/podcasts/{ref}`（统一为与直播 `RadioStation` 分离的 `Podcast`，资源引用决定平台、`account` 选择该平台可选持久登录态；固定 WeAPI `/api/djradio/v2/get` 和数字 `id`，稳定映射名称、介绍、封面、主播、主/次分类、节目/订阅/播放数、订阅态、付费/购买态及创建时间，单项原文与完整响应不丢失；缺失对象、非法 ID 和上游错误均稳定拒绝；2026-07-17 provider 显式联网测试及真实二进制统一 HTTP 验证 `netease:336355127` 返回“代码时间”、36 期节目和上游 `code=200`） |
 | `dj_difm_all_style_channel` | `/dj/difm/all/style/channel` | `pending` | — |
 | `dj_difm_channel_subscribe` | `/dj/difm/channel/subscribe` | `pending` | — |
