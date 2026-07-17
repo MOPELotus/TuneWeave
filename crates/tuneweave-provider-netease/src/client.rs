@@ -11,7 +11,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest, Md5};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client, StatusCode, header};
+use reqwest::{Client, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
@@ -27,6 +27,7 @@ const DEFAULT_XEAPI_BASE_URL: &str = "https://interface3.music.163.com";
 const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
 const IMAGE_UPLOAD_BASE_URL: &str = "https://nosup-hz1.127.net/yyimgs";
 const CLOUD_UPLOAD_LBS_URL: &str = "https://wanproxy.127.net/lbs";
+const MAX_VOICE_LYRIC_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_USER_AGENT: &str = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)";
 const DEFAULT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
@@ -76,6 +77,7 @@ impl Default for NeteaseConfig {
 #[derive(Clone)]
 pub struct NeteaseClient {
     http: Client,
+    asset_http: Client,
     base_url: String,
     xeapi_base_url: String,
     web_base_url: String,
@@ -215,6 +217,19 @@ impl NeteaseClient {
                 )
                 .with_platform(Platform::Netease)
             })?;
+        let asset_http = Client::builder()
+            .timeout(config.timeout)
+            .connect_timeout(Duration::from_secs(8))
+            .user_agent(&config.web_user_agent)
+            .redirect(Policy::none())
+            .build()
+            .map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!("failed to build NetEase asset HTTP client: {error}"),
+                )
+                .with_platform(Platform::Netease)
+            })?;
 
         let seed = format!(
             "{}:{}:{}",
@@ -233,6 +248,7 @@ impl NeteaseClient {
 
         Ok(Self {
             http,
+            asset_http,
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             xeapi_base_url: config.xeapi_base_url.trim_end_matches('/').to_owned(),
             web_base_url: config.web_base_url.trim_end_matches('/').to_owned(),
@@ -399,6 +415,53 @@ impl NeteaseClient {
             .await
             .map_err(request_error)?;
         parse_response(response).await
+    }
+
+    pub async fn fetch_voice_lyric_document(&self, url: &str) -> Result<Value> {
+        let url = validate_voice_lyric_url(url)?;
+        let mut response = self
+            .asset_http
+            .get(url)
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase voice lyric asset returned HTTP {status}"),
+            )
+            .with_platform(Platform::Netease)
+            .retryable(status.is_server_error())
+            .with_details(json!({ "status": status.as_u16() })));
+        }
+        if response.content_length().is_some_and(|length| {
+            length > u64::try_from(MAX_VOICE_LYRIC_DOCUMENT_BYTES).unwrap_or(u64::MAX)
+        }) {
+            return Err(voice_lyric_document_too_large());
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+            let next_length = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase voice lyric asset size overflowed",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            if next_length > MAX_VOICE_LYRIC_DOCUMENT_BYTES {
+                return Err(voice_lyric_document_too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase voice lyric asset returned invalid JSON: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })
     }
 
     pub async fn allocate_image_upload(&self, filename: &str) -> Result<NeteaseResponse> {
@@ -1022,6 +1085,40 @@ fn validate_cloud_upload_url(upload_url: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_voice_lyric_url(lyric_url: &str) -> Result<Url> {
+    let url = Url::parse(lyric_url).map_err(|_| voice_lyric_url_error())?;
+    let host = url.host_str().unwrap_or_default();
+    let valid_host = ["music.126.net", "music.163.com"]
+        .into_iter()
+        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")));
+    if !matches!(url.scheme(), "http" | "https")
+        || !valid_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(voice_lyric_url_error());
+    }
+    Ok(url)
+}
+
+fn voice_lyric_url_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        "NetEase voice lyric URL is outside the allowed asset destinations",
+    )
+    .with_platform(Platform::Netease)
+}
+
+fn voice_lyric_document_too_large() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        "NetEase voice lyric asset exceeds the 16 MiB limit",
+    )
+    .with_platform(Platform::Netease)
+}
+
 fn encrypted_response_requested(payload: &Map<String, Value>) -> bool {
     match payload.get("e_r") {
         Some(Value::Bool(value)) => *value,
@@ -1196,6 +1293,27 @@ fn unix_time_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_lyric_assets_only_allow_netease_media_hosts() {
+        for url in [
+            "http://d1.music.126.net/voice/lyric.json?token=opaque",
+            "https://music.163.com/voice/lyric.json",
+            "https://cdn.music.163.com/voice/lyric.json",
+        ] {
+            assert!(validate_voice_lyric_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "file:///private/lyric.json",
+            "http://127.0.0.1/lyric.json",
+            "https://music.126.net.evil.test/lyric.json",
+            "https://user@d1.music.126.net/lyric.json",
+            "https://d1.music.126.net:8443/lyric.json",
+            "https://d1.music.126.net/lyric.json#fragment",
+        ] {
+            assert!(validate_voice_lyric_url(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn extracts_only_authentication_cookie_values() {

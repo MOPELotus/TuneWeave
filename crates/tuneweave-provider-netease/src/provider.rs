@@ -46,17 +46,18 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode, PodcastEpisodeListRequest,
-    PodcastEpisodeStream, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeStream, PrincipalType, ProviderQrPoll, ProviderQrStart,
+    Quality, RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef,
+    Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -411,6 +412,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeStream,
+            Capability::PodcastEpisodeLyrics,
             Capability::TrackDetail,
             Capability::TrackAvailability,
             Capability::AlbumDetail,
@@ -815,6 +817,33 @@ impl MusicProvider for NeteaseProvider {
             self.stream(audio, request).await?
         };
         map_netease_podcast_episode_stream(episode, stream)
+    }
+
+    async fn podcast_episode_lyrics(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<PodcastEpisodeLyrics> {
+        let id = parse_numeric_id("podcast episode", id)?;
+        let episode = self.podcast_episode(&id.to_string(), account).await?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_podcast_episode_lyrics_request(id);
+        let response = client.request_eapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        let document = match response.body.get("data") {
+            Some(Value::Null) => None,
+            Some(data) if data.is_object() => {
+                let url = data
+                    .get("lyricUrl")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| podcast_lyrics_error("lyric URL", &response.body))?;
+                Some(client.fetch_voice_lyric_document(url).await?)
+            }
+            _ => return Err(podcast_lyrics_error("data object or null", &response.body)),
+        };
+        map_netease_podcast_episode_lyrics(episode, response.body, document)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -4284,6 +4313,10 @@ fn netease_podcast_episode_request(id: u64) -> (&'static str, Value) {
     ("/api/dj/program/detail", json!({ "id": id }))
 }
 
+fn netease_podcast_episode_lyrics_request(id: u64) -> (&'static str, Value) {
+    ("/api/voice/lyric/get", json!({ "programId": id }))
+}
+
 fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Result<Value> {
     let category_id = request
         .category_id
@@ -4750,6 +4783,125 @@ fn map_netease_podcast_episode_stream(
         stream,
         extensions: Extensions::from([("episode".to_owned(), json!(episode))]),
     })
+}
+
+fn map_netease_podcast_episode_lyrics(
+    episode: PodcastEpisode,
+    response: Value,
+    document: Option<Value>,
+) -> Result<PodcastEpisodeLyrics> {
+    ensure_success(&response)?;
+    let episode_ref = episode.resource_ref.clone();
+    let audio_ref = episode
+        .audio
+        .as_ref()
+        .map(|audio| audio.resource_ref.clone());
+    let track_ref = audio_ref.clone().unwrap_or_else(|| episode_ref.clone());
+    let mut extensions = Extensions::from([
+        ("episode".to_owned(), json!(episode)),
+        ("response".to_owned(), response.clone()),
+    ]);
+    let Some(document) = document else {
+        return Ok(PodcastEpisodeLyrics {
+            episode_ref,
+            audio_ref,
+            lyrics: Lyrics {
+                track_ref,
+                plain: None,
+                translated: None,
+                romanized: None,
+                word_synced: None,
+                format: "plain".to_owned(),
+                contributors: Vec::new(),
+                extensions: Extensions::from([("available".to_owned(), json!(false))]),
+            },
+            extensions,
+        });
+    };
+
+    let sentences = document
+        .get("sents")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut lines = Vec::with_capacity(sentences.len());
+    for sentence in sentences {
+        let begin = sentence
+            .get("beg")
+            .and_then(json_u64)
+            .ok_or_else(|| podcast_lyrics_error("sentence start time", &document))?;
+        if let Some(end) = sentence.get("end").and_then(json_u64)
+            && end < begin
+        {
+            return Err(podcast_lyrics_error(
+                "sentence end time after its start",
+                &document,
+            ));
+        }
+        let text = sentence
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| podcast_lyrics_error("sentence text", &document))?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            lines.push(format!("{}{}", voice_lrc_timestamp(begin), text));
+        }
+    }
+    let plain = (!lines.is_empty()).then(|| lines.join("\n"));
+    let word_synced = serde_json::to_string(&document).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase voice lyric document could not be serialized: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut lyric_extensions = Extensions::from([
+        ("available".to_owned(), json!(true)),
+        ("sentence_count".to_owned(), json!(sentences.len())),
+        ("word_synced_format".to_owned(), json!("netease_voice_json")),
+    ]);
+    if let Some(duration) = document.get("duration").and_then(json_u64) {
+        lyric_extensions.insert("duration_ms".to_owned(), json!(duration));
+    }
+    if let Some(source) = response.pointer("/data/source")
+        && !source.is_null()
+    {
+        lyric_extensions.insert("source".to_owned(), source.clone());
+    }
+    extensions.insert("transcript_schema".to_owned(), json!("netease_voice_json"));
+    Ok(PodcastEpisodeLyrics {
+        episode_ref,
+        audio_ref,
+        lyrics: Lyrics {
+            track_ref,
+            plain,
+            translated: None,
+            romanized: None,
+            word_synced: Some(word_synced),
+            format: "netease_voice_json".to_owned(),
+            contributors: Vec::new(),
+            extensions: lyric_extensions,
+        },
+        extensions,
+    })
+}
+
+fn voice_lrc_timestamp(milliseconds: u64) -> String {
+    let minutes = milliseconds / 60_000;
+    let seconds = (milliseconds % 60_000) / 1_000;
+    let fraction = milliseconds % 1_000;
+    format!("[{minutes:02}:{seconds:02}.{fraction:03}]")
+}
+
+fn podcast_lyrics_error(field: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase voice lyric response did not contain a valid {field}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": raw }))
 }
 
 fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
@@ -13174,7 +13326,7 @@ mod tests {
     }
 
     #[test]
-    fn podcast_requests_match_all_three_reference_modules() {
+    fn podcast_requests_match_all_four_reference_modules() {
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -13198,6 +13350,10 @@ mod tests {
         assert_eq!(
             netease_podcast_episode_request(1_367_665_101),
             ("/api/dj/program/detail", json!({"id": 1_367_665_101}))
+        );
+        assert_eq!(
+            netease_podcast_episode_lyrics_request(1_367_665_101),
+            ("/api/voice/lyric/get", json!({"programId": 1_367_665_101}))
         );
     }
 
@@ -13328,6 +13484,107 @@ mod tests {
             "netease:2603965162"
         );
         assert_eq!(episode_stream.extensions["episode"]["id"], "1367665101");
+    }
+
+    #[test]
+    fn maps_voice_transcript_and_empty_lyrics_without_losing_audio_identity() {
+        let program = fixture_podcast_program(2_058_695_201, 336_355_127, 1_336_048_748);
+        let episode = map_netease_podcast_episode_response(json!({
+            "code": 200,
+            "program": program.clone()
+        }))
+        .expect("map voice episode");
+        let document = json!({
+            "duration": 61_250,
+            "sents": [
+                {
+                    "beg": 0,
+                    "end": 1_250,
+                    "name": "第一句",
+                    "speaker": "speaker_0",
+                    "sylls": [{"beg": 0, "end": 500, "name": "第一"}]
+                },
+                {
+                    "beg": 60_010,
+                    "end": 61_250,
+                    "name": "第二句",
+                    "speaker": "speaker_1",
+                    "sylls": []
+                }
+            ],
+            "paragraphs": null,
+            "futureField": {"preserved": true}
+        });
+        let response = json!({
+            "code": 200,
+            "data": {
+                "lyricUrl": "http://d1.music.126.net/voice/lyric.json",
+                "source": {"kind": "automatic"}
+            }
+        });
+        let lyrics = map_netease_podcast_episode_lyrics(episode, response, Some(document.clone()))
+            .expect("map voice transcript");
+        assert_eq!(lyrics.episode_ref.to_string(), "netease:2058695201");
+        assert_eq!(
+            lyrics.audio_ref.expect("audio reference").to_string(),
+            "netease:1336048748"
+        );
+        assert_eq!(lyrics.lyrics.track_ref.to_string(), "netease:1336048748");
+        assert_eq!(
+            lyrics.lyrics.plain.as_deref(),
+            Some("[00:00.000]第一句\n[01:00.010]第二句")
+        );
+        assert_eq!(lyrics.lyrics.format, "netease_voice_json");
+        assert_eq!(lyrics.lyrics.extensions["available"], true);
+        assert_eq!(lyrics.lyrics.extensions["duration_ms"], 61_250);
+        assert_eq!(lyrics.lyrics.extensions["sentence_count"], 2);
+        assert_eq!(lyrics.lyrics.extensions["source"]["kind"], "automatic");
+        let word_synced: Value = serde_json::from_str(
+            lyrics
+                .lyrics
+                .word_synced
+                .as_deref()
+                .expect("word-synced transcript"),
+        )
+        .expect("word-synced JSON");
+        assert_eq!(word_synced, document);
+        assert_eq!(lyrics.extensions["episode"]["id"], "2058695201");
+        assert_eq!(lyrics.extensions["response"]["code"], 200);
+
+        let empty_episode = map_netease_podcast_episode_response(json!({
+            "code": 200,
+            "program": program
+        }))
+        .expect("map empty lyric episode");
+        let empty = map_netease_podcast_episode_lyrics(
+            empty_episode,
+            json!({"code": 200, "data": null}),
+            None,
+        )
+        .expect("map empty voice lyrics");
+        assert_eq!(empty.lyrics.track_ref.to_string(), "netease:1336048748");
+        assert_eq!(empty.lyrics.plain, None);
+        assert_eq!(empty.lyrics.word_synced, None);
+        assert_eq!(empty.lyrics.format, "plain");
+        assert_eq!(empty.lyrics.extensions["available"], false);
+        assert_eq!(empty.extensions["response"]["data"], Value::Null);
+    }
+
+    #[test]
+    fn voice_transcript_mapping_rejects_invalid_sentence_boundaries() {
+        let episode =
+            map_netease_podcast_episode(fixture_podcast_program(1, 2, 3)).expect("voice episode");
+        let error = map_netease_podcast_episode_lyrics(
+            episode,
+            json!({"code": 200, "data": {"lyricUrl": "http://d1.music.126.net/a"}}),
+            Some(json!({
+                "sents": [{"beg": 2_000, "end": 1_000, "name": "无效句段"}]
+            })),
+        )
+        .expect_err("invalid sentence boundary");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(error.message.contains("sentence end time"));
+        assert_eq!(voice_lrc_timestamp(3_661_007), "[61:01.007]");
     }
 
     #[test]
@@ -17495,6 +17752,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeLyrics));
     }
 
     #[test]
@@ -18204,6 +18462,46 @@ mod tests {
         );
         assert!(stream.stream.url.starts_with("http"));
         assert_eq!(stream.stream.resolved_platform, Platform::Netease);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_voice_lyrics_cover_transcript_and_empty_data() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let lyrics = MusicProvider::podcast_episode_lyrics(&provider, "2058695201", None)
+            .await
+            .expect("live voice transcript");
+        assert_eq!(lyrics.episode_ref.to_string(), "netease:2058695201");
+        assert_eq!(
+            lyrics.audio_ref.expect("voice audio").to_string(),
+            "netease:1336048748"
+        );
+        assert_eq!(lyrics.lyrics.track_ref.to_string(), "netease:1336048748");
+        assert!(lyrics.lyrics.plain.is_some_and(|plain| !plain.is_empty()));
+        assert_eq!(lyrics.lyrics.format, "netease_voice_json");
+        let document: Value = serde_json::from_str(
+            lyrics
+                .lyrics
+                .word_synced
+                .as_deref()
+                .expect("voice word-synced document"),
+        )
+        .expect("valid live voice document JSON");
+        assert!(
+            document
+                .get("sents")
+                .and_then(Value::as_array)
+                .is_some_and(|sentences| !sentences.is_empty())
+        );
+        assert_eq!(lyrics.extensions["response"]["code"], 200);
+
+        let empty = MusicProvider::podcast_episode_lyrics(&provider, "1367665101", None)
+            .await
+            .expect("live empty voice lyric response");
+        assert_eq!(empty.lyrics.extensions["available"], false);
+        assert_eq!(empty.lyrics.plain, None);
+        assert_eq!(empty.lyrics.word_synced, None);
+        assert_eq!(empty.extensions["response"]["data"], Value::Null);
     }
 
     #[tokio::test]
