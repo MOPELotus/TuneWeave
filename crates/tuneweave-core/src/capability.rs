@@ -30,6 +30,7 @@ pub enum Capability {
     PodcastCategories,
     PodcastList,
     PodcastDetail,
+    PodcastSubscriptionWrite,
     PodcastEpisodeList,
     PodcastEpisodeCharts,
     PodcastEpisodeDetail,
@@ -77,6 +78,7 @@ pub enum Capability {
     AccountPlaylists,
     AccountAlbums,
     AccountRadioStations,
+    AccountPodcasts,
     AccountFollowingArtists,
     AccountArtistNewVideos,
     AccountArtistNewTracks,
@@ -200,6 +202,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::PodcastDetail).expect("serialize capability"),
             serde_json::json!("podcast_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastSubscriptionWrite)
+                .expect("serialize capability"),
+            serde_json::json!("podcast_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountPodcasts).expect("serialize capability"),
+            serde_json::json!("account_podcasts")
         );
         assert_eq!(
             serde_json::to_value(Capability::PodcastEpisodeList).expect("serialize capability"),

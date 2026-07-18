@@ -214,6 +214,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn set_podcast_subscription(
+        &self,
+        _id: &str,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastSubscriptionWrite,
+        ))
+    }
+
     async fn podcast_episodes(
         &self,
         _id: &str,
@@ -602,6 +614,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountRadioStations,
+        ))
+    }
+
+    async fn account_podcasts(&self, _request: &PageRequest) -> Result<Page<Podcast>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountPodcasts,
         ))
     }
 

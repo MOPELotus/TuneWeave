@@ -412,6 +412,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastCategories,
             Capability::PodcastList,
             Capability::PodcastDetail,
+            Capability::PodcastSubscriptionWrite,
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeDetail,
@@ -460,6 +461,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
             Capability::AccountRadioStations,
+            Capability::AccountPodcasts,
             Capability::AccountFollowingArtists,
             Capability::AccountArtistNewVideos,
             Capability::AccountArtistNewTracks,
@@ -794,6 +796,20 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_request(id);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_response(response.body)
+    }
+
+    async fn set_podcast_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let id = parse_numeric_id("podcast", id)?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_podcast_subscription_request(id, subscribed);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "podcast subscription")?;
+        map_podcast_subscription_result(id, subscribed, response.body)
     }
 
     async fn podcast_episodes(
@@ -1792,6 +1808,16 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "broadcast station collection")?;
         map_radio_collection_response(response.body, limit, request.offset)
+    }
+
+    async fn account_podcasts(&self, request: &PageRequest) -> Result<Page<Podcast>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.clamp(1, 100);
+        let (path, payload) = netease_subscribed_podcasts_request(limit, request.offset);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "subscribed podcast catalog")?;
+        map_netease_subscribed_podcasts(response.body, limit, request.offset)
     }
 
     async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
@@ -4474,6 +4500,24 @@ fn netease_podcast_request(id: u64) -> (&'static str, Value) {
     ("/api/djradio/v2/get", json!({ "id": id }))
 }
 
+fn netease_podcast_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
+    (
+        if subscribed {
+            "/api/djradio/sub"
+        } else {
+            "/api/djradio/unsub"
+        },
+        json!({ "id": id }),
+    )
+}
+
+fn netease_subscribed_podcasts_request(limit: u32, offset: u32) -> (&'static str, Value) {
+    (
+        "/api/djradio/get/subed",
+        json!({ "limit": limit, "offset": offset, "total": true }),
+    )
+}
+
 fn netease_podcast_episodes_request(
     id: u64,
     request: &PodcastEpisodeListRequest,
@@ -5063,6 +5107,65 @@ fn map_netease_podcast_response(body: Value) -> Result<Podcast> {
     let mut podcast = map_netease_podcast(raw)?;
     podcast.extensions.insert("response".to_owned(), body);
     Ok(podcast)
+}
+
+fn map_netease_subscribed_podcasts(body: Value, limit: u32, offset: u32) -> Result<Page<Podcast>> {
+    ensure_success(&body)?;
+    let raw_items = body
+        .get("djRadios")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("subscribed podcast list", &body))?;
+    let mut items = raw_items
+        .into_iter()
+        .map(map_netease_podcast)
+        .collect::<Result<Vec<_>>>()?;
+    for podcast in &mut items {
+        podcast.subscribed = Some(true);
+    }
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let candidate_offset = offset.saturating_add(consumed);
+    let total = body.get("count").and_then(json_u64);
+    let explicit_more = body
+        .get("hasMore")
+        .and_then(json_bool)
+        .or_else(|| body.get("more").and_then(json_bool));
+    let has_more = consumed > 0
+        && explicit_more.unwrap_or_else(|| {
+            total.map_or(consumed >= limit, |total| {
+                u64::from(candidate_offset) < total
+            })
+        });
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: has_more.then_some(candidate_offset),
+            has_more,
+            extensions: Extensions::from([("response".to_owned(), body)]),
+        },
+    })
+}
+
+fn map_podcast_subscription_result(
+    id: u64,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid podcast id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
 }
 
 fn map_netease_podcast(raw: Value) -> Result<Podcast> {
@@ -14230,6 +14333,21 @@ mod tests {
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
         );
+        assert_eq!(
+            netease_podcast_subscription_request(336_355_127, true),
+            ("/api/djradio/sub", json!({"id": 336_355_127}))
+        );
+        assert_eq!(
+            netease_podcast_subscription_request(336_355_127, false),
+            ("/api/djradio/unsub", json!({"id": 336_355_127}))
+        );
+        assert_eq!(
+            netease_subscribed_podcasts_request(30, 60),
+            (
+                "/api/djradio/get/subed",
+                json!({"limit": 30, "offset": 60, "total": true})
+            )
+        );
 
         let mut request = PodcastEpisodeListRequest::new(25, 50);
         request.ascending = true;
@@ -14853,6 +14971,78 @@ mod tests {
             .expect("recover podcast timing from richer fallback fields");
         assert_eq!(recovered.duration_ms, Some(258_000));
         assert_eq!(recovered.published_at, unix_rfc3339(1_704_067_200));
+    }
+
+    #[test]
+    fn maps_subscribed_podcasts_and_mutations_with_library_semantics() {
+        let mut first = fixture_podcast_radio(336_355_127, "代码时间");
+        first["subed"] = json!(false);
+        let page = map_netease_subscribed_podcasts(
+            json!({
+                "code": 200,
+                "count": 10,
+                "hasMore": null,
+                "more": true,
+                "djRadios": [
+                    first,
+                    fixture_podcast_radio(350_080_795, "音乐电台")
+                ],
+                "futureField": "preserved"
+            }),
+            2,
+            4,
+        )
+        .expect("map subscribed podcasts");
+        assert_eq!(page.items.len(), 2);
+        assert!(
+            page.items
+                .iter()
+                .all(|podcast| podcast.subscribed == Some(true))
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 4);
+        assert_eq!(page.pagination.total, Some(10));
+        assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
+        assert_eq!(
+            page.pagination.extensions["response"]["futureField"],
+            "preserved"
+        );
+
+        let subscribed = map_podcast_subscription_result(
+            336_355_127,
+            true,
+            json!({"code": 200, "futureField": true}),
+        )
+        .expect("map podcast subscribe result");
+        assert_eq!(subscribed.resource_ref.to_string(), "netease:336355127");
+        assert!(subscribed.subscribed);
+        assert_eq!(subscribed.extensions["response"]["futureField"], true);
+        let unsubscribed =
+            map_podcast_subscription_result(336_355_127, false, json!({"code": 200}))
+                .expect("map podcast unsubscribe result");
+        assert!(!unsubscribed.subscribed);
+
+        let empty = map_netease_subscribed_podcasts(
+            json!({"code": 200, "count": 10, "hasMore": true, "djRadios": []}),
+            20,
+            10,
+        )
+        .expect("map empty subscribed podcast page");
+        assert!(!empty.pagination.has_more);
+        assert_eq!(empty.pagination.next_offset, None);
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "djRadios": [{"name": "缺少 ID"}]}),
+        ] {
+            assert_eq!(
+                map_netease_subscribed_podcasts(invalid, 20, 0)
+                    .expect_err("invalid subscribed podcast response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
@@ -19741,6 +19931,38 @@ mod tests {
         .await
         .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn account_podcasts_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::account_podcasts(
+            &provider,
+            &PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn podcast_subscription_requires_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for subscribed in [true, false] {
+            let error = MusicProvider::set_podcast_subscription(
+                &provider,
+                "336355127",
+                subscribed,
+                Some("missing"),
+            )
+            .await
+            .expect_err("missing account alias");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
     }
 
     #[tokio::test]

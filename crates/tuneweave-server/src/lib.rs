@@ -277,6 +277,10 @@ pub fn build_router(state: AppState) -> Router {
             "/account/library/radio-stations/{reference}",
             put(radio_station_subscribe).delete(radio_station_unsubscribe),
         )
+        .route(
+            "/account/library/podcasts/{reference}",
+            put(podcast_subscribe).delete(podcast_unsubscribe),
+        )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/playlists", post(playlist_create).delete(playlists_delete))
@@ -398,6 +402,7 @@ pub fn build_router(state: AppState) -> Router {
             "/account/library/radio-stations",
             get(account_radio_stations),
         )
+        .route("/account/library/podcasts", get(account_podcasts))
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -1697,6 +1702,42 @@ async fn set_radio_station_subscription(
     let provider = state.registry.require(platform)?;
     let result = provider
         .set_radio_station_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn podcast_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_podcast_subscription(state, reference, params, true).await
+}
+
+async fn podcast_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<AccountParams>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_podcast_subscription(state, reference, params, false).await
+}
+
+async fn set_podcast_subscription(
+    state: AppState,
+    reference: String,
+    params: AccountParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_podcast_subscription(reference.id(), subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -5645,6 +5686,33 @@ async fn account_radio_stations(
     ))
 }
 
+async fn account_podcasts(
+    State(state): State<AppState>,
+    Query(params): Query<AccountQuery>,
+) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_podcasts(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_following_artists(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -6897,6 +6965,7 @@ mod tests {
                 Capability::PodcastCategories,
                 Capability::PodcastList,
                 Capability::PodcastDetail,
+                Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeDetail,
@@ -6945,6 +7014,7 @@ mod tests {
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
                 Capability::AccountRadioStations,
+                Capability::AccountPodcasts,
                 Capability::AccountFollowingArtists,
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
@@ -7285,6 +7355,22 @@ mod tests {
                 .extensions
                 .insert("account".to_owned(), json!(account));
             Ok(podcast)
+        }
+
+        async fn set_podcast_subscription(
+            &self,
+            id: &str,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            let mut extensions = Extensions::new();
+            extensions.insert("account".to_owned(), json!(account));
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test reference"),
+                subscribed,
+                extensions,
+            })
         }
 
         async fn podcast_categories(&self, account: Option<&str>) -> Result<PodcastTaxonomy> {
@@ -8287,6 +8373,25 @@ mod tests {
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions,
+                },
+            })
+        }
+
+        async fn account_podcasts(&self, request: &PageRequest) -> Result<Page<Podcast>> {
+            let mut podcast = sample_podcast("336355127");
+            podcast.subscribed = Some(true);
+            podcast
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            Ok(Page {
+                items: vec![podcast],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(10),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([("response".to_owned(), json!({"code": 200}))]),
                 },
             })
         }
@@ -11831,6 +11936,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_library_put_and_delete_share_the_subscription_result() {
+        let (status, subscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/library/podcasts/netease:336355127?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscribed["data"]["resource_ref"], "netease:336355127");
+        assert_eq!(subscribed["data"]["subscribed"], true);
+        assert_eq!(subscribed["data"]["extensions"]["account"], "collector");
+        assert_eq!(subscribed["meta"]["platform"], "netease");
+        assert_eq!(subscribed["meta"]["account"], "collector");
+
+        let (status, unsubscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/library/podcasts/netease:336355127?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unsubscribed["data"]["resource_ref"], "netease:336355127");
+        assert_eq!(unsubscribed["data"]["subscribed"], false);
+        assert_eq!(unsubscribed["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
     async fn artist_following_put_and_delete_share_the_subscription_result() {
         let (status, subscribed) = json_request_from(
             test_app_with_provider(),
@@ -13821,6 +13955,53 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["source"],
             "QT"
         );
+    }
+
+    #[tokio::test]
+    async fn account_podcasts_preserve_subscription_and_page_metadata() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/library/podcasts?platform=netease&account=personal&limit=30&offset=4",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["subscribed"], true);
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 30);
+        assert_eq!(json["meta"]["pagination"]["offset"], 4);
+        assert_eq!(json["meta"]["pagination"]["total"], 10);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 5);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["response"]["code"],
+            200
+        );
+    }
+
+    #[tokio::test]
+    async fn account_podcast_library_rejects_invalid_platform_reference_and_pagination() {
+        for path in [
+            "/v1/account/library/podcasts?limit=0",
+            "/v1/account/library/podcasts?limit=101",
+            "/v1/account/library/podcasts?offset=invalid",
+            "/v1/account/library/podcasts?platform=unknown",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/library/podcasts/336355127?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
