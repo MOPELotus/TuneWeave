@@ -395,7 +395,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchUsers,
             Capability::SearchMvs,
             Capability::SearchLyrics,
-            Capability::SearchRadioStations,
+            Capability::SearchPodcasts,
             Capability::SearchVideos,
             Capability::SearchMixed,
             Capability::SearchVoices,
@@ -553,6 +553,12 @@ impl MusicProvider for NeteaseProvider {
                     .with_platform(Platform::Netease),
             );
         }
+        if query.kind == SearchKind::RadioStation {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Netease,
+                Capability::SearchRadioStations,
+            ));
+        }
         let limit = query.limit.clamp(1, 100);
         let client = self.client_for(query.account.as_deref())?;
         let (path, payload, variant) = netease_catalog_search_request(query, keyword, limit);
@@ -626,6 +632,12 @@ impl MusicProvider for NeteaseProvider {
                 "multi-match search query cannot be empty",
             )
             .with_platform(Platform::Netease));
+        }
+        if request.kind == SearchKind::RadioStation {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Netease,
+                Capability::SearchRadioStations,
+            ));
         }
         let client = self.client_for(request.account.as_deref())?;
         let (path, payload) = netease_search_multi_match_request(request.kind, query);
@@ -10859,6 +10871,7 @@ const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
         SearchKind::Mv => 1_004,
         SearchKind::Lyric => 1_006,
         SearchKind::RadioStation => 1_009,
+        SearchKind::Podcast => 1_009,
         SearchKind::Video => 1_014,
         SearchKind::Mixed => 1_018,
         SearchKind::Voice => 2_000,
@@ -10934,7 +10947,7 @@ const fn netease_search_kind_from_type(value: u64) -> Option<SearchKind> {
         1_002 => Some(SearchKind::User),
         1_004 => Some(SearchKind::Mv),
         1_006 => Some(SearchKind::Lyric),
-        1_009 => Some(SearchKind::RadioStation),
+        1_009 => Some(SearchKind::Podcast),
         1_014 => Some(SearchKind::Video),
         1_018 => Some(SearchKind::Mixed),
         2_000 => Some(SearchKind::Voice),
@@ -11138,7 +11151,7 @@ fn map_netease_web_search_suggestions(result: &Value) -> Result<Vec<SearchSugges
         ("playlists", SearchKind::Playlist),
         ("userprofiles", SearchKind::User),
         ("mvs", SearchKind::Mv),
-        ("djRadios", SearchKind::RadioStation),
+        ("djRadios", SearchKind::Podcast),
         ("videos", SearchKind::Video),
     ] {
         if result.get(section.0).is_some() && !sections.contains(&section) {
@@ -11183,7 +11196,7 @@ fn web_search_suggestion_section(value: &str) -> Option<(&'static str, SearchKin
         "playlist" | "playlists" => Some(("playlists", SearchKind::Playlist)),
         "user" | "users" | "userprofiles" => Some(("userprofiles", SearchKind::User)),
         "mv" | "mvs" => Some(("mvs", SearchKind::Mv)),
-        "radio" | "djRadio" | "djRadios" => Some(("djRadios", SearchKind::RadioStation)),
+        "radio" | "djRadio" | "djRadios" => Some(("djRadios", SearchKind::Podcast)),
         "video" | "videos" => Some(("videos", SearchKind::Video)),
         _ => None,
     }
@@ -11250,6 +11263,7 @@ fn search_item_keyword(item: &SearchItem) -> Option<String> {
         SearchItem::User(user) => Some(user.name.as_str()),
         SearchItem::Video(video) => Some(video.title.as_str()),
         SearchItem::RadioStation(station) => Some(station.name.as_str()),
+        SearchItem::Podcast(podcast) => Some(podcast.name.as_str()),
         SearchItem::Opaque(item) => item.title.as_deref(),
     }?;
     let value = value.trim();
@@ -11376,7 +11390,7 @@ fn netease_multi_match_section_kind(section: &str) -> Option<SearchKind> {
         "playlist" | "playlists" => Some(SearchKind::Playlist),
         "user" | "users" | "userprofile" | "userprofiles" => Some(SearchKind::User),
         "mv" | "mvs" => Some(SearchKind::Mv),
-        "djRadio" | "djRadios" | "radio" | "radios" => Some(SearchKind::RadioStation),
+        "djRadio" | "djRadios" | "radio" | "radios" => Some(SearchKind::Podcast),
         "new_mlog" | "video" | "videos" => Some(SearchKind::Video),
         "voice" | "voices" | "resources" => Some(SearchKind::Voice),
         _ => None,
@@ -11566,6 +11580,19 @@ fn netease_catalog_search_request(
     keyword: &str,
     limit: u32,
 ) -> (&'static str, Value, SearchVariant) {
+    if query.kind == SearchKind::Podcast && query.variant == SearchVariant::Default {
+        return (
+            "/api/search/voicelist/get",
+            json!({
+                "keyword": keyword,
+                "scene": "normal",
+                "limit": limit,
+                "offset": query.offset,
+                "e_r": true
+            }),
+            SearchVariant::Default,
+        );
+    }
     let variant = match query.variant {
         SearchVariant::Default => SearchVariant::Cloud,
         variant => variant,
@@ -11615,6 +11642,7 @@ fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&
         SearchKind::User => (&["userprofiles"], &["userprofileCount"]),
         SearchKind::Mv => (&["mvs"], &["mvCount"]),
         SearchKind::RadioStation => (&["djRadios"], &["djRadiosCount"]),
+        SearchKind::Podcast => (&["resources", "djRadios"], &["totalCount", "djRadiosCount"]),
         SearchKind::Video => (&["videos"], &["videoCount"]),
         SearchKind::Mixed => (&[], &[]),
         SearchKind::Voice => (
@@ -11629,7 +11657,7 @@ fn preferred_cloud_search_result<'a>(
     body: &'a Value,
     item_keys: &[&str],
 ) -> Option<&'a Value> {
-    if kind != SearchKind::Voice {
+    if !matches!(kind, SearchKind::Voice | SearchKind::Podcast) {
         return body.get("result");
     }
 
@@ -11680,6 +11708,8 @@ fn map_cloud_search_response(
     let next_offset = offset.saturating_add(consumed);
     let has_more = if opaque_result {
         false
+    } else if let Some(has_more) = result.get("hasMore").and_then(json_bool) {
+        consumed > 0 && has_more
     } else if let Some(total) = total {
         u64::from(next_offset) < total
     } else {
@@ -11747,6 +11777,19 @@ fn map_cloud_search_item(kind: SearchKind, raw: Value) -> SearchItem {
                 SearchItem::RadioStation(station)
             })
         }
+        SearchKind::Podcast => {
+            let source = raw
+                .get("baseInfo")
+                .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+                .cloned()
+                .unwrap_or_else(|| raw.clone());
+            map_netease_podcast(source).map(|mut podcast| {
+                podcast
+                    .extensions
+                    .insert("search_item".to_owned(), raw.clone());
+                SearchItem::Podcast(podcast)
+            })
+        }
         SearchKind::Video => map_cloud_search_video(raw.clone()).map(SearchItem::Video),
         SearchKind::Mixed | SearchKind::Voice => {
             return opaque_cloud_search_item(kind, raw, None);
@@ -11758,7 +11801,7 @@ fn map_cloud_search_item(kind: SearchKind, raw: Value) -> SearchItem {
 fn cloud_search_item_source(raw: &Value) -> &Value {
     let mut best = raw;
     let mut best_score = cloud_search_item_source_score(raw);
-    for field in ["data", "resource", "content"] {
+    for field in ["baseInfo", "data", "resource", "content"] {
         let Some(candidate) = raw.get(field).filter(|value| value.is_object()) else {
             continue;
         };
@@ -11944,6 +11987,7 @@ fn capability_for_search(kind: SearchKind) -> Capability {
         SearchKind::Mv => Capability::SearchMvs,
         SearchKind::Lyric => Capability::SearchLyrics,
         SearchKind::RadioStation => Capability::SearchRadioStations,
+        SearchKind::Podcast => Capability::SearchPodcasts,
         SearchKind::Video => Capability::SearchVideos,
         SearchKind::Mixed => Capability::SearchMixed,
         SearchKind::Voice => Capability::SearchVoices,
@@ -12373,13 +12417,22 @@ mod tests {
             json!({
                 "code": 200,
                 "result": {
-                    "order": ["albums"],
+                    "order": ["albums", "djRadios"],
                     "albums": [{
                         "id": 34209,
                         "name": "海阔天空",
                         "artists": [{"id": 11127, "name": "Beyond"}],
                         "picUrl": "https://example.test/album.jpg",
                         "size": 10
+                    }],
+                    "djRadios": [{
+                        "id": 336355127,
+                        "name": "代码时间",
+                        "desc": "面向开发者的播客",
+                        "picUrl": "https://example.test/podcast.jpg",
+                        "dj": {"userId": 32953014, "nickname": "主播"},
+                        "category": "科技",
+                        "programCount": 120
                     }]
                 }
             }),
@@ -12387,13 +12440,19 @@ mod tests {
         .expect("map web suggestions");
         assert_eq!(web.client, SearchSuggestionClient::Web);
         assert_eq!(web.query, "海阔天空");
-        assert_eq!(web.suggestions.len(), 1);
+        assert_eq!(web.suggestions.len(), 2);
         assert_eq!(web.suggestions[0].keyword, "海阔天空");
         assert_eq!(web.suggestions[0].kind, Some(SearchKind::Album));
         assert!(matches!(
             web.suggestions[0].resource.as_ref(),
             Some(SearchItem::Album(_))
         ));
+        assert_eq!(web.suggestions[1].keyword, "代码时间");
+        assert_eq!(web.suggestions[1].kind, Some(SearchKind::Podcast));
+        let Some(SearchItem::Podcast(podcast)) = web.suggestions[1].resource.as_ref() else {
+            panic!("djRadios search suggestions must map to podcasts");
+        };
+        assert_eq!(podcast.resource_ref.to_string(), "netease:336355127");
         assert!(web.recommendations.is_empty());
 
         let mobile = map_netease_search_suggestions(
@@ -12403,14 +12462,16 @@ mod tests {
                 "code": 200,
                 "result": {"allMatch": [
                     {"keyword": "海阔天空", "type": 0, "resourceType": 10, "feature": ""},
-                    {"keyword": "海阔天空尾奏", "type": 1}
+                    {"keyword": "海阔天空尾奏", "type": 1},
+                    {"keyword": "代码时间", "type": 0, "resourceType": 1009}
                 ]}
             }),
         )
         .expect("map mobile suggestions");
-        assert_eq!(mobile.suggestions.len(), 2);
+        assert_eq!(mobile.suggestions.len(), 3);
         assert_eq!(mobile.suggestions[0].kind, Some(SearchKind::Album));
         assert!(mobile.suggestions[0].resource.is_none());
+        assert_eq!(mobile.suggestions[2].kind, Some(SearchKind::Podcast));
 
         let pc = map_netease_search_suggestions(
             SearchSuggestionClient::Pc,
@@ -12475,7 +12536,7 @@ mod tests {
                 "code": 200,
                 "result": {
                     "orders": null,
-                    "order": ["artist", "new_mlog", "playlist"],
+                    "order": ["artist", "new_mlog", "playlist", "djRadios"],
                     "artist": [{"id": 11127, "name": "Beyond"}],
                     "new_mlog": [{
                         "resourceId": "5501497",
@@ -12497,6 +12558,12 @@ mod tests {
                         }
                     }],
                     "playlist": [{"id": 151235962, "name": "粤语经典老歌"}],
+                    "djRadios": [{
+                        "id": 336355127,
+                        "name": "代码时间",
+                        "desc": "面向开发者的播客",
+                        "dj": {"userId": 32953014, "nickname": "主播"}
+                    }],
                     "mystery": [{"id": " ", "resourceId": "opaque-1", "title": "未知匹配"}]
                 }
             }),
@@ -12505,7 +12572,7 @@ mod tests {
 
         assert_eq!(result.query, "海阔天空");
         assert_eq!(result.requested_kind, SearchKind::Track);
-        assert_eq!(result.sections.len(), 4);
+        assert_eq!(result.sections.len(), 5);
         assert_eq!(result.sections[0].section, "artist");
         assert_eq!(result.sections[0].kind, Some(SearchKind::Artist));
         assert!(matches!(result.sections[0].items[0], SearchItem::Artist(_)));
@@ -12522,9 +12589,15 @@ mod tests {
             result.sections[2].items[0],
             SearchItem::Playlist(_)
         ));
-        assert_eq!(result.sections[3].section, "mystery");
-        assert_eq!(result.sections[3].kind, None);
-        let SearchItem::Opaque(item) = &result.sections[3].items[0] else {
+        assert_eq!(result.sections[3].section, "djRadios");
+        assert_eq!(result.sections[3].kind, Some(SearchKind::Podcast));
+        let SearchItem::Podcast(podcast) = &result.sections[3].items[0] else {
+            panic!("djRadios multi-match sections must map to podcasts");
+        };
+        assert_eq!(podcast.resource_ref.to_string(), "netease:336355127");
+        assert_eq!(result.sections[4].section, "mystery");
+        assert_eq!(result.sections[4].kind, None);
+        let SearchItem::Opaque(item) = &result.sections[4].items[0] else {
             panic!("unknown sections should remain opaque");
         };
         assert_eq!(item.kind, "mystery");
@@ -12737,7 +12810,7 @@ mod tests {
             SearchKind::User,
             SearchKind::Mv,
             SearchKind::Lyric,
-            SearchKind::RadioStation,
+            SearchKind::Podcast,
             SearchKind::Video,
             SearchKind::Mixed,
         ] {
@@ -12763,6 +12836,28 @@ mod tests {
         assert!(payload.get("type").is_none());
         assert_eq!(variant, SearchVariant::Legacy);
 
+        query.kind = SearchKind::Podcast;
+        query.variant = SearchVariant::Default;
+        let (path, payload, variant) = netease_catalog_search_request(&query, "故事", 2);
+        assert_eq!(path, "/api/search/voicelist/get");
+        assert_eq!(payload["keyword"], "故事");
+        assert_eq!(payload["scene"], "normal");
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["offset"], 3);
+        assert_eq!(payload["e_r"], true);
+        assert!(payload.get("s").is_none());
+        assert!(payload.get("type").is_none());
+        assert_eq!(variant, SearchVariant::Default);
+
+        query.variant = SearchVariant::Cloud;
+        let (path, payload, variant) = netease_catalog_search_request(&query, "故事", 2);
+        assert_eq!(path, "/api/cloudsearch/pc");
+        assert_eq!(payload["s"], "故事");
+        assert_eq!(payload["type"], 1_009);
+        assert_eq!(payload["total"], true);
+        assert_eq!(variant, SearchVariant::Cloud);
+
+        query.kind = SearchKind::Voice;
         for requested_variant in [SearchVariant::Default, SearchVariant::Cloud] {
             query.variant = requested_variant;
             let (path, payload, resolved_variant) =
@@ -12773,6 +12868,41 @@ mod tests {
             assert_eq!(payload["total"], true);
             assert_eq!(resolved_variant, SearchVariant::Cloud);
         }
+    }
+
+    #[tokio::test]
+    async fn catalog_search_does_not_mislabel_podcasts_as_live_radio_stations() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::search_catalog(
+            &provider,
+            &SearchQuery {
+                query: "故事".to_owned(),
+                kind: SearchKind::RadioStation,
+                variant: SearchVariant::Default,
+                limit: 10,
+                offset: 0,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("NetEase has no live broadcast search endpoint");
+        assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(error.platform, Some(Platform::Netease));
+        assert_eq!(error.details["capability"], "search_radio_stations");
+
+        let error = MusicProvider::search_multi_match(
+            &provider,
+            &SearchMultiMatchRequest {
+                query: "故事".to_owned(),
+                kind: SearchKind::RadioStation,
+                account: None,
+            },
+        )
+        .await
+        .expect_err("multi-match must not relabel podcast matches as live broadcasts");
+        assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(error.platform, Some(Platform::Netease));
+        assert_eq!(error.details["capability"], "search_radio_stations");
     }
 
     #[test]
@@ -12874,18 +13004,20 @@ mod tests {
                 "netease:185809",
             ),
             (
-                SearchKind::RadioStation,
+                SearchKind::Podcast,
                 "djRadios",
                 "djRadiosCount",
                 json!({
-                    "id": 362,
-                    "name": "金山区广播电视台综合广播",
-                    "desc": "广播电台",
-                    "picUrl": "https://example.test/radio.jpg",
-                    "category": "音乐"
+                    "id": 336355127,
+                    "name": "代码时间",
+                    "desc": "面向开发者的播客",
+                    "picUrl": "https://example.test/podcast.jpg",
+                    "dj": {"userId": 32953014, "nickname": "主播"},
+                    "category": "科技",
+                    "programCount": 120
                 }),
-                "radio_station",
-                "netease:362",
+                "podcast",
+                "netease:336355127",
             ),
             (
                 SearchKind::Video,
@@ -12924,6 +13056,65 @@ mod tests {
             );
             assert_eq!(page.pagination.extensions["response"]["code"], 200);
         }
+    }
+
+    #[test]
+    fn dedicated_podcast_search_unwraps_base_info_and_preserves_ranking_metadata() {
+        let page = map_cloud_search_response(
+            SearchKind::Podcast,
+            3,
+            0,
+            json!({
+                "code": 200,
+                "data": {
+                    "resources": [{
+                        "alg": "voice_search",
+                        "reason": "标题命中",
+                        "baseInfo": {
+                            "id": 1212051560,
+                            "name": "宝宝巴士-十万个为什么百科故事",
+                            "desc": "儿童百科故事",
+                            "picUrl": "https://example.test/story.jpg",
+                            "dj": {
+                                "userId": 32953014,
+                                "nickname": "宝宝巴士"
+                            },
+                            "category": "亲子",
+                            "programCount": 88,
+                            "subCount": 1234,
+                            "playCount": 5678,
+                            "radioFeeType": 0
+                        }
+                    }],
+                    "totalCount": 349,
+                    "hasMore": true
+                }
+            }),
+        )
+        .expect("map dedicated podcast search");
+
+        let SearchItem::Podcast(podcast) = &page.items[0] else {
+            panic!("dedicated podcast search must stay typed");
+        };
+        assert_eq!(podcast.resource_ref.to_string(), "netease:1212051560");
+        assert_eq!(podcast.name, "宝宝巴士-十万个为什么百科故事");
+        assert_eq!(
+            podcast
+                .creator
+                .as_ref()
+                .map(|creator| creator.name.as_str()),
+            Some("宝宝巴士")
+        );
+        assert_eq!(podcast.episode_count, Some(88));
+        assert_eq!(podcast.subscriber_count, Some(1234));
+        assert_eq!(podcast.play_count, Some(5678));
+        assert_eq!(podcast.extensions["search_item"]["alg"], "voice_search");
+        assert_eq!(podcast.extensions["search_item"]["reason"], "标题命中");
+        assert_eq!(page.pagination.total, Some(349));
+        assert_eq!(page.pagination.next_offset, Some(1));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["returned_count"], 1);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 
     #[test]
@@ -12989,27 +13180,6 @@ mod tests {
         assert_eq!(legacy_voice_item.id.as_deref(), Some("voice-2"));
         assert_eq!(legacy_voice.pagination.total, Some(2));
         assert!(legacy_voice.pagination.has_more);
-
-        let radio = map_cloud_search_response(
-            SearchKind::RadioStation,
-            2,
-            0,
-            json!({
-                "code": 200,
-                "result": {
-                    "djRadiosCount": 3,
-                    "djRadios": [
-                        {"id": 1, "name": "一台"},
-                        {"id": 2, "name": "二台"},
-                        {"id": 3, "name": "三台"}
-                    ]
-                }
-            }),
-        )
-        .expect("map radio cloud search");
-        assert_eq!(radio.items.len(), 3);
-        assert_eq!(radio.pagination.extensions["limit_applied"], false);
-        assert!(!radio.pagination.has_more);
 
         let malformed = map_cloud_search_response(
             SearchKind::Album,
@@ -13095,6 +13265,7 @@ mod tests {
                 1_009,
                 Capability::SearchRadioStations,
             ),
+            (SearchKind::Podcast, 1_009, Capability::SearchPodcasts),
             (SearchKind::Video, 1_014, Capability::SearchVideos),
             (SearchKind::Mixed, 1_018, Capability::SearchMixed),
             (SearchKind::Voice, 2_000, Capability::SearchVoices),
@@ -13104,7 +13275,11 @@ mod tests {
         for (kind, platform_type, capability) in cases {
             assert_eq!(netease_cloud_search_type(kind), platform_type);
             assert_eq!(capability_for_search(kind), capability);
-            assert!(capabilities.contains(&capability), "{capability:?}");
+            if kind == SearchKind::RadioStation {
+                assert!(!capabilities.contains(&capability), "{capability:?}");
+            } else {
+                assert!(capabilities.contains(&capability), "{capability:?}");
+            }
         }
         assert!(capabilities.contains(&Capability::SearchDefault));
         assert!(capabilities.contains(&Capability::SearchTrending));
@@ -21470,6 +21645,35 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
+    async fn live_dedicated_podcast_search_returns_typed_catalogs() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let page = MusicProvider::search_catalog(
+            &provider,
+            &SearchQuery {
+                query: "故事".to_owned(),
+                kind: SearchKind::Podcast,
+                variant: SearchVariant::Default,
+                limit: 3,
+                offset: 0,
+                account: None,
+            },
+        )
+        .await
+        .expect("live dedicated podcast search");
+        assert_eq!(page.pagination.extensions["variant"], "default");
+        assert_eq!(
+            page.pagination.extensions["request_path"],
+            "/api/search/voicelist/get"
+        );
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+        assert!(!page.items.is_empty());
+        assert!(page.items.iter().all(|item| {
+            matches!(item, SearchItem::Podcast(podcast) if !podcast.name.trim().is_empty())
+        }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
     async fn live_default_search_keyword_is_public_and_actionable() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let prompt = MusicProvider::default_search_keyword(
@@ -21563,7 +21767,7 @@ mod tests {
             (SearchKind::User, 1_002),
             (SearchKind::Mv, 1_004),
             (SearchKind::Lyric, 1_006),
-            (SearchKind::RadioStation, 1_009),
+            (SearchKind::Podcast, 1_009),
             (SearchKind::Video, 1_014),
             (SearchKind::Mixed, 1_018),
             (SearchKind::Voice, 2_000),
@@ -21667,7 +21871,7 @@ mod tests {
             SearchKind::User,
             SearchKind::Mv,
             SearchKind::Lyric,
-            SearchKind::RadioStation,
+            SearchKind::Podcast,
             SearchKind::Video,
             SearchKind::Mixed,
             SearchKind::Voice,
@@ -21711,7 +21915,7 @@ mod tests {
             SearchKind::User,
             SearchKind::Mv,
             SearchKind::Lyric,
-            SearchKind::RadioStation,
+            SearchKind::Podcast,
             SearchKind::Video,
             SearchKind::Mixed,
             SearchKind::Voice,

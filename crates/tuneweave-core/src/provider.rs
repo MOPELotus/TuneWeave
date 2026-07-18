@@ -1074,6 +1074,7 @@ fn search_capability(kind: SearchKind) -> Capability {
         SearchKind::Mv => Capability::SearchMvs,
         SearchKind::Lyric => Capability::SearchLyrics,
         SearchKind::RadioStation => Capability::SearchRadioStations,
+        SearchKind::Podcast => Capability::SearchPodcasts,
         SearchKind::Video => Capability::SearchVideos,
         SearchKind::Mixed => Capability::SearchMixed,
         SearchKind::Voice => Capability::SearchVoices,

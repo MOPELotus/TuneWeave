@@ -6774,7 +6774,8 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
         "user" | "1002" => Ok(SearchKind::User),
         "mv" | "1004" => Ok(SearchKind::Mv),
         "lyric" | "lyrics" | "1006" => Ok(SearchKind::Lyric),
-        "radio_station" | "radio" | "dj" | "1009" => Ok(SearchKind::RadioStation),
+        "radio_station" | "radio" | "broadcast" => Ok(SearchKind::RadioStation),
+        "podcast" | "podcasts" | "dj" | "dj_radio" | "1009" => Ok(SearchKind::Podcast),
         "video" | "1014" => Ok(SearchKind::Video),
         "mixed" | "complex" | "1018" => Ok(SearchKind::Mixed),
         "voice" | "2000" => Ok(SearchKind::Voice),
@@ -6783,8 +6784,8 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
                 .with_details(json!({
                     "allowed": [
                         "track", "album", "artist", "playlist", "user", "mv", "lyric",
-                        "radio_station", "video", "mixed", "voice", 1, 10, 100, 1000, 1002,
-                        1004, 1006, 1009, 1014, 1018, 2000
+                        "radio_station", "podcast", "video", "mixed", "voice", 1, 10, 100,
+                        1000, 1002, 1004, 1006, 1009, 1014, 1018, 2000
                     ]
                 })),
         ),
@@ -7098,6 +7099,7 @@ mod tests {
                 Capability::SearchMvs,
                 Capability::SearchLyrics,
                 Capability::SearchRadioStations,
+                Capability::SearchPodcasts,
                 Capability::SearchVideos,
                 Capability::SearchMixed,
                 Capability::SearchVoices,
@@ -7219,6 +7221,7 @@ mod tests {
                 SearchKind::User => SearchItem::User(sample_user("6298206519")),
                 SearchKind::Mv | SearchKind::Video => SearchItem::Video(sample_video("22695250")),
                 SearchKind::RadioStation => SearchItem::RadioStation(sample_radio_station("362")),
+                SearchKind::Podcast => SearchItem::Podcast(sample_podcast("336355127")),
                 SearchKind::Mixed | SearchKind::Voice => {
                     SearchItem::Opaque(tuneweave_core::SearchOpaqueItem {
                         platform: Platform::Netease,
@@ -9964,12 +9967,7 @@ mod tests {
             ("1002", "user", "user", Some("netease:6298206519")),
             ("1004", "mv", "video", Some("netease:22695250")),
             ("1006", "lyric", "track", Some("netease:123")),
-            (
-                "1009",
-                "radio_station",
-                "radio_station",
-                Some("netease:362"),
-            ),
+            ("1009", "podcast", "podcast", Some("netease:336355127")),
             ("1014", "video", "video", Some("netease:22695250")),
             ("1018", "mixed", "opaque", None),
             ("2000", "voice", "opaque", None),
@@ -10398,7 +10396,9 @@ mod tests {
             ("user", SearchKind::User),
             ("mv", SearchKind::Mv),
             ("lyrics", SearchKind::Lyric),
-            ("dj", SearchKind::RadioStation),
+            ("radio_station", SearchKind::RadioStation),
+            ("dj", SearchKind::Podcast),
+            ("podcast", SearchKind::Podcast),
             ("video", SearchKind::Video),
             ("complex", SearchKind::Mixed),
             ("voice", SearchKind::Voice),
@@ -12638,7 +12638,7 @@ mod tests {
     async fn invalid_search_parameters_use_the_error_envelope() {
         for path in [
             "/v1/search?q=clock&limit=101",
-            "/v1/search?q=clock&type=podcast",
+            "/v1/search?q=clock&type=book",
             "/v1/search?type=1",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;

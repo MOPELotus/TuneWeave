@@ -19,6 +19,7 @@ pub enum SearchKind {
     Mv,
     Lyric,
     RadioStation,
+    Podcast,
     Video,
     Mixed,
     Voice,
@@ -217,6 +218,7 @@ pub enum SearchItem {
     User(User),
     Video(Video),
     RadioStation(RadioStation),
+    Podcast(Podcast),
     Opaque(SearchOpaqueItem),
 }
 
@@ -3743,6 +3745,14 @@ mod tests {
         assert_eq!(value["type"], "track");
         assert_eq!(value["data"]["ref"], "netease:185809");
 
+        let podcast = SearchItem::Podcast(Podcast::new(
+            ResourceRef::new(Platform::Netease, "336355127").expect("valid podcast reference"),
+            "代码时间",
+        ));
+        let value = serde_json::to_value(podcast).expect("serialize podcast search item");
+        assert_eq!(value["type"], "podcast");
+        assert_eq!(value["data"]["ref"], "netease:336355127");
+
         let mut extensions = Extensions::new();
         extensions.insert(
             "response".to_owned(),
@@ -3773,6 +3783,7 @@ mod tests {
             SearchKind::Mv,
             SearchKind::Lyric,
             SearchKind::RadioStation,
+            SearchKind::Podcast,
             SearchKind::Video,
             SearchKind::Mixed,
             SearchKind::Voice,
@@ -3792,6 +3803,7 @@ mod tests {
                 "mv",
                 "lyric",
                 "radio_station",
+                "podcast",
                 "video",
                 "mixed",
                 "voice",

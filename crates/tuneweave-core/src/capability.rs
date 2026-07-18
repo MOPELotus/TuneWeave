@@ -12,6 +12,7 @@ pub enum Capability {
     SearchMvs,
     SearchLyrics,
     SearchRadioStations,
+    SearchPodcasts,
     SearchVideos,
     SearchMixed,
     SearchVoices,
@@ -259,6 +260,11 @@ mod tests {
             serde_json::to_value(Capability::SearchRadioStations)
                 .expect("serialize search capability"),
             serde_json::json!("search_radio_stations")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SearchPodcasts)
+                .expect("serialize podcast search capability"),
+            serde_json::json!("search_podcasts")
         );
         assert_eq!(
             serde_json::to_value(Capability::SearchVoices).expect("serialize search capability"),
