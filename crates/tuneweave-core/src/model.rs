@@ -940,6 +940,62 @@ impl PodcastEpisodeListRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastEpisodeDisplayStatus {
+    Auditing,
+    OnlySelfSee,
+    Online,
+    SchedulePublish,
+    TranscodeFailed,
+    Publishing,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastEpisodeVisibility {
+    Public,
+    Private,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastEpisodeFeeFilter {
+    #[default]
+    All,
+    Free,
+    Paid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeWorkbenchSearchRequest {
+    pub query: Option<String>,
+    pub display_status: Option<PodcastEpisodeDisplayStatus>,
+    pub visibility: Option<PodcastEpisodeVisibility>,
+    pub fee_type: Option<PodcastEpisodeFeeFilter>,
+    pub podcast_id: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastEpisodeWorkbenchSearchRequest {
+    #[must_use]
+    pub const fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            query: None,
+            display_status: None,
+            visibility: None,
+            fee_type: None,
+            podcast_id: None,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PodcastEpisodeChartKind {
@@ -2760,6 +2816,27 @@ mod tests {
         assert_eq!(request.offset, 60);
         assert!(!request.ascending);
         assert_eq!(request.account.as_deref(), Some("spoken-word"));
+    }
+
+    #[test]
+    fn podcast_workbench_search_keeps_every_filter_typed() {
+        let mut request = PodcastEpisodeWorkbenchSearchRequest::new(200, 400);
+        request.query = Some("一期".to_owned());
+        request.display_status = Some(PodcastEpisodeDisplayStatus::SchedulePublish);
+        request.visibility = Some(PodcastEpisodeVisibility::Private);
+        request.fee_type = Some(PodcastEpisodeFeeFilter::Paid);
+        request.podcast_id = Some("336355127".to_owned());
+        request.account = Some("studio-user".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize workbench search request");
+        assert_eq!(value["query"], "一期");
+        assert_eq!(value["display_status"], "schedule_publish");
+        assert_eq!(value["visibility"], "private");
+        assert_eq!(value["fee_type"], "paid");
+        assert_eq!(value["podcast_id"], "336355127");
+        assert_eq!(value["limit"], 200);
+        assert_eq!(value["offset"], 400);
+        assert_eq!(value["account"], "studio-user");
     }
 
     #[test]

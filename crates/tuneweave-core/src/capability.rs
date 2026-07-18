@@ -37,6 +37,7 @@ pub enum Capability {
     PodcastSubscriptionWrite,
     PodcastEpisodeList,
     PodcastEpisodeWorkbenchList,
+    PodcastEpisodeWorkbenchSearch,
     PodcastEpisodeCharts,
     PodcastEpisodeDetail,
     PodcastEpisodeWorkbenchDetail,
@@ -234,6 +235,11 @@ mod tests {
             serde_json::to_value(Capability::PodcastEpisodeWorkbenchList)
                 .expect("serialize capability"),
             serde_json::json!("podcast_episode_workbench_list")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeWorkbenchSearch)
+                .expect("serialize capability"),
+            serde_json::json!("podcast_episode_workbench_search")
         );
         assert_eq!(
             serde_json::to_value(Capability::PodcastEpisodeCharts).expect("serialize capability"),

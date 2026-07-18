@@ -48,19 +48,20 @@ use tuneweave_core::{
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
     PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, PrincipalType,
-    ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
-    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -420,6 +421,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastSubscriptionWrite,
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeWorkbenchList,
+            Capability::PodcastEpisodeWorkbenchSearch,
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeWorkbenchDetail,
@@ -916,6 +918,24 @@ impl MusicProvider for NeteaseProvider {
         let client = self.client_for(request.account.as_deref())?;
         require_authenticated_client(&client, "podcast workbench episode list")?;
         let (path, payload) = netease_podcast_episodes_workbench_request(id, request);
+        let response = client.request_eapi(path, payload).await?;
+        map_netease_podcast_episodes_workbench(response.body, request.limit, request.offset)
+    }
+
+    async fn search_podcast_episodes_workbench(
+        &self,
+        request: &PodcastEpisodeWorkbenchSearchRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        if !(1..=200).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast workbench search limit must be between 1 and 200",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "limit": request.limit })));
+        }
+        let (path, payload) = netease_podcast_episode_workbench_search_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "podcast workbench episode search")?;
         let response = client.request_eapi(path, payload).await?;
         map_netease_podcast_episodes_workbench(response.body, request.limit, request.offset)
     }
@@ -4768,6 +4788,51 @@ fn netease_podcast_episodes_workbench_request(
             "voiceListId": id
         }),
     )
+}
+
+fn netease_podcast_episode_workbench_search_request(
+    request: &PodcastEpisodeWorkbenchSearchRequest,
+) -> Result<(&'static str, Value)> {
+    let podcast_id = request
+        .podcast_id
+        .as_deref()
+        .map(|id| parse_numeric_id("podcast voice list", id))
+        .transpose()?;
+    let name = request
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let display_status = request.display_status.map(|status| match status {
+        PodcastEpisodeDisplayStatus::Auditing => "AUDITING",
+        PodcastEpisodeDisplayStatus::OnlySelfSee => "ONLY_SELF_SEE",
+        PodcastEpisodeDisplayStatus::Online => "ONLINE",
+        PodcastEpisodeDisplayStatus::SchedulePublish => "SCHEDULE_PUBLISH",
+        PodcastEpisodeDisplayStatus::TranscodeFailed => "TRANSCODE_FAILED",
+        PodcastEpisodeDisplayStatus::Publishing => "PUBLISHING",
+        PodcastEpisodeDisplayStatus::Failed => "FAILED",
+    });
+    let visibility = request.visibility.map(|visibility| match visibility {
+        PodcastEpisodeVisibility::Public => "PUBLIC",
+        PodcastEpisodeVisibility::Private => "PRIVATE",
+    });
+    let fee_type = request.fee_type.map(|fee_type| match fee_type {
+        PodcastEpisodeFeeFilter::All => -1,
+        PodcastEpisodeFeeFilter::Free => 0,
+        PodcastEpisodeFeeFilter::Paid => 1,
+    });
+    Ok((
+        "/api/voice/workbench/voice/list",
+        json!({
+            "limit": request.limit,
+            "offset": request.offset,
+            "name": name,
+            "displayStatus": display_status,
+            "type": visibility,
+            "voiceFeeType": fee_type,
+            "radioId": podcast_id
+        }),
+    ))
 }
 
 fn netease_podcast_episode_chart_request(
@@ -15247,6 +15312,89 @@ mod tests {
                 })
             )
         );
+        let mut search = PodcastEpisodeWorkbenchSearchRequest::new(200, 40);
+        search.query = Some(" 一期 ".to_owned());
+        search.display_status = Some(PodcastEpisodeDisplayStatus::SchedulePublish);
+        search.visibility = Some(PodcastEpisodeVisibility::Private);
+        search.fee_type = Some(PodcastEpisodeFeeFilter::Paid);
+        search.podcast_id = Some("336355127".to_owned());
+        search.account = Some("studio-user".to_owned());
+        assert_eq!(
+            netease_podcast_episode_workbench_search_request(&search)
+                .expect("workbench voice search request"),
+            (
+                "/api/voice/workbench/voice/list",
+                json!({
+                    "limit": 200,
+                    "offset": 40,
+                    "name": "一期",
+                    "displayStatus": "SCHEDULE_PUBLISH",
+                    "type": "PRIVATE",
+                    "voiceFeeType": 1,
+                    "radioId": 336_355_127
+                })
+            )
+        );
+        assert_eq!(
+            netease_podcast_episode_workbench_search_request(
+                &PodcastEpisodeWorkbenchSearchRequest::new(20, 0)
+            )
+            .expect("unfiltered workbench voice search request"),
+            (
+                "/api/voice/workbench/voice/list",
+                json!({
+                    "limit": 20,
+                    "offset": 0,
+                    "name": null,
+                    "displayStatus": null,
+                    "type": null,
+                    "voiceFeeType": null,
+                    "radioId": null
+                })
+            )
+        );
+        for (status, expected) in [
+            (PodcastEpisodeDisplayStatus::Auditing, "AUDITING"),
+            (PodcastEpisodeDisplayStatus::OnlySelfSee, "ONLY_SELF_SEE"),
+            (PodcastEpisodeDisplayStatus::Online, "ONLINE"),
+            (
+                PodcastEpisodeDisplayStatus::SchedulePublish,
+                "SCHEDULE_PUBLISH",
+            ),
+            (
+                PodcastEpisodeDisplayStatus::TranscodeFailed,
+                "TRANSCODE_FAILED",
+            ),
+            (PodcastEpisodeDisplayStatus::Publishing, "PUBLISHING"),
+            (PodcastEpisodeDisplayStatus::Failed, "FAILED"),
+        ] {
+            let mut request = PodcastEpisodeWorkbenchSearchRequest::new(200, 0);
+            request.display_status = Some(status);
+            let (_, payload) = netease_podcast_episode_workbench_search_request(&request)
+                .expect("display status request");
+            assert_eq!(payload["displayStatus"], expected);
+        }
+        for (visibility, expected) in [
+            (PodcastEpisodeVisibility::Public, "PUBLIC"),
+            (PodcastEpisodeVisibility::Private, "PRIVATE"),
+        ] {
+            let mut request = PodcastEpisodeWorkbenchSearchRequest::new(200, 0);
+            request.visibility = Some(visibility);
+            let (_, payload) = netease_podcast_episode_workbench_search_request(&request)
+                .expect("visibility request");
+            assert_eq!(payload["type"], expected);
+        }
+        for (fee_type, expected) in [
+            (PodcastEpisodeFeeFilter::All, -1),
+            (PodcastEpisodeFeeFilter::Free, 0),
+            (PodcastEpisodeFeeFilter::Paid, 1),
+        ] {
+            let mut request = PodcastEpisodeWorkbenchSearchRequest::new(200, 0);
+            request.fee_type = Some(fee_type);
+            let (_, payload) = netease_podcast_episode_workbench_search_request(&request)
+                .expect("fee filter request");
+            assert_eq!(payload["voiceFeeType"], expected);
+        }
         assert_eq!(
             netease_podcast_episode_request(1_367_665_101),
             ("/api/dj/program/detail", json!({"id": 1_367_665_101}))
@@ -21107,6 +21255,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchList));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchSearch));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
@@ -21424,6 +21573,35 @@ mod tests {
             let error = MusicProvider::podcast_episodes_workbench(&provider, "336355127", &request)
                 .await
                 .expect_err("workbench voice list requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_voice_workbench_search_requires_valid_filters_and_a_logged_in_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for limit in [0, 201] {
+            let error = MusicProvider::search_podcast_episodes_workbench(
+                &provider,
+                &PodcastEpisodeWorkbenchSearchRequest::new(limit, 0),
+            )
+            .await
+            .expect_err("invalid workbench voice search limit");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let mut invalid_podcast = PodcastEpisodeWorkbenchSearchRequest::new(200, 0);
+        invalid_podcast.podcast_id = Some("not-a-number".to_owned());
+        let error = MusicProvider::search_podcast_episodes_workbench(&provider, &invalid_podcast)
+            .await
+            .expect_err("invalid podcast filter");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        for account in [None, Some("missing")] {
+            let mut request = PodcastEpisodeWorkbenchSearchRequest::new(200, 0);
+            request.account = account.map(str::to_owned);
+            let error = MusicProvider::search_podcast_episodes_workbench(&provider, &request)
+                .await
+                .expect_err("workbench voice search requires authentication");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         }
     }

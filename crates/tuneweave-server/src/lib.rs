@@ -50,11 +50,12 @@ use tuneweave_core::{
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
     PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, PrincipalType,
-    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
@@ -407,6 +408,10 @@ pub fn build_router(state: AppState) -> Router {
             get(account_radio_stations),
         )
         .route("/account/library/podcasts", get(account_podcasts))
+        .route(
+            "/account/podcast-episodes",
+            get(account_podcast_episode_search),
+        )
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -5893,6 +5898,148 @@ async fn account_podcasts(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountPodcastEpisodeSearchParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "name", alias = "keyword")]
+    query: Option<String>,
+    #[serde(alias = "displayStatus")]
+    display_status: Option<String>,
+    #[serde(alias = "type")]
+    visibility: Option<String>,
+    #[serde(alias = "voiceFeeType", alias = "fee_type")]
+    fee: Option<String>,
+    #[serde(
+        alias = "podcast_ref",
+        alias = "voiceListId",
+        alias = "radioId",
+        alias = "podcast_id"
+    )]
+    podcast: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn account_podcast_episode_search(
+    State(state): State<AppState>,
+    params: Result<Query<AccountPodcastEpisodeSearchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 200)?;
+    if !(1..=200).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 200").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let query = optional_trimmed(params.query);
+    let podcast_id = parse_optional_podcast_filter(platform, params.podcast)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .search_podcast_episodes_workbench(&PodcastEpisodeWorkbenchSearchRequest {
+            query,
+            display_status: parse_podcast_episode_display_status(params.display_status.as_deref())?,
+            visibility: parse_podcast_episode_visibility(params.visibility.as_deref())?,
+            fee_type: parse_podcast_episode_fee_filter(params.fee.as_deref())?,
+            podcast_id,
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+fn parse_podcast_episode_display_status(
+    value: Option<&str>,
+) -> Result<Option<PodcastEpisodeDisplayStatus>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().replace('-', "_").as_str() {
+        "auditing" => Ok(Some(PodcastEpisodeDisplayStatus::Auditing)),
+        "only_self_see" => Ok(Some(PodcastEpisodeDisplayStatus::OnlySelfSee)),
+        "online" => Ok(Some(PodcastEpisodeDisplayStatus::Online)),
+        "schedule_publish" | "scheduled" => Ok(Some(PodcastEpisodeDisplayStatus::SchedulePublish)),
+        "transcode_failed" => Ok(Some(PodcastEpisodeDisplayStatus::TranscodeFailed)),
+        "publishing" => Ok(Some(PodcastEpisodeDisplayStatus::Publishing)),
+        "failed" => Ok(Some(PodcastEpisodeDisplayStatus::Failed)),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode display status: {value}"
+        ))
+        .with_details(json!({
+            "allowed": [
+                "auditing", "only_self_see", "online", "schedule_publish",
+                "transcode_failed", "publishing", "failed"
+            ]
+        }))),
+    }
+}
+
+fn parse_podcast_episode_visibility(
+    value: Option<&str>,
+) -> Result<Option<PodcastEpisodeVisibility>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "public" => Ok(Some(PodcastEpisodeVisibility::Public)),
+        "private" => Ok(Some(PodcastEpisodeVisibility::Private)),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode visibility: {value}"
+        ))
+        .with_details(json!({ "allowed": ["public", "private"] }))),
+    }
+}
+
+fn parse_podcast_episode_fee_filter(
+    value: Option<&str>,
+) -> Result<Option<PodcastEpisodeFeeFilter>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "all" | "-1" => Ok(Some(PodcastEpisodeFeeFilter::All)),
+        "free" | "0" => Ok(Some(PodcastEpisodeFeeFilter::Free)),
+        "paid" | "1" => Ok(Some(PodcastEpisodeFeeFilter::Paid)),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode fee filter: {value}"
+        ))
+        .with_details(json!({ "allowed": ["all", "free", "paid", -1, 0, 1] }))),
+    }
+}
+
+fn parse_optional_podcast_filter(
+    platform: Platform,
+    value: Option<String>,
+) -> Result<Option<String>, TuneWeaveError> {
+    let Some(value) = optional_trimmed(value) else {
+        return Ok(None);
+    };
+    let reference = if value.contains(':') {
+        parse_reference(value)?
+    } else {
+        ResourceRef::new(platform, &value).map_err(|error| {
+            TuneWeaveError::invalid_request(format!("invalid podcast id: {error}"))
+                .with_details(json!({ "podcast": value }))
+        })?
+    };
+    if reference.platform() != platform {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast reference must use the selected account platform",
+        )
+        .with_details(json!({ "platform": platform, "podcast_ref": reference })));
+    }
+    Ok(Some(reference.id().to_owned()))
+}
+
 async fn account_following_artists(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -7211,6 +7358,7 @@ mod tests {
                 Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeWorkbenchList,
+                Capability::PodcastEpisodeWorkbenchSearch,
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeWorkbenchDetail,
@@ -7912,6 +8060,31 @@ mod tests {
                     total: Some(201),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Extensions::from([("request".to_owned(), json!(request))]),
+                },
+            })
+        }
+
+        async fn search_podcast_episodes_workbench(
+            &self,
+            request: &PodcastEpisodeWorkbenchSearchRequest,
+        ) -> Result<Page<PodcastEpisode>> {
+            let mut episode = sample_podcast_episode(
+                "2058695201",
+                request.podcast_id.as_deref().unwrap_or("336355127"),
+                "2603965162",
+            );
+            episode
+                .extensions
+                .insert("workbench_search".to_owned(), json!(request));
+            Ok(Page {
+                items: vec![episode],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
                     extensions: Extensions::from([("request".to_owned(), json!(request))]),
                 },
             })
@@ -14588,6 +14761,92 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["code"],
             200
         );
+    }
+
+    #[tokio::test]
+    async fn account_podcast_episode_search_preserves_every_workbench_filter() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/podcast-episodes?platform=netease&account=studio&name=episode&displayStatus=SCHEDULE_PUBLISH&type=PRIVATE&voiceFeeType=1&voiceListId=netease%3A336355127&limit=20&offset=40",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:2058695201");
+        assert_eq!(json["data"][0]["podcast_ref"], "netease:336355127");
+        let request = &json["data"][0]["extensions"]["workbench_search"];
+        assert_eq!(request["query"], "episode");
+        assert_eq!(request["display_status"], "schedule_publish");
+        assert_eq!(request["visibility"], "private");
+        assert_eq!(request["fee_type"], "paid");
+        assert_eq!(request["podcast_id"], "336355127");
+        assert_eq!(request["limit"], 20);
+        assert_eq!(request["offset"], 40);
+        assert_eq!(request["account"], "studio");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "studio");
+        assert_eq!(json["meta"]["pagination"]["limit"], 20);
+        assert_eq!(json["meta"]["pagination"]["offset"], 40);
+    }
+
+    #[tokio::test]
+    async fn account_podcast_episode_search_rejects_invalid_filters_and_cross_platform_refs() {
+        for path in [
+            "/v1/account/podcast-episodes?limit=0",
+            "/v1/account/podcast-episodes?limit=201",
+            "/v1/account/podcast-episodes?offset=invalid",
+            "/v1/account/podcast-episodes?platform=unknown",
+            "/v1/account/podcast-episodes?display_status=unknown",
+            "/v1/account/podcast-episodes?visibility=friends",
+            "/v1/account/podcast-episodes?fee=2",
+            "/v1/account/podcast-episodes?platform=netease&podcast_ref=qq%3A1",
+            "/v1/account/podcast-episodes?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
+    }
+
+    #[test]
+    fn podcast_workbench_filter_parsers_cover_all_reference_values() {
+        for (value, expected) in [
+            ("AUDITING", PodcastEpisodeDisplayStatus::Auditing),
+            ("ONLY_SELF_SEE", PodcastEpisodeDisplayStatus::OnlySelfSee),
+            ("ONLINE", PodcastEpisodeDisplayStatus::Online),
+            (
+                "SCHEDULE_PUBLISH",
+                PodcastEpisodeDisplayStatus::SchedulePublish,
+            ),
+            (
+                "TRANSCODE_FAILED",
+                PodcastEpisodeDisplayStatus::TranscodeFailed,
+            ),
+            ("PUBLISHING", PodcastEpisodeDisplayStatus::Publishing),
+            ("FAILED", PodcastEpisodeDisplayStatus::Failed),
+        ] {
+            assert_eq!(
+                parse_podcast_episode_display_status(Some(value)).expect("display status"),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            parse_podcast_episode_visibility(Some("PUBLIC")).expect("public visibility"),
+            Some(PodcastEpisodeVisibility::Public)
+        );
+        assert_eq!(
+            parse_podcast_episode_visibility(Some("PRIVATE")).expect("private visibility"),
+            Some(PodcastEpisodeVisibility::Private)
+        );
+        for (value, expected) in [
+            ("-1", PodcastEpisodeFeeFilter::All),
+            ("0", PodcastEpisodeFeeFilter::Free),
+            ("1", PodcastEpisodeFeeFilter::Paid),
+        ] {
+            assert_eq!(
+                parse_podcast_episode_fee_filter(Some(value)).expect("fee filter"),
+                Some(expected)
+            );
+        }
     }
 
     #[tokio::test]

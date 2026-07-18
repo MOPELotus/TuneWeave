@@ -28,14 +28,15 @@ use crate::{
     PlaylistUpdateRequest, Podcast, PodcastChartEntry, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
     PodcastEpisodeChartRequest, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, ProviderDescriptor, ProviderQrPoll,
-    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisodeStream, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
+    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -273,6 +274,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PodcastEpisodeWorkbenchList,
+        ))
+    }
+
+    async fn search_podcast_episodes_workbench(
+        &self,
+        _request: &PodcastEpisodeWorkbenchSearchRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeWorkbenchSearch,
         ))
     }
 
