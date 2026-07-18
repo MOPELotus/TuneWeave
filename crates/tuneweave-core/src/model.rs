@@ -1487,6 +1487,7 @@ impl ArtistWorksRequest {
 pub enum ArtistWorkKind {
     Track,
     Video,
+    Mixed,
     #[default]
     Unknown,
 }
@@ -3447,6 +3448,10 @@ mod tests {
         let value = serde_json::to_value(update).expect("serialize artist work update");
         assert_eq!(value["kind"], "track");
         assert_eq!(value["tracks"][0]["ref"], "netease:2099001");
+        assert_eq!(
+            serde_json::to_value(ArtistWorkKind::Mixed).expect("serialize mixed artist work"),
+            "mixed"
+        );
     }
 
     #[test]

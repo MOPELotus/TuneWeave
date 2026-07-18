@@ -304,7 +304,7 @@
 
 已关注歌手的新视频与新曲时间线分别返回 `Video[]` 和 `Track[]`，但都属于账户资源。它们以毫秒时间戳 `before` 翻页，并在 `meta.pagination.extensions.next_before_ms` 返回下一页起点；`account` 只选择登录态，不改变内容平台。
 
-混合作品流返回 `ArtistWorkUpdate[]`：`kind=track|video|unknown` 明确资源类型，已识别内容分别进入 `tracks` 或 `videos`，`source_type`、作品标题、歌手、封面和发布时间使用稳定字段。尚未识别的平台来源仍返回 `kind=unknown`，完整负载保留在 `extensions.artist_work`，不会静默丢弃。
+混合作品流返回 `ArtistWorkUpdate[]`：`kind=track|video|mixed|unknown` 明确资源类型，已识别内容分别进入 `tracks` 或 `videos`；同一作品块同时含歌曲和视频时使用 `mixed`，两类数组都保留。实际非空资源优先于 `blockType` 提示，空的旧字段别名也不会遮住后续非空数组。`source_type`、作品标题、歌手、封面和发布时间使用稳定字段；尚未识别的平台来源仍返回 `kind=unknown`，完整负载保留在 `extensions.artist_work`，不会静默丢弃。
 
 ### Playlist
 

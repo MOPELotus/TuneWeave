@@ -8826,14 +8826,7 @@ fn map_artist_work_update(raw: Value, default_source_type: u32) -> Result<Artist
         .as_str()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let kind = if !tracks.is_empty() || block_type.contains("song") || block_type.contains("track")
-    {
-        ArtistWorkKind::Track
-    } else if !videos.is_empty() || block_type.contains("mv") || block_type.contains("video") {
-        ArtistWorkKind::Video
-    } else {
-        ArtistWorkKind::Unknown
-    };
+    let kind = artist_work_kind(!tracks.is_empty(), !videos.is_empty(), &block_type);
     let artist_name = block_title["artistName"]
         .as_str()
         .map(str::trim)
@@ -8878,7 +8871,37 @@ fn map_artist_work_update(raw: Value, default_source_type: u32) -> Result<Artist
 }
 
 fn artist_work_resources<'a>(info: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
-    keys.iter().find_map(|key| info.get(*key)?.as_array())
+    let mut first_present = None;
+    for key in keys {
+        let Some(values) = info.get(*key).and_then(Value::as_array) else {
+            continue;
+        };
+        if first_present.is_none() {
+            first_present = Some(values);
+        }
+        if !values.is_empty() {
+            return Some(values);
+        }
+    }
+    first_present
+}
+
+fn artist_work_kind(has_tracks: bool, has_videos: bool, block_type: &str) -> ArtistWorkKind {
+    match (has_tracks, has_videos) {
+        (true, true) => ArtistWorkKind::Mixed,
+        (true, false) => ArtistWorkKind::Track,
+        (false, true) => ArtistWorkKind::Video,
+        (false, false) => {
+            let track_hint = block_type.contains("song") || block_type.contains("track");
+            let video_hint = block_type.contains("mv") || block_type.contains("video");
+            match (track_hint, video_hint) {
+                (true, true) => ArtistWorkKind::Mixed,
+                (true, false) => ArtistWorkKind::Track,
+                (false, true) => ArtistWorkKind::Video,
+                (false, false) => ArtistWorkKind::Unknown,
+            }
+        }
+    }
 }
 
 fn map_artist_new_video(raw: Value) -> Result<Video> {
@@ -15147,6 +15170,34 @@ mod tests {
         );
         assert_eq!(page.pagination.extensions["first_request"], false);
         assert!(page.pagination.has_more);
+    }
+
+    #[test]
+    fn artist_work_mapping_prefers_real_nonempty_resources_over_empty_aliases_and_hints() {
+        let resources = json!({
+            "songLists": [],
+            "songList": null,
+            "songs": [{"id": 2099001}]
+        });
+        let selected = artist_work_resources(&resources, &["songLists", "songList", "songs"])
+            .expect("select present artist work resource list");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["id"], 2099001);
+
+        assert_eq!(
+            artist_work_kind(true, false, "video"),
+            ArtistWorkKind::Track
+        );
+        assert_eq!(artist_work_kind(false, true, "song"), ArtistWorkKind::Video);
+        assert_eq!(artist_work_kind(true, true, "song"), ArtistWorkKind::Mixed);
+        assert_eq!(
+            artist_work_kind(false, false, "song_video"),
+            ArtistWorkKind::Mixed
+        );
+        assert_eq!(
+            artist_work_kind(false, false, "future_resource"),
+            ArtistWorkKind::Unknown
+        );
     }
 
     #[test]
