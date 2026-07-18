@@ -725,6 +725,44 @@ impl PodcastListRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastChartKind {
+    #[default]
+    New,
+    Hot,
+    Paid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastChartRequest {
+    pub kind: PodcastChartKind,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastChartRequest {
+    #[must_use]
+    pub const fn new(kind: PodcastChartKind, limit: u32, offset: u32) -> Self {
+        Self {
+            kind,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastChartEntry {
+    pub rank: u32,
+    pub previous_rank: Option<i64>,
+    pub score: Option<u64>,
+    pub podcast: Podcast,
+    pub extensions: Extensions,
+}
+
 /// An on-demand spoken-audio show. This is intentionally separate from a live radio station.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Podcast {
@@ -2670,6 +2708,32 @@ mod tests {
         assert_eq!(request.offset, 60);
         assert!(!request.ascending);
         assert_eq!(request.account.as_deref(), Some("spoken-word"));
+    }
+
+    #[test]
+    fn podcast_chart_keeps_rank_movement_and_podcast_identity_explicit() {
+        let mut request = PodcastChartRequest::new(PodcastChartKind::Paid, 30, 0);
+        request.account = Some("spoken-word".to_owned());
+        let podcast = Podcast::new(
+            ResourceRef::new(Platform::Netease, "1490425014").expect("valid podcast reference"),
+            "猫平安逆袭传奇",
+        );
+        let entry = PodcastChartEntry {
+            rank: 1,
+            previous_rank: Some(-1),
+            score: Some(193_200),
+            podcast,
+            extensions: Extensions::new(),
+        };
+
+        let request_value = serde_json::to_value(request).expect("serialize chart request");
+        assert_eq!(request_value["kind"], "paid");
+        assert_eq!(request_value["account"], "spoken-word");
+        let entry_value = serde_json::to_value(entry).expect("serialize chart entry");
+        assert_eq!(entry_value["rank"], 1);
+        assert_eq!(entry_value["previous_rank"], -1);
+        assert_eq!(entry_value["score"], 193_200);
+        assert_eq!(entry_value["podcast"]["ref"], "netease:1490425014");
     }
 
     #[test]

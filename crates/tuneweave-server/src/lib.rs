@@ -48,7 +48,8 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
     PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
@@ -245,6 +246,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts", get(chart_catalog))
+        .route("/charts/podcasts", get(podcast_chart))
         .route("/charts/artists", get(artist_chart))
         .route("/charts/digital-albums", get(digital_album_chart))
         .route("/charts/dimensions/{chart_code}", get(dimension_chart))
@@ -1003,6 +1005,48 @@ async fn podcasts(
             limit,
             offset,
             page,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn podcast_chart(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastChartParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastChartEntry>>>, ApiError> {
+    let params = query_params(params)?;
+    let kind = parse_podcast_chart_kind(params.kind.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .podcast_chart(&PodcastChartRequest {
+            kind,
+            limit,
+            offset,
             account: account.clone(),
         })
         .await?;
@@ -6792,6 +6836,24 @@ fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeav
     }
 }
 
+fn parse_podcast_chart_kind(value: Option<&str>) -> Result<PodcastChartKind, TuneWeaveError> {
+    match value
+        .unwrap_or("new")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "new" | "newcomer" => Ok(PodcastChartKind::New),
+        "hot" | "popular" => Ok(PodcastChartKind::Hot),
+        "paid" | "pay" => Ok(PodcastChartKind::Paid),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast chart kind: {value}"
+        ))
+        .with_details(json!({ "allowed": ["new", "hot", "paid"] }))),
+    }
+}
+
 fn parse_podcast_episode_chart_kind(
     value: Option<&str>,
 ) -> Result<PodcastEpisodeChartKind, TuneWeaveError> {
@@ -6964,6 +7026,7 @@ mod tests {
                 Capability::RadioStationSubscriptionWrite,
                 Capability::PodcastCategories,
                 Capability::PodcastList,
+                Capability::PodcastCharts,
                 Capability::PodcastDetail,
                 Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
@@ -7491,6 +7554,54 @@ mod tests {
                     },
                     has_more: paged || category_featured,
                     extensions: pagination_extensions,
+                },
+            })
+        }
+
+        async fn podcast_chart(
+            &self,
+            request: &PodcastChartRequest,
+        ) -> Result<Page<PodcastChartEntry>> {
+            if request.kind == PodcastChartKind::Paid && request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the paid test podcast chart does not support offset",
+                ));
+            }
+            let mut podcast = sample_podcast("1490425014");
+            if request.kind == PodcastChartKind::Paid {
+                podcast.paid = Some(true);
+            }
+            let entry = PodcastChartEntry {
+                rank: 1,
+                previous_rank: Some(-1),
+                score: Some(193_200),
+                podcast,
+                extensions: Extensions::from([(
+                    "chart_entry".to_owned(),
+                    json!({"rank": 1, "lastRank": -1, "score": 193200}),
+                )]),
+            };
+            Ok(Page {
+                items: vec![entry],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: (request.kind == PodcastChartKind::Paid).then_some(3),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([
+                        ("kind".to_owned(), json!(request.kind)),
+                        ("requested_offset".to_owned(), json!(request.offset)),
+                        (
+                            "offset_submitted".to_owned(),
+                            json!(request.kind != PodcastChartKind::Paid),
+                        ),
+                        ("offset_applied".to_owned(), json!(false)),
+                        ("offset_control_supported".to_owned(), json!(false)),
+                        ("continuation_supported".to_owned(), json!(false)),
+                        ("updated_at".to_owned(), json!("2024-01-01T00:00:00Z")),
+                        ("request".to_owned(), json!(request)),
+                    ]),
                 },
             })
         }
@@ -11182,6 +11293,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_charts_preserve_rank_and_real_pagination_controls() {
+        let (status, new_chart) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/podcasts?kind=new&limit=3&offset=40&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(new_chart["data"][0]["rank"], 1);
+        assert_eq!(new_chart["data"][0]["previous_rank"], -1);
+        assert_eq!(new_chart["data"][0]["score"], 193_200);
+        assert_eq!(new_chart["data"][0]["podcast"]["ref"], "netease:1490425014");
+        assert_eq!(new_chart["meta"]["pagination"]["limit"], 3);
+        assert_eq!(new_chart["meta"]["pagination"]["offset"], 0);
+        assert_eq!(new_chart["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(new_chart["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(new_chart["meta"]["pagination"]["has_more"], false);
+        assert_eq!(new_chart["meta"]["pagination"]["extensions"]["kind"], "new");
+        assert_eq!(
+            new_chart["meta"]["pagination"]["extensions"]["requested_offset"],
+            40
+        );
+        assert_eq!(
+            new_chart["meta"]["pagination"]["extensions"]["offset_submitted"],
+            true
+        );
+        assert_eq!(
+            new_chart["meta"]["pagination"]["extensions"]["offset_applied"],
+            false
+        );
+        assert_eq!(new_chart["meta"]["platform"], "netease");
+        assert_eq!(new_chart["meta"]["account"], "podcast-user");
+
+        let (status, paid) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/podcasts?type=pay&limit=10&platform=netease",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(paid["data"][0]["podcast"]["paid"], true);
+        assert_eq!(paid["meta"]["pagination"]["total"], 3);
+        assert_eq!(paid["meta"]["pagination"]["extensions"]["kind"], "paid");
+        assert_eq!(
+            paid["meta"]["pagination"]["extensions"]["offset_submitted"],
+            false
+        );
+    }
+
+    #[tokio::test]
     async fn podcast_episode_charts_preserve_rank_and_real_pagination_controls() {
         let (status, popular) = json_response_from(
             test_app_with_provider(),
@@ -11245,6 +11404,13 @@ mod tests {
     #[tokio::test]
     async fn podcast_routes_reject_invalid_references_pagination_and_order() {
         for path in [
+            "/v1/charts/podcasts?kind=unknown",
+            "/v1/charts/podcasts?kind=new&limit=0",
+            "/v1/charts/podcasts?kind=new&limit=101",
+            "/v1/charts/podcasts?kind=new&offset=invalid",
+            "/v1/charts/podcasts?kind=paid&offset=1",
+            "/v1/charts/podcasts?kind=new&unknown=true",
+            "/v1/charts/podcasts?kind=new&platform=unknown",
             "/v1/episodes",
             "/v1/episodes?catalog=unknown",
             "/v1/episodes?catalog=popular&limit=0",

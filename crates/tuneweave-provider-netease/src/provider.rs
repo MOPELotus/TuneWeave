@@ -46,7 +46,8 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
     PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
@@ -411,6 +412,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationSubscriptionWrite,
             Capability::PodcastCategories,
             Capability::PodcastList,
+            Capability::PodcastCharts,
             Capability::PodcastDetail,
             Capability::PodcastSubscriptionWrite,
             Capability::PodcastEpisodeList,
@@ -796,6 +798,16 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_request(id);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_response(response.body)
+    }
+
+    async fn podcast_chart(
+        &self,
+        request: &PodcastChartRequest,
+    ) -> Result<Page<PodcastChartEntry>> {
+        let (path, payload) = netease_podcast_chart_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_chart(response.body, request)
     }
 
     async fn set_podcast_subscription(
@@ -4500,6 +4512,39 @@ fn netease_podcast_request(id: u64) -> (&'static str, Value) {
     ("/api/djradio/v2/get", json!({ "id": id }))
 }
 
+fn netease_podcast_chart_request(request: &PodcastChartRequest) -> Result<(&'static str, Value)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast chart limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    match request.kind {
+        PodcastChartKind::New => Ok((
+            "/api/djradio/toplist",
+            json!({ "limit": request.limit, "offset": request.offset, "type": "0" }),
+        )),
+        PodcastChartKind::Hot => Ok((
+            "/api/djradio/toplist",
+            json!({ "limit": request.limit, "offset": request.offset, "type": 1 }),
+        )),
+        PodcastChartKind::Paid => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase paid podcast chart does not support offset",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "kind": request.kind, "offset": request.offset })));
+            }
+            Ok((
+                "/api/djradio/toplist/pay",
+                json!({ "limit": request.limit }),
+            ))
+        }
+    }
+}
+
 fn netease_podcast_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
     (
         if subscribed {
@@ -5109,6 +5154,90 @@ fn map_netease_podcast_response(body: Value) -> Result<Podcast> {
     Ok(podcast)
 }
 
+fn map_netease_podcast_chart(
+    body: Value,
+    request: &PodcastChartRequest,
+) -> Result<Page<PodcastChartEntry>> {
+    ensure_success(&body)?;
+    let (raw_items, total, update_time_ms, offset_submitted) = match request.kind {
+        PodcastChartKind::New | PodcastChartKind::Hot => (
+            body.get("toplist").and_then(Value::as_array).cloned(),
+            None,
+            body.get("updateTime").and_then(json_u64),
+            true,
+        ),
+        PodcastChartKind::Paid => {
+            let data = body
+                .get("data")
+                .filter(|data| data.is_object())
+                .ok_or_else(|| podcast_item_error("paid podcast chart data", &body))?;
+            (
+                data.get("list").and_then(Value::as_array).cloned(),
+                data.get("total").and_then(json_u64),
+                data.get("updateTime").and_then(json_u64),
+                false,
+            )
+        }
+    };
+    let raw_items = raw_items.ok_or_else(|| podcast_item_error("podcast chart list", &body))?;
+    let entries = raw_items
+        .into_iter()
+        .map(|raw| map_netease_podcast_chart_entry(raw, request.kind))
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::from([
+        ("kind".to_owned(), json!(request.kind)),
+        ("returned_count".to_owned(), json!(entries.len())),
+        (
+            "limit_applied".to_owned(),
+            json!(entries.len() <= request.limit as usize),
+        ),
+        ("requested_offset".to_owned(), json!(request.offset)),
+        ("offset_submitted".to_owned(), json!(offset_submitted)),
+        ("offset_applied".to_owned(), json!(false)),
+        ("offset_control_supported".to_owned(), json!(false)),
+        ("continuation_supported".to_owned(), json!(false)),
+    ]);
+    insert_extension(&mut extensions, "update_time_ms", update_time_ms);
+    if let Some(updated_at) = update_time_ms.and_then(|value| unix_rfc3339(value / 1_000)) {
+        extensions.insert("updated_at".to_owned(), json!(updated_at));
+    }
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items: entries,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
+fn map_netease_podcast_chart_entry(
+    raw: Value,
+    kind: PodcastChartKind,
+) -> Result<PodcastChartEntry> {
+    let rank = raw
+        .get("rank")
+        .and_then(json_u64)
+        .and_then(|rank| u32::try_from(rank).ok())
+        .filter(|rank| *rank > 0)
+        .ok_or_else(|| podcast_item_error("positive podcast chart rank", &raw))?;
+    let mut podcast = map_netease_podcast(raw.clone())?;
+    if kind == PodcastChartKind::Paid {
+        podcast.paid = Some(true);
+    }
+    Ok(PodcastChartEntry {
+        rank,
+        previous_rank: raw.get("lastRank").and_then(json_i64),
+        score: raw.get("score").and_then(json_u64),
+        podcast,
+        extensions: Extensions::from([("chart_entry".to_owned(), raw)]),
+    })
+}
+
 fn map_netease_subscribed_podcasts(body: Value, limit: u32, offset: u32) -> Result<Page<Podcast>> {
     ensure_success(&body)?;
     let raw_items = body
@@ -5186,7 +5315,13 @@ fn map_netease_podcast(raw: Value) -> Result<Podcast> {
     let mut podcast = Podcast::new(reference, name);
     podcast.description = radio_text_field(&raw, &["desc", "description"]).unwrap_or_default();
     podcast.cover_url = radio_text_field(&raw, &["picUrl", "coverUrl"]);
-    podcast.creator = map_podcast_creator(raw.get("dj"))?;
+    podcast.creator = map_podcast_creator(raw.get("dj"))?.or_else(|| {
+        radio_text_field(&raw, &["creatorName"]).map(|name| CreatorSummary {
+            resource_ref: None,
+            name,
+            avatar_url: None,
+        })
+    });
     podcast.category = radio_text_field(&raw, &["category", "categoryName"]);
     podcast.secondary_category = radio_text_field(&raw, &["secondCategory", "secondCategoryName"]);
     podcast.episode_count = podcast_u64_field(&raw, &["programCount", "episodeCount"]);
@@ -14334,6 +14469,45 @@ mod tests {
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
         );
         assert_eq!(
+            netease_podcast_chart_request(
+                &PodcastChartRequest::new(PodcastChartKind::New, 20, 40,)
+            )
+            .expect("new podcast chart request"),
+            (
+                "/api/djradio/toplist",
+                json!({"limit": 20, "offset": 40, "type": "0"})
+            )
+        );
+        assert_eq!(
+            netease_podcast_chart_request(
+                &PodcastChartRequest::new(PodcastChartKind::Hot, 30, 60,)
+            )
+            .expect("hot podcast chart request"),
+            (
+                "/api/djradio/toplist",
+                json!({"limit": 30, "offset": 60, "type": 1})
+            )
+        );
+        assert_eq!(
+            netease_podcast_chart_request(
+                &PodcastChartRequest::new(PodcastChartKind::Paid, 10, 0,)
+            )
+            .expect("paid podcast chart request"),
+            ("/api/djradio/toplist/pay", json!({"limit": 10}))
+        );
+        for invalid in [
+            PodcastChartRequest::new(PodcastChartKind::New, 0, 0),
+            PodcastChartRequest::new(PodcastChartKind::Hot, 101, 0),
+            PodcastChartRequest::new(PodcastChartKind::Paid, 20, 1),
+        ] {
+            assert_eq!(
+                netease_podcast_chart_request(&invalid)
+                    .expect_err("invalid podcast chart request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        assert_eq!(
             netease_podcast_subscription_request(336_355_127, true),
             ("/api/djradio/sub", json!({"id": 336_355_127}))
         );
@@ -15039,6 +15213,115 @@ mod tests {
             assert_eq!(
                 map_netease_subscribed_podcasts(invalid, 20, 0)
                     .expect_err("invalid subscribed podcast response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_podcast_charts_without_faking_ignored_offset_or_losing_sparse_paid_entries() {
+        let new_request = PodcastChartRequest::new(PodcastChartKind::New, 1, 40);
+        let mut new_entry = fixture_podcast_radio(792_868_378, "一条小团团OvO的翻唱合集");
+        new_entry["rank"] = json!(1);
+        new_entry["lastRank"] = json!(3);
+        new_entry["score"] = json!(116_563);
+        let new_chart = map_netease_podcast_chart(
+            json!({
+                "code": 200,
+                "updateTime": 1_704_067_200_000_u64,
+                "toplist": [new_entry],
+                "futureField": "preserved"
+            }),
+            &new_request,
+        )
+        .expect("map new podcast chart");
+        assert_eq!(new_chart.items.len(), 1);
+        assert_eq!(new_chart.items[0].rank, 1);
+        assert_eq!(new_chart.items[0].previous_rank, Some(3));
+        assert_eq!(new_chart.items[0].score, Some(116_563));
+        assert_eq!(new_chart.items[0].podcast.id, "792868378");
+        assert_eq!(new_chart.pagination.offset, 0);
+        assert_eq!(new_chart.pagination.total, None);
+        assert_eq!(new_chart.pagination.next_offset, None);
+        assert!(!new_chart.pagination.has_more);
+        assert_eq!(new_chart.pagination.extensions["kind"], "new");
+        assert_eq!(new_chart.pagination.extensions["requested_offset"], 40);
+        assert_eq!(new_chart.pagination.extensions["offset_submitted"], true);
+        assert_eq!(new_chart.pagination.extensions["offset_applied"], false);
+        assert_eq!(
+            new_chart.pagination.extensions["continuation_supported"],
+            false
+        );
+        assert_eq!(
+            new_chart.pagination.extensions["updated_at"],
+            "2024-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            new_chart.pagination.extensions["response"]["futureField"],
+            "preserved"
+        );
+
+        let paid_request = PodcastChartRequest::new(PodcastChartKind::Paid, 3, 0);
+        let paid_chart = map_netease_podcast_chart(
+            json!({
+                "code": 200,
+                "data": {
+                    "total": 3,
+                    "updateTime": 1_704_067_260_000_u64,
+                    "list": [{
+                        "id": 1_490_425_014_u64,
+                        "rank": 1,
+                        "lastRank": -1,
+                        "score": 193_200,
+                        "name": "猫平安逆袭传奇",
+                        "picUrl": "https://example.test/paid-podcast.jpg",
+                        "creatorName": "猫平安"
+                    }]
+                }
+            }),
+            &paid_request,
+        )
+        .expect("map paid podcast chart");
+        assert_eq!(paid_chart.items[0].rank, 1);
+        assert_eq!(paid_chart.items[0].previous_rank, Some(-1));
+        assert_eq!(paid_chart.items[0].score, Some(193_200));
+        assert_eq!(paid_chart.items[0].podcast.id, "1490425014");
+        assert_eq!(paid_chart.items[0].podcast.paid, Some(true));
+        assert_eq!(
+            paid_chart.items[0]
+                .podcast
+                .creator
+                .as_ref()
+                .map(|creator| creator.name.as_str()),
+            Some("猫平安")
+        );
+        assert_eq!(
+            paid_chart.items[0].extensions["chart_entry"]["creatorName"],
+            "猫平安"
+        );
+        assert_eq!(paid_chart.pagination.total, Some(3));
+        assert_eq!(paid_chart.pagination.extensions["kind"], "paid");
+        assert_eq!(paid_chart.pagination.extensions["offset_submitted"], false);
+
+        for (invalid, request) in [
+            (json!({"code": 200}), &new_request),
+            (
+                json!({"code": 200, "toplist": [{"id": 1, "name": "缺少排名"}]}),
+                &new_request,
+            ),
+            (
+                json!({
+                    "code": 200,
+                    "toplist": [{"id": 1, "name": "非法排名", "rank": 0}]
+                }),
+                &new_request,
+            ),
+            (json!({"code": 200, "data": {}}), &paid_request),
+        ] {
+            assert_eq!(
+                map_netease_podcast_chart(invalid, request)
+                    .expect_err("invalid podcast chart response")
                     .code,
                 ErrorCode::UpstreamError
             );
