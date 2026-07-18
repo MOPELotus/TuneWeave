@@ -22,17 +22,18 @@ use crate::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream,
-    MembershipSummary, Page, PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast, PodcastChartEntry,
-    PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    MembershipSummary, Page, PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
+    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast,
+    PodcastChartEntry, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest,
+    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, ProviderDescriptor,
+    ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
@@ -843,6 +844,23 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Recommendations,
+        ))
+    }
+
+    async fn personal_fm(&self, _request: &PersonalFmRequest) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PersonalFm,
+        ))
+    }
+
+    async fn dislike_recommendation(
+        &self,
+        _request: &RecommendationDislikeRequest,
+    ) -> Result<RecommendationDislikeResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationFeedback,
         ))
     }
 

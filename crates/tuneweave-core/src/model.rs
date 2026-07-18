@@ -1659,6 +1659,48 @@ impl RecommendationRequest {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PersonalFmVariant {
+    #[default]
+    Classic,
+    Mode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersonalFmRequest {
+    pub variant: PersonalFmVariant,
+    pub mode: Option<String>,
+    pub sub_mode: Option<String>,
+    pub limit: u32,
+    pub account: Option<String>,
+}
+
+impl Default for PersonalFmRequest {
+    fn default() -> Self {
+        Self {
+            variant: PersonalFmVariant::Classic,
+            mode: None,
+            sub_mode: None,
+            limit: 3,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationDislikeRequest {
+    pub track_ref: ResourceRef,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationDislikeResult {
+    pub track_ref: ResourceRef,
+    pub applied: bool,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtistCategory {
     #[default]
     All,
@@ -3178,6 +3220,31 @@ mod tests {
         assert!(value["active"].is_null());
         assert_eq!(value["annual_count"], -1);
         assert!(value["expires_at"].is_null());
+    }
+
+    #[test]
+    fn personal_fm_and_dislike_contracts_keep_mode_and_track_identity_explicit() {
+        let request = PersonalFmRequest {
+            variant: PersonalFmVariant::Mode,
+            mode: Some("SCENE_RCMD".to_owned()),
+            sub_mode: Some("FOCUS".to_owned()),
+            limit: 3,
+            account: Some("default".to_owned()),
+        };
+        let value = serde_json::to_value(request).expect("serialize personal FM request");
+        assert_eq!(value["variant"], "mode");
+        assert_eq!(value["mode"], "SCENE_RCMD");
+        assert_eq!(value["sub_mode"], "FOCUS");
+
+        let result = RecommendationDislikeResult {
+            track_ref: ResourceRef::new(Platform::Netease, "347230")
+                .expect("valid track reference"),
+            applied: true,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize dislike result");
+        assert_eq!(value["track_ref"], "netease:347230");
+        assert_eq!(value["applied"], true);
     }
 
     #[test]

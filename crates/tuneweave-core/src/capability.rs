@@ -110,6 +110,8 @@ pub enum Capability {
     Favorites,
     ListeningHistory,
     Recommendations,
+    PersonalFm,
+    RecommendationFeedback,
     MusicPartner,
     CommentWrite,
     CommentsRead,
@@ -181,6 +183,15 @@ mod tests {
             serde_json::to_value(Capability::ListeningRightsGain)
                 .expect("serialize listening-rights gain capability"),
             serde_json::json!("listening_rights_gain")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PersonalFm).expect("serialize personal FM capability"),
+            serde_json::json!("personal_fm")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::RecommendationFeedback)
+                .expect("serialize recommendation feedback capability"),
+            serde_json::json!("recommendation_feedback")
         );
         assert_eq!(
             serde_json::to_value(Capability::AudioStreamBatch)

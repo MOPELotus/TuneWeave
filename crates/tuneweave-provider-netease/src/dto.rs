@@ -998,6 +998,12 @@ pub(crate) struct RecommendedTracksEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct PersonalFmEnvelope {
+    #[serde(default)]
+    pub data: Vec<Song>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct RecommendedTracksData {
     #[serde(rename = "dailySongs", default)]
     pub daily_songs: Vec<Song>,

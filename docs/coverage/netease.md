@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=252`、`partial=3`、`implemented=63`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=249`、`partial=3`、`implemented=64`、`verified=100`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -197,8 +197,8 @@
 | `mv_sublist` | `/mv/sublist` | `pending` | — |
 | `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收；零首选清晰度/有效期会继续读取有效兼容字段 |
 | `nickname_check` | `/nickname/check` | `pending` | — |
-| `personal_fm` | `/personal_fm` | `pending` | — |
-| `personal_fm_mode` | `/personal/fm/mode` | `pending` | — |
+| `personal_fm` | `/personal_fm` | `verified` | `GET /v1/recommendations/personal-fm`（缺省 `backend=classic`，也接受 `default/personal_fm`；固定 WeAPI `/api/v1/radio/get` 和空载荷，不伪造参考实现不存在的分页参数；统一返回当前 `Track[]` 队列快照，`total` 为本次数量，`has_more=false/next_offset=null/continuation_supported=false`，完整响应保留在分页扩展；请求协议、能力发现、歌曲映射、截取语义、账户隔离、冲突和未知字段均有测试；2026-07-18 匿名真实 provider 联网返回非空统一曲目队列） |
+| `personal_fm_mode` | `/personal/fm/mode` | `verified` | `GET /v1/recommendations/personal-fm?backend=mode`（也接受 `personal_fm_mode`；固定 EAPI `/api/v1/radio/get`，按参考实现保留可选 `mode/subMode/limit`，统一字段兼容 `sub_mode/submode/subMode`；模式值采用可扩展字符串校验，不把未来平台模式锁死在本地枚举；响应沿用不可续页队列快照并在扩展保留实际后端、协议、参数和完整原文；精确协议、可选参数、校验、统一 HTTP 与匿名真实联网均已覆盖，2026-07-18 返回非空统一曲目队列） |
 | `personalized` | `/personalized` | `pending` | — |
 | `personalized_djprogram` | `/personalized/djprogram` | `pending` | — |
 | `personalized_mv` | `/personalized/mv` | `pending` | — |
@@ -241,7 +241,7 @@
 | `recent_listen_list` | `/recent/listen/list` | `pending` | — |
 | `recommend_resource` | `/recommend/resource` | `verified` | `GET /v1/recommendations/playlists`（2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
 | `recommend_songs` | `/recommend/songs` | `verified` | `GET /v1/recommendations/tracks`（含 `afresh`→`refresh`；2026-07-16 匿名 HTTP 实测返回 30 首并保留推荐理由） |
-| `recommend_songs_dislike` | `/recommend/songs/dislike` | `pending` | — |
+| `recommend_songs_dislike` | `/recommend/songs/dislike` | `implemented` | `POST /v1/recommendations/tracks/{ref}/dislike`（完整曲目引用决定平台，`account` 选择隔离持久账户；网易云固定 WeAPI `/api/v2/discovery/recommend/dislike`，精确提交 `resId/resType=4/sceneType=1`，统一返回 `RecommendationDislikeResult` 并保留完整响应；协议、能力、引用/平台冲突、账户隔离、未知字段及 HTTP 包络均有测试；2026-07-18 匿名真实联网确认上游登录边界稳定映射 401 `authentication_required`，成功写入待 Basic 末尾使用持久化账户验收） |
 | `record_recent_album` | `/record/recent/album` | `pending` | — |
 | `record_recent_dj` | `/record/recent/dj` | `pending` | — |
 | `record_recent_playlist` | `/record/recent/playlist` | `pending` | — |

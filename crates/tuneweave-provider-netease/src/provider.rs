@@ -41,12 +41,12 @@ use tuneweave_core::{
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor,
     Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
+    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
@@ -56,15 +56,16 @@ use tuneweave_core::{
     PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
+    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -88,11 +89,11 @@ use crate::{
         DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
         DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
         LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope,
-        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
-        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
-        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
-        TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope, VideoCreatorItem,
-        VideoStatsEnvelope, VideoUrlItem,
+        PersonalFmEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail,
+        PlaylistEnvelope, Privilege, RecommendationReason, RecommendedPlaylistsEnvelope,
+        RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData, StreamEnvelope,
+        SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -564,6 +565,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
+            Capability::PersonalFm,
+            Capability::RecommendationFeedback,
             Capability::CommentWrite,
             Capability::CommentsRead,
             Capability::CommentReactionsRead,
@@ -2338,6 +2341,32 @@ impl MusicProvider for NeteaseProvider {
         ensure_account_access(&client, &response.body, "daily playlist recommendations")?;
         let response: RecommendedPlaylistsEnvelope = parse_body(response.body)?;
         map_recommended_playlists(response, request.limit, request.offset)
+    }
+
+    async fn personal_fm(&self, request: &PersonalFmRequest) -> Result<Page<Track>> {
+        let (path, payload, protocol) = netease_personal_fm_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = match request.variant {
+            PersonalFmVariant::Classic => client.request_weapi(path, payload).await?,
+            PersonalFmVariant::Mode => client.request_eapi(path, payload).await?,
+        };
+        ensure_account_access(&client, &response.body, "personal FM")?;
+        map_personal_fm(response.body, request, protocol)
+    }
+
+    async fn dislike_recommendation(
+        &self,
+        request: &RecommendationDislikeRequest,
+    ) -> Result<RecommendationDislikeResult> {
+        let (path, payload) = netease_recommendation_dislike_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "recommendation dislike feedback")?;
+        Ok(RecommendationDislikeResult {
+            track_ref: request.track_ref.clone(),
+            applied: true,
+            extensions: Extensions::from([("response".to_owned(), response.body)]),
+        })
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -4485,6 +4514,105 @@ fn map_recommended_tracks(
     let limit = limit.clamp(1, 100);
     let (items, pagination) = select_page(tracks, limit, offset);
     Ok(Page { items, pagination })
+}
+
+fn netease_personal_fm_request(
+    request: &PersonalFmRequest,
+) -> Result<(&'static str, Value, &'static str)> {
+    validate_personal_fm_request(request)?;
+    match request.variant {
+        PersonalFmVariant::Classic => Ok(("/api/v1/radio/get", json!({}), "weapi")),
+        PersonalFmVariant::Mode => {
+            let mut payload = serde_json::Map::new();
+            if let Some(mode) = request.mode.as_deref() {
+                payload.insert("mode".to_owned(), Value::String(mode.to_owned()));
+            }
+            if let Some(sub_mode) = request.sub_mode.as_deref() {
+                payload.insert("subMode".to_owned(), Value::String(sub_mode.to_owned()));
+            }
+            payload.insert("limit".to_owned(), json!(request.limit));
+            Ok(("/api/v1/radio/get", Value::Object(payload), "eapi"))
+        }
+    }
+}
+
+fn netease_recommendation_dislike_request(
+    request: &RecommendationDislikeRequest,
+) -> Result<(&'static str, Value)> {
+    if request.track_ref.platform() != Platform::Netease {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase recommendation feedback requires a NetEase track reference",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let id = parse_numeric_id("track", request.track_ref.id())?;
+    Ok((
+        "/api/v2/discovery/recommend/dislike",
+        json!({ "resId": id, "resType": 4, "sceneType": 1 }),
+    ))
+}
+
+fn validate_personal_fm_request(request: &PersonalFmRequest) -> Result<()> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(
+            TuneWeaveError::invalid_request("personal FM limit must be between 1 and 100")
+                .with_platform(Platform::Netease),
+        );
+    }
+    if request.variant == PersonalFmVariant::Classic
+        && (request.mode.is_some() || request.sub_mode.is_some())
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "classic personal FM does not accept mode or sub_mode",
+        )
+        .with_platform(Platform::Netease));
+    }
+    for (name, value) in [("mode", &request.mode), ("sub_mode", &request.sub_mode)] {
+        if let Some(value) = value {
+            if value.is_empty() || value.trim() != value || value.len() > 64 {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "personal FM {name} must contain 1 to 64 bytes without surrounding whitespace",
+                ))
+                .with_platform(Platform::Netease));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn map_personal_fm(
+    raw_response: Value,
+    request: &PersonalFmRequest,
+    protocol: &str,
+) -> Result<Page<Track>> {
+    let response: PersonalFmEnvelope = parse_body(raw_response.clone())?;
+    let mut items = response
+        .data
+        .into_iter()
+        .map(|song| map_song(song, None))
+        .collect::<Result<Vec<_>>>()?;
+    let total = items.len();
+    items.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+    let extensions = Extensions::from([
+        ("variant".to_owned(), json!(request.variant)),
+        ("mode".to_owned(), json!(request.mode)),
+        ("sub_mode".to_owned(), json!(request.sub_mode)),
+        ("protocol".to_owned(), json!(protocol)),
+        ("continuation_supported".to_owned(), Value::Bool(false)),
+        ("truncated".to_owned(), Value::Bool(items.len() < total)),
+        ("response".to_owned(), raw_response),
+    ]);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total: u64::try_from(total).ok(),
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
 }
 
 fn insert_recommendation_reason(extensions: &mut Extensions, reason: RecommendationReason) {
@@ -13160,7 +13288,11 @@ mod tests {
     }
 
     fn fixture_song() -> Song {
-        serde_json::from_value(json!({
+        serde_json::from_value(fixture_song_value()).expect("valid fixture")
+    }
+
+    fn fixture_song_value() -> Value {
+        json!({
             "id": 123,
             "name": "反方向的钟",
             "alia": ["Clockwise"],
@@ -13177,8 +13309,7 @@ mod tests {
             "h": {"br": 320000},
             "sq": {"br": 999000},
             "hr": null
-        }))
-        .expect("valid fixture")
+        })
     }
 
     fn fixture_podcast_program(id: u64, podcast_id: u64, audio_id: u64) -> Value {
@@ -23147,6 +23278,137 @@ mod tests {
     }
 
     #[test]
+    fn personal_fm_requests_preserve_classic_and_mode_protocols() {
+        let classic = PersonalFmRequest::default();
+        let (path, payload, protocol) =
+            netease_personal_fm_request(&classic).expect("classic personal FM request");
+        assert_eq!(path, "/api/v1/radio/get");
+        assert_eq!(payload, json!({}));
+        assert_eq!(protocol, "weapi");
+
+        let mode = PersonalFmRequest {
+            variant: PersonalFmVariant::Mode,
+            mode: Some("SCENE_RCMD".to_owned()),
+            sub_mode: Some("FOCUS".to_owned()),
+            limit: 8,
+            account: Some("premium".to_owned()),
+        };
+        let (path, payload, protocol) =
+            netease_personal_fm_request(&mode).expect("mode personal FM request");
+        assert_eq!(path, "/api/v1/radio/get");
+        assert_eq!(
+            payload,
+            json!({"mode": "SCENE_RCMD", "subMode": "FOCUS", "limit": 8})
+        );
+        assert_eq!(protocol, "eapi");
+    }
+
+    #[test]
+    fn personal_fm_mapping_is_a_fixed_queue_without_fake_continuation() {
+        let page = map_personal_fm(
+            json!({"code": 200, "data": [fixture_song_value(), fixture_song_value()]}),
+            &PersonalFmRequest {
+                variant: PersonalFmVariant::Mode,
+                mode: Some("FAMILIAR".to_owned()),
+                sub_mode: None,
+                limit: 1,
+                account: None,
+            },
+            "eapi",
+        )
+        .expect("map personal FM queue");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:123");
+        assert_eq!(page.pagination.total, Some(2));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["variant"], "mode");
+        assert_eq!(page.pagination.extensions["protocol"], "eapi");
+        assert_eq!(page.pagination.extensions["truncated"], true);
+        assert_eq!(page.pagination.extensions["continuation_supported"], false);
+    }
+
+    #[test]
+    fn personal_fm_and_dislike_requests_reject_invalid_inputs_before_network_access() {
+        for request in [
+            PersonalFmRequest {
+                mode: Some("FAMILIAR".to_owned()),
+                ..PersonalFmRequest::default()
+            },
+            PersonalFmRequest {
+                limit: 0,
+                ..PersonalFmRequest::default()
+            },
+            PersonalFmRequest {
+                variant: PersonalFmVariant::Mode,
+                mode: Some(" ".to_owned()),
+                ..PersonalFmRequest::default()
+            },
+        ] {
+            assert_eq!(
+                netease_personal_fm_request(&request)
+                    .expect_err("invalid personal FM request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+
+        let valid = RecommendationDislikeRequest {
+            track_ref: ResourceRef::new(Platform::Netease, "347230")
+                .expect("valid track reference"),
+            account: Some("personal".to_owned()),
+        };
+        let (path, payload) = netease_recommendation_dislike_request(&valid)
+            .expect("build recommendation dislike request");
+        assert_eq!(path, "/api/v2/discovery/recommend/dislike");
+        assert_eq!(
+            payload,
+            json!({"resId": 347230, "resType": 4, "sceneType": 1})
+        );
+        for track_ref in [
+            ResourceRef::new(Platform::Qq, "347230").expect("QQ reference"),
+            ResourceRef::new(Platform::Netease, "not-a-number").expect("opaque reference"),
+        ] {
+            assert_eq!(
+                netease_recommendation_dislike_request(&RecommendationDislikeRequest {
+                    track_ref,
+                    account: None,
+                })
+                .expect_err("invalid recommendation feedback")
+                .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn personal_fm_and_dislike_use_the_selected_account_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let fm_error = MusicProvider::personal_fm(
+            &provider,
+            &PersonalFmRequest {
+                account: Some("missing".to_owned()),
+                ..PersonalFmRequest::default()
+            },
+        )
+        .await
+        .expect_err("missing personal FM account");
+        assert_eq!(fm_error.code, ErrorCode::AuthenticationRequired);
+
+        let dislike_error = MusicProvider::dislike_recommendation(
+            &provider,
+            &RecommendationDislikeRequest {
+                track_ref: ResourceRef::new(Platform::Netease, "347230")
+                    .expect("valid track reference"),
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing recommendation feedback account");
+        assert_eq!(dislike_error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn paginates_favorite_track_ids_without_reordering_them() {
         let (ids, pagination) = select_page(vec![1, 2, 3, 4], 2, 1);
         assert_eq!(ids, vec![2, 3]);
@@ -24942,6 +25204,47 @@ mod tests {
             .expect("anonymous daily tracks");
         assert!(!tracks.items.is_empty());
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_anonymous_personal_fm_covers_classic_and_mode_backends() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for request in [
+            PersonalFmRequest::default(),
+            PersonalFmRequest {
+                variant: PersonalFmVariant::Mode,
+                mode: Some("DEFAULT".to_owned()),
+                ..PersonalFmRequest::default()
+            },
+        ] {
+            let page = MusicProvider::personal_fm(&provider, &request)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("live {:?} personal FM failed: {error:?}", request.variant)
+                });
+            assert!(!page.items.is_empty(), "{:?}", request.variant);
+            assert!(page.items.iter().all(|track| !track.name.is_empty()));
+            assert_eq!(page.pagination.next_offset, None);
+            assert!(!page.pagination.has_more);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_anonymous_recommendation_dislike_requires_authentication() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::dislike_recommendation(
+            &provider,
+            &RecommendationDislikeRequest {
+                track_ref: ResourceRef::new(Platform::Netease, "347230")
+                    .expect("valid track reference"),
+                account: None,
+            },
+        )
+        .await
+        .expect_err("anonymous dislike feedback must require authentication");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]

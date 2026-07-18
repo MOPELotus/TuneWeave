@@ -43,29 +43,29 @@ use tuneweave_core::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
-    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
-    PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastChartEntry,
-    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
-    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
-    PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    MediaStream, MembershipSummary, PageRequest, PasswordFormat, PasswordLoginRequest,
+    PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
+    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
     PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
+    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
+    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -353,6 +353,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
+        .route("/recommendations/personal-fm", get(personal_fm))
+        .route(
+            "/recommendations/tracks/{reference}/dislike",
+            post(dislike_recommendation),
+        )
         .route("/listening-rights/ads", get(listening_rights_ads))
         .route(
             "/listening-rights/gains",
@@ -4491,6 +4496,99 @@ fn recommendation_request(
     })
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersonalFmParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "variant")]
+    backend: Option<String>,
+    mode: Option<String>,
+    #[serde(alias = "submode", alias = "subMode")]
+    sub_mode: Option<String>,
+    limit: Option<String>,
+}
+
+async fn personal_fm(
+    State(state): State<AppState>,
+    params: Result<Query<PersonalFmParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let variant = parse_personal_fm_variant(params.backend.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 3)?;
+    if !(1..=100).contains(&limit) {
+        return Err(
+            TuneWeaveError::invalid_request("personal FM limit must be between 1 and 100").into(),
+        );
+    }
+    let mode = optional_trimmed(params.mode);
+    let sub_mode = optional_trimmed(params.sub_mode);
+    if variant == PersonalFmVariant::Classic && (mode.is_some() || sub_mode.is_some()) {
+        return Err(TuneWeaveError::invalid_request(
+            "classic personal FM does not accept mode or sub_mode",
+        )
+        .into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .personal_fm(&PersonalFmRequest {
+            variant,
+            mode,
+            sub_mode,
+            limit,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+fn parse_personal_fm_variant(value: Option<&str>) -> Result<PersonalFmVariant, ApiError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("classic" | "default" | "personal_fm") => Ok(PersonalFmVariant::Classic),
+        Some("mode" | "personal_fm_mode") => Ok(PersonalFmVariant::Mode),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported personal FM backend: {value}",
+        ))
+        .into()),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecommendationFeedbackParams {
+    account: Option<String>,
+}
+
+async fn dislike_recommendation(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<RecommendationFeedbackParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RecommendationDislikeResult>>, ApiError> {
+    let params = query_params(params)?;
+    let track_ref = parse_reference(reference)?;
+    let platform = track_ref.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .dislike_recommendation(&RecommendationDislikeRequest {
+            track_ref,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 #[derive(Deserialize)]
 struct AuthQrStartBody {
     platform: String,
@@ -7940,6 +8038,8 @@ mod tests {
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
+                Capability::PersonalFm,
+                Capability::RecommendationFeedback,
                 Capability::CommentWrite,
                 Capability::CommentsRead,
                 Capability::CommentReactionsRead,
@@ -9818,6 +9918,35 @@ mod tests {
                     has_more: false,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn personal_fm(&self, request: &PersonalFmRequest) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![sample_track("347230")],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([
+                        ("variant".to_owned(), json!(request.variant)),
+                        ("mode".to_owned(), json!(request.mode)),
+                        ("sub_mode".to_owned(), json!(request.sub_mode)),
+                    ]),
+                },
+            })
+        }
+
+        async fn dislike_recommendation(
+            &self,
+            request: &RecommendationDislikeRequest,
+        ) -> Result<RecommendationDislikeResult> {
+            Ok(RecommendationDislikeResult {
+                track_ref: request.track_ref.clone(),
+                applied: true,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -15847,6 +15976,82 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn personal_fm_exposes_classic_and_mode_queues_without_fake_pagination() {
+        let (status, classic) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/personal-fm?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(classic["data"][0]["ref"], "netease:347230");
+        assert_eq!(classic["meta"]["account"], "personal");
+        assert_eq!(classic["meta"]["pagination"]["limit"], 3);
+        assert_eq!(
+            classic["meta"]["pagination"]["extensions"]["variant"],
+            "classic"
+        );
+        assert_eq!(classic["meta"]["pagination"]["has_more"], false);
+
+        let (status, mode) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/personal-fm?backend=mode&mode=SCENE_RCMD&submode=FOCUS&limit=8",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mode["meta"]["pagination"]["limit"], 8);
+        assert_eq!(mode["meta"]["pagination"]["extensions"]["variant"], "mode");
+        assert_eq!(
+            mode["meta"]["pagination"]["extensions"]["mode"],
+            "SCENE_RCMD"
+        );
+        assert_eq!(
+            mode["meta"]["pagination"]["extensions"]["sub_mode"],
+            "FOCUS"
+        );
+    }
+
+    #[tokio::test]
+    async fn recommendation_dislike_preserves_track_platform_and_account() {
+        let (status, response) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/recommendations/tracks/netease:347230/dislike?account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["track_ref"], "netease:347230");
+        assert_eq!(response["data"]["applied"], true);
+        assert_eq!(response["data"]["extensions"]["account"], "personal");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn personal_fm_and_dislike_reject_invalid_controls() {
+        for path in [
+            "/v1/recommendations/personal-fm?backend=unknown",
+            "/v1/recommendations/personal-fm?limit=0",
+            "/v1/recommendations/personal-fm?limit=101",
+            "/v1/recommendations/personal-fm?mode=FAMILIAR",
+            "/v1/recommendations/personal-fm?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+        for path in [
+            "/v1/recommendations/tracks/not-a-reference/dislike",
+            "/v1/recommendations/tracks/netease:347230/dislike?platform=netease",
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::POST, path, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
