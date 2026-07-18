@@ -17,10 +17,10 @@
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
 | S01 | 搜索与发现 | 11 类统一目录搜索及新版 `cloudsearch` | `verified` | 全部类型、分页和真实 HTTP 已验收；声音搜索优先专用字段，空旧数组/空结果不遮蔽非空兼容结构 |
-| S02 | 搜索与发现 | 默认搜索词 | `verified` | `search_default` 已验收 |
+| S02 | 搜索与发现 | 默认搜索词 | `verified` | `search_default` 已验收；空展示摘要会回退样式关键词 |
 | S03 | 搜索与发现 | 简略及详细热搜 | `verified` | `search_hot/search_hot_detail` 已验收 |
-| S04 | 搜索与发现 | Web、移动端及 PC 搜索建议 | `verified` | `search_suggest/search_suggest_pc` 已验收 |
-| S05 | 搜索与发现 | 多重匹配与本地歌曲匹配 | `verified` | `search_multimatch/search_match` 命中和空结果均已验收 |
+| S04 | 搜索与发现 | Web、移动端及 PC 搜索建议 | `verified` | `search_suggest/search_suggest_pc` 已验收；未知首选类型不会遮蔽有效资源类型 |
+| S05 | 搜索与发现 | 多重匹配与本地歌曲匹配 | `verified` | `search_multimatch/search_match` 命中和空结果均已验收；`orders=null` 会回退有效 `order` |
 | S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收；并存时优先非空大图和主标题，空白首选值会继续回退普通图片/类型标题 |
 | S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `verified` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 三类目录、四地区歌手榜及榜单曲目均已真实 HTTP 验收；新版首图优先于旧版首图 |
 | S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `pending` | `personalized*` 模块族未接入 |
@@ -32,7 +32,7 @@
 | C04 | 内容展示 | 歌手目录、详情、专辑、歌曲及热门歌曲 | `verified` | 常规 `artist*` 展示链已验收 |
 | C05 | 内容展示 | 歌单详情及完整曲目列表 | `verified` | `playlist_detail/playlist_track_all` 已验收 |
 | C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收；YRC 与 LRC 并存时以 `format=yrc` 标记最高同步能力并同时保留两者 |
-| C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成；实际视频 ID、专用标题/封面及非空完整创作者优先于包装摘要，独立目录/收藏列表仍缺 |
+| C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成；实际视频 ID、专用标题/封面、正时长及非空完整创作者优先于空/零包装摘要，独立目录/收藏列表仍缺 |
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收；收藏兼容结构的空包装及空分页别名不会遮蔽后续有效值 |
 | C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_catelist/dj_detail/dj_program/dj_program_detail` 已通过 provider 与真实统一 HTTP 验收；零摘要时长/时间不遮蔽完整音频时长或计划发布时间，空主播摘要不遮蔽有效兼容身份；推荐、热门及其他常规目录仍待接入 |
@@ -64,13 +64,13 @@
 | L03 | 个人音乐库 | 收藏/取消收藏广播电台及收藏列表 | `implemented` | 2026-07-17 真实账户收藏列表成功返回空列表；兼容结构中空旧列表不再遮蔽嵌套非空列表；收藏/取消收藏写入回滚仍待验收 |
 | L04 | 个人音乐库 | 关注/取消关注歌手及关注列表 | `implemented` | 2026-07-17 真实账户关注列表返回 5 项；关注/取消关注写入回滚仍待验收 |
 | L05 | 个人音乐库 | 当前账户歌单列表 | `implemented` | 2026-07-17 真实账户内容成功返回，但请求 `limit=5` 时上游仍返回完整列表，需先收口分页契约 |
-| L06 | 个人音乐库 | 创建、编辑、删除歌单及增删/排序歌曲 | `implemented` | `playlist_create/delete/update/name/desc/tags/cover`、普通歌曲增删及 512 重试、VIDEO 歌单增删、歌曲顺序和账户歌单顺序均已接入统一 HTTP；离线协议/认证前置完整，待真实账户事务写入与回滚 |
+| L06 | 个人音乐库 | 创建、编辑、删除歌单及增删/排序歌曲 | `implemented` | `playlist_create/delete/update/name/desc/tags/cover`、普通歌曲增删及 512 重试、VIDEO 歌单增删、歌曲顺序和账户歌单顺序均已接入统一 HTTP；零创建 ID 与空快照不会遮蔽有效别名，离线协议/认证前置完整，待真实账户事务写入与回滚 |
 | L07 | 个人音乐库 | 全部/周播放历史 | `verified` | 2026-07-17 持久化真实账户实测全部历史返回 5 项，周历史成功返回空列表 |
 | L08 | 个人音乐库 | 每日推荐歌曲 | `verified` | `recommend_songs` 匿名可用真实路径已验收 |
 | L09 | 个人音乐库 | 每日推荐歌单 | `verified` | 2026-07-17 持久化真实账户实测返回 5 项 |
 | L10 | 个人音乐库 | 私人 FM、跳过/不喜欢反馈和模式 | `pending` | `personal_fm/personal_fm_mode/recommend_songs_dislike` 未接入 |
-| L11 | 个人音乐库 | 云盘上传、直传事务、导入、匹配和歌词 | `implemented` | 2026-07-17 以唯一生成的 MP3 完成代理上传、上传检查、NOS 票据与字节写入、登记发布、详情/下载/播放及同 MD5 导入，最终精确删除并恢复原有 209 项；合成素材的匹配与内嵌歌词请求在 TuneWeave 和参考实现中均未得到成功业务态，待合适素材补验 |
-| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `verified` | 2026-07-17 持久化真实账户在刷新及重启前后读取全部 209 项三页数据，兼容历史条目的空歌手/专辑字段；详情、源文件下载、302、统一直接播放均成功，专用 `downloadUrl` 不会被通用 `url` 覆盖，并以唯一生成测试音频验证删除返回 200、列表恢复 209 项且无标记残留 |
+| L11 | 个人音乐库 | 云盘上传、直传事务、导入、匹配和歌词 | `implemented` | 2026-07-17 以唯一生成的 MP3 完成代理上传、上传检查、NOS 票据与字节写入、登记发布、详情/下载/播放及同 MD5 导入，最终精确删除并恢复原有 209 项；标签按字段在主/备用标签间回退，零导入 ID 不遮蔽有效结果；合成素材的匹配与内嵌歌词请求在 TuneWeave 和参考实现中均未得到成功业务态，待合适素材补验 |
+| L12 | 个人音乐库 | 云盘列表、详情、删除和直接播放 | `verified` | 2026-07-17 持久化真实账户在刷新及重启前后读取全部 209 项三页数据，兼容历史条目的空歌手/专辑字段；空 `simpleSong`、空云盘 ID 和零匹配 ID 不遮蔽有效兼容数据；详情、源文件下载、302、统一直接播放均成功，专用 `downloadUrl` 不会被通用 `url` 覆盖，并以唯一生成测试音频验证删除返回 200、列表恢复 209 项且无标记残留 |
 | F01 | 平台基础协议 | EAPI 请求、响应解密与错误映射 | `verified` | 通用 API 与真实搜索已验收；2026-07-17 修正 Cookie 为 JavaScript `encodeURIComponent` 字符集后，真实账户作品流、喜欢列表、刷新及云盘下载均通过 |
 | F02 | 平台基础协议 | WeAPI 双层 AES/RSA 请求 | `verified` | 通用 API 与真实搜索已验收 |
 | F03 | 平台基础协议 | 未加密 API 请求 | `verified` | 通用 API 与真实搜索已验收 |

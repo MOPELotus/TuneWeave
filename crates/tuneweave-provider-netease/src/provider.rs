@@ -5321,16 +5321,27 @@ fn read_cloud_audio_metadata(data: &[u8]) -> CloudAudioMetadata {
     let Ok(tagged_file) = probe.read() else {
         return CloudAudioMetadata::default();
     };
-    let Some(tag) = tagged_file
-        .primary_tag()
-        .or_else(|| tagged_file.first_tag())
-    else {
-        return CloudAudioMetadata::default();
-    };
+    let primary_tag = tagged_file.primary_tag();
+    let fallback_tag = tagged_file.first_tag();
+    cloud_audio_metadata_from_tags(primary_tag, fallback_tag)
+}
+
+fn cloud_audio_metadata_from_tags(
+    primary_tag: Option<&lofty::tag::Tag>,
+    fallback_tag: Option<&lofty::tag::Tag>,
+) -> CloudAudioMetadata {
     CloudAudioMetadata {
-        song_name: clean_cloud_tag_value(tag.title().as_deref()),
-        artist: clean_cloud_tag_value(tag.artist().as_deref()),
-        album: clean_cloud_tag_value(tag.album().as_deref()),
+        song_name: primary_tag
+            .and_then(|tag| clean_cloud_tag_value(tag.title().as_deref()))
+            .or_else(|| fallback_tag.and_then(|tag| clean_cloud_tag_value(tag.title().as_deref()))),
+        artist: primary_tag
+            .and_then(|tag| clean_cloud_tag_value(tag.artist().as_deref()))
+            .or_else(|| {
+                fallback_tag.and_then(|tag| clean_cloud_tag_value(tag.artist().as_deref()))
+            }),
+        album: primary_tag
+            .and_then(|tag| clean_cloud_tag_value(tag.album().as_deref()))
+            .or_else(|| fallback_tag.and_then(|tag| clean_cloud_tag_value(tag.album().as_deref()))),
     }
 }
 
@@ -5649,10 +5660,10 @@ fn map_netease_cloud_track_details(response: Value) -> Result<Vec<CloudTrack>> {
 }
 
 fn map_netease_cloud_track(raw: Value) -> Result<CloudTrack> {
-    let song_value = raw
-        .get("simpleSong")
-        .or_else(|| raw.get("song"))
-        .filter(|song| song.is_object())
+    let song_value = [raw.get("simpleSong"), raw.get("song")]
+        .into_iter()
+        .flatten()
+        .find(|song| song.is_object())
         .cloned()
         .ok_or_else(|| {
             TuneWeaveError::new(
@@ -5667,7 +5678,7 @@ fn map_netease_cloud_track(raw: Value) -> Result<CloudTrack> {
     let mut track = map_song(song, None)?;
     let cloud_track_id = raw
         .get("songId")
-        .and_then(json_scalar_string)
+        .and_then(usable_resource_id)
         .unwrap_or_else(|| original_track_id.clone());
     let cloud_track_ref =
         ResourceRef::new(Platform::Netease, cloud_track_id.clone()).map_err(|error| {
@@ -5688,8 +5699,7 @@ fn map_netease_cloud_track(raw: Value) -> Result<CloudTrack> {
     ]
     .into_iter()
     .flatten()
-    .find_map(json_scalar_string)
-    .filter(|id| id != "0" && id != &cloud_track_id)
+    .find_map(|value| usable_resource_id(value).filter(|id| id != &cloud_track_id))
     .or_else(|| (original_track_id != cloud_track_id).then_some(original_track_id));
     let matched_track_ref = matched_track_id
         .map(|id| ResourceRef::new(Platform::Netease, id))
@@ -6118,7 +6128,7 @@ fn map_cloud_import_result(
     ]
     .into_iter()
     .flatten()
-    .find_map(json_scalar_string)
+    .find_map(usable_resource_id)
     .unwrap_or_else(|| checked_track_id.to_owned());
     let track_ref = ResourceRef::new(Platform::Netease, track_id).map_err(|error| {
         TuneWeaveError::new(
@@ -6214,10 +6224,14 @@ fn map_image_upload_result(
     let url_pre = format!("https://p1.music.126.net/{}", allocation.result.object_key);
     let url = ["/data/url", "/url", "/data/avatarUrl", "/avatarUrl"]
         .into_iter()
-        .find_map(|pointer| update_response.pointer(pointer).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned)
+        .find_map(|pointer| {
+            update_response
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(str::to_owned)
+        })
         .or_else(|| Some(url_pre.clone()));
     let mut extensions = Extensions::new();
     extensions.insert("url_pre".to_owned(), json!(url_pre));
@@ -7685,8 +7699,12 @@ fn map_playlist(playlist: PlaylistDetail) -> Result<Playlist> {
 fn map_netease_playlist_create_result(response: Value) -> Result<PlaylistMutationResult> {
     let id = ["/playlist/id", "/data/id", "/id"]
         .into_iter()
-        .find_map(|pointer| response.pointer(pointer).and_then(json_u64))
-        .filter(|id| *id > 0)
+        .find_map(|pointer| {
+            response
+                .pointer(pointer)
+                .and_then(json_u64)
+                .filter(|id| *id > 0)
+        })
         .ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -7755,7 +7773,7 @@ fn map_netease_playlist_item_mutation_result(
         })?;
     let snapshot_id = ["/snapshotId", "/snapshot_id", "/data/snapshotId"]
         .into_iter()
-        .find_map(|pointer| response.pointer(pointer).and_then(json_scalar_string));
+        .find_map(|pointer| response.pointer(pointer).and_then(usable_resource_id));
     let cloud_track_count = ["/cloudCount", "/cloudTrackCount", "/data/cloudCount"]
         .into_iter()
         .find_map(|pointer| response.pointer(pointer).and_then(json_u64));
@@ -7790,7 +7808,7 @@ fn map_netease_playlist_track_order_result(
         })?;
     let snapshot_id = ["/snapshotId", "/snapshot_id", "/data/snapshotId"]
         .into_iter()
-        .find_map(|pointer| response.pointer(pointer).and_then(json_scalar_string));
+        .find_map(|pointer| response.pointer(pointer).and_then(usable_resource_id));
     Ok(PlaylistTrackOrderResult {
         playlist_ref,
         track_refs,
@@ -10103,16 +10121,18 @@ fn map_netease_default_search_keyword(response: Value) -> Result<SearchDefaultKe
             .with_platform(Platform::Netease)
             .with_details(json!({ "response": response }))
         })?;
-    let display_text = data
-        .get("showKeyword")
-        .and_then(json_scalar_string)
-        .or_else(|| {
-            data.pointer("/styleKeyword/keyWord")
-                .and_then(json_scalar_string)
-        })
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| keyword.clone());
+    let display_text = [
+        data.get("showKeyword"),
+        data.pointer("/styleKeyword/keyWord"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| {
+        json_scalar_string(value)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+    .unwrap_or_else(|| keyword.clone());
     let kind = data
         .get("searchType")
         .and_then(json_u64)
@@ -10408,10 +10428,11 @@ fn map_netease_keyword_suggestion(
         .with_platform(Platform::Netease)
         .with_details(json!({ "entry": raw }))
     })?;
-    let kind = ["type", "resourceType"]
-        .into_iter()
-        .find_map(|field| raw.get(field).and_then(json_u64))
-        .and_then(netease_search_kind_from_type);
+    let kind = ["type", "resourceType"].into_iter().find_map(|field| {
+        raw.get(field)
+            .and_then(json_u64)
+            .and_then(netease_search_kind_from_type)
+    });
     let display_text = ["showText", "feature"].into_iter().find_map(|field| {
         raw.get(field)
             .and_then(json_scalar_string)
@@ -10489,7 +10510,11 @@ fn map_netease_search_multi_match(
             .with_details(json!({ "response": response }))
         })?;
     let mut section_names = Vec::new();
-    if let Some(order) = result.get("orders").or_else(|| result.get("order")) {
+    let order = match result.get("orders") {
+        None | Some(Value::Null) => result.get("order"),
+        order => order,
+    };
+    if let Some(order) = order {
         let order = order.as_array().ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -11010,7 +11035,7 @@ fn map_cloud_search_video(raw: Value) -> Result<Video> {
     let source = cloud_search_item_source(&raw);
     let id = ["vid", "id"]
         .into_iter()
-        .find_map(|field| source.get(field).and_then(json_scalar_string))
+        .find_map(|field| source.get(field).and_then(usable_resource_id))
         .ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -11039,7 +11064,7 @@ fn map_cloud_search_video(raw: Value) -> Result<Video> {
             let name = radio_text_field(creator, &["userName", "name", "nickname"])?;
             let creator_ref = ["userId", "id"]
                 .into_iter()
-                .find_map(|field| creator.get(field).and_then(json_scalar_string))
+                .find_map(|field| creator.get(field).and_then(usable_resource_id))
                 .and_then(|id| ResourceRef::new(Platform::Netease, id).ok());
             Some(CreatorSummary {
                 resource_ref: creator_ref,
@@ -11050,7 +11075,12 @@ fn map_cloud_search_video(raw: Value) -> Result<Video> {
         .collect();
     let duration_ms = ["durationms", "durationMs", "duration"]
         .into_iter()
-        .find_map(|field| source.get(field).and_then(json_u64));
+        .find_map(|field| {
+            source
+                .get(field)
+                .and_then(json_u64)
+                .filter(|duration| *duration > 0)
+        });
     let play_count = ["playTime", "playCount"]
         .into_iter()
         .find_map(|field| source.get(field).and_then(json_u64));
@@ -11089,11 +11119,11 @@ fn opaque_cloud_search_item(
     let source = cloud_search_item_source(&raw);
     let id = ["id", "vid", "userId", "resourceId", "djId"]
         .into_iter()
-        .find_map(|field| source.get(field).and_then(json_scalar_string))
+        .find_map(|field| source.get(field).and_then(usable_resource_id))
         .or_else(|| {
             ["id", "vid", "userId", "resourceId", "djId"]
                 .into_iter()
-                .find_map(|field| raw.get(field).and_then(json_scalar_string))
+                .find_map(|field| raw.get(field).and_then(usable_resource_id))
         });
     let title = ["name", "title", "nickname"]
         .into_iter()
@@ -11155,9 +11185,14 @@ fn ensure_success(body: &Value) -> Result<()> {
     if code == 200 {
         return Ok(());
     }
-    let message = body["message"]
-        .as_str()
-        .or_else(|| body["msg"].as_str())
+    let message = ["message", "msg"]
+        .into_iter()
+        .find_map(|field| {
+            body[field]
+                .as_str()
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+        })
         .unwrap_or("NetEase request failed");
     let error_code = match code {
         301 | 401 => ErrorCode::AuthenticationRequired,
@@ -11422,6 +11457,7 @@ mod tests {
             "code": 200,
             "data": {
                 "realkeyword": "未知类型",
+                "showKeyword": " ",
                 "searchType": 9999,
                 "styleKeyword": {"keyWord": "展示未知类型"}
             }
@@ -11593,14 +11629,14 @@ mod tests {
             json!({
                 "code": 200,
                 "result": {"allMatch": [
-                    {"keyword": "海阔天空", "type": 1, "feature": ""},
+                    {"keyword": "海阔天空", "type": 0, "resourceType": 10, "feature": ""},
                     {"keyword": "海阔天空尾奏", "type": 1}
                 ]}
             }),
         )
         .expect("map mobile suggestions");
         assert_eq!(mobile.suggestions.len(), 2);
-        assert_eq!(mobile.suggestions[0].kind, Some(SearchKind::Track));
+        assert_eq!(mobile.suggestions[0].kind, Some(SearchKind::Album));
         assert!(mobile.suggestions[0].resource.is_none());
 
         let pc = map_netease_search_suggestions(
@@ -11665,7 +11701,8 @@ mod tests {
             json!({
                 "code": 200,
                 "result": {
-                    "orders": ["artist", "new_mlog", "playlist"],
+                    "orders": null,
+                    "order": ["artist", "new_mlog", "playlist"],
                     "artist": [{"id": 11127, "name": "Beyond"}],
                     "new_mlog": [{
                         "resourceId": "5501497",
@@ -11687,7 +11724,7 @@ mod tests {
                         }
                     }],
                     "playlist": [{"id": 151235962, "name": "粤语经典老歌"}],
-                    "mystery": [{"id": "opaque-1", "title": "未知匹配"}]
+                    "mystery": [{"id": " ", "resourceId": "opaque-1", "title": "未知匹配"}]
                 }
             }),
         )
@@ -11728,6 +11765,7 @@ mod tests {
         for response in [
             json!({"code": 200}),
             json!({"code": 200, "result": {"orders": {}}}),
+            json!({"code": 200, "result": {"orders": null, "order": {}}}),
             json!({"code": 200, "result": {"orders": [1]}}),
             json!({"code": 200, "result": {"orders": ["artist"], "artist": {}}}),
         ] {
@@ -12232,12 +12270,15 @@ mod tests {
                         "title": "摘要标题",
                         "data": {},
                         "resource": {
-                            "vid": "video-rich",
+                            "vid": " ",
+                            "id": "video-rich",
                             "title": "完整视频",
                             "coverUrl": "https://example.test/rich.jpg",
+                            "durationms": 0,
+                            "duration": 330230,
                             "creators": [],
                             "artists": [
-                                {"id": 6452, "name": "周杰伦"},
+                                {"userId": 0, "id": 6452, "name": "周杰伦"},
                                 {"id": 13193, "name": "五月天"}
                             ],
                             "creator": [{"id": 1, "name": "单人摘要"}]
@@ -12253,7 +12294,16 @@ mod tests {
         };
         assert_eq!(video.resource_ref.to_string(), "netease:video-rich");
         assert_eq!(video.title, "完整视频");
+        assert_eq!(video.duration_ms, Some(330230));
         assert_eq!(video.creators.len(), 2);
+        assert_eq!(
+            video.creators[0]
+                .resource_ref
+                .as_ref()
+                .expect("creator reference")
+                .to_string(),
+            "netease:6452"
+        );
         assert_eq!(video.creators[1].name, "五月天");
     }
 
@@ -14542,7 +14592,11 @@ mod tests {
             &request,
             allocation,
             json!({"code": 200, "size": "3"}),
-            json!({"code": 200, "url": "https://p1.music.126.net/final-avatar.jpg"}),
+            json!({
+                "code": 200,
+                "data": {"url": " "},
+                "url": "https://p1.music.126.net/final-avatar.jpg"
+            }),
         )
         .expect("map image upload result");
 
@@ -16081,7 +16135,12 @@ mod tests {
             2_039_116_066,
             PlaylistItemMutationAction::Add,
             &request,
-            json!({ "code": 200, "snapshotId": "snapshot-2", "cloudCount": 4 }),
+            json!({
+                "code": 200,
+                "snapshotId": " ",
+                "snapshot_id": "snapshot-2",
+                "cloudCount": 4
+            }),
             Some(json!({ "code": 512, "message": "retry" })),
         )
         .expect("map retried playlist track update");
@@ -16095,7 +16154,11 @@ mod tests {
         let ordered = map_netease_playlist_track_order_result(
             2_039_116_066,
             vec![ResourceRef::new(Platform::Netease, "5268328").expect("track reference")],
-            json!({ "code": 200, "snapshotId": "snapshot-3" }),
+            json!({
+                "code": 200,
+                "snapshotId": "",
+                "data": {"snapshotId": "snapshot-3"}
+            }),
         )
         .expect("map playlist track order");
         assert_eq!(ordered.snapshot_id.as_deref(), Some("snapshot-3"));
@@ -16122,6 +16185,14 @@ mod tests {
         assert_eq!(result.action, PlaylistMutationAction::Create);
         assert_eq!(result.playlist.expect("created playlist").name, "测试歌单");
         assert_eq!(result.extensions["response"]["code"], 200);
+
+        let fallback_id = map_netease_playlist_create_result(json!({
+            "code": 200,
+            "playlist": {"id": 0},
+            "data": {"id": 2947311456_u64}
+        }))
+        .expect("skip zero playlist id alias");
+        assert_eq!(fallback_id.playlist_ref.to_string(), "netease:2947311456");
 
         let missing_id = map_netease_playlist_create_result(json!({ "code": 200 }))
             .expect_err("creation response without id");
@@ -17093,6 +17164,18 @@ mod tests {
         assert_eq!(metadata.artist.as_deref(), Some("Tagged Artist"));
         assert_eq!(metadata.album.as_deref(), Some("Tagged Album"));
         assert_eq!(cloud_audio_md5(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+
+        let mut primary = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        primary.set_title(" ".to_owned());
+        primary.set_album("Primary Album".to_owned());
+        let mut fallback = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
+        fallback.set_title("Fallback Song".to_owned());
+        fallback.set_artist("Fallback Artist".to_owned());
+        fallback.set_album("Fallback Album".to_owned());
+        let merged = cloud_audio_metadata_from_tags(Some(&primary), Some(&fallback));
+        assert_eq!(merged.song_name.as_deref(), Some("Fallback Song"));
+        assert_eq!(merged.artist.as_deref(), Some("Fallback Artist"));
+        assert_eq!(merged.album.as_deref(), Some("Primary Album"));
     }
 
     #[test]
@@ -17346,7 +17429,7 @@ mod tests {
             "123",
             Some(1),
             json!({ "code": 200, "data": [{ "songId": 123, "upload": 1 }] }),
-            json!({ "code": 200, "data": { "songId": 456 } }),
+            json!({ "code": 200, "songId": 0, "data": { "songId": 456 } }),
         )
         .expect("cloud import result");
         assert_eq!(
@@ -17515,6 +17598,26 @@ mod tests {
                 .as_ref()
                 .and_then(|album| album.cover_url.as_deref()),
             Some("https://example.test/cloud-cover.jpg")
+        );
+    }
+
+    #[test]
+    fn cloud_library_mapping_skips_null_song_objects_and_zero_match_ids() {
+        let mut item = fixture_cloud_item(" ", 9001);
+        item["song"] = item["simpleSong"].clone();
+        item["simpleSong"] = Value::Null;
+        item["matchedId"] = json!(0);
+        item["matchId"] = json!(185809);
+
+        let cloud = map_netease_cloud_track(item).expect("map compatible cloud aliases");
+        assert_eq!(cloud.cloud_track_ref.to_string(), "netease:9001");
+        assert_eq!(
+            cloud
+                .matched_track_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:185809")
         );
     }
 
@@ -18655,9 +18758,14 @@ mod tests {
             ensure_platform_api_success(&json!({ "code": code }))
                 .expect("reference special code remains a raw response");
         }
-        let error = ensure_platform_api_success(&json!({ "code": 401, "msg": "login" }))
-            .expect_err("authentication failure");
+        let error = ensure_platform_api_success(&json!({
+            "code": 401,
+            "message": " ",
+            "msg": "login"
+        }))
+        .expect_err("authentication failure");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.message, "login");
     }
 
     #[test]
