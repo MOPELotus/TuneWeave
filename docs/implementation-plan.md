@@ -30,7 +30,7 @@ Basic 不是按模块文件名字母排序，而是按普通音乐 App 的使用
 
 社交动态、私信、粉丝关系、评论反应写入、一起听等不属于 Basic；它们仍在对应平台全量账本中逐项实现。播放权益相关广告、免费听、VIP、云盘、MV 和播客属于 Basic，不按“边缘功能”延后。
 
-网易云 Basic 的可计算阶段进度见 [`docs/coverage/netease-basic.md`](coverage/netease-basic.md)。该聚合账本只用于阶段验收和排序；407 项逐模块全量状态仍以 [`docs/coverage/netease.md`](coverage/netease.md) 为准。
+网易云 Basic 的可计算阶段进度见 [`docs/coverage/netease-basic.md`](coverage/netease-basic.md)。该聚合账本只用于阶段验收和排序；416 项逐模块全量状态仍以 [`docs/coverage/netease.md`](coverage/netease.md) 为准。
 
 ## 多平台账户持久化
 
