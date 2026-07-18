@@ -208,6 +208,26 @@ pub struct MembershipSummary {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AntiCheatToken {
+    pub token: String,
+    pub registered: bool,
+    pub refreshed: bool,
+    pub extensions: Extensions,
+}
+
+impl fmt::Debug for AntiCheatToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AntiCheatToken")
+            .field("token", &"[REDACTED]")
+            .field("registered", &self.registered)
+            .field("refreshed", &self.refreshed)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -3044,6 +3064,22 @@ mod tests {
         assert!(value["active"].is_null());
         assert_eq!(value["annual_count"], -1);
         assert!(value["expires_at"].is_null());
+    }
+
+    #[test]
+    fn anti_cheat_tokens_serialize_for_the_api_but_are_redacted_from_debug_output() {
+        let token = AntiCheatToken {
+            token: "temporary-secret-token".to_owned(),
+            registered: true,
+            refreshed: false,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(&token).expect("serialize anti-cheat token");
+        assert_eq!(value["token"], "temporary-secret-token");
+        assert_eq!(value["registered"], true);
+        let debug = format!("{token:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("temporary-secret-token"));
     }
 
     #[test]

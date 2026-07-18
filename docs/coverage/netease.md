@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=248`、`partial=3`、`implemented=60`、`verified=96`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=247`、`partial=3`、`implemented=60`、`verified=97`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -250,7 +250,7 @@
 | `record_recent_voice` | `/record/recent/voice` | `pending` | — |
 | `register_anonimous` | `/register/anonimous` | `pending` | — |
 | `register_cellphone` | `/register/cellphone` | `pending` | — |
-| `register_checktoken` | `/register/checktoken` | `pending` | 2026-07-17 上游新增；底层协议 Basic，支持读取缓存 token、`refresh=1|true` 与 POST 强制刷新，敏感 token 不进入普通日志 |
+| `register_checktoken` | `/register/checktoken` | `verified` | `GET/POST /v1/extensions/netease/check-token`，并兼容 `/v1/extensions/netease/register/checktoken`（GET 缺省复用进程内缓存，`refresh=1|true` 及 POST 强制刷新；固定请求官方易盾 `/v3/b?pn=YD00000558929251`，严格解析成功 JSONP 并校验安全 HTTP 头值；账户 client 共享缓存，要求 checkToken 的 XEAPI 请求由 provider 自动取得并注入 `X-antiCheatToken`，不接受客户端传 token；稳定结果返回 `token/registered/refreshed`，序列化仍满足参考响应，Debug 和普通日志强制脱敏；核心模型、能力名、有效/字符串业务码、畸形/失败响应、共享缓存、查询布尔值、双路径 GET/POST、未知字段和 HTTP 包络均有测试；2026-07-18 真实易盾联网验证首次注册、缓存命中及强制刷新全部成功） |
 | `register_xeapikey` | `/register/xeapikey` | `pending` | — |
 | `related_allvideo` | `/related/allvideo` | `pending` | — |
 | `related_playlist` | `/related/playlist` | `pending` | — |

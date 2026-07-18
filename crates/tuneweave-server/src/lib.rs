@@ -21,9 +21,9 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistArea, ArtistCategory,
-    ArtistChart, ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview,
-    ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AntiCheatToken, Artist, ArtistArea,
+    ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest, ArtistListRequest,
+    ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
     AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
@@ -437,6 +437,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
         .route("/extensions/netease/calendar", get(netease_calendar))
+        .route(
+            "/extensions/netease/check-token",
+            get(netease_check_token).post(netease_check_token_refresh),
+        )
+        .route(
+            "/extensions/netease/register/checktoken",
+            get(netease_check_token).post(netease_check_token_refresh),
+        )
         .route("/extensions/netease/api", post(netease_extension_api))
         .route(
             "/extensions/netease/batch",
@@ -6327,6 +6335,40 @@ struct NeteaseCalendarQuery {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeteaseCheckTokenQuery {
+    refresh: Option<String>,
+}
+
+async fn netease_check_token(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    let params = query_params(params)?;
+    let refresh = parse_bool_parameter("refresh", params.refresh.as_deref(), false)?;
+    let provider = state.registry.require(Platform::Netease)?;
+    let token = provider.anti_cheat_token(refresh).await?;
+    Ok(Json(
+        ApiResponse::new(token).with_platform(Platform::Netease),
+    ))
+}
+
+async fn netease_check_token_refresh(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    let params = query_params(params)?;
+    if params.refresh.is_some() {
+        parse_bool_parameter("refresh", params.refresh.as_deref(), true)?;
+    }
+    let provider = state.registry.require(Platform::Netease)?;
+    let token = provider.anti_cheat_token(true).await?;
+    Ok(Json(
+        ApiResponse::new(token).with_platform(Platform::Netease),
+    ))
+}
+
 async fn netease_calendar(
     State(state): State<AppState>,
     Query(params): Query<NeteaseCalendarQuery>,
@@ -7505,6 +7547,7 @@ mod tests {
                 Capability::AccountCloudRead,
                 Capability::AccountCloudDelete,
                 Capability::AccountCloudDownload,
+                Capability::AntiCheatToken,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -7721,6 +7764,20 @@ mod tests {
                     ("account".to_owned(), json!(account)),
                     ("backend".to_owned(), json!("client")),
                 ]),
+            })
+        }
+
+        async fn anti_cheat_token(&self, refresh: bool) -> Result<AntiCheatToken> {
+            Ok(AntiCheatToken {
+                token: if refresh {
+                    "refreshed-token"
+                } else {
+                    "cached-token"
+                }
+                .to_owned(),
+                registered: true,
+                refreshed: refresh,
+                extensions: Extensions::new(),
             })
         }
 
@@ -10511,6 +10568,15 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
+        let (status, response) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/check-token?refresh=sometimes",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
@@ -15329,6 +15395,53 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn netease_check_token_supports_cached_query_refresh_and_post_refresh_flows() {
+        let (status, cached) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/check-token",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cached["data"]["token"], "cached-token");
+        assert_eq!(cached["data"]["registered"], true);
+        assert_eq!(cached["data"]["refreshed"], false);
+        assert_eq!(cached["meta"]["platform"], "netease");
+
+        let (status, refreshed) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/check-token?refresh=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(refreshed["data"]["token"], "refreshed-token");
+        assert_eq!(refreshed["data"]["refreshed"], true);
+
+        let (status, posted) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/register/checktoken",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(posted["data"]["token"], "refreshed-token");
+        assert_eq!(posted["data"]["refreshed"], true);
+    }
+
+    #[tokio::test]
+    async fn netease_check_token_rejects_invalid_refresh_and_unknown_query_fields() {
+        for path in [
+            "/v1/extensions/netease/check-token?refresh=sometimes",
+            "/v1/extensions/netease/check-token?account=default",
+            "/v1/extensions/netease/register/checktoken?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

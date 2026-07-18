@@ -15,35 +15,36 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary,
-    Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea,
-    ArtistChartEntry, ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview,
-    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart,
-    ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
-    CommentReactionKind, CommentReactionListRequest, CommentReactionMutationRequest,
-    CommentReactionMutationResult, CommentReactionPage, CommentReplyReference,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStats, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
-    CountryCallingCode, CountryCallingCodeGroup, CountryCallingCodeListRequest, CreatorSummary,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest, LocalTrackMatchResult,
-    LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider,
-    Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest,
-    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    AntiCheatToken, Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart,
+    ArtistChartArea, ArtistChartEntry, ArtistChartRequest, ArtistContentCount, ArtistListRequest,
+    ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate,
+    ArtistWorksRequest, AudioRecognition, AudioRecognitionMatch, AudioRecognitionRequest,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, BannerTargetKind,
+    Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    ChartGroup, ChartTrackPreview, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
+    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationAction,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReplyReference, CommentReportRequest, CommentReportResult,
+    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
+    CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCode, CountryCallingCodeGroup,
+    CountryCallingCodeListRequest, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
+    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackEntry,
+    DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
+    LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload,
+    MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta, PageRequest,
+    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
@@ -407,6 +408,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchLocalTrackMatch,
             Capability::UserMembership,
             Capability::UserMembershipClientInfo,
+            Capability::AntiCheatToken,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -697,6 +699,16 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_weapi(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_user_membership_client(id, response.body)
+    }
+
+    async fn anti_cheat_token(&self, refresh: bool) -> Result<AntiCheatToken> {
+        let (token, refreshed) = self.client.anti_cheat_token(refresh).await?;
+        Ok(AntiCheatToken {
+            token,
+            registered: true,
+            refreshed,
+            extensions: Extensions::new(),
+        })
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -14000,6 +14012,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SearchLocalTrackMatch));
         assert!(capabilities.contains(&Capability::UserMembership));
         assert!(capabilities.contains(&Capability::UserMembershipClientInfo));
+        assert!(capabilities.contains(&Capability::AntiCheatToken));
     }
 
     #[test]

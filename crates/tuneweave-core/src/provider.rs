@@ -3,12 +3,12 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, Artist, ArtistChart, ArtistChartRequest,
-    ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, Banner, BannerListRequest, Capability, ChartCatalog,
-    ChartCatalogRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AntiCheatToken, Artist, ArtistChart,
+    ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, Banner, BannerListRequest, Capability,
+    ChartCatalog, ChartCatalogRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
     CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
@@ -150,6 +150,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::UserMembershipClientInfo,
+        ))
+    }
+
+    async fn anti_cheat_token(&self, _refresh: bool) -> Result<AntiCheatToken> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AntiCheatToken,
         ))
     }
 

@@ -78,7 +78,7 @@
 | F05 | 平台基础协议 | XEAPI 密钥注册、签名和响应解密 | `verified` | 公钥注册和真实请求已验收 |
 | F06 | 平台基础协议 | `e_r` 加密响应解包 | `verified` | EAPI 真实加密响应已验收 |
 | F07 | 平台基础协议 | 安全原始 API 与批量 API 扩展 | `verified` | 五协议、动态键、域名和凭据边界已验收 |
-| F08 | 平台基础协议 | 设备身份、匿名 token 与实时 checkToken | `partial` | 请求层设备默认值已有；`register_anonimous/register_checktoken` 未接入 |
+| F08 | 平台基础协议 | 设备身份、匿名 token 与实时 checkToken | `partial` | 请求层设备默认值已有；`register_checktoken` 已完成双路径 GET/POST、缓存/刷新、日志脱敏、XEAPI 受控头注入及真实注册/强刷验收，`register_anonimous` 仍待接入 |
 | F09 | 平台基础协议 | 随机中国 IP 与安全服务端代理/真实 IP 配置 | `pending` | 不允许客户端注入；受控服务端配置和随机 IP 能力未实现 |
 
 ## 更新规则
