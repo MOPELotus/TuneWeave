@@ -419,6 +419,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastWorkbenchDetail,
             Capability::PodcastSubscriptionWrite,
             Capability::PodcastEpisodeList,
+            Capability::PodcastEpisodeWorkbenchList,
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeWorkbenchDetail,
@@ -891,6 +892,32 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_episodes_request(id, request, limit);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_episodes(response.body, limit, request.offset)
+    }
+
+    async fn podcast_episodes_workbench(
+        &self,
+        id: &str,
+        request: &PodcastEpisodeListRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        let id = parse_numeric_id("podcast voice list", id)?;
+        if !(1..=200).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast workbench episode limit must be between 1 and 200",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "limit": request.limit })));
+        }
+        if request.ascending {
+            return Err(TuneWeaveError::invalid_request(
+                "the NetEase podcast workbench episode list does not support ascending order",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "podcast workbench episode list")?;
+        let (path, payload) = netease_podcast_episodes_workbench_request(id, request);
+        let response = client.request_eapi(path, payload).await?;
+        map_netease_podcast_episodes_workbench(response.body, request.limit, request.offset)
     }
 
     async fn podcast_episode_chart(
@@ -4729,6 +4756,20 @@ fn netease_podcast_episodes_request(
     )
 }
 
+fn netease_podcast_episodes_workbench_request(
+    id: u64,
+    request: &PodcastEpisodeListRequest,
+) -> (&'static str, Value) {
+    (
+        "/api/voice/workbench/voices/by/voicelist",
+        json!({
+            "limit": request.limit,
+            "offset": request.offset,
+            "voiceListId": id
+        }),
+    )
+}
+
 fn netease_podcast_episode_chart_request(
     request: &PodcastEpisodeChartRequest,
 ) -> Result<(&'static str, Value)> {
@@ -5652,6 +5693,99 @@ fn map_netease_podcast_episodes(
             extensions: Extensions::from([("response".to_owned(), body)]),
         },
     })
+}
+
+fn map_netease_podcast_episodes_workbench(
+    body: Value,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<PodcastEpisode>> {
+    ensure_success(&body)?;
+    let data = body.get("data");
+    let candidates = [
+        data.and_then(|value| value.get("list")),
+        data.and_then(|value| value.get("voices")),
+        data.and_then(|value| value.get("records")),
+        data.filter(|value| value.is_array()),
+        body.get("list"),
+        body.get("voices"),
+    ];
+    let mut saw_array = false;
+    let mut last_error = None;
+    let mut mapped_items = None;
+    for candidate in candidates.into_iter().flatten() {
+        let Some(raw_items) = candidate.as_array() else {
+            continue;
+        };
+        saw_array = true;
+        let items = raw_items
+            .iter()
+            .map(workbench_voice_item)
+            .map(map_netease_podcast_episode)
+            .collect::<Result<Vec<_>>>();
+        match items {
+            Ok(items) => {
+                mapped_items = Some(items);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let items = match mapped_items {
+        Some(items) => items,
+        None if saw_array => return Err(last_error.expect("failed array mapping records an error")),
+        None => return Err(podcast_item_error("workbench voice list array", &body)),
+    };
+    let total = data
+        .and_then(|value| {
+            value
+                .get("total")
+                .and_then(json_u64)
+                .or_else(|| value.get("count").and_then(json_u64))
+        })
+        .or_else(|| body.get("total").and_then(json_u64))
+        .or_else(|| body.get("count").and_then(json_u64));
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let explicit_more = data
+        .and_then(|value| {
+            value
+                .get("hasMore")
+                .and_then(json_bool)
+                .or_else(|| value.get("more").and_then(json_bool))
+        })
+        .or_else(|| body.get("hasMore").and_then(json_bool))
+        .or_else(|| body.get("more").and_then(json_bool));
+    let has_more = consumed > 0
+        && explicit_more.unwrap_or_else(|| {
+            total.map_or(consumed >= limit, |total| u64::from(next_offset) < total)
+        });
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([("response".to_owned(), body)]),
+        },
+    })
+}
+
+fn workbench_voice_item(raw: &Value) -> Value {
+    let Some(voice) = raw.get("voice").and_then(Value::as_object) else {
+        return raw.clone();
+    };
+    let mut merged = voice.clone();
+    if let Some(wrapper) = raw.as_object() {
+        for (key, value) in wrapper {
+            if key != "voice" {
+                merged.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    Value::Object(merged)
 }
 
 fn map_netease_podcast_episode_chart(
@@ -15100,6 +15234,19 @@ mod tests {
                 })
             )
         );
+        request.limit = 200;
+        request.ascending = false;
+        assert_eq!(
+            netease_podcast_episodes_workbench_request(336_355_127, &request),
+            (
+                "/api/voice/workbench/voices/by/voicelist",
+                json!({
+                    "limit": 200,
+                    "offset": 50,
+                    "voiceListId": 336_355_127
+                })
+            )
+        );
         assert_eq!(
             netease_podcast_episode_request(1_367_665_101),
             ("/api/dj/program/detail", json!({"id": 1_367_665_101}))
@@ -15881,6 +16028,118 @@ mod tests {
             assert_eq!(
                 map_netease_podcast_episode_workbench_response(invalid)
                     .expect_err("invalid workbench voice response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_workbench_voice_list_wrappers_pagination_and_compatible_fallbacks() {
+        let page = map_netease_podcast_episodes_workbench(
+            json!({
+                "code": 200,
+                "data": {
+                    "total": 205,
+                    "hasMore": true,
+                    "list": [
+                        {
+                            "displayStatus": "ONLINE",
+                            "futureWrapperField": "preserved",
+                            "voice": {
+                                "voiceId": 2_058_695_201_u64,
+                                "songName": "工作台声音一",
+                                "voiceListId": 336_355_127,
+                                "songId": 1_336_048_748,
+                                "durationMs": 61_250,
+                                "voiceFeeType": 1,
+                                "displayStatus": "AUDITING"
+                            }
+                        },
+                        {
+                            "programId": 2_058_695_202_u64,
+                            "name": "工作台声音二",
+                            "radioId": 336_355_127,
+                            "trackId": 1_336_048_749,
+                            "voiceFeeType": 0
+                        }
+                    ]
+                }
+            }),
+            2,
+            4,
+        )
+        .expect("map workbench voice list");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:2058695201");
+        assert_eq!(page.items[0].name, "工作台声音一");
+        assert_eq!(
+            page.items[0]
+                .podcast_ref
+                .as_ref()
+                .expect("podcast reference")
+                .to_string(),
+            "netease:336355127"
+        );
+        assert_eq!(
+            page.items[0]
+                .audio
+                .as_ref()
+                .expect("audio reference")
+                .resource_ref
+                .to_string(),
+            "netease:1336048748"
+        );
+        assert_eq!(page.items[0].paid, Some(true));
+        assert_eq!(
+            page.items[0].extensions["program"]["displayStatus"],
+            "AUDITING"
+        );
+        assert_eq!(
+            page.items[0].extensions["program"]["futureWrapperField"],
+            "preserved"
+        );
+        assert_eq!(page.items[1].paid, Some(false));
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 4);
+        assert_eq!(page.pagination.total, Some(205));
+        assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+
+        let fallback = map_netease_podcast_episodes_workbench(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{"songName": "缺少 ID"}],
+                    "voices": [{
+                        "voiceId": 2_058_695_203_u64,
+                        "songName": "兼容列表",
+                        "voiceListId": 336_355_127
+                    }],
+                    "count": 1,
+                    "more": false
+                }
+            }),
+            200,
+            0,
+        )
+        .expect("fall back after malformed preferred workbench list");
+        assert_eq!(
+            fallback.items[0].resource_ref.to_string(),
+            "netease:2058695203"
+        );
+        assert_eq!(fallback.pagination.total, Some(1));
+        assert!(!fallback.pagination.has_more);
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": {}}),
+            json!({"code": 200, "data": {"list": [{"songName": "缺少 ID"}]}}),
+        ] {
+            assert_eq!(
+                map_netease_podcast_episodes_workbench(invalid, 200, 0)
+                    .expect_err("invalid workbench voice list")
                     .code,
                 ErrorCode::UpstreamError
             );
@@ -20847,6 +21106,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastDetail));
         assert!(capabilities.contains(&Capability::PodcastWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
@@ -21134,6 +21394,36 @@ mod tests {
             let error = MusicProvider::podcast_episode_workbench(&provider, "2058695201", account)
                 .await
                 .expect_err("workbench voice detail requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_voice_list_workbench_requires_valid_controls_and_a_logged_in_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for limit in [0, 201] {
+            let error = MusicProvider::podcast_episodes_workbench(
+                &provider,
+                "336355127",
+                &PodcastEpisodeListRequest::new(limit, 0),
+            )
+            .await
+            .expect_err("invalid workbench voice list limit");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let mut ascending = PodcastEpisodeListRequest::new(200, 0);
+        ascending.ascending = true;
+        let error = MusicProvider::podcast_episodes_workbench(&provider, "336355127", &ascending)
+            .await
+            .expect_err("unsupported workbench ordering");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        for account in [None, Some("missing")] {
+            let mut request = PodcastEpisodeListRequest::new(200, 0);
+            request.account = account.map(str::to_owned);
+            let error = MusicProvider::podcast_episodes_workbench(&provider, "336355127", &request)
+                .await
+                .expect_err("workbench voice list requires authentication");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         }
     }

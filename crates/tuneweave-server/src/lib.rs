@@ -1212,40 +1212,63 @@ async fn podcast(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PodcastEpisodeListParams {
     account: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
     #[serde(alias = "asc")]
     ascending: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
 }
 
 async fn podcast_episodes(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<PodcastEpisodeListParams>,
+    params: Result<Query<PodcastEpisodeListParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
+    let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
-    if !(1..=100).contains(&limit) {
-        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    let backend = parse_podcast_detail_backend(params.backend.as_deref())?;
+    let (default_limit, max_limit) = match backend {
+        PodcastDetailBackend::Default => (30, 100),
+        PodcastDetailBackend::Workbench => (200, 200),
+    };
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), default_limit)?;
+    if !(1..=max_limit).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "limit must be between 1 and {max_limit}"
+        ))
+        .into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let ascending = parse_bool_parameter("ascending", params.ascending.as_deref(), false)?;
+    if backend == PodcastDetailBackend::Workbench && ascending {
+        return Err(TuneWeaveError::invalid_request(
+            "the podcast workbench episode list does not support ascending order",
+        )
+        .into());
+    }
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
-    let page = provider
-        .podcast_episodes(
-            reference.id(),
-            &PodcastEpisodeListRequest {
-                limit,
-                offset,
-                ascending,
-                account: account.clone(),
-            },
-        )
-        .await?;
+    let request = PodcastEpisodeListRequest {
+        limit,
+        offset,
+        ascending,
+        account: account.clone(),
+    };
+    let page = match backend {
+        PodcastDetailBackend::Default => {
+            provider.podcast_episodes(reference.id(), &request).await?
+        }
+        PodcastDetailBackend::Workbench => {
+            provider
+                .podcast_episodes_workbench(reference.id(), &request)
+                .await?
+        }
+    };
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -7187,6 +7210,7 @@ mod tests {
                 Capability::PodcastWorkbenchDetail,
                 Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
+                Capability::PodcastEpisodeWorkbenchList,
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeWorkbenchDetail,
@@ -7861,6 +7885,31 @@ mod tests {
                     limit: request.limit,
                     offset: request.offset,
                     total: Some(12),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([("request".to_owned(), json!(request))]),
+                },
+            })
+        }
+
+        async fn podcast_episodes_workbench(
+            &self,
+            id: &str,
+            request: &PodcastEpisodeListRequest,
+        ) -> Result<Page<PodcastEpisode>> {
+            let mut episode = sample_podcast_episode("2058695201", id, "2603965162");
+            episode
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            episode
+                .extensions
+                .insert("backend".to_owned(), json!("workbench"));
+            Ok(Page {
+                items: vec![episode],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(201),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Extensions::from([("request".to_owned(), json!(request))]),
@@ -11593,6 +11642,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_episode_catalog_preserves_the_explicit_workbench_backend() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/netease:336355127/episodes?source=creator&offset=200&account=studio-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:2058695201");
+        assert_eq!(json["data"][0]["podcast_ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["extensions"]["backend"], "workbench");
+        assert_eq!(json["data"][0]["extensions"]["account"], "studio-user");
+        assert_eq!(json["meta"]["pagination"]["limit"], 200);
+        assert_eq!(json["meta"]["pagination"]["offset"], 200);
+        assert_eq!(json["meta"]["pagination"]["total"], 201);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 201);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["request"]["ascending"],
+            false
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "studio-user");
+    }
+
+    #[tokio::test]
     async fn podcast_charts_preserve_rank_and_real_pagination_controls() {
         let (status, new_chart) = json_response_from(
             test_app_with_provider(),
@@ -11793,6 +11866,10 @@ mod tests {
             "/v1/podcasts/netease:336355127/episodes?limit=101",
             "/v1/podcasts/netease:336355127/episodes?offset=invalid",
             "/v1/podcasts/netease:336355127/episodes?ascending=newest",
+            "/v1/podcasts/netease:336355127/episodes?backend=unknown",
+            "/v1/podcasts/netease:336355127/episodes?unknown=true",
+            "/v1/podcasts/netease:336355127/episodes?backend=workbench&limit=201",
+            "/v1/podcasts/netease:336355127/episodes?backend=workbench&ascending=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");

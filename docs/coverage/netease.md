@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=252`、`partial=3`、`implemented=56`、`verified=96`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=251`、`partial=3`、`implemented=57`、`verified=96`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -403,7 +403,7 @@
 | `voice_lyric` | `/voice/lyric` | `verified` | `GET /v1/episodes/{ref}/lyrics`（EAPI `/api/voice/lyric/get`；节目与音频引用分离，受限下载网易媒体域名的完整 JSON 转写并生成句段 LRC，逐词/说话人原文保留于 `word_synced`；2026-07-17 provider 与真实 HTTP 实测 `2058695201` 返回 675 段、约 1.6 MB 转写，`1367665101` 正确保留 `data=null` 无歌词成功态） |
 | `voice_upload` | `/voice/upload` | `pending` | — |
 | `voicelist_detail` | `/voicelist/detail` | `implemented` | `GET /v1/podcasts/{ref}?backend=workbench`（与缺省 `/dj/detail` 共用稳定 `Podcast`，但用显式后端和独立 `PodcastWorkbenchDetail` 能力保留创作者声音歌单工作台语义；固定 EAPI `/api/voice/workbench/voicelist/detail` 并只提交数字 `id`，要求 `account` 选择已登录隔离会话；按可成功映射的优先级解包 `data.voiceList/data.voicelist/data/voiceList/voicelist`，无效高优先包装不会遮蔽有效兼容对象，兼容 `voiceListId/radioId`、`coverImgUrl`、`creator`、`categoryName`、`voiceCount` 和 `voiceFeeType`，完整发布状态与未来字段保留在扩展；完整主播对象优先于 `creatorName` 摘要，不会丢失用户引用和头像；协议、能力、认证前置、全部包装/别名、冲突优先级、畸形响应、统一端点后端别名和未知字段拒绝均有测试；2026-07-18 匿名真实原始 API 以 `336355127` 验证上游返回 301 并稳定映射 401 `authentication_required`，成功详情留待 Basic 末尾使用持久化账户集中验收） |
-| `voicelist_list` | `/voicelist/list` | `pending` | — |
+| `voicelist_list` | `/voicelist/list` | `implemented` | `GET /v1/podcasts/{ref}/episodes?backend=workbench`（与缺省公开 `/dj/program` 目录共用稳定 `PodcastEpisode` 列表，但以显式后端和独立 `PodcastEpisodeWorkbenchList` 能力保留创作者工作台语义，不静默回退；固定 EAPI `/api/voice/workbench/voices/by/voicelist`，精确提交 `voiceListId/limit/offset`，要求 `account` 选择已登录隔离会话；工作台缺省和最大 limit 均为参考实现的 200，明确拒绝上游不支持的升序控制；按可成功映射的顺序兼容 `data.list/data.voices/data.records/data/list/voices`，无效高优先数组不会遮蔽有效兼容数组，嵌套 `voice` 与外层审核字段无损合并且声音对象自身字段优先；`voiceId/programId`、`voiceListId/radioId`、`songId/trackId` 分别保持节目、声音歌单和承载音频身份，`total/count` 与 `hasMore/more` 驱动真实分页；协议、能力、认证前置、200 条边界、升序拒绝、全部包装/别名、冲突优先级、畸形响应、统一端点后端别名及未知字段拒绝均有测试；2026-07-18 匿名真实原始 API 以声音歌单 `336355127` 验证上游返回 301 并稳定映射 401 `authentication_required`，成功列表留待 Basic 末尾使用持久化账户集中验收） |
 | `voicelist_list_search` | `/voicelist/list/search` | `pending` | — |
 | `voicelist_my_created` | `/voicelist/my/created` | `pending` | — |
 | `voicelist_search` | `/voicelist/search` | `verified` | `GET /v1/search?type=podcast`（统一新增 `Podcast` 搜索类型和 `SearchPodcasts` 能力；缺省 `variant=default` 精确使用 EAPI `/api/search/voicelist/get` 并提交 `keyword/scene=normal/limit/offset/e_r=true`，同时保留 `legacy/cloud` 的 1009 兼容后端；解包 `data.resources[].baseInfo` 为完整 `Podcast`，排名算法与命中理由保存在 `extensions.search_item`，以 `totalCount/hasMore` 驱动统一分页；Web 搜索建议、多重匹配和数字类型 1009 同步改正为播客语义，直播广播搜索会明确返回能力不支持；核心模型、全部协议分支、包装映射、错误边界、别名和 HTTP 参数均有测试；2026-07-18 匿名真实 provider 联网以“故事”查询成功返回类型化播客、上游 `code=200`，并确认实际路径为 `/api/search/voicelist/get`） |

@@ -265,6 +265,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn podcast_episodes_workbench(
+        &self,
+        _id: &str,
+        _request: &PodcastEpisodeListRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastEpisodeWorkbenchList,
+        ))
+    }
+
     async fn podcast_episode_chart(
         &self,
         _request: &PodcastEpisodeChartRequest,
