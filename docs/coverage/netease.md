@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=256`、`partial=3`、`implemented=53`、`verified=95`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=255`、`partial=3`、`implemented=54`、`verified=95`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -93,7 +93,7 @@
 | `digitalAlbum_ordering` | `/digitalAlbum/ordering` | `pending` | — |
 | `digitalAlbum_purchased` | `/digitalAlbum/purchased` | `pending` | — |
 | `digitalAlbum_sales` | `/digitalAlbum/sales` | `pending` | — |
-| `dj_banner` | `/dj/banner` | `pending` | — |
+| `dj_banner` | `/dj/banner` | `implemented` | `GET /v1/banners?catalog=podcast`（与音乐推广横幅共用统一 `Banner` 模型，但固定使用 WeAPI `/api/djradio/banner/get`，不伪造该接口不存在的客户端分支；目标类型 `60001` 稳定映射为 `podcast_episode`，节目引用、标题、封面、Orpheus 跳转、独家标志及完整平台原文均保留；省略 `catalog` 仍严格保持既有音乐横幅行为，播客目录显式拒绝非 PC 的客户端选择；2026-07-18 底层原始 API 匿名实测 `code=200`、返回 3 项，首项目标 `netease:3723949603`、标题“脱口秀”，协议选择、映射、非法组合和统一 HTTP 离线测试已完成，provider 与真实二进制统一端点按 Basic 收口集中验收） |
 | `dj_category_excludehot` | `/dj/category/excludehot` | `pending` | — |
 | `dj_category_recommend` | `/dj/category/recommend` | `pending` | — |
 | `dj_catelist` | `/dj/catelist` | `verified` | `GET /v1/podcasts/categories`（固定 WeAPI `/api/djradio/category/get` 空负载，`platform/account` 分别选择平台与持久账户别名；统一 `PodcastTaxonomy` 将数字或字符串分类 ID 归一为不透明字符串，映射名称并从网页、尺寸及客户端图标字段稳定回退，单项与顶层完整原文均保存在扩展；缺失分类数组、ID、名称、未知平台和查询字段均稳定拒绝；2026-07-17 provider 显式联网及真实二进制统一 HTTP 均返回上游 `code=200`、19 个分类，全部 ID/名称/图标有效，能力发现和未知参数 400 分支同时验收） |

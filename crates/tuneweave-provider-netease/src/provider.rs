@@ -20,11 +20,11 @@ use tuneweave_core::{
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerClient,
-    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog,
-    ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
-    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart,
+    ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
@@ -693,18 +693,39 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn banners(&self, request: &BannerListRequest) -> Result<Vec<Banner>> {
-        let client_type = netease_banner_client(request.client);
+        let (path, payload, protocol) = netease_banner_request(request)?;
         let client = self.client_for(request.account.as_deref())?;
-        let response = client
-            .request_eapi("/api/v2/banner/get", json!({ "clientType": client_type }))
-            .await?;
+        let response = match protocol {
+            NeteaseBannerProtocol::Eapi => client.request_eapi(path, payload).await?,
+            NeteaseBannerProtocol::Weapi => client.request_weapi(path, payload).await?,
+        };
         ensure_success(&response.body)?;
-        let response: BannerEnvelope = parse_body(response.body)?;
-        response
-            .banners
-            .into_iter()
-            .map(|banner| map_banner(banner, request.client))
-            .collect()
+        match request.catalog {
+            BannerCatalog::Music => {
+                let response: BannerEnvelope = parse_body(response.body)?;
+                response
+                    .banners
+                    .into_iter()
+                    .map(|banner| map_banner(banner, request.client))
+                    .collect()
+            }
+            BannerCatalog::Podcast => {
+                let body = response.body;
+                let banners = body
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| {
+                        TuneWeaveError::new(
+                            ErrorCode::UpstreamError,
+                            "NetEase podcast banner response did not contain its data array",
+                        )
+                        .with_platform(Platform::Netease)
+                        .with_details(json!({ "response": body.clone() }))
+                    })?;
+                banners.into_iter().map(map_podcast_banner).collect()
+            }
+        }
     }
 
     async fn radio_taxonomy(&self, request: &RadioTaxonomyRequest) -> Result<RadioTaxonomy> {
@@ -4257,7 +4278,47 @@ fn netease_banner_client(client: BannerClient) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NeteaseBannerProtocol {
+    Eapi,
+    Weapi,
+}
+
+fn netease_banner_request(
+    request: &BannerListRequest,
+) -> Result<(&'static str, Value, NeteaseBannerProtocol)> {
+    match request.catalog {
+        BannerCatalog::Music => Ok((
+            "/api/v2/banner/get",
+            json!({ "clientType": netease_banner_client(request.client) }),
+            NeteaseBannerProtocol::Eapi,
+        )),
+        BannerCatalog::Podcast if request.client == BannerClient::Pc => Ok((
+            "/api/djradio/banner/get",
+            json!({}),
+            NeteaseBannerProtocol::Weapi,
+        )),
+        BannerCatalog::Podcast => Err(TuneWeaveError::invalid_request(
+            "the NetEase podcast banner catalog does not support client selection",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "catalog": request.catalog, "client": request.client }))),
+    }
+}
+
 fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
+    map_banner_with_context(raw, BannerCatalog::Music, Some(client))
+}
+
+fn map_podcast_banner(raw: Value) -> Result<Banner> {
+    map_banner_with_context(raw, BannerCatalog::Podcast, None)
+}
+
+fn map_banner_with_context(
+    raw: Value,
+    catalog: BannerCatalog,
+    client: Option<BannerClient>,
+) -> Result<Banner> {
     let image_url =
         radio_text_field(&raw, &["bigImageUrl", "pic", "imageUrl"]).ok_or_else(|| {
             TuneWeaveError::new(
@@ -4273,6 +4334,7 @@ fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
         Some(100) => BannerTargetKind::Artist,
         Some(1_000) => BannerTargetKind::Playlist,
         Some(1_004) => BannerTargetKind::Video,
+        Some(60_001) => BannerTargetKind::PodcastEpisode,
         Some(3_000) => BannerTargetKind::Web,
         _ => BannerTargetKind::Unknown,
     };
@@ -4290,7 +4352,8 @@ fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
             .with_platform(Platform::Netease)
         })?;
     let mut extensions = Extensions::new();
-    extensions.insert("client".to_owned(), json!(client));
+    extensions.insert("catalog".to_owned(), json!(catalog));
+    insert_extension(&mut extensions, "client", client);
     extensions.insert("banner".to_owned(), raw.clone());
     Ok(Banner {
         id: ["bannerId", "adid"]
@@ -14488,6 +14551,7 @@ mod tests {
             "netease:384808686"
         );
         assert_eq!(pc.extensions["client"], "pc");
+        assert_eq!(pc.extensions["catalog"], "music");
         assert_eq!(pc.extensions["banner"]["s_ctrp"], "trace-metadata");
 
         let mobile = map_banner(
@@ -14522,6 +14586,36 @@ mod tests {
         .expect("skip blank preferred banner fields");
         assert_eq!(fallback.image_url, "https://example.test/fallback.jpg");
         assert_eq!(fallback.title.as_deref(), Some("有效摘要"));
+    }
+
+    #[test]
+    fn maps_podcast_banners_without_faking_music_targets() {
+        let banner = map_podcast_banner(json!({
+            "exclusive": false,
+            "pic": "https://example.test/podcast-banner.jpg",
+            "targetId": 3723949603_i64,
+            "targetType": 60001,
+            "typeTitle": "脱口秀",
+            "url": "orpheus://program/3723949603",
+            "futureField": { "kept": true }
+        }))
+        .expect("map podcast banner");
+
+        assert_eq!(banner.id, None);
+        assert_eq!(banner.title.as_deref(), Some("脱口秀"));
+        assert_eq!(
+            banner
+                .target_ref
+                .expect("podcast episode target")
+                .to_string(),
+            "netease:3723949603"
+        );
+        assert_eq!(banner.target_kind, BannerTargetKind::PodcastEpisode);
+        assert_eq!(banner.url.as_deref(), Some("orpheus://program/3723949603"));
+        assert_eq!(banner.exclusive, Some(false));
+        assert_eq!(banner.extensions["catalog"], "podcast");
+        assert!(!banner.extensions.contains_key("client"));
+        assert_eq!(banner.extensions["banner"]["futureField"]["kept"], true);
     }
 
     #[test]
@@ -16137,6 +16231,31 @@ mod tests {
         assert_eq!(netease_banner_client(BannerClient::Android), "android");
         assert_eq!(netease_banner_client(BannerClient::Iphone), "iphone");
         assert_eq!(netease_banner_client(BannerClient::Ipad), "ipad");
+    }
+
+    #[test]
+    fn selects_the_exact_banner_protocol_for_each_catalog() {
+        let music = BannerListRequest::new(BannerClient::Iphone);
+        let (path, payload, protocol) =
+            netease_banner_request(&music).expect("build music banner request");
+        assert_eq!(path, "/api/v2/banner/get");
+        assert_eq!(payload, json!({ "clientType": "iphone" }));
+        assert_eq!(protocol, NeteaseBannerProtocol::Eapi);
+
+        let mut podcast = BannerListRequest::new(BannerClient::Pc);
+        podcast.catalog = BannerCatalog::Podcast;
+        let (path, payload, protocol) =
+            netease_banner_request(&podcast).expect("build podcast banner request");
+        assert_eq!(path, "/api/djradio/banner/get");
+        assert_eq!(payload, json!({}));
+        assert_eq!(protocol, NeteaseBannerProtocol::Weapi);
+
+        podcast.client = BannerClient::Android;
+        let error = netease_banner_request(&podcast).expect_err("reject unsupported client");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.platform, Some(Platform::Netease));
+        assert_eq!(error.details["catalog"], "podcast");
+        assert_eq!(error.details["client"], "android");
     }
 
     #[test]

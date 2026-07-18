@@ -261,8 +261,17 @@ pub enum BannerClient {
     Ipad,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerCatalog {
+    #[default]
+    Music,
+    Podcast,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BannerListRequest {
+    pub catalog: BannerCatalog,
     pub client: BannerClient,
     pub account: Option<String>,
 }
@@ -271,6 +280,7 @@ impl BannerListRequest {
     #[must_use]
     pub fn new(client: BannerClient) -> Self {
         Self {
+            catalog: BannerCatalog::Music,
             client,
             account: None,
         }
@@ -285,6 +295,7 @@ pub enum BannerTargetKind {
     Artist,
     Playlist,
     Video,
+    PodcastEpisode,
     Web,
     #[default]
     Unknown,
@@ -3155,28 +3166,33 @@ mod tests {
 
     #[test]
     fn banner_keeps_client_and_target_semantics_typed() {
-        let request = BannerListRequest::new(BannerClient::Iphone);
+        let mut request = BannerListRequest::new(BannerClient::Pc);
+        request.catalog = BannerCatalog::Podcast;
+        assert_eq!(
+            serde_json::to_value(request.catalog).expect("serialize banner catalog"),
+            serde_json::json!("podcast")
+        );
         assert_eq!(
             serde_json::to_value(request.client).expect("serialize banner client"),
-            "iphone"
+            "pc"
         );
 
         let banner = Banner {
             id: Some("4862548".to_owned()),
-            title: Some("新歌首发".to_owned()),
+            title: Some("播客精选".to_owned()),
             image_url: "https://example.test/banner.jpg".to_owned(),
             target_ref: Some(
                 ResourceRef::new(Platform::Netease, "3402163617").expect("valid target reference"),
             ),
-            target_kind: BannerTargetKind::Track,
-            url: Some("https://music.163.com/song?id=3402163617".to_owned()),
+            target_kind: BannerTargetKind::PodcastEpisode,
+            url: Some("orpheus://program/3402163617".to_owned()),
             exclusive: Some(false),
             extensions: Extensions::new(),
         };
         let value = serde_json::to_value(banner).expect("serialize banner");
         assert_eq!(value["target_ref"], "netease:3402163617");
-        assert_eq!(value["target_kind"], "track");
-        assert_eq!(value["title"], "新歌首发");
+        assert_eq!(value["target_kind"], "podcast_episode");
+        assert_eq!(value["title"], "播客精选");
     }
 
     #[test]

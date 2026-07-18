@@ -26,10 +26,10 @@ use tuneweave_core::{
     ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, Banner, BannerClient, BannerListRequest, Capability,
-    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
-    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
+    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
@@ -821,21 +821,26 @@ async fn search(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BannerParams {
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "scope")]
+    catalog: Option<String>,
     #[serde(alias = "type")]
     client: Option<String>,
 }
 
 async fn banners(
     State(state): State<AppState>,
-    Query(params): Query<BannerParams>,
+    params: Result<Query<BannerParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<Banner>>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
     let provider = state.registry.require(platform)?;
     let mut request = BannerListRequest::new(parse_banner_client(params.client.as_deref())?);
+    request.catalog = parse_banner_catalog(params.catalog.as_deref())?;
     request.account.clone_from(&account);
     let banners = provider.banners(&request).await?;
     let mut response = ApiResponse::new(banners).with_platform(platform);
@@ -6847,6 +6852,22 @@ fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveErr
     }
 }
 
+fn parse_banner_catalog(value: Option<&str>) -> Result<BannerCatalog, TuneWeaveError> {
+    match value
+        .unwrap_or("music")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "music" | "main" => Ok(BannerCatalog::Music),
+        "podcast" | "dj" => Ok(BannerCatalog::Podcast),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported banner catalog: {value}"
+        ))
+        .with_details(json!({ "allowed": ["music", "podcast"] }))),
+    }
+}
+
 fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeaveError> {
     let value = value
         .map(str::trim)
@@ -7385,18 +7406,41 @@ mod tests {
         }
 
         async fn banners(&self, request: &BannerListRequest) -> Result<Vec<Banner>> {
+            if request.catalog == BannerCatalog::Podcast && request.client != BannerClient::Pc {
+                return Err(TuneWeaveError::invalid_request(
+                    "the test podcast banner catalog does not support client selection",
+                ));
+            }
             let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("catalog".to_owned(), json!(request.catalog));
             extensions.insert("client".to_owned(), json!(request.client));
             extensions.insert("account".to_owned(), json!(request.account));
+            let podcast = request.catalog == BannerCatalog::Podcast;
             Ok(vec![Banner {
                 id: Some("banner-1".to_owned()),
-                title: Some("新歌首发".to_owned()),
+                title: Some(if podcast {
+                    "脱口秀".to_owned()
+                } else {
+                    "新歌首发".to_owned()
+                }),
                 image_url: "https://example.test/banner.jpg".to_owned(),
                 target_ref: Some(
-                    ResourceRef::new(Platform::Netease, "185809").expect("valid banner target"),
+                    ResourceRef::new(
+                        Platform::Netease,
+                        if podcast { "3723949603" } else { "185809" },
+                    )
+                    .expect("valid banner target"),
                 ),
-                target_kind: BannerTargetKind::Track,
-                url: Some("https://music.163.com/song?id=185809".to_owned()),
+                target_kind: if podcast {
+                    BannerTargetKind::PodcastEpisode
+                } else {
+                    BannerTargetKind::Track
+                },
+                url: Some(if podcast {
+                    "orpheus://program/3723949603".to_owned()
+                } else {
+                    "https://music.163.com/song?id=185809".to_owned()
+                }),
                 exclusive: Some(false),
                 extensions,
             }])
@@ -10901,6 +10945,7 @@ mod tests {
         assert_eq!(json["data"][0]["target_ref"], "netease:185809");
         assert_eq!(json["data"][0]["target_kind"], "track");
         assert_eq!(json["data"][0]["extensions"]["client"], "iphone");
+        assert_eq!(json["data"][0]["extensions"]["catalog"], "music");
         assert_eq!(json["data"][0]["extensions"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
@@ -10922,11 +10967,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_banners_share_the_unified_model_without_faking_music_targets() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/banners?catalog=podcast&platform=netease&account=spoken-word",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["title"], "脱口秀");
+        assert_eq!(json["data"][0]["target_ref"], "netease:3723949603");
+        assert_eq!(json["data"][0]["target_kind"], "podcast_episode");
+        assert_eq!(json["data"][0]["url"], "orpheus://program/3723949603");
+        assert_eq!(json["data"][0]["extensions"]["catalog"], "podcast");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "spoken-word");
+    }
+
+    #[tokio::test]
     async fn banners_reject_unknown_clients() {
-        let (status, json) =
-            json_response_from(test_app_with_provider(), "/v1/banners?client=windows-phone").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(json["error"]["code"], "invalid_request");
+        for path in [
+            "/v1/banners?client=windows-phone",
+            "/v1/banners?catalog=unknown",
+            "/v1/banners?catalog=podcast&client=iphone",
+            "/v1/banners?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]
