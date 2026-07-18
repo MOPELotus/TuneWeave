@@ -7237,9 +7237,15 @@ mod tests {
         }
 
         async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
-            if request.catalog != PodcastCatalog::Hot || request.category_id.is_some() {
+            let featured = request.catalog == PodcastCatalog::Featured;
+            if !matches!(
+                request.catalog,
+                PodcastCatalog::Featured | PodcastCatalog::Hot
+            ) || request.category_id.is_some()
+                || (featured && request.offset != 0)
+            {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports the hot podcast catalog",
+                    "test provider only supports featured and hot podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
@@ -7251,12 +7257,21 @@ mod tests {
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
-                    total: None,
-                    next_offset: Some(request.offset.saturating_add(1)),
-                    has_more: true,
+                    total: featured.then_some(1),
+                    next_offset: (!featured).then_some(request.offset.saturating_add(1)),
+                    has_more: !featured,
                     extensions: Extensions::from([
                         ("catalog".to_owned(), json!(request.catalog)),
-                        ("response".to_owned(), json!({"code": 200, "hasMore": true})),
+                        ("returned_count".to_owned(), json!(1)),
+                        ("limit_applied".to_owned(), json!(!featured)),
+                        (
+                            "response".to_owned(),
+                            if featured {
+                                json!({"code": 200, "name": "精选电台 - 测试"})
+                            } else {
+                                json!({"code": 200, "hasMore": true})
+                            },
+                        ),
                     ]),
                 },
             })
@@ -10577,11 +10592,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn featured_podcast_catalog_is_a_complete_fixed_snapshot() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=recommend&limit=2&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["catalog"],
+            "featured"
+        );
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["catalog"],
+            "featured"
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["limit_applied"],
+            false
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["response"]["name"],
+            "精选电台 - 测试"
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
         for path in [
             "/v1/podcasts",
             "/v1/podcasts?catalog=unknown",
-            "/v1/podcasts?catalog=featured",
+            "/v1/podcasts?catalog=featured&offset=1",
+            "/v1/podcasts?catalog=featured&category_id=2",
+            "/v1/podcasts?catalog=personalized",
             "/v1/podcasts?catalog=hot&limit=0",
             "/v1/podcasts?catalog=hot&limit=101",
             "/v1/podcasts?catalog=hot&offset=invalid",

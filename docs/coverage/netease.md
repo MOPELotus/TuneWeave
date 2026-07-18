@@ -111,7 +111,7 @@
 | `dj_program_toplist` | `/dj/program/toplist` | `pending` | — |
 | `dj_program_toplist_hours` | `/dj/program/toplist/hours` | `pending` | — |
 | `dj_radio_hot` | `/dj/radio/hot` | `pending` | — |
-| `dj_recommend` | `/dj/recommend` | `pending` | — |
+| `dj_recommend` | `/dj/recommend` | `implemented` | `GET /v1/podcasts?catalog=featured`（固定无参数 WeAPI `/api/djradio/recommend/v1`；该上游返回不可续页的完整精选快照，统一端点要求 `offset=0` 且拒绝 `category_id`，保留请求 `limit` 但以 `limit_applied=false` 明示平台未应用，`total` 为实际返回项数、`next_offset=null/has_more=false`；复用完整 `Podcast` 映射并保留栏目名称、单项原文与顶层响应；协议、异常边界、映射和统一 HTTP 离线测试已完成，2026-07-18 底层原始 API 实测 `code=200`、10 项及栏目“精选电台 - 谈情说爱”，按集中验收安排留待 Basic 代码收口后复跑 provider 与真实统一 HTTP） |
 | `dj_recommend_type` | `/dj/recommend/type` | `pending` | — |
 | `dj_sub` | `/dj/sub` | `pending` | — |
 | `dj_sublist` | `/dj/sublist` | `pending` | — |
