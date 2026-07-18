@@ -23,10 +23,10 @@ pub use credential_store::{
 pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
-    Album, AlbumListRequest, AlbumStats, AlbumSummary, AntiCheatToken, Artist, ArtistArea,
-    ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry,
-    ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    Album, AlbumListRequest, AlbumStats, AlbumSummary, AntiCheatToken, AntiCheatTokenVersion,
+    Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea,
+    ArtistChartEntry, ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview,
+    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, Banner, BannerCatalog, BannerClient,
     BannerListRequest, BannerTargetKind, Chart, ChartCatalog, ChartCatalogRequest,

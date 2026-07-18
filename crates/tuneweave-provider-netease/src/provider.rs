@@ -15,16 +15,16 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary,
-    AntiCheatToken, Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart,
-    ArtistChartArea, ArtistChartEntry, ArtistChartRequest, ArtistContentCount, ArtistListRequest,
-    ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate,
-    ArtistWorksRequest, AudioRecognition, AudioRecognitionMatch, AudioRecognitionRequest,
-    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
-    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, BannerTargetKind,
-    Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    ChartGroup, ChartTrackPreview, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
-    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistBiographySection,
+    ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry, ArtistChartRequest,
+    ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
+    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
+    ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionMatch,
+    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
+    BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest,
+    ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationAction,
@@ -702,9 +702,14 @@ impl MusicProvider for NeteaseProvider {
         map_netease_user_membership_client(id, response.body)
     }
 
-    async fn anti_cheat_token(&self, refresh: bool) -> Result<AntiCheatToken> {
-        let (token, refreshed) = self.client.anti_cheat_token(refresh).await?;
+    async fn anti_cheat_token(
+        &self,
+        version: AntiCheatTokenVersion,
+        refresh: bool,
+    ) -> Result<AntiCheatToken> {
+        let (token, refreshed) = self.client.anti_cheat_token(version, refresh).await?;
         Ok(AntiCheatToken {
+            version,
             token,
             registered: true,
             refreshed,

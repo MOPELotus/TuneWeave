@@ -14,7 +14,9 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{
+    AccountCredentialStore, AntiCheatTokenVersion, ErrorCode, Platform, Result, TuneWeaveError,
+};
 use url::Url;
 
 use crate::crypto::{
@@ -25,7 +27,8 @@ use crate::crypto::{
 const DEFAULT_BASE_URL: &str = "https://interface.music.163.com";
 const DEFAULT_XEAPI_BASE_URL: &str = "https://interface3.music.163.com";
 const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
-const DEFAULT_ANTI_CHEAT_URL: &str = "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251";
+const DEFAULT_ANTI_CHEAT_V2_URL: &str = "https://ac.dun.163.com/v2/config/js?pn=YD00000558929251";
+const DEFAULT_ANTI_CHEAT_V3_URL: &str = "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251";
 const IMAGE_UPLOAD_BASE_URL: &str = "https://nosup-hz1.127.net/yyimgs";
 const CLOUD_UPLOAD_LBS_URL: &str = "https://wanproxy.127.net/lbs";
 const MAX_VOICE_LYRIC_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -53,6 +56,8 @@ pub struct NeteaseConfig {
     pub base_url: String,
     pub xeapi_base_url: String,
     pub web_base_url: String,
+    pub anti_cheat_v2_url: String,
+    /// Backward-compatible v3 registration URL override.
     pub anti_cheat_url: String,
     pub cookie: Option<String>,
     pub timeout: Duration,
@@ -67,7 +72,8 @@ impl Default for NeteaseConfig {
             base_url: DEFAULT_BASE_URL.to_owned(),
             xeapi_base_url: DEFAULT_XEAPI_BASE_URL.to_owned(),
             web_base_url: DEFAULT_WEB_BASE_URL.to_owned(),
-            anti_cheat_url: DEFAULT_ANTI_CHEAT_URL.to_owned(),
+            anti_cheat_v2_url: DEFAULT_ANTI_CHEAT_V2_URL.to_owned(),
+            anti_cheat_url: DEFAULT_ANTI_CHEAT_V3_URL.to_owned(),
             cookie: None,
             timeout: Duration::from_secs(15),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
@@ -84,13 +90,15 @@ pub struct NeteaseClient {
     base_url: String,
     xeapi_base_url: String,
     web_base_url: String,
-    anti_cheat_url: String,
+    anti_cheat_v2_url: String,
+    anti_cheat_v3_url: String,
     web_user_agent: String,
     cookie: Option<String>,
     device_id: String,
     web_client_id: String,
     xeapi_state: Arc<RwLock<XeapiState>>,
-    anti_cheat_token: Arc<RwLock<Option<String>>>,
+    anti_cheat_v2_token: Arc<RwLock<Option<String>>>,
+    anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -257,17 +265,39 @@ impl NeteaseClient {
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             xeapi_base_url: config.xeapi_base_url.trim_end_matches('/').to_owned(),
             web_base_url: config.web_base_url.trim_end_matches('/').to_owned(),
-            anti_cheat_url: config.anti_cheat_url,
+            anti_cheat_v2_url: config.anti_cheat_v2_url,
+            anti_cheat_v3_url: config.anti_cheat_url,
             web_user_agent: config.web_user_agent,
             cookie: config.cookie,
             device_id,
             web_client_id,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
-            anti_cheat_token: Arc::new(RwLock::new(None)),
+            anti_cheat_v2_token: Arc::new(RwLock::new(None)),
+            anti_cheat_v3_token: Arc::new(RwLock::new(None)),
         })
     }
 
     pub async fn request_eapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
+        self.request_eapi_inner(path, payload, None).await
+    }
+
+    pub async fn request_eapi_with_check_token_v2(
+        &self,
+        path: &str,
+        payload: Value,
+    ) -> Result<NeteaseResponse> {
+        let (token, _) = self
+            .anti_cheat_token(AntiCheatTokenVersion::V2, false)
+            .await?;
+        self.request_eapi_inner(path, payload, Some(&token)).await
+    }
+
+    async fn request_eapi_inner(
+        &self,
+        path: &str,
+        payload: Value,
+        anti_cheat_token: Option<&str>,
+    ) -> Result<NeteaseResponse> {
         if !path.starts_with("/api/") {
             return Err(TuneWeaveError::invalid_request(
                 "NetEase EAPI paths must start with /api/",
@@ -307,10 +337,14 @@ impl NeteaseClient {
             self.base_url,
             path.trim_start_matches("/api/")
         );
-        let response = self
+        let mut request = self
             .http
             .post(endpoint)
-            .header(header::COOKIE, encode_cookie_header(&header))
+            .header(header::COOKIE, encode_cookie_header(&header));
+        if let Some(token) = anti_cheat_token {
+            request = request.header("X-antiCheatToken", token);
+        }
+        let response = request
             .form(&[("params", params)])
             .send()
             .await
@@ -618,23 +652,21 @@ impl NeteaseClient {
         parse_response(response).await
     }
 
-    pub async fn anti_cheat_token(&self, refresh: bool) -> Result<(String, bool)> {
-        if !refresh
-            && let Some(token) = self
-                .anti_cheat_token
-                .read()
-                .map_err(|_| anti_cheat_state_error())?
-                .clone()
+    pub async fn anti_cheat_token(
+        &self,
+        version: AntiCheatTokenVersion,
+        refresh: bool,
+    ) -> Result<(String, bool)> {
+        let (url, cache) = match version {
+            AntiCheatTokenVersion::V2 => (&self.anti_cheat_v2_url, &self.anti_cheat_v2_token),
+            AntiCheatTokenVersion::V3 => (&self.anti_cheat_v3_url, &self.anti_cheat_v3_token),
+        };
+        if !refresh && let Some(token) = cache.read().map_err(|_| anti_cheat_state_error())?.clone()
         {
             return Ok((token, false));
         }
 
-        let response = self
-            .http
-            .get(&self.anti_cheat_url)
-            .send()
-            .await
-            .map_err(request_error)?;
+        let response = self.http.get(url).send().await.map_err(request_error)?;
         let status = response.status();
         let body = response.text().await.map_err(request_error)?;
         if !status.is_success() {
@@ -646,7 +678,10 @@ impl NeteaseClient {
             .retryable(status.is_server_error())
             .with_details(json!({ "http_status": status.as_u16() })));
         }
-        let token = parse_anti_cheat_token(&body)?;
+        let token = match version {
+            AntiCheatTokenVersion::V2 => parse_anti_cheat_token_v2(&body)?,
+            AntiCheatTokenVersion::V3 => parse_anti_cheat_token_v3(&body)?,
+        };
         token.parse::<header::HeaderValue>().map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -654,10 +689,7 @@ impl NeteaseClient {
             )
             .with_platform(Platform::Netease)
         })?;
-        *self
-            .anti_cheat_token
-            .write()
-            .map_err(|_| anti_cheat_state_error())? = Some(token.clone());
+        *cache.write().map_err(|_| anti_cheat_state_error())? = Some(token.clone());
         Ok((token, true))
     }
 
@@ -670,7 +702,9 @@ impl NeteaseClient {
         path: &str,
         payload: Value,
     ) -> Result<NeteaseResponse> {
-        let (token, _) = self.anti_cheat_token(false).await?;
+        let (token, _) = self
+            .anti_cheat_token(AntiCheatTokenVersion::V3, false)
+            .await?;
         self.request_xeapi_inner(path, payload, Some(&token)).await
     }
 
@@ -1218,7 +1252,24 @@ fn scalar_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn parse_anti_cheat_token(body: &str) -> Result<String> {
+fn parse_anti_cheat_token_v2(body: &str) -> Result<String> {
+    let response =
+        serde_json::from_str::<Value>(body).map_err(|_| anti_cheat_registration_error())?;
+    let code = response
+        .get("code")
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
+    let token = response
+        .pointer("/result/conf")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    match (code, token) {
+        (Some(200), Some(token)) => Ok(token.to_owned()),
+        _ => Err(anti_cheat_registration_error()),
+    }
+}
+
+fn parse_anti_cheat_token_v3(body: &str) -> Result<String> {
     let body = body.trim();
     if !body.starts_with("null(") || !body.ends_with(')') {
         return Err(anti_cheat_registration_error());
@@ -1584,6 +1635,10 @@ mod tests {
         assert_eq!(config.xeapi_base_url, "https://interface3.music.163.com");
         assert_eq!(config.web_base_url, "https://music.163.com");
         assert_eq!(
+            config.anti_cheat_v2_url,
+            "https://ac.dun.163.com/v2/config/js?pn=YD00000558929251"
+        );
+        assert_eq!(
             config.anti_cheat_url,
             "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251"
         );
@@ -1601,14 +1656,24 @@ mod tests {
     }
 
     #[test]
-    fn anti_cheat_token_parser_accepts_the_reference_jsonp_and_rejects_malformed_values() {
+    fn anti_cheat_token_parsers_accept_both_versions_and_reject_malformed_values() {
         assert_eq!(
-            parse_anti_cheat_token("null([200,1784194692,\"opaque-token\"])")
+            parse_anti_cheat_token_v2(r#"{"code":200,"result":{"conf":"v2-token"}}"#)
+                .expect("parse v2 anti-cheat token"),
+            "v2-token"
+        );
+        assert_eq!(
+            parse_anti_cheat_token_v2(r#"{"code":"200","result":{"conf":" token-2 "}}"#)
+                .expect("parse compatible v2 anti-cheat token"),
+            "token-2"
+        );
+        assert_eq!(
+            parse_anti_cheat_token_v3("null([200,1784194692,\"opaque-token\"])")
                 .expect("parse anti-cheat token"),
             "opaque-token"
         );
         assert_eq!(
-            parse_anti_cheat_token(" null([\"200\",0,\"token-2\",\"ignored\"]) ")
+            parse_anti_cheat_token_v3(" null([\"200\",0,\"token-2\",\"ignored\"]) ")
                 .expect("parse compatible anti-cheat token"),
             "token-2"
         );
@@ -1621,8 +1686,24 @@ mod tests {
             "null([200])",
         ] {
             assert_eq!(
-                parse_anti_cheat_token(body)
+                parse_anti_cheat_token_v3(body)
                     .expect_err("malformed anti-cheat response")
+                    .code,
+                ErrorCode::UpstreamError,
+                "{body}"
+            );
+        }
+        for body in [
+            "",
+            r#"{"code":500,"result":{"conf":"token"}}"#,
+            r#"{"code":200,"result":{"conf":""}}"#,
+            r#"{"code":200,"result":{}}"#,
+            r#"{"code":200,"result":{"conf":1}}"#,
+            r#"{"result":{"conf":"token"}}"#,
+        ] {
+            assert_eq!(
+                parse_anti_cheat_token_v2(body)
+                    .expect_err("malformed v2 anti-cheat response")
                     .code,
                 ErrorCode::UpstreamError,
                 "{body}"
@@ -1634,45 +1715,57 @@ mod tests {
     async fn anti_cheat_token_cache_is_shared_by_account_clients_without_refreshing() {
         let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
         *client
-            .anti_cheat_token
+            .anti_cheat_v2_token
             .write()
-            .expect("write anti-cheat cache") = Some("cached-token".to_owned());
+            .expect("write v2 anti-cheat cache") = Some("cached-v2-token".to_owned());
+        *client
+            .anti_cheat_v3_token
+            .write()
+            .expect("write v3 anti-cheat cache") = Some("cached-v3-token".to_owned());
         let account = client.with_cookie("MUSIC_U=account-session".to_owned());
-        let (token, refreshed) = account
-            .anti_cheat_token(false)
+        let (v2, refreshed) = account
+            .anti_cheat_token(AntiCheatTokenVersion::V2, false)
             .await
-            .expect("read cached anti-cheat token");
-        assert_eq!(token, "cached-token");
+            .expect("read cached v2 anti-cheat token");
+        assert_eq!(v2, "cached-v2-token");
+        assert!(!refreshed);
+        let (v3, refreshed) = account
+            .anti_cheat_token(AntiCheatTokenVersion::V3, false)
+            .await
+            .expect("read cached v3 anti-cheat token");
+        assert_eq!(v3, "cached-v3-token");
         assert!(!refreshed);
     }
 
     #[tokio::test]
     #[ignore = "requires live NetEase anti-cheat access"]
-    async fn live_anti_cheat_token_registration_returns_and_refreshes_a_safe_token() {
+    async fn live_anti_cheat_token_registration_returns_and_refreshes_both_versions() {
         let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
-        let (first, refreshed) = client
-            .anti_cheat_token(false)
-            .await
-            .expect("register anti-cheat token");
-        assert!(refreshed);
-        assert!(!first.is_empty());
-        first
-            .parse::<header::HeaderValue>()
-            .expect("safe token header");
+        for version in [AntiCheatTokenVersion::V2, AntiCheatTokenVersion::V3] {
+            let (first, refreshed) = client
+                .anti_cheat_token(version, false)
+                .await
+                .expect("register anti-cheat token");
+            assert!(refreshed);
+            assert!(!first.is_empty());
+            first
+                .parse::<header::HeaderValue>()
+                .expect("safe token header");
 
-        let (cached, refreshed) = client
-            .anti_cheat_token(false)
-            .await
-            .expect("read cached anti-cheat token");
-        assert_eq!(cached, first);
-        assert!(!refreshed);
+            let (cached, refreshed) = client
+                .anti_cheat_token(version, false)
+                .await
+                .expect("read cached anti-cheat token");
+            assert_eq!(cached, first);
+            assert!(!refreshed);
 
-        let (second, refreshed) = client
-            .anti_cheat_token(true)
-            .await
-            .expect("refresh anti-cheat token");
-        assert!(refreshed);
-        assert!(!second.is_empty());
+            let (second, refreshed) = client
+                .anti_cheat_token(version, true)
+                .await
+                .expect("refresh anti-cheat token");
+            assert!(refreshed);
+            assert!(!second.is_empty());
+        }
     }
 
     #[test]

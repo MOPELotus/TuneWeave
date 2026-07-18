@@ -208,8 +208,17 @@ pub struct MembershipSummary {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AntiCheatTokenVersion {
+    V2,
+    #[default]
+    V3,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AntiCheatToken {
+    pub version: AntiCheatTokenVersion,
     pub token: String,
     pub registered: bool,
     pub refreshed: bool,
@@ -220,6 +229,7 @@ impl fmt::Debug for AntiCheatToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AntiCheatToken")
+            .field("version", &self.version)
             .field("token", &"[REDACTED]")
             .field("registered", &self.registered)
             .field("refreshed", &self.refreshed)
@@ -3090,12 +3100,14 @@ mod tests {
     #[test]
     fn anti_cheat_tokens_serialize_for_the_api_but_are_redacted_from_debug_output() {
         let token = AntiCheatToken {
+            version: AntiCheatTokenVersion::V2,
             token: "temporary-secret-token".to_owned(),
             registered: true,
             refreshed: false,
             extensions: Extensions::new(),
         };
         let value = serde_json::to_value(&token).expect("serialize anti-cheat token");
+        assert_eq!(value["version"], "v2");
         assert_eq!(value["token"], "temporary-secret-token");
         assert_eq!(value["registered"], true);
         let debug = format!("{token:?}");

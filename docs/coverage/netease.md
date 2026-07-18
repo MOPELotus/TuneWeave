@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=255`、`partial=4`、`implemented=60`、`verified=97`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=254`、`partial=4`、`implemented=60`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -250,7 +250,7 @@
 | `record_recent_voice` | `/record/recent/voice` | `pending` | — |
 | `register_anonimous` | `/register/anonimous` | `pending` | — |
 | `register_cellphone` | `/register/cellphone` | `pending` | — |
-| `register_checktoken_v2` | `/register/checktoken/v2` | `pending` | 2026-07-17 上游新增；固定请求易盾 `/v2/config/js?pn=YD00000558929251` 并读取 `result.conf`，评论和歌单收藏等 EAPI 链路依赖该版本，必须与 v3 缓存及能力明确分离 |
+| `register_checktoken_v2` | `/register/checktoken/v2` | `verified` | `GET/POST /v1/extensions/netease/register/checktoken/v2`，也可在通用 `/v1/extensions/netease/check-token` 以 `version=v2` 选择（固定请求易盾 `/v2/config/js?pn=YD00000558929251`，严格要求成功 JSON 的非空 `result.conf` 并校验安全 HTTP 头值；v2/v3 使用独立 URL 和共享于账户 client 的独立缓存，返回体以 `version` 明示版本，固定版本路由拒绝冲突参数，旧端点缺省仍为 v3；EAPI 可由 provider 受控取得并注入 v2 token，客户端不能提交 token；核心版本契约、双解析器、畸形响应、缓存隔离、通用/固定版本 GET/POST 和冲突输入均有测试；2026-07-18 真实易盾联网验证 v2/v3 首次注册、缓存命中与强制刷新全部成功） |
 | `register_checktoken_v3` | `/register/checktoken/v3` | `verified` | `GET/POST /v1/extensions/netease/check-token`，并兼容 `/v1/extensions/netease/register/checktoken`（当前明确对应 v3；GET 缺省复用进程内缓存，`refresh=1|true` 及 POST 强制刷新；固定请求官方易盾 `/v3/b?pn=YD00000558929251`，严格解析成功 JSONP 并校验安全 HTTP 头值；账户 client 共享缓存，要求 v3 checkToken 的 XEAPI 请求由 provider 自动取得并注入 `X-antiCheatToken`，不接受客户端传 token；稳定结果返回 `token/registered/refreshed`，序列化仍满足参考响应，Debug 和普通日志强制脱敏；核心模型、能力名、有效/字符串业务码、畸形/失败响应、共享缓存、查询布尔值、双路径 GET/POST、未知字段和 HTTP 包络均有测试；2026-07-18 真实易盾联网验证首次注册、缓存命中及强制刷新全部成功） |
 | `register_xeapikey` | `/register/xeapikey` | `pending` | — |
 | `related_allvideo` | `/related/allvideo` | `pending` | — |

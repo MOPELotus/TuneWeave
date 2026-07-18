@@ -21,21 +21,22 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AntiCheatToken, Artist, ArtistArea,
-    ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest, ArtistListRequest,
-    ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
-    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
-    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AntiCheatToken, AntiCheatTokenVersion,
+    Artist, ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
+    ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
+    ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -446,6 +447,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/extensions/netease/register/checktoken",
             get(netease_check_token).post(netease_check_token_refresh),
+        )
+        .route(
+            "/extensions/netease/register/checktoken/v2",
+            get(netease_check_token_v2).post(netease_check_token_v2_refresh),
+        )
+        .route(
+            "/extensions/netease/register/checktoken/v3",
+            get(netease_check_token_v3).post(netease_check_token_v3_refresh),
         )
         .route("/extensions/netease/api", post(netease_extension_api))
         .route(
@@ -6409,6 +6418,7 @@ struct NeteaseCalendarQuery {
 #[serde(deny_unknown_fields)]
 struct NeteaseCheckTokenQuery {
     refresh: Option<String>,
+    version: Option<String>,
 }
 
 async fn netease_check_token(
@@ -6417,8 +6427,9 @@ async fn netease_check_token(
 ) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
     let params = query_params(params)?;
     let refresh = parse_bool_parameter("refresh", params.refresh.as_deref(), false)?;
+    let version = parse_anti_cheat_token_version(params.version.as_deref())?;
     let provider = state.registry.require(Platform::Netease)?;
-    let token = provider.anti_cheat_token(refresh).await?;
+    let token = provider.anti_cheat_token(version, refresh).await?;
     Ok(Json(
         ApiResponse::new(token).with_platform(Platform::Netease),
     ))
@@ -6432,11 +6443,81 @@ async fn netease_check_token_refresh(
     if params.refresh.is_some() {
         parse_bool_parameter("refresh", params.refresh.as_deref(), true)?;
     }
+    let version = parse_anti_cheat_token_version(params.version.as_deref())?;
     let provider = state.registry.require(Platform::Netease)?;
-    let token = provider.anti_cheat_token(true).await?;
+    let token = provider.anti_cheat_token(version, true).await?;
     Ok(Json(
         ApiResponse::new(token).with_platform(Platform::Netease),
     ))
+}
+
+async fn netease_check_token_v2(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    netease_fixed_check_token(state, params, AntiCheatTokenVersion::V2, false).await
+}
+
+async fn netease_check_token_v2_refresh(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    netease_fixed_check_token(state, params, AntiCheatTokenVersion::V2, true).await
+}
+
+async fn netease_check_token_v3(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    netease_fixed_check_token(state, params, AntiCheatTokenVersion::V3, false).await
+}
+
+async fn netease_check_token_v3_refresh(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    netease_fixed_check_token(state, params, AntiCheatTokenVersion::V3, true).await
+}
+
+async fn netease_fixed_check_token(
+    state: AppState,
+    params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
+    version: AntiCheatTokenVersion,
+    force_refresh: bool,
+) -> Result<Json<ApiResponse<AntiCheatToken>>, ApiError> {
+    let params = query_params(params)?;
+    if let Some(requested) = params.version.as_deref()
+        && parse_anti_cheat_token_version(Some(requested))? != version
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "version conflicts with the check-token route",
+        )
+        .into());
+    }
+    let refresh = if force_refresh {
+        if params.refresh.is_some() {
+            parse_bool_parameter("refresh", params.refresh.as_deref(), true)?;
+        }
+        true
+    } else {
+        parse_bool_parameter("refresh", params.refresh.as_deref(), false)?
+    };
+    let provider = state.registry.require(Platform::Netease)?;
+    let token = provider.anti_cheat_token(version, refresh).await?;
+    Ok(Json(
+        ApiResponse::new(token).with_platform(Platform::Netease),
+    ))
+}
+
+fn parse_anti_cheat_token_version(value: Option<&str>) -> Result<AntiCheatTokenVersion, ApiError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("v3" | "3") => Ok(AntiCheatTokenVersion::V3),
+        Some("v2" | "2") => Ok(AntiCheatTokenVersion::V2),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported check-token version: {value}",
+        ))
+        .into()),
+    }
 }
 
 async fn netease_calendar(
@@ -7838,8 +7919,13 @@ mod tests {
             })
         }
 
-        async fn anti_cheat_token(&self, refresh: bool) -> Result<AntiCheatToken> {
+        async fn anti_cheat_token(
+            &self,
+            version: AntiCheatTokenVersion,
+            refresh: bool,
+        ) -> Result<AntiCheatToken> {
             Ok(AntiCheatToken {
+                version,
                 token: if refresh {
                     "refreshed-token"
                 } else {
@@ -15557,6 +15643,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(cached["data"]["version"], "v3");
         assert_eq!(cached["data"]["token"], "cached-token");
         assert_eq!(cached["data"]["registered"], true);
         assert_eq!(cached["data"]["refreshed"], false);
@@ -15581,6 +15668,24 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(posted["data"]["token"], "refreshed-token");
         assert_eq!(posted["data"]["refreshed"], true);
+
+        let (status, v2) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/check-token?version=v2",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v2["data"]["version"], "v2");
+        assert_eq!(v2["data"]["token"], "cached-token");
+
+        let (status, v2_alias) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/register/checktoken/v2?refresh=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v2_alias["data"]["version"], "v2");
+        assert_eq!(v2_alias["data"]["refreshed"], true);
     }
 
     #[tokio::test]
@@ -15588,7 +15693,9 @@ mod tests {
         for path in [
             "/v1/extensions/netease/check-token?refresh=sometimes",
             "/v1/extensions/netease/check-token?account=default",
+            "/v1/extensions/netease/check-token?version=v1",
             "/v1/extensions/netease/register/checktoken?unknown=true",
+            "/v1/extensions/netease/register/checktoken/v2?version=v3",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
