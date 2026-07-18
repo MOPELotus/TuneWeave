@@ -32,10 +32,10 @@
 | C04 | 内容展示 | 歌手目录、详情、专辑、歌曲及热门歌曲 | `verified` | 常规 `artist*` 展示链已验收 |
 | C05 | 内容展示 | 歌单详情及完整曲目列表 | `verified` | `playlist_detail/playlist_track_all` 已验收 |
 | C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收；YRC 与 LRC 并存时以 `format=yrc` 标记最高同步能力并同时保留两者 |
-| C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成，独立目录/收藏列表仍缺 |
+| C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成；实际视频 ID、专用标题/封面及非空完整创作者优先于包装摘要，独立目录/收藏列表仍缺 |
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收 |
-| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_catelist/dj_detail/dj_program/dj_program_detail` 已通过 provider 与真实统一 HTTP 验收；推荐、热门及其他常规目录仍待接入 |
+| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_catelist/dj_detail/dj_program/dj_program_detail` 已通过 provider 与真实统一 HTTP 验收；零摘要时长/时间不遮蔽完整音频时长或计划发布时间；推荐、热门及其他常规目录仍待接入 |
 | C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `partial` | `voice_lyric` 已通过 provider 与真实统一 HTTP 验收，覆盖 675 段非空转写和 `data=null`；`voice_detail`、`voicelist_*` 等详情与目录仍待接入 |
 | C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `partial` | 会员摘要已验证，`user_detail/user_detail_new` 未接入，账户资料待登录验收 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |

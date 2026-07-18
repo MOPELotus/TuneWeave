@@ -4871,7 +4871,7 @@ fn map_netease_podcast(raw: Value) -> Result<Podcast> {
     podcast.subscribed = radio_bool_field(&raw, &["subed", "subscribed"]);
     podcast.paid = podcast_paid_field(&raw, &["radioFeeType", "feeScope"]);
     podcast.purchased = radio_bool_field(&raw, &["buyed", "purchased"]);
-    podcast.created_at = podcast_u64_field(&raw, &["createTime"])
+    podcast.created_at = podcast_positive_u64_field(&raw, &["createTime"])
         .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
     podcast.extensions.insert("podcast".to_owned(), raw);
     Ok(podcast)
@@ -5142,7 +5142,7 @@ fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
             .with_platform(Platform::Netease)
         })?;
         let mut fallback = Track::new(audio_ref, name.clone());
-        fallback.duration_ms = podcast_u64_field(&raw, &["duration"]);
+        fallback.duration_ms = podcast_positive_u64_field(&raw, &["duration"]);
         audio = Some(fallback);
     }
 
@@ -5152,11 +5152,12 @@ fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
         radio_text_field(&raw, &["description", "programDesc"]).unwrap_or_default();
     episode.cover_url = radio_text_field(&raw, &["coverUrl", "blurCoverUrl"]);
     episode.creator = map_podcast_creator(raw.get("dj"))?;
-    episode.duration_ms = podcast_u64_field(&raw, &["duration"])
+    episode.duration_ms = podcast_positive_u64_field(&raw, &["duration"])
         .or_else(|| audio.as_ref().and_then(|audio| audio.duration_ms));
     episode.audio = audio;
-    episode.published_at = podcast_u64_field(&raw, &["createTime", "scheduledPublishTime"])
-        .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
+    episode.published_at =
+        podcast_positive_u64_field(&raw, &["createTime", "scheduledPublishTime"])
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
     episode.serial_number = podcast_u64_field(&raw, &["serialNum", "seqNo"]);
     episode.listener_count = podcast_u64_field(&raw, &["listenerCount", "playCount"]);
     episode.liked_count = podcast_u64_field(&raw, &["likedCount"]);
@@ -5201,6 +5202,14 @@ fn podcast_u64_field(raw: &Value, fields: &[&str]) -> Option<u64> {
     fields
         .iter()
         .find_map(|field| raw.get(field).and_then(json_u64))
+}
+
+fn podcast_positive_u64_field(raw: &Value, fields: &[&str]) -> Option<u64> {
+    fields.iter().find_map(|field| {
+        raw.get(*field)
+            .and_then(json_u64)
+            .filter(|value| *value > 0)
+    })
 }
 
 fn podcast_paid_field(raw: &Value, fields: &[&str]) -> Option<bool> {
@@ -8191,42 +8200,34 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
             .with_platform(Platform::Netease)
         })?;
     let artist_name = item.artist_name.clone();
-    let mut creator_items = item.artists;
-    if creator_items.is_empty() {
-        if let Some(creator) = item.artist {
-            creator_items.push(creator);
-        } else if let Some((id, name)) = item.artist_id.zip(artist_name.clone()) {
-            creator_items.push(crate::dto::ArtistMvCreator {
-                id,
-                name,
-                avatar_url: None,
-            });
-        }
-    }
-    let mut creators = creator_items
+    let mut creators = item
+        .artists
         .into_iter()
-        .filter(|creator| !creator.name.trim().is_empty())
-        .map(|creator| {
-            let creator_ref =
-                ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
+        .map(map_artist_mv_creator)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if creators.is_empty()
+        && let Some(creator) = item.artist
+        && let Some(creator) = map_artist_mv_creator(creator)?
+    {
+        creators.push(creator);
+    }
+    if creators.is_empty()
+        && let Some((id, name)) = item.artist_id.zip(artist_name)
+        && !name.trim().is_empty()
+    {
+        creators.push(CreatorSummary {
+            resource_ref: Some(ResourceRef::new(Platform::Netease, id.to_string()).map_err(
+                |error| {
                     TuneWeaveError::new(
                         ErrorCode::UpstreamError,
                         format!("NetEase returned an invalid MV artist id: {error}"),
                     )
                     .with_platform(Platform::Netease)
-                })?;
-            Ok(CreatorSummary {
-                resource_ref: Some(creator_ref),
-                name: creator.name,
-                avatar_url: creator.avatar_url,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if creators.is_empty()
-        && let Some(name) = artist_name.filter(|name| !name.trim().is_empty())
-    {
-        creators.push(CreatorSummary {
-            resource_ref: None,
+                },
+            )?),
             name,
             avatar_url: None,
         });
@@ -8240,13 +8241,33 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
         title: item.name,
         creators,
         description: String::new(),
-        cover_url: item.image_16x9_url.or(item.imgurl),
+        cover_url: normalized_string(item.image_16x9_url)
+            .or_else(|| normalized_string(item.imgurl)),
         duration_ms: item.duration,
         published_at: item.published_at,
         play_count: item.play_count,
         subscribed: item.subed,
         extensions,
     })
+}
+
+fn map_artist_mv_creator(creator: crate::dto::ArtistMvCreator) -> Result<Option<CreatorSummary>> {
+    if creator.name.trim().is_empty() {
+        return Ok(None);
+    }
+    let creator_ref =
+        ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid MV artist id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    Ok(Some(CreatorSummary {
+        resource_ref: Some(creator_ref),
+        name: creator.name,
+        avatar_url: normalized_string(creator.avatar_url),
+    }))
 }
 
 fn map_artist_videos_response(
@@ -8287,10 +8308,12 @@ fn map_artist_videos_response(
 fn map_artist_video(raw: Value) -> Result<Video> {
     let item: ArtistVideoRecord = parse_body(raw.clone())?;
     let id = item
+        .resource
+        .base
         .id
         .as_ref()
-        .and_then(json_scalar_string)
-        .or_else(|| item.resource.base.id.as_ref().and_then(json_scalar_string))
+        .and_then(usable_resource_id)
+        .or_else(|| item.id.as_ref().and_then(usable_resource_id))
         .ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -8922,10 +8945,10 @@ fn artist_work_kind(has_tracks: bool, has_videos: bool, block_type: &str) -> Art
 fn map_artist_new_video(raw: Value) -> Result<Video> {
     let item: ArtistNewVideoItem = parse_body(raw.clone())?;
     let id = item
-        .id
+        .mv_id
         .as_ref()
-        .and_then(json_scalar_string)
-        .or_else(|| item.mv_id.as_ref().and_then(json_scalar_string))
+        .and_then(usable_resource_id)
+        .or_else(|| item.id.as_ref().and_then(usable_resource_id))
         .ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -8962,9 +8985,7 @@ fn map_artist_new_video(raw: Value) -> Result<Video> {
             avatar_url: item.artist_image_url.clone(),
         });
     }
-    let published_at = item
-        .published_date
-        .filter(|published_at| !published_at.trim().is_empty())
+    let published_at = normalized_string(item.published_date)
         .or_else(|| item.published_at.as_ref().and_then(netease_published_at));
     let mut extensions = Extensions::new();
     extensions.insert("artist_new_video".to_owned(), raw);
@@ -8972,14 +8993,14 @@ fn map_artist_new_video(raw: Value) -> Result<Video> {
         resource_ref,
         platform: Platform::Netease,
         id,
-        title: item
-            .name
-            .filter(|title| !title.trim().is_empty())
-            .or(item.mv_name)
+        title: normalized_string(item.mv_name)
+            .or_else(|| normalized_string(item.name))
             .unwrap_or_default(),
         creators,
-        description: item.desc.or(item.brief_description).unwrap_or_default(),
-        cover_url: item.cover.or(item.mv_cover_url),
+        description: normalized_string(item.desc)
+            .or_else(|| normalized_string(item.brief_description))
+            .unwrap_or_default(),
+        cover_url: normalized_string(item.mv_cover_url).or_else(|| normalized_string(item.cover)),
         duration_ms: item.duration,
         published_at,
         play_count: item.play_count,
@@ -9039,6 +9060,12 @@ fn json_scalar_string(value: &Value) -> Option<String> {
         Value::Number(value) => Some(value.to_string()),
         _ => None,
     }
+}
+
+fn usable_resource_id(value: &Value) -> Option<String> {
+    json_scalar_string(value)
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty() && id != "0")
 }
 
 fn map_artist(
@@ -10558,7 +10585,11 @@ fn netease_multi_match_section_kind(section: &str) -> Option<SearchKind> {
 
 fn map_netease_multi_match_item(section: &str, kind: Option<SearchKind>, raw: Value) -> SearchItem {
     if section == "new_mlog" {
-        let record = raw.get("baseInfo").cloned().unwrap_or_else(|| raw.clone());
+        let record = raw
+            .get("baseInfo")
+            .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| raw.clone());
         if let Ok(mut video) = map_artist_video(record) {
             video.extensions.insert("multi_match_item".to_owned(), raw);
             return SearchItem::Video(video);
@@ -10924,11 +10955,57 @@ fn map_cloud_search_item(kind: SearchKind, raw: Value) -> SearchItem {
     mapped.unwrap_or_else(|error| opaque_cloud_search_item(kind, raw, Some(error.message)))
 }
 
-fn map_cloud_search_video(raw: Value) -> Result<Video> {
-    let source = ["data", "resource", "content"]
+fn cloud_search_item_source(raw: &Value) -> &Value {
+    let mut best = raw;
+    let mut best_score = cloud_search_item_source_score(raw);
+    for field in ["data", "resource", "content"] {
+        let Some(candidate) = raw.get(field).filter(|value| value.is_object()) else {
+            continue;
+        };
+        let score = cloud_search_item_source_score(candidate);
+        if score > best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
+fn cloud_search_item_source_score(source: &Value) -> usize {
+    let has_id = ["vid", "id", "resourceId", "userId", "djId"]
         .into_iter()
-        .find_map(|field| raw.get(field).filter(|value| value.is_object()))
-        .unwrap_or(&raw);
+        .any(|field| {
+            source
+                .get(field)
+                .and_then(json_scalar_string)
+                .is_some_and(|value| !value.trim().is_empty() && value != "0")
+        });
+    let has_title = ["title", "name", "nickname"]
+        .into_iter()
+        .any(|field| radio_text_field(source, &[field]).is_some());
+    let creator_count = preferred_array_field(source, &["creators", "artists", "creator"])
+        .map_or(0, Vec::len)
+        .min(4);
+    let metadata_count = [
+        "coverUrl",
+        "cover",
+        "picUrl",
+        "durationms",
+        "durationMs",
+        "duration",
+        "playTime",
+        "playCount",
+        "description",
+        "desc",
+    ]
+    .into_iter()
+    .filter(|field| source.get(*field).is_some_and(|value| !value.is_null()))
+    .count();
+    usize::from(has_id) * 16 + usize::from(has_title) * 16 + creator_count * 2 + metadata_count
+}
+
+fn map_cloud_search_video(raw: Value) -> Result<Video> {
+    let source = cloud_search_item_source(&raw);
     let id = ["vid", "id"]
         .into_iter()
         .find_map(|field| source.get(field).and_then(json_scalar_string))
@@ -10953,9 +11030,7 @@ fn map_cloud_search_video(raw: Value) -> Result<Video> {
         )
         .with_platform(Platform::Netease)
     })?;
-    let creators = ["creator", "creators", "artists"]
-        .into_iter()
-        .find_map(|field| source.get(field).and_then(Value::as_array))
+    let creators = preferred_array_field(source, &["creators", "artists", "creator"])
         .into_iter()
         .flatten()
         .filter_map(|creator| {
@@ -11009,10 +11084,7 @@ fn opaque_cloud_search_item(
     raw: Value,
     mapping_error: Option<String>,
 ) -> SearchItem {
-    let source = ["data", "resource", "content"]
-        .into_iter()
-        .find_map(|field| raw.get(field).filter(|value| value.is_object()))
-        .unwrap_or(&raw);
+    let source = cloud_search_item_source(&raw);
     let id = ["id", "vid", "userId", "resourceId", "djId"]
         .into_iter()
         .find_map(|field| source.get(field).and_then(json_scalar_string))
@@ -12141,6 +12213,46 @@ mod tests {
         };
         assert_eq!(malformed.kind, "album");
         assert!(malformed.extensions["mapping_error"].is_string());
+    }
+
+    #[test]
+    fn cloudsearch_video_prefers_the_richest_nested_resource_and_nonempty_creators() {
+        let page = map_cloud_search_response(
+            SearchKind::Video,
+            1,
+            0,
+            json!({
+                "code": 200,
+                "result": {
+                    "videoCount": 1,
+                    "videos": [{
+                        "id": "wrapper-summary",
+                        "title": "摘要标题",
+                        "data": {},
+                        "resource": {
+                            "vid": "video-rich",
+                            "title": "完整视频",
+                            "coverUrl": "https://example.test/rich.jpg",
+                            "creators": [],
+                            "artists": [
+                                {"id": 6452, "name": "周杰伦"},
+                                {"id": 13193, "name": "五月天"}
+                            ],
+                            "creator": [{"id": 1, "name": "单人摘要"}]
+                        }
+                    }]
+                }
+            }),
+        )
+        .expect("map richest nested video search resource");
+
+        let SearchItem::Video(video) = &page.items[0] else {
+            panic!("video result must remain typed");
+        };
+        assert_eq!(video.resource_ref.to_string(), "netease:video-rich");
+        assert_eq!(video.title, "完整视频");
+        assert_eq!(video.creators.len(), 2);
+        assert_eq!(video.creators[1].name, "五月天");
     }
 
     #[test]
@@ -13920,6 +14032,16 @@ mod tests {
             "netease:2603965162"
         );
         assert_eq!(episode_stream.extensions["episode"]["id"], "1367665101");
+
+        let mut incomplete_summary =
+            fixture_podcast_program(1_367_665_102, 336_355_127, 2_603_965_162);
+        incomplete_summary["duration"] = json!(0);
+        incomplete_summary["createTime"] = json!(0);
+        incomplete_summary["scheduledPublishTime"] = json!(1_704_067_200_000_u64);
+        let recovered = map_netease_podcast_episode(incomplete_summary)
+            .expect("recover podcast timing from richer fallback fields");
+        assert_eq!(recovered.duration_ms, Some(258_000));
+        assert_eq!(recovered.published_at, unix_rfc3339(1_704_067_200));
     }
 
     #[test]
@@ -14585,6 +14707,30 @@ mod tests {
     }
 
     #[test]
+    fn artist_mv_mapping_falls_back_after_blank_creator_and_cover_summaries() {
+        let video = map_artist_mv(json!({
+            "id": 22695250,
+            "name": "任性",
+            "artist": {
+                "id": 6452,
+                "name": "周杰伦",
+                "img1v1Url": "https://example.test/artist.jpg"
+            },
+            "artists": [{"id": 0, "name": ""}],
+            "imgurl16v9": "  ",
+            "imgurl": "https://example.test/square.jpg"
+        }))
+        .expect("fall back from blank MV summaries");
+
+        assert_eq!(video.creators.len(), 1);
+        assert_eq!(video.creators[0].name, "周杰伦");
+        assert_eq!(
+            video.cover_url.as_deref(),
+            Some("https://example.test/square.jpg")
+        );
+    }
+
+    #[test]
     fn maps_followed_artist_catalog_and_subscription_metadata() {
         let response: ArtistSublistEnvelope = serde_json::from_value(json!({
             "data": [
@@ -14744,7 +14890,7 @@ mod tests {
                 "page": { "cursor": "2", "more": true, "size": 1 },
                 "records": [
                     {
-                        "id": "22695250",
+                        "id": "record-summary-id",
                         "type": 1,
                         "resource": {
                             "mlogBaseData": {
@@ -15011,10 +15157,14 @@ mod tests {
                 "hasMore": true,
                 "newWorks": [
                     {
-                        "id": 1099001,
-                        "name": "新 MV",
-                        "cover": "https://example.test/new-mv.jpg",
+                        "id": "work-summary-id",
+                        "mvId": 1099001,
+                        "name": "作品摘要",
+                        "mvName": "新 MV",
+                        "cover": "https://example.test/work-summary.jpg",
+                        "mvCoverUrl": "https://example.test/new-mv.jpg",
                         "playCount": 3456,
+                        "desc": " ",
                         "briefDesc": "关注歌手更新",
                         "artistName": "周杰伦",
                         "artistImgUrl": "https://example.test/artist.jpg",
@@ -15034,6 +15184,11 @@ mod tests {
 
         assert_eq!(page.items[0].resource_ref.to_string(), "netease:1099001");
         assert_eq!(page.items[0].title, "新 MV");
+        assert_eq!(page.items[0].description, "关注歌手更新");
+        assert_eq!(
+            page.items[0].cover_url.as_deref(),
+            Some("https://example.test/new-mv.jpg")
+        );
         assert_eq!(
             page.items[0].creators[0]
                 .resource_ref
