@@ -48,17 +48,18 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastEpisode, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
-    PodcastListRequest, PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
+    PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -213,6 +214,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/podcasts", get(podcasts))
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
+        .route("/episodes", get(podcast_episode_chart))
         .route("/episodes/{reference}", get(podcast_episode))
         .route("/episodes/{reference}/lyrics", get(podcast_episode_lyrics))
         .route("/episodes/{reference}/stream", get(podcast_episode_stream))
@@ -996,6 +998,47 @@ async fn podcasts(
             limit,
             offset,
             page,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastEpisodeChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    catalog: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn podcast_episode_chart(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastEpisodeChartParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastEpisodeChartEntry>>>, ApiError> {
+    let params = query_params(params)?;
+    let kind = parse_podcast_episode_chart_kind(params.catalog.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .podcast_episode_chart(&PodcastEpisodeChartRequest {
+            kind,
+            limit,
+            offset,
             account: account.clone(),
         })
         .await?;
@@ -6681,6 +6724,28 @@ fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeav
     }
 }
 
+fn parse_podcast_episode_chart_kind(
+    value: Option<&str>,
+) -> Result<PodcastEpisodeChartKind, TuneWeaveError> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TuneWeaveError::invalid_request("catalog must not be empty"))?
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "popular" | "top" | "toplist" => Ok(PodcastEpisodeChartKind::Popular),
+        "trending24_hours" | "trending_24_hours" | "hours" | "24h" => {
+            Ok(PodcastEpisodeChartKind::Trending24Hours)
+        }
+        _ => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode chart catalog: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["popular", "trending24_hours"]
+        }))),
+    }
+}
+
 fn parse_u32_parameter(
     name: &str,
     value: Option<&str>,
@@ -6833,6 +6898,7 @@ mod tests {
                 Capability::PodcastList,
                 Capability::PodcastDetail,
                 Capability::PodcastEpisodeList,
+                Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeStream,
                 Capability::PodcastEpisodeLyrics,
@@ -7361,6 +7427,51 @@ mod tests {
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Extensions::from([("request".to_owned(), json!(request))]),
+                },
+            })
+        }
+
+        async fn podcast_episode_chart(
+            &self,
+            request: &PodcastEpisodeChartRequest,
+        ) -> Result<Page<PodcastEpisodeChartEntry>> {
+            if request.kind == PodcastEpisodeChartKind::Trending24Hours && request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the 24-hour test episode chart does not support offset",
+                ));
+            }
+            let episode = sample_podcast_episode("3724712156", "793942484", "3407644127");
+            let entry = PodcastEpisodeChartEntry {
+                rank: 1,
+                previous_rank: Some(-1),
+                score: Some(302_820),
+                episode,
+                extensions: Extensions::from([(
+                    "chart_entry".to_owned(),
+                    json!({"rank": 1, "lastRank": -1, "score": 302820}),
+                )]),
+            };
+            Ok(Page {
+                items: vec![entry],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: (request.kind == PodcastEpisodeChartKind::Trending24Hours).then_some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([
+                        ("kind".to_owned(), json!(request.kind)),
+                        ("requested_offset".to_owned(), json!(request.offset)),
+                        (
+                            "offset_submitted".to_owned(),
+                            json!(request.kind == PodcastEpisodeChartKind::Popular),
+                        ),
+                        ("offset_applied".to_owned(), json!(false)),
+                        ("offset_control_supported".to_owned(), json!(false)),
+                        ("continuation_supported".to_owned(), json!(false)),
+                        ("updated_at".to_owned(), json!("2024-01-01T00:00:00Z")),
+                        ("request".to_owned(), json!(request)),
+                    ]),
                 },
             })
         }
@@ -10966,8 +11077,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_episode_charts_preserve_rank_and_real_pagination_controls() {
+        let (status, popular) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes?catalog=toplist&limit=3&offset=40&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(popular["data"][0]["rank"], 1);
+        assert_eq!(popular["data"][0]["previous_rank"], -1);
+        assert_eq!(popular["data"][0]["score"], 302_820);
+        assert_eq!(popular["data"][0]["episode"]["ref"], "netease:3724712156");
+        assert_eq!(
+            popular["data"][0]["episode"]["audio"]["ref"],
+            "netease:3407644127"
+        );
+        assert_eq!(popular["meta"]["pagination"]["limit"], 3);
+        assert_eq!(popular["meta"]["pagination"]["offset"], 0);
+        assert_eq!(popular["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(popular["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(popular["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            popular["meta"]["pagination"]["extensions"]["kind"],
+            "popular"
+        );
+        assert_eq!(
+            popular["meta"]["pagination"]["extensions"]["requested_offset"],
+            40
+        );
+        assert_eq!(
+            popular["meta"]["pagination"]["extensions"]["offset_applied"],
+            false
+        );
+        assert_eq!(
+            popular["meta"]["pagination"]["extensions"]["offset_submitted"],
+            true
+        );
+        assert_eq!(popular["meta"]["platform"], "netease");
+        assert_eq!(popular["meta"]["account"], "podcast-user");
+
+        let (status, hours) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes?catalog=24h&limit=10&platform=netease",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hours["meta"]["pagination"]["total"], 1);
+        assert_eq!(
+            hours["meta"]["pagination"]["extensions"]["kind"],
+            "trending24_hours"
+        );
+        assert_eq!(
+            hours["meta"]["pagination"]["extensions"]["offset_applied"],
+            false
+        );
+        assert_eq!(
+            hours["meta"]["pagination"]["extensions"]["offset_submitted"],
+            false
+        );
+    }
+
+    #[tokio::test]
     async fn podcast_routes_reject_invalid_references_pagination_and_order() {
         for path in [
+            "/v1/episodes",
+            "/v1/episodes?catalog=unknown",
+            "/v1/episodes?catalog=popular&limit=0",
+            "/v1/episodes?catalog=popular&limit=101",
+            "/v1/episodes?catalog=popular&offset=invalid",
+            "/v1/episodes?catalog=hours&offset=1",
+            "/v1/episodes?catalog=popular&unknown=true",
+            "/v1/episodes?catalog=popular&platform=unknown",
             "/v1/podcasts/336355127",
             "/v1/episodes/1367665101",
             "/v1/episodes/1367665101/lyrics",

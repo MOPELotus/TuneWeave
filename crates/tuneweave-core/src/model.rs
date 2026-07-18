@@ -850,6 +850,43 @@ impl PodcastEpisodeListRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastEpisodeChartKind {
+    #[default]
+    Popular,
+    Trending24Hours,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeChartRequest {
+    pub kind: PodcastEpisodeChartKind,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastEpisodeChartRequest {
+    #[must_use]
+    pub const fn new(kind: PodcastEpisodeChartKind, limit: u32, offset: u32) -> Self {
+        Self {
+            kind,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeChartEntry {
+    pub rank: u32,
+    pub previous_rank: Option<i64>,
+    pub score: Option<u64>,
+    pub episode: PodcastEpisode,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PodcastEpisodeStream {
     #[serde(rename = "ref")]
@@ -2633,6 +2670,33 @@ mod tests {
         assert_eq!(request.offset, 60);
         assert!(!request.ascending);
         assert_eq!(request.account.as_deref(), Some("spoken-word"));
+    }
+
+    #[test]
+    fn podcast_episode_chart_keeps_rank_movement_and_episode_identity_explicit() {
+        let mut request =
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Trending24Hours, 30, 0);
+        request.account = Some("spoken-word".to_owned());
+        let episode = PodcastEpisode::new(
+            ResourceRef::new(Platform::Netease, "3724712156").expect("valid episode reference"),
+            "贪生Pass",
+        );
+        let entry = PodcastEpisodeChartEntry {
+            rank: 1,
+            previous_rank: Some(-1),
+            score: Some(302_820),
+            episode,
+            extensions: Extensions::new(),
+        };
+
+        let request_value = serde_json::to_value(request).expect("serialize chart request");
+        assert_eq!(request_value["kind"], "trending24_hours");
+        assert_eq!(request_value["account"], "spoken-word");
+        let entry_value = serde_json::to_value(entry).expect("serialize chart entry");
+        assert_eq!(entry_value["rank"], 1);
+        assert_eq!(entry_value["previous_rank"], -1);
+        assert_eq!(entry_value["score"], 302_820);
+        assert_eq!(entry_value["episode"]["ref"], "netease:3724712156");
     }
 
     #[test]

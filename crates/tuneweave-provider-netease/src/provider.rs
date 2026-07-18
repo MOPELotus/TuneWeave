@@ -46,18 +46,19 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastEpisode, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
-    PodcastListRequest, PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
+    PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -412,6 +413,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastList,
             Capability::PodcastDetail,
             Capability::PodcastEpisodeList,
+            Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeStream,
             Capability::PodcastEpisodeLyrics,
@@ -805,6 +807,16 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_episodes_request(id, request, limit);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_episodes(response.body, limit, request.offset)
+    }
+
+    async fn podcast_episode_chart(
+        &self,
+        request: &PodcastEpisodeChartRequest,
+    ) -> Result<Page<PodcastEpisodeChartEntry>> {
+        let (path, payload) = netease_podcast_episode_chart_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_episode_chart(response.body, request)
     }
 
     async fn podcast_episode(&self, id: &str, account: Option<&str>) -> Result<PodcastEpisode> {
@@ -4478,6 +4490,37 @@ fn netease_podcast_episodes_request(
     )
 }
 
+fn netease_podcast_episode_chart_request(
+    request: &PodcastEpisodeChartRequest,
+) -> Result<(&'static str, Value)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode chart limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    match request.kind {
+        PodcastEpisodeChartKind::Popular => Ok((
+            "/api/program/toplist/v1",
+            json!({ "limit": request.limit, "offset": request.offset }),
+        )),
+        PodcastEpisodeChartKind::Trending24Hours => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase 24-hour podcast episode chart does not support offset",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "kind": request.kind, "offset": request.offset })));
+            }
+            Ok((
+                "/api/djprogram/toplist/hours",
+                json!({ "limit": request.limit }),
+            ))
+        }
+    }
+}
+
 fn netease_podcast_episode_request(id: u64) -> (&'static str, Value) {
     ("/api/dj/program/detail", json!({ "id": id }))
 }
@@ -5088,6 +5131,94 @@ fn map_netease_podcast_episodes(
             has_more,
             extensions: Extensions::from([("response".to_owned(), body)]),
         },
+    })
+}
+
+fn map_netease_podcast_episode_chart(
+    body: Value,
+    request: &PodcastEpisodeChartRequest,
+) -> Result<Page<PodcastEpisodeChartEntry>> {
+    ensure_success(&body)?;
+    let (raw_items, total, update_time_ms, offset_submitted) = match request.kind {
+        PodcastEpisodeChartKind::Popular => (
+            body.get("toplist").and_then(Value::as_array).cloned(),
+            None,
+            body.get("updateTime").and_then(json_u64),
+            true,
+        ),
+        PodcastEpisodeChartKind::Trending24Hours => {
+            let data = body
+                .get("data")
+                .filter(|data| data.is_object())
+                .ok_or_else(|| podcast_item_error("24-hour chart data", &body))?;
+            (
+                data.get("list").and_then(Value::as_array).cloned(),
+                data.get("total").and_then(json_u64),
+                data.get("updateTime").and_then(json_u64),
+                false,
+            )
+        }
+    };
+    let raw_items = raw_items.ok_or_else(|| podcast_item_error("episode chart list", &body))?;
+    let entries = raw_items
+        .into_iter()
+        .map(map_netease_podcast_episode_chart_entry)
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::from([
+        ("kind".to_owned(), json!(request.kind)),
+        ("returned_count".to_owned(), json!(entries.len())),
+        (
+            "limit_applied".to_owned(),
+            json!(entries.len() <= request.limit as usize),
+        ),
+        ("requested_offset".to_owned(), json!(request.offset)),
+        ("offset_submitted".to_owned(), json!(offset_submitted)),
+        ("offset_applied".to_owned(), json!(false)),
+        ("offset_control_supported".to_owned(), json!(false)),
+        ("continuation_supported".to_owned(), json!(false)),
+    ]);
+    insert_extension(&mut extensions, "update_time_ms", update_time_ms);
+    if let Some(updated_at) = update_time_ms.and_then(|value| unix_rfc3339(value / 1_000)) {
+        extensions.insert("updated_at".to_owned(), json!(updated_at));
+    }
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items: entries,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
+fn map_netease_podcast_episode_chart_entry(raw: Value) -> Result<PodcastEpisodeChartEntry> {
+    let program = raw
+        .get("program")
+        .filter(|program| program.is_object())
+        .cloned()
+        .ok_or_else(|| podcast_item_error("episode chart program", &raw))?;
+    let rank = raw
+        .get("rank")
+        .and_then(json_u64)
+        .and_then(|rank| u32::try_from(rank).ok())
+        .filter(|rank| *rank > 0)
+        .ok_or_else(|| podcast_item_error("positive episode chart rank", &raw))?;
+    let mut episode = map_netease_podcast_episode(program)?;
+    episode.paid = raw
+        .get("programFeeType")
+        .and_then(json_i64)
+        .map(|fee_type| fee_type > 0)
+        .or(episode.paid);
+    Ok(PodcastEpisodeChartEntry {
+        rank,
+        previous_rank: raw.get("lastRank").and_then(json_i64),
+        score: raw.get("score").and_then(json_u64),
+        episode,
+        extensions: Extensions::from([("chart_entry".to_owned(), raw)]),
     })
 }
 
@@ -14123,6 +14254,39 @@ mod tests {
             netease_podcast_episode_lyrics_request(1_367_665_101),
             ("/api/voice/lyric/get", json!({"programId": 1_367_665_101}))
         );
+        assert_eq!(
+            netease_podcast_episode_chart_request(&PodcastEpisodeChartRequest::new(
+                PodcastEpisodeChartKind::Popular,
+                20,
+                40,
+            ))
+            .expect("popular episode chart request"),
+            (
+                "/api/program/toplist/v1",
+                json!({"limit": 20, "offset": 40})
+            )
+        );
+        assert_eq!(
+            netease_podcast_episode_chart_request(&PodcastEpisodeChartRequest::new(
+                PodcastEpisodeChartKind::Trending24Hours,
+                30,
+                0,
+            ))
+            .expect("24-hour episode chart request"),
+            ("/api/djprogram/toplist/hours", json!({"limit": 30}))
+        );
+        for invalid in [
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Popular, 0, 0),
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Popular, 101, 0),
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Trending24Hours, 20, 1),
+        ] {
+            assert_eq!(
+                netease_podcast_episode_chart_request(&invalid)
+                    .expect_err("invalid episode chart request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
 
         for invalid in [
             PodcastListRequest::new(PodcastCatalog::Hot, 0, 0),
@@ -14689,6 +14853,119 @@ mod tests {
             .expect("recover podcast timing from richer fallback fields");
         assert_eq!(recovered.duration_ms, Some(258_000));
         assert_eq!(recovered.published_at, unix_rfc3339(1_704_067_200));
+    }
+
+    #[test]
+    fn maps_episode_charts_without_faking_ignored_offset_or_losing_rank_movement() {
+        let popular_request =
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Popular, 1, 40);
+        let popular = map_netease_podcast_episode_chart(
+            json!({
+                "code": 200,
+                "updateTime": 1_704_067_200_000_u64,
+                "toplist": [{
+                    "program": fixture_podcast_program(
+                        1_367_665_101,
+                        336_355_127,
+                        2_603_965_162
+                    ),
+                    "rank": 2,
+                    "lastRank": -1,
+                    "score": 41_300,
+                    "programFeeType": 2,
+                    "futureField": "preserved"
+                }]
+            }),
+            &popular_request,
+        )
+        .expect("map popular episode chart");
+        assert_eq!(popular.items.len(), 1);
+        assert_eq!(popular.items[0].rank, 2);
+        assert_eq!(popular.items[0].previous_rank, Some(-1));
+        assert_eq!(popular.items[0].score, Some(41_300));
+        assert_eq!(popular.items[0].episode.id, "1367665101");
+        assert_eq!(popular.items[0].episode.paid, Some(true));
+        assert_eq!(
+            popular.items[0].extensions["chart_entry"]["futureField"],
+            "preserved"
+        );
+        assert_eq!(popular.pagination.limit, 1);
+        assert_eq!(popular.pagination.offset, 0);
+        assert_eq!(popular.pagination.total, None);
+        assert_eq!(popular.pagination.next_offset, None);
+        assert!(!popular.pagination.has_more);
+        assert_eq!(popular.pagination.extensions["kind"], "popular");
+        assert_eq!(popular.pagination.extensions["requested_offset"], 40);
+        assert_eq!(popular.pagination.extensions["offset_applied"], false);
+        assert_eq!(popular.pagination.extensions["offset_submitted"], true);
+        assert_eq!(
+            popular.pagination.extensions["continuation_supported"],
+            false
+        );
+        assert_eq!(
+            popular.pagination.extensions["updated_at"],
+            "2024-01-01T00:00:00Z"
+        );
+
+        let hours_request =
+            PodcastEpisodeChartRequest::new(PodcastEpisodeChartKind::Trending24Hours, 1, 0);
+        let hours = map_netease_podcast_episode_chart(
+            json!({
+                "code": 200,
+                "msg": null,
+                "data": {
+                    "total": 1,
+                    "updateTime": 1_704_067_260_000_u64,
+                    "list": [{
+                        "program": fixture_podcast_program(
+                            2_058_695_201,
+                            336_355_127,
+                            1_336_048_748
+                        ),
+                        "rank": 1,
+                        "lastRank": 3,
+                        "score": 302_820,
+                        "programFeeType": 0
+                    }]
+                }
+            }),
+            &hours_request,
+        )
+        .expect("map 24-hour episode chart");
+        assert_eq!(hours.items[0].rank, 1);
+        assert_eq!(hours.items[0].previous_rank, Some(3));
+        assert_eq!(hours.items[0].score, Some(302_820));
+        assert_eq!(hours.pagination.total, Some(1));
+        assert_eq!(hours.pagination.extensions["kind"], "trending24_hours");
+        assert_eq!(hours.pagination.extensions["offset_submitted"], false);
+        assert_eq!(hours.pagination.extensions["offset_applied"], false);
+        assert_eq!(hours.pagination.extensions["response"]["code"], 200);
+
+        for (invalid, request) in [
+            (json!({"code": 200}), &popular_request),
+            (
+                json!({"code": 200, "toplist": [{"rank": 1}]}),
+                &popular_request,
+            ),
+            (
+                json!({
+                    "code": 200,
+                    "toplist": [{
+                        "program": fixture_podcast_program(1, 2, 3),
+                        "rank": 0
+                    }]
+                }),
+                &popular_request,
+            ),
+            (json!({"code": 200, "data": {}}), &hours_request),
+        ] {
+            assert_eq!(
+                map_netease_podcast_episode_chart(invalid, request)
+                    .expect_err("invalid episode chart response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
@@ -20055,6 +20332,35 @@ mod tests {
         assert_eq!(page.pagination.extensions["catalog"], "paid");
         assert_eq!(page.pagination.extensions["limit_applied"], true);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_episode_charts_preserve_rank_and_playable_audio_identity() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for kind in [
+            PodcastEpisodeChartKind::Popular,
+            PodcastEpisodeChartKind::Trending24Hours,
+        ] {
+            let page = MusicProvider::podcast_episode_chart(
+                &provider,
+                &PodcastEpisodeChartRequest::new(kind, 3, 0),
+            )
+            .await
+            .expect("live public episode chart");
+            assert_eq!(page.items.len(), 3);
+            assert!(page.items.iter().all(|entry| {
+                entry.rank > 0
+                    && !entry.episode.id.is_empty()
+                    && !entry.episode.name.is_empty()
+                    && entry.episode.audio.is_some()
+            }));
+            assert_eq!(page.pagination.offset, 0);
+            assert_eq!(page.pagination.next_offset, None);
+            assert!(!page.pagination.has_more);
+            assert_eq!(page.pagination.extensions["kind"], json!(kind));
+            assert_eq!(page.pagination.extensions["response"]["code"], 200);
+        }
     }
 
     #[tokio::test]
