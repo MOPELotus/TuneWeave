@@ -24,7 +24,7 @@
 | `album_list_style` | `/album/list/style` | `verified` | `GET /v1/digital-albums?catalog=style`（`ZH/EA` 统一区域值映射到上游 `Z_H/E_A`；2026-07-16 HTTP 实测返回 2 项并保留销量与购买状态） |
 | `album_new` | `/album/new` | `verified` | `GET /v1/albums?catalog=new`（`area` 筛选；2026-07-16 匿名 HTTP 实测返回 2 项、总数 500） |
 | `album_newest` | `/album/newest` | `verified` | `GET /v1/albums?catalog=newest`（2026-07-16 匿名 HTTP 实测首页共 12 项，统一分页返回前 2 项） |
-| `album_privilege` | `/album/privilege` | `verified` | `GET /v1/albums/{ref}/track-entitlements`（2026-07-16 匿名 HTTP 实测 `netease:168223858` 共 10 项，首项 `netease:2058263030` 可播 320 kbps、最高 999 kbps，并保留无损及 Hi-Res 权益） |
+| `album_privilege` | `/album/privilege` | `verified` | `GET /v1/albums/{ref}/track-entitlements`（可用音质固定按能力升序去重，192/320 kbps 不混档，零 `playMaxbr` 不遮住有效 `maxbr`；2026-07-16 匿名 HTTP 实测 `netease:168223858` 共 10 项，首项 `netease:2058263030` 可播 320 kbps、最高 999 kbps，并保留无损及 Hi-Res 权益） |
 | `album_songsaleboard` | `/album/songsaleboard` | `verified` | `GET /v1/charts/digital-albums`（完整支持 `daily/week/year/total` 与数字专辑/数字单曲；2026-07-16 HTTP 实测 2025 年数字单曲榜共 10 项，首项 `netease:83848829`《好想爱这个世界啊》，销量 316218） |
 | `album_sub` | `/album/sub` | `implemented` | `PUT/DELETE /v1/account/library/albums/{ref}`（收藏与取消收藏路径均已实现；2026-07-16 匿名 HTTP 实测正确映射为 401 `authentication_required`，待真实账户验证成功写入） |
 | `album_sublist` | `/album/sublist` | `verified` | `GET /v1/account/library/albums`（分页、收藏时间与 `paidCount` 等元数据已完整映射；2026-07-17 持久化真实账户 HTTP 实测返回 5 项） |
@@ -49,7 +49,7 @@
 | `artists` | `/artists` | `verified` | `GET /v1/artists/{ref}/overview`（统一为 `ArtistOverview`，明确分离歌手摘要、50 首精选 `Track[]` 和 `has_more_tracks`，不与 `/artist/list` 或完整曲目目录误合并；歌手、曲目及完整响应原文分别保留；2026-07-16 匿名 HTTP 实测 `netease:6452` 返回周杰伦、568 首总曲目计数、50 首精选，首项 `netease:210049`《布拉格广场》，`has_more_tracks=true`） |
 | `audio_match` | `/audio/match` | `implemented` | `POST /v1/audio/recognize`（统一 `platform/account/fingerprint/duration_seconds` 输入，兼容参考项目 `audioFP/duration` 字段；多候选曲目、命中起点、查询 ID、无匹配原因和完整上游响应均已映射；离线成功命中样本、输入边界及 HTTP 端点测试已完成；2026-07-16 匿名 HTTP 实测无匹配路径返回 `code=200`、空 `matches`、`no_match_reason=10` 与真实查询 ID，待有效音频指纹验证真实成功命中） |
 | `avatar_upload` | `/avatar/upload` | `implemented` | `PUT /v1/account/avatar`（统一以 `platform/account/filename` 查询参数、`Content-Type: image/*` 和原始图片请求体写入，最大 20 MiB；完整实现 WeAPI 申请 `yyimgs` NOS 凭据、原始字节上传及 EAPI 提交 `imgId` 三段流程，统一返回 URL/图片 ID，NOS token 不进入响应或日志；兼容 `imgSize/imgX/imgY` 参数并明确记录参考实现未实际应用裁剪；离线映射、认证前置、参数别名、大小边界、标准错误包络及 token 防泄漏测试已完成；2026-07-16 匿名 HTTP 实测在 NOS 分配前稳定返回 401 `authentication_required`，待真实账户验证最终写入） |
-| `banner` | `/banner` | `verified` | `GET /v1/banners`（完整支持 `client=pc/android/iphone/ipad`，并兼容参考项目 `type=0/1/2/3`；同时存在时优先使用大图 `bigImageUrl` 与主标题 `mainTitle`，再回退普通图片/类型标题；横幅 ID、跳转 URL、独家标志及歌曲/专辑/歌手/歌单/MV/网页/未知目标进入稳定字段，监测和广告等完整原文保留在 `extensions.banner`；2026-07-16 适配器与统一 HTTP 均逐分支联网实测成功，PC 7 项、Android 8 项、iPhone 8 项、iPad 6 项，首项目标分别正确映射为网页或 `netease:384808686` 专辑） |
+| `banner` | `/banner` | `verified` | `GET /v1/banners`（完整支持 `client=pc/android/iphone/ipad`，并兼容参考项目 `type=0/1/2/3`；同时存在时优先使用非空大图 `bigImageUrl` 与主标题 `mainTitle`，空白值不会遮住普通图片/类型标题；横幅 ID、跳转 URL、独家标志及歌曲/专辑/歌手/歌单/MV/网页/未知目标进入稳定字段，监测和广告等完整原文保留在 `extensions.banner`；2026-07-16 适配器与统一 HTTP 均逐分支联网实测成功，PC 7 项、Android 8 项、iPhone 8 项、iPad 6 项，首项目标分别正确映射为网页或 `netease:384808686` 专辑） |
 | `batch` | `/batch` | `verified` | `GET/POST /v1/extensions/netease/batch`（完整保留任意 `/api/...` 子请求及逐项原始响应，支持参考 GET 查询键、POST 顶层动态键和 `requests` 结构化容器；对象值自动序列化为上游真实要求的 JSON 文本，预序列化字符串原样保留；完整支持 `eapi/weapi/api/linuxapi/xeapi`、`crypto/protocol`、`e_r/encrypted_response` 与 `account`，逐路径限制固定网易云域名并拒绝 Cookie、域名、代理、请求头和 IP 等传输注入；2026-07-16 适配器及统一 HTTP 对五种协议均联网实测顶层/子请求 `code=200`，每种取得 7 条横幅，参考 GET 形态加 `e_r=true` 亦成功解密并返回 7 条，不存在的账户别名实测为 401） |
 | `broadcast_category_region_get` | `/broadcast/category/region/get` | `verified` | `GET /v1/radio/taxonomy`（统一为 `RadioTaxonomy`，分类与地区 ID 均保持平台不透明字符串，单项及完整响应原文保留在扩展中，可直接供后续广播电台列表筛选；支持 `platform/account` 选择且公开响应无需登录；2026-07-16 适配器与统一 HTTP 均联网实测成功，返回 12 个分类和 32 个地区，首项分别为 `1`“音乐台”与 `407`“网络台”，原始上游 `code=200`） |
 | `broadcast_channel_collect_list` | `/broadcast/channel/collect/list` | `verified` | `GET /v1/account/library/radio-stations`（以 `platform/account` 选择登录态，完整提交参考实现的 `contentType/timeReverseOrder/startDate/limit`，并补齐参考接口声明的 `offset` 分页；统一为 `RadioStation[]`，兼容对象及 JSON 字符串嵌套条目，空的旧列表别名不会遮住后续嵌套非空列表；收藏项、频道原文和完整分页响应分别保留在扩展中；2026-07-17 持久化真实账户 HTTP 实测成功返回空收藏列表） |
@@ -168,7 +168,7 @@
 | `login_refresh` | `/login/refresh` | `verified` | `POST /v1/auth/session/refresh`（2026-07-17 持久化真实账户 HTTP 实测返回已认证；新 Cookie 原子替换为单一代际，服务重启后会话及 EAPI 云盘下载继续成功） |
 | `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证；2026-07-17 真实二维码确认后返回已认证，并在服务重启后从 `platform/account` 持久化存储恢复） |
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
-| `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖） |
+| `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖；逐字格式优先且全部文本并存保留，无效旧贡献者 ID 不遮住有效 `userId`） |
 | `lyric_new` | `/lyric/new` | `verified` | `GET /v1/tracks/{ref}/lyrics`（普通、翻译、罗马音、逐字及逐字翻译/罗马音均保留；YRC 与 LRC 并存时稳定标记 `format=yrc`，2026-07-18 以公开曲目 `185809` 真实验证两者同时存在且逐字能力不会再被逐行格式覆盖） |
 | `mlog_music_rcmd` | `/mlog/music/rcmd` | `pending` | — |
 | `mlog_to_video` | `/mlog/to/video` | `pending` | — |
@@ -195,7 +195,7 @@
 | `mv_first` | `/mv/first` | `pending` | — |
 | `mv_sub` | `/mv/sub` | `pending` | — |
 | `mv_sublist` | `/mv/sublist` | `pending` | — |
-| `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收 |
+| `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收；零首选清晰度/有效期会继续读取有效兼容字段 |
 | `nickname_check` | `/nickname/check` | `pending` | — |
 | `personal_fm` | `/personal_fm` | `pending` | — |
 | `personal_fm_mode` | `/personal/fm/mode` | `pending` | — |
@@ -293,7 +293,7 @@
 | `song_creators` | `/song/creators` | `pending` | — |
 | `song_detail` | `/song/detail` | `verified` | `GET /v1/tracks/{ref}` |
 | `song_downlist` | `/song/downlist` | `pending` | — |
-| `song_download_url` | `/song/download/url` | `verified` | `GET /v1/tracks/{ref}/download?variant=legacy`（统一 `bitrate` 与参考 `br` 接受任意无符号 bit/s 并原样提交 EAPI `/api/song/enhance/download/url`，省略时按统一音质映射默认码率；统一 `MediaDownload` 保留可用态、URL、格式、实际码率、大小、时长、业务码、费用及完整响应；2026-07-17 provider 忽略测试与真实二进制 HTTP 均验证 `netease:2709812973&br=192123` 成功，上游顶层/条目 `code=200`、实际 192000 bit/s、`available=true`） |
+| `song_download_url` | `/song/download/url` | `verified` | `GET /v1/tracks/{ref}/download?variant=legacy`（统一 `bitrate` 与参考 `br` 接受任意无符号 bit/s 并原样提交 EAPI `/api/song/enhance/download/url`，省略时按统一音质映射默认码率；统一 `MediaDownload` 保留可用态、URL、格式、实际码率、大小、时长、业务码、费用及完整响应，空白编码/零响应时长不会遮住有效容器格式/歌曲时长；2026-07-17 provider 忽略测试与真实二进制 HTTP 均验证 `netease:2709812973&br=192123` 成功，上游顶层/条目 `code=200`、实际 192000 bit/s、`available=true`） |
 | `song_download_url_v1` | `/song/download/url/v1` | `verified` | `GET /v1/tracks/{ref}/download`（缺省或 `variant/backend=modern|v1` 固定 EAPI `/api/song/enhance/download/url/v1`，精确提交字符串 ID、`immerseType=c51` 和九档 `level`；对象与数组两种 `data` 形状均支持，顶层成功但条目无 URL 以 `available=false` 正常返回，不伪造错误或 URL；2026-07-17 可重复 provider 联网测试和真实二进制 HTTP 对 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster` 九档全部验证上游 `code=200`，八档取得 URL，当前 `sky` 如实返回条目 `code=-110/url=null`） |
 | `song_dynamic_cover` | `/song/dynamic/cover` | `pending` | — |
 | `song_like` | `/song/like` | `pending` | — |
@@ -308,7 +308,7 @@
 | `song_purchased` | `/song/purchased` | `pending` | — |
 | `song_red_count` | `/song/red/count` | `pending` | — |
 | `song_singledownlist` | `/song/singledownlist` | `pending` | — |
-| `song_url` | `/song/url` | `verified` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（`variant/backend=legacy`；完整接受统一 `bitrate` 和参考 `br`，任意无符号 bit/s 原样进入 `/api/song/enhance/player/url`，省略时按音质映射默认码率；批量 `id/ids` 保留顺序与重复项并以逐项结果表达失败，完整上游响应只保存一次；2026-07-17 真实二进制 HTTP 以 `br=192123` 请求两首歌曲，上游 `code=200`、两项均成功并按平台档位返回 192000 bit/s，路径与变体分别确认为旧版 API/legacy） |
+| `song_url` | `/song/url` | `verified` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（`variant/backend=legacy`；完整接受统一 `bitrate` 和参考 `br`，任意无符号 bit/s 原样进入 `/api/song/enhance/player/url`，省略时按音质映射默认码率；批量 `id/ids` 保留顺序与重复项并以逐项结果表达失败，空白编码/零响应时长回退有效容器格式/歌曲时长，完整上游响应只保存一次；2026-07-17 真实二进制 HTTP 以 `br=192123` 请求两首歌曲，上游 `code=200`、两项均成功并按平台档位返回 192000 bit/s，路径与变体分别确认为旧版 API/legacy） |
 | `song_url_match` | `/song/url/match` | `implemented` | `GET /v1/tracks/{ref}/stream?unblock=true&source=...`、批量端点同参数（复用统一严格匹配解析器而不引入第二套 URL 匹配；支持选择任意平台注册来源，省略时按 QQ/酷狗/酷我/咪咕顺序后回原平台，账号绑定首个目标，返回完整尝试轨迹；离线已验证来源选择、冲突拒绝、账户归属和批量逐项结果；2026-07-17 真实二进制 HTTP 验证当前未注册 QQ 时明确记录 `qq:unavailable` 后 `netease:success`，待 QQ Basic 接入后验证真实跨平台成功 URL） |
 | `song_url_ncmget` | `/song/url/ncmget` | `pending` | — |
 | `song_url_v1` | `/song/url/v1` | `implemented` | `GET /v1/tracks/{ref}/stream`、`GET/POST /v1/tracks/streams`（缺省或 `variant/backend=modern|v1` 固定 XEAPI `/api/song/enhance/player/url/v1`，精确提交数字 ID 列表、`level`、`encodeType=flac`，`sky` 额外提交 `immerseType=c51`；完整支持 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster` 九档及统一别名，批量保序、保重复、逐项失败且完整响应不重复；`unblock/source` 分支复用统一回退；2026-07-17 真实二进制 HTTP 对九档逐项验证均为上游 `code=200` 和成功流，三项含重复 ID 的 GET/POST 批量均按原顺序成功；跨平台成功态待对应 provider Basic 接入） |

@@ -4202,13 +4202,8 @@ fn netease_banner_client(client: BannerClient) -> &'static str {
 }
 
 fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
-    let image_url = ["bigImageUrl", "pic", "imageUrl"]
-        .into_iter()
-        .find_map(|field| raw.get(field).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
+    let image_url =
+        radio_text_field(&raw, &["bigImageUrl", "pic", "imageUrl"]).ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
                 "NetEase banner did not contain an image URL",
@@ -4245,12 +4240,7 @@ fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
         id: ["bannerId", "adid"]
             .into_iter()
             .find_map(|field| raw.get(field).and_then(json_scalar_string)),
-        title: ["mainTitle", "typeTitle"]
-            .into_iter()
-            .find_map(|field| raw.get(field).and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_owned),
+        title: radio_text_field(&raw, &["mainTitle", "typeTitle"]),
         image_url,
         target_ref,
         target_kind,
@@ -7208,6 +7198,8 @@ fn map_netease_download(
     if let Some(level) = requested_level {
         extensions.insert("requested_level".to_owned(), json!(level));
     }
+    let format = normalized_string(download.kind);
+    let codec = normalized_string(download.encode_type).or_else(|| format.clone());
     Ok(MediaDownload {
         track_ref: track.resource_ref.clone(),
         platform: Platform::Netease,
@@ -7218,11 +7210,14 @@ fn map_netease_download(
             .expi
             .filter(|expires_in_seconds| *expires_in_seconds > 0)
             .and_then(expiration_rfc3339),
-        format: download.kind.clone(),
-        codec: download.encode_type.or(download.kind),
+        format,
+        codec,
         bitrate: download.br,
         size: download.size,
-        duration_ms: download.time.or(track.duration_ms),
+        duration_ms: download
+            .time
+            .filter(|duration| *duration > 0)
+            .or_else(|| track.duration_ms.filter(|duration| *duration > 0)),
         requested_quality: request.quality,
         actual_quality,
         platform_code: download.code,
@@ -7297,6 +7292,8 @@ fn map_stream(
         let end_ms = trial.end?.checked_mul(1_000)?;
         (end_ms > start_ms).then_some(TrialWindow { start_ms, end_ms })
     });
+    let format = normalized_string(stream.kind);
+    let codec = normalized_string(stream.encode_type).or_else(|| format.clone());
 
     Ok(MediaStream {
         url,
@@ -7306,11 +7303,14 @@ fn map_stream(
             .expi
             .filter(|expires_in_seconds| *expires_in_seconds > 0)
             .and_then(expiration_rfc3339),
-        format: stream.kind.clone(),
-        codec: stream.encode_type.or(stream.kind),
+        format,
+        codec,
         bitrate: stream.br,
         size: stream.size,
-        duration_ms: stream.time.or(track.duration_ms),
+        duration_ms: stream
+            .time
+            .filter(|duration| *duration > 0)
+            .or_else(|| track.duration_ms.filter(|duration| *duration > 0)),
         requested_quality: request.quality,
         actual_quality,
         trial,
@@ -7595,10 +7595,10 @@ fn map_lyric_user(role: &str, user: Option<LyricUser>) -> Result<Option<LyricCon
         return Ok(None);
     };
     let resource_ref = user
-        .id
-        .or(user.userid)
-        .or(user.user_id)
+        .user_id
         .filter(|id| *id > 0)
+        .or_else(|| user.userid.filter(|id| *id > 0))
+        .or_else(|| user.id.filter(|id| *id > 0))
         .map(|id| ResourceRef::new(Platform::Netease, id.to_string()))
         .transpose()
         .map_err(|error| {
@@ -8373,10 +8373,8 @@ fn map_artist_video(raw: Value) -> Result<Video> {
         resource_ref,
         platform: Platform::Netease,
         id,
-        title: base
-            .text
-            .filter(|title| !title.trim().is_empty())
-            .or(base.original_title)
+        title: normalized_string(base.text)
+            .or_else(|| normalized_string(base.original_title))
             .unwrap_or_default(),
         creators,
         description: base.desc.unwrap_or_default(),
@@ -8525,13 +8523,9 @@ fn map_video_creator(creator: VideoCreatorItem) -> Option<CreatorSummary> {
 fn map_video_resolution(raw: Value) -> Option<VideoResolution> {
     let resolution = ["br", "resolution", "height"]
         .into_iter()
-        .find_map(|key| raw.get(key).and_then(scalar_u64))
+        .find_map(|key| raw.get(key).and_then(scalar_u64).filter(|value| *value > 0))
         .and_then(|value| u32::try_from(value).ok())?;
-    let format = ["format", "container", "type"]
-        .into_iter()
-        .find_map(|key| raw.get(key).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let format = radio_text_field(&raw, &["format", "container", "type"])
         .map(|value| value.to_ascii_lowercase());
     let mut extensions = Extensions::new();
     extensions.insert("resolution".to_owned(), raw.clone());
@@ -8591,7 +8585,10 @@ fn map_video_stream(
         .code
         .or_else(|| raw_response.get("code").and_then(Value::as_i64));
     let available = url.is_some() && platform_code.is_none_or(|code| code == 200);
-    let actual_resolution = item.r.or(item.resolution);
+    let actual_resolution = item
+        .r
+        .filter(|resolution| *resolution > 0)
+        .or_else(|| item.resolution.filter(|resolution| *resolution > 0));
     let format = url.as_deref().and_then(video_url_format);
     let mut extensions = Extensions::new();
     extensions.insert("kind".to_owned(), json!(request.kind));
@@ -8606,8 +8603,8 @@ fn map_video_stream(
         headers: BTreeMap::new(),
         expires_at: item
             .expi
-            .or(item.validity)
             .filter(|seconds| *seconds > 0)
+            .or_else(|| item.validity.filter(|seconds| *seconds > 0))
             .and_then(expiration_rfc3339),
         format,
         codec: None,
@@ -8899,12 +8896,7 @@ fn map_artist_work_update(raw: Value, default_source_type: u32) -> Result<Artist
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let cover_url = ["resourcePicUrl", "imgUrl"]
-        .into_iter()
-        .find_map(|key| block_title[key].as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let cover_url = radio_text_field(block_title, &["resourcePicUrl", "imgUrl"]);
     let mut extensions = Extensions::new();
     extensions.insert("artist_work".to_owned(), raw);
     Ok(ArtistWorkUpdate {
@@ -9274,7 +9266,10 @@ fn map_track_entitlement(raw: Value) -> Result<TrackEntitlement> {
             .map(|status| status >= 0 && entitlement.dl.unwrap_or(0) > 0),
         play_bitrate: entitlement.pl,
         download_bitrate: entitlement.dl,
-        max_play_bitrate: entitlement.play_max_bitrate.or(entitlement.maxbr),
+        max_play_bitrate: entitlement
+            .play_max_bitrate
+            .filter(|bitrate| *bitrate > 0)
+            .or_else(|| entitlement.maxbr.filter(|bitrate| *bitrate > 0)),
         max_download_bitrate: entitlement.download_max_bitrate,
         play_quality: optional_quality(entitlement.play_level.as_deref(), entitlement.pl),
         download_quality: optional_quality(entitlement.download_level.as_deref(), entitlement.dl),
@@ -9490,7 +9485,8 @@ fn map_chart_group(raw: Value) -> Result<ChartGroup> {
     Ok(ChartGroup {
         code: normalized_string(group.category_code),
         name: group.name,
-        display_type: normalized_string(group.display_type.or(group.front_display_type)),
+        display_type: normalized_string(group.display_type)
+            .or_else(|| normalized_string(group.front_display_type)),
         target_url: normalized_string(group.target_url),
         charts,
         extensions,
@@ -9521,7 +9517,8 @@ fn map_chart(raw: Value) -> Result<Chart> {
     ]
     .into_iter()
     .find_map(normalized_string);
-    let target_url = normalized_string(item.target_url.or(item.front_target_url));
+    let target_url =
+        normalized_string(item.target_url).or_else(|| normalized_string(item.front_target_url));
     let mut extensions = Extensions::new();
     extensions.insert("chart".to_owned(), raw);
     Ok(Chart {
@@ -9580,7 +9577,9 @@ fn map_chart_rank_preview(raw: Value) -> Result<ChartTrackPreview> {
         previous_rank,
         rank_change,
         track_ref,
-        name: normalized_string(item.song_name.or(item.item_name)).unwrap_or_default(),
+        name: normalized_string(item.song_name)
+            .or_else(|| normalized_string(item.item_name))
+            .unwrap_or_default(),
         byline: normalized_string(item.artist_name),
         cover_url: normalized_string(item.cover_url),
         extensions,
@@ -13695,6 +13694,19 @@ mod tests {
         assert_eq!(mobile.target_kind, BannerTargetKind::Web);
         assert_eq!(mobile.exclusive, Some(false));
         assert_eq!(mobile.extensions["client"], "iphone");
+
+        let fallback = map_banner(
+            json!({
+                "bigImageUrl": "  ",
+                "pic": "https://example.test/fallback.jpg",
+                "mainTitle": "",
+                "typeTitle": "有效摘要"
+            }),
+            BannerClient::Android,
+        )
+        .expect("skip blank preferred banner fields");
+        assert_eq!(fallback.image_url, "https://example.test/fallback.jpg");
+        assert_eq!(fallback.title.as_deref(), Some("有效摘要"));
     }
 
     #[test]
@@ -14969,7 +14981,7 @@ mod tests {
                 "publishTime": "2025-02-23",
                 "playCount": 100751,
                 "brs": [
-                    {"br": 240, "size": 17851236},
+                    {"br": 0, "resolution": 240, "format": " ", "container": "mp4", "size": 17851236},
                     {"br": 480, "size": 28558850},
                     {"br": 720, "size": 44613276},
                     {"br": 1080, "size": 177950112, "future": true}
@@ -14994,6 +15006,8 @@ mod tests {
         assert_eq!(detail.video.duration_ms, Some(266_000));
         assert_eq!(detail.video.subscribed, Some(false));
         assert_eq!(detail.resolutions.len(), 4);
+        assert_eq!(detail.resolutions[0].resolution, 240);
+        assert_eq!(detail.resolutions[0].format.as_deref(), Some("mp4"));
         assert_eq!(detail.resolutions[3].resolution, 1080);
         assert_eq!(detail.resolutions[3].size, Some(177_950_112));
         assert_eq!(
@@ -15024,13 +15038,15 @@ mod tests {
             "code": 200,
             "data": {
                 "code": 200,
-                "expi": 3600,
+                "expi": 0,
+                "validity": 3600,
                 "fee": 0,
                 "id": 22695250,
                 "md5": "abcdef",
                 "msg": "",
                 "mvFee": 0,
-                "r": 1080,
+                "r": 0,
+                "resolution": 1080,
                 "size": 177950120,
                 "url": "https://example.test/live.mv.mp4?token=secret"
             }
@@ -15411,6 +15427,23 @@ mod tests {
             artist_work_kind(false, false, "future_resource"),
             ArtistWorkKind::Unknown
         );
+
+        let update = map_artist_work_update(
+            json!({
+                "info": {
+                    "blockTitle": {
+                        "resourcePicUrl": " ",
+                        "imgUrl": "https://example.test/artist-work.jpg"
+                    }
+                }
+            }),
+            0,
+        )
+        .expect("skip blank preferred artist work cover");
+        assert_eq!(
+            update.cover_url.as_deref(),
+            Some("https://example.test/artist-work.jpg")
+        );
     }
 
     #[test]
@@ -15748,7 +15781,7 @@ mod tests {
             "pl": 320000,
             "dl": 0,
             "maxbr": 999000,
-            "playMaxbr": 999000,
+            "playMaxbr": 0,
             "downloadMaxbr": 999000,
             "plLevel": "exhigh",
             "dlLevel": "none",
@@ -15769,6 +15802,7 @@ mod tests {
         assert_eq!(entitlement.downloadable, Some(false));
         assert_eq!(entitlement.play_quality, Some(Quality::High));
         assert_eq!(entitlement.download_quality, None);
+        assert_eq!(entitlement.max_play_bitrate, Some(999_000));
         assert_eq!(
             entitlement.available_qualities,
             vec![
@@ -16324,7 +16358,7 @@ mod tests {
             "code": 200,
             "data": [{
                 "categoryCode": "OFFICIAL",
-                "displayType": "HORIZONTAL",
+                "displayType": "  ",
                 "frontDisplayType": "CAROUSEL",
                 "name": "官方榜",
                 "targetUrl": "orpheus://toplist",
@@ -16339,7 +16373,8 @@ mod tests {
                         "trackRankList": [
                             {
                                 "trackId": 3404238777_u64,
-                                "songName": "周旋",
+                                "songName": " ",
+                                "itemName": "周旋",
                                 "artistName": "王以太/艾热 AIR",
                                 "coverImgUrl": "https://example.test/song.jpg",
                                 "rank": 1,
@@ -16362,7 +16397,8 @@ mod tests {
                         "newFirstCoverUrl": "https://example.test/new-album-chart.jpg",
                         "canPlay": false,
                         "targetType": "H5",
-                        "targetUrl": "https://example.test/store",
+                        "targetUrl": " ",
+                        "frontTargetUrl": "https://example.test/store",
                         "toplistCode": "ALBUM_SELL_CHART##",
                         "trackRankList": null,
                         "tracks": null
@@ -16378,7 +16414,7 @@ mod tests {
         let group = &catalog.groups[0];
         assert_eq!(group.code.as_deref(), Some("OFFICIAL"));
         assert_eq!(group.name, "官方榜");
-        assert_eq!(group.display_type.as_deref(), Some("HORIZONTAL"));
+        assert_eq!(group.display_type.as_deref(), Some("CAROUSEL"));
         assert_eq!(group.extensions["group"]["frontDisplayType"], "CAROUSEL");
         let chart = &group.charts[0];
         assert_eq!(
@@ -17717,7 +17753,7 @@ mod tests {
             "ytlrc": {"version": 2, "lyric": "[1000,2000]Blue porcelain"},
             "yromalrc": null,
             "lyricUser": {"id": 10, "nickname": "歌词贡献者"},
-            "transUser": {"userId": 11, "nickname": "翻译贡献者"},
+            "transUser": {"id": 0, "userid": 0, "userId": 11, "nickname": "翻译贡献者"},
             "pureMusic": false
         }))
         .expect("valid lyrics fixture");
@@ -17729,6 +17765,14 @@ mod tests {
         assert!(lyrics.word_synced.is_some());
         assert_eq!(lyrics.contributors.len(), 2);
         assert_eq!(lyrics.contributors[1].role, "translation");
+        assert_eq!(
+            lyrics.contributors[1]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:11")
+        );
         assert_eq!(lyrics.extensions["word_synced_version"], 7);
     }
 
@@ -17763,10 +17807,11 @@ mod tests {
 
     #[test]
     fn maps_netease_stream_quality_expiry_and_trial() {
-        let track = Track::new(
+        let mut track = Track::new(
             ResourceRef::new(Platform::Netease, "123").expect("track reference"),
             "测试歌曲",
         );
+        track.duration_ms = Some(258_000);
         let request = StreamRequest {
             quality: Quality::High,
             variant: StreamVariant::Modern,
@@ -17782,8 +17827,8 @@ mod tests {
             "expi": 1200,
             "type": "mp3",
             "level": "exhigh",
-            "encodeType": "mp3",
-            "time": 258000,
+            "encodeType": "  ",
+            "time": 0,
             "fee": 1,
             "freeTrialInfo": {"start": 0, "end": 30}
         }))
@@ -17793,6 +17838,9 @@ mod tests {
         assert_eq!(stream.requested_quality, Quality::High);
         assert_eq!(stream.actual_quality, Quality::High);
         assert_eq!(stream.bitrate, Some(320000));
+        assert_eq!(stream.format.as_deref(), Some("mp3"));
+        assert_eq!(stream.codec.as_deref(), Some("mp3"));
+        assert_eq!(stream.duration_ms, Some(258_000));
         assert_eq!(stream.trial.expect("trial").end_ms, 30_000);
         assert!(
             stream
@@ -17950,8 +17998,8 @@ mod tests {
                     "expi": 1200,
                     "type": "mp3",
                     "level": "higher",
-                    "encodeType": "mp3",
-                    "time": 238378,
+                    "encodeType": "  ",
+                    "time": 0,
                     "fee": 0,
                     "message": null,
                     "freeTrialInfo": null
@@ -17967,6 +18015,9 @@ mod tests {
         assert_eq!(download.requested_quality, Quality::Higher);
         assert_eq!(download.actual_quality, Quality::Higher);
         assert_eq!(download.bitrate, Some(192_000));
+        assert_eq!(download.format.as_deref(), Some("mp3"));
+        assert_eq!(download.codec.as_deref(), Some("mp3"));
+        assert_eq!(download.duration_ms, Some(238_378));
         assert_eq!(download.platform_code, Some(200));
         assert_eq!(download.extensions["variant"], "legacy");
         assert_eq!(download.extensions["response"]["code"], 200);
