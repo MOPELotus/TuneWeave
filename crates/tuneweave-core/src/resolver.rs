@@ -263,7 +263,11 @@ fn best_candidate(
             let assessment = assess_track_match(origin, &candidate, threshold);
             (candidate, assessment)
         })
-        .max_by(|(_, left), (_, right)| left.score.total_cmp(&right.score))
+        .max_by(|(_, left), (_, right)| {
+            left.accepted
+                .cmp(&right.accepted)
+                .then_with(|| left.score.total_cmp(&right.score))
+        })
 }
 
 fn failed_attempt(
@@ -497,5 +501,26 @@ mod tests {
             .expect_err("must stop");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["attempts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn accepted_candidate_outranks_a_higher_scoring_hard_rejection() {
+        let origin = track(Platform::Netease, "origin", "晴天", "周杰伦");
+        let mut rejected = track(Platform::Qq, "rejected", "晴天", "周杰伦");
+        rejected.duration_ms = Some(280_000);
+        let mut accepted = track(Platform::Qq, "accepted", "晴天晴", "周杰伦");
+        accepted.duration_ms = None;
+
+        let rejected_assessment = assess_track_match(&origin, &rejected, 0.70);
+        let accepted_assessment = assess_track_match(&origin, &accepted, 0.70);
+        assert!(!rejected_assessment.accepted);
+        assert!(rejected_assessment.hard_rejected);
+        assert!(accepted_assessment.accepted);
+        assert!(rejected_assessment.score > accepted_assessment.score);
+
+        let (candidate, assessment) =
+            best_candidate(&origin, vec![accepted, rejected], 0.70).expect("best candidate");
+        assert_eq!(candidate.id, "accepted");
+        assert!(assessment.accepted);
     }
 }
