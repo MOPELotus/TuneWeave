@@ -4202,7 +4202,7 @@ fn netease_banner_client(client: BannerClient) -> &'static str {
 }
 
 fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
-    let image_url = ["pic", "imageUrl", "bigImageUrl"]
+    let image_url = ["bigImageUrl", "pic", "imageUrl"]
         .into_iter()
         .find_map(|field| raw.get(field).and_then(Value::as_str))
         .map(str::trim)
@@ -4245,7 +4245,7 @@ fn map_banner(raw: Value, client: BannerClient) -> Result<Banner> {
         id: ["bannerId", "adid"]
             .into_iter()
             .find_map(|field| raw.get(field).and_then(json_scalar_string)),
-        title: ["typeTitle", "mainTitle"]
+        title: ["mainTitle", "typeTitle"]
             .into_iter()
             .find_map(|field| raw.get(field).and_then(Value::as_str))
             .map(str::trim)
@@ -8164,44 +8164,46 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
             .with_platform(Platform::Netease)
         })?;
     let artist_name = item.artist_name.clone();
-    let creator = item
-        .artist
-        .or_else(|| item.artists.into_iter().next())
-        .or_else(|| {
-            item.artist_id
-                .zip(artist_name.clone())
-                .map(|(id, name)| crate::dto::ArtistMvCreator {
-                    id,
-                    name,
-                    avatar_url: None,
-                })
-        });
-    let creators = if let Some(creator) = creator {
-        let creator_ref =
-            ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    format!("NetEase returned an invalid MV artist id: {error}"),
-                )
-                .with_platform(Platform::Netease)
-            })?;
-        vec![CreatorSummary {
-            resource_ref: Some(creator_ref),
-            name: creator.name,
-            avatar_url: creator.avatar_url,
-        }]
-    } else {
-        artist_name
-            .filter(|name| !name.trim().is_empty())
-            .map(|name| {
-                vec![CreatorSummary {
-                    resource_ref: None,
-                    name,
-                    avatar_url: None,
-                }]
+    let mut creator_items = item.artists;
+    if creator_items.is_empty() {
+        if let Some(creator) = item.artist {
+            creator_items.push(creator);
+        } else if let Some((id, name)) = item.artist_id.zip(artist_name.clone()) {
+            creator_items.push(crate::dto::ArtistMvCreator {
+                id,
+                name,
+                avatar_url: None,
+            });
+        }
+    }
+    let mut creators = creator_items
+        .into_iter()
+        .filter(|creator| !creator.name.trim().is_empty())
+        .map(|creator| {
+            let creator_ref =
+                ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        format!("NetEase returned an invalid MV artist id: {error}"),
+                    )
+                    .with_platform(Platform::Netease)
+                })?;
+            Ok(CreatorSummary {
+                resource_ref: Some(creator_ref),
+                name: creator.name,
+                avatar_url: creator.avatar_url,
             })
-            .unwrap_or_default()
-    };
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if creators.is_empty()
+        && let Some(name) = artist_name.filter(|name| !name.trim().is_empty())
+    {
+        creators.push(CreatorSummary {
+            resource_ref: None,
+            name,
+            avatar_url: None,
+        });
+    }
     let mut extensions = Extensions::new();
     extensions.insert("mv".to_owned(), raw);
     Ok(Video {
@@ -13491,6 +13493,7 @@ mod tests {
                 "targetId": 384808686,
                 "targetType": 10,
                 "typeTitle": "新碟首发",
+                "mainTitle": "首发专辑标题",
                 "url": "https://music.163.com/album?id=384808686",
                 "s_ctrp": "trace-metadata"
             }),
@@ -13498,8 +13501,8 @@ mod tests {
         )
         .expect("map PC banner");
         assert_eq!(pc.id, None);
-        assert_eq!(pc.image_url, "https://example.test/banner.png");
-        assert_eq!(pc.title.as_deref(), Some("新碟首发"));
+        assert_eq!(pc.image_url, "https://example.test/banner-large.png");
+        assert_eq!(pc.title.as_deref(), Some("首发专辑标题"));
         assert_eq!(pc.target_kind, BannerTargetKind::Album);
         assert_eq!(
             pc.target_ref.expect("album target").to_string(),
@@ -14448,6 +14451,18 @@ mod tests {
                         "name": "周杰伦",
                         "img1v1Url": "https://example.test/artist.jpg"
                     },
+                    "artists": [
+                        {
+                            "id": 6452,
+                            "name": "周杰伦",
+                            "img1v1Url": "https://example.test/artist.jpg"
+                        },
+                        {
+                            "id": 13193,
+                            "name": "五月天",
+                            "img1v1Url": "https://example.test/collaborator.jpg"
+                        }
+                    ],
                     "artistName": "周杰伦",
                     "duration": 266000,
                     "imgurl": "https://example.test/square.jpg",
@@ -14473,6 +14488,8 @@ mod tests {
                 .as_deref(),
             Some("netease:6452")
         );
+        assert_eq!(page.items[0].creators.len(), 2);
+        assert_eq!(page.items[0].creators[1].name, "五月天");
         assert_eq!(
             page.items[0].cover_url.as_deref(),
             Some("https://example.test/wide.jpg")

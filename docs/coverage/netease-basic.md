@@ -21,7 +21,7 @@
 | S03 | 搜索与发现 | 简略及详细热搜 | `verified` | `search_hot/search_hot_detail` 已验收 |
 | S04 | 搜索与发现 | Web、移动端及 PC 搜索建议 | `verified` | `search_suggest/search_suggest_pc` 已验收 |
 | S05 | 搜索与发现 | 多重匹配与本地歌曲匹配 | `verified` | `search_multimatch/search_match` 命中和空结果均已验收 |
-| S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收 |
+| S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收；并存时优先大图和主标题，不以普通摘要覆盖 |
 | S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `verified` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 三类目录、四地区歌手榜及榜单曲目均已真实 HTTP 验收 |
 | S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `pending` | `personalized*` 模块族未接入 |
 | S09 | 搜索与发现 | 每日歌曲及歌单推荐 | `verified` | `recommend_songs` 已验证；2026-07-17 持久化真实账户实测 `recommend_resource` 返回 5 项 |
