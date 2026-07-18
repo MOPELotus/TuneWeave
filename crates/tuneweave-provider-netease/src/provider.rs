@@ -2898,7 +2898,9 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload, action) = netease_comment_write_request(request)?;
         let client = self.client_for(request.account.as_deref())?;
         require_authenticated_client(&client, "comment writing")?;
-        let response = client.request_weapi(path, payload).await?;
+        let response = client
+            .request_eapi_with_check_token_v2(path, payload)
+            .await?;
         ensure_account_access(&client, &response.body, "comment writing")?;
         map_comment_mutation_result(&request.target, action, None, response.body)
     }
@@ -2910,7 +2912,9 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload, comment_id) = netease_comment_delete_request(request)?;
         let client = self.client_for(request.account.as_deref())?;
         require_authenticated_client(&client, "comment deletion")?;
-        let response = client.request_weapi(path, payload).await?;
+        let response = client
+            .request_eapi_with_check_token_v2(path, payload)
+            .await?;
         ensure_account_access(&client, &response.body, "comment deletion")?;
         map_comment_mutation_result(
             &request.target,
