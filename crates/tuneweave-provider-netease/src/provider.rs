@@ -4564,17 +4564,44 @@ fn map_radio_collection_response(
 fn radio_collection_items(body: &Value) -> Option<Vec<Value>> {
     let data = body.get("data").unwrap_or(&Value::Null);
     let nested_data = data.get("data").unwrap_or(&Value::Null);
+    let mut first_present = None;
     for container in [data, nested_data, body] {
         if let Some(items) = container.as_array() {
-            return Some(items.clone());
-        }
-        for field in ["list", "items", "records", "contents", "channels"] {
-            if let Some(items) = container.get(field).and_then(Value::as_array) {
+            if first_present.is_none() {
+                first_present = Some(items);
+            }
+            if !items.is_empty() {
                 return Some(items.clone());
             }
         }
+        for field in ["list", "items", "records", "contents", "channels"] {
+            if let Some(items) = container.get(field).and_then(Value::as_array) {
+                if first_present.is_none() {
+                    first_present = Some(items);
+                }
+                if !items.is_empty() {
+                    return Some(items.clone());
+                }
+            }
+        }
     }
-    None
+    first_present.cloned()
+}
+
+fn preferred_array_field<'a>(container: &'a Value, fields: &[&str]) -> Option<&'a Vec<Value>> {
+    let mut first_present = None;
+    for field in fields {
+        let Some(values) = container.get(*field).and_then(Value::as_array) else {
+            continue;
+        };
+        if first_present.is_none() {
+            first_present = Some(values);
+        }
+        if !values.is_empty() {
+            return Some(values);
+        }
+    }
+    first_present
 }
 
 fn radio_collection_scalar<'a>(body: &'a Value, fields: &[&str]) -> Option<&'a Value> {
@@ -5798,7 +5825,7 @@ fn map_netease_cloud_track_download(
         )
         .with_platform(Platform::Netease)
     })?;
-    let url = cloud_text_field(&item, &["url", "downloadUrl"]);
+    let url = cloud_text_field(&item, &["downloadUrl", "url"]);
     let bitrate = cloud_u64_field(&item, &["br", "bitrate"]);
     let format = cloud_text_field(&item, &["fileType", "type"])
         .and_then(normalize_cloud_file_type)
@@ -8871,19 +8898,7 @@ fn map_artist_work_update(raw: Value, default_source_type: u32) -> Result<Artist
 }
 
 fn artist_work_resources<'a>(info: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
-    let mut first_present = None;
-    for key in keys {
-        let Some(values) = info.get(*key).and_then(Value::as_array) else {
-            continue;
-        };
-        if first_present.is_none() {
-            first_present = Some(values);
-        }
-        if !values.is_empty() {
-            return Some(values);
-        }
-    }
-    first_present
+    preferred_array_field(info, keys)
 }
 
 fn artist_work_kind(has_tracks: bool, has_videos: bool, block_type: &str) -> ArtistWorkKind {
@@ -9264,7 +9279,8 @@ fn map_digital_album(
             )
             .with_platform(Platform::Netease)
         })?;
-    let artist_name = album.artist_name.or(album.artist_names);
+    let artist_name =
+        normalized_string(album.artist_names).or_else(|| normalized_string(album.artist_name));
     let artists = match (album.artist_id, artist_name) {
         (id, Some(name)) if !name.trim().is_empty() => vec![ArtistSummary {
             resource_ref: id
@@ -9473,8 +9489,8 @@ fn map_chart(raw: Value) -> Result<Chart> {
     let cover_url = [
         item.cover_url,
         item.cover_img_url,
-        item.first_cover_url,
         item.new_first_cover_url,
+        item.first_cover_url,
     ]
     .into_iter()
     .find_map(normalized_string);
@@ -10771,10 +10787,31 @@ fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&
         SearchKind::Video => (&["videos"], &["videoCount"]),
         SearchKind::Mixed => (&[], &[]),
         SearchKind::Voice => (
-            &["resources", "voices"],
-            &["resourceCount", "voiceCount", "totalCount"],
+            &["voices", "resources"],
+            &["voiceCount", "resourceCount", "totalCount"],
         ),
     }
+}
+
+fn preferred_cloud_search_result<'a>(
+    kind: SearchKind,
+    body: &'a Value,
+    item_keys: &[&str],
+) -> Option<&'a Value> {
+    if kind != SearchKind::Voice {
+        return body.get("result");
+    }
+
+    let mut first_present = None;
+    for candidate in [body.get("result"), body.get("data")].into_iter().flatten() {
+        if first_present.is_none() {
+            first_present = Some(candidate);
+        }
+        if preferred_array_field(candidate, item_keys).is_some_and(|items| !items.is_empty()) {
+            return Some(candidate);
+        }
+    }
+    first_present
 }
 
 fn map_cloud_search_response(
@@ -10783,21 +10820,11 @@ fn map_cloud_search_response(
     offset: u32,
     body: Value,
 ) -> Result<Page<SearchItem>> {
-    let result = body
-        .get("result")
-        .or_else(|| {
-            if kind == SearchKind::Voice {
-                body.get("data")
-            } else {
-                None
-            }
-        })
+    let (item_keys, count_keys) = cloud_search_shape(kind);
+    let result = preferred_cloud_search_result(kind, &body, item_keys)
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let (item_keys, count_keys) = cloud_search_shape(kind);
-    let raw_items = item_keys
-        .iter()
-        .find_map(|key| result.get(*key).and_then(Value::as_array))
+    let raw_items = preferred_array_field(&result, item_keys)
         .cloned()
         .unwrap_or_default();
     let total = count_keys
@@ -12040,8 +12067,10 @@ mod tests {
             json!({
                 "code": 200,
                 "result": {
-                    "resourceCount": 2,
-                    "resources": [{"id": "voice-1", "title": "声音节目"}]
+                    "voiceCount": 2,
+                    "resourceCount": 99,
+                    "voices": [{"id": "voice-1", "title": "声音节目"}],
+                    "resources": [{"id": "legacy-voice", "title": "旧摘要"}]
                 }
             }),
         )
@@ -12060,6 +12089,7 @@ mod tests {
             0,
             json!({
                 "code": 200,
+                "result": {"voices": []},
                 "data": {
                     "totalCount": 2,
                     "hasMore": true,
@@ -14161,6 +14191,34 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_station_collection_skips_empty_legacy_lists() {
+        let page = map_radio_collection_response(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [],
+                    "data": {
+                        "records": [{
+                            "contentId": 362,
+                            "contentName": "金山区广播电视台综合广播"
+                        }],
+                        "total": 1,
+                        "hasMore": false
+                    }
+                }
+            }),
+            25,
+            0,
+        )
+        .expect("skip empty legacy broadcast collection list");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:362");
+        assert_eq!(page.pagination.total, Some(1));
+        assert!(!page.pagination.has_more);
+    }
+
+    #[test]
     fn broadcast_station_collection_rejects_missing_lists() {
         let error = map_radio_collection_response(json!({ "code": 200, "data": {} }), 25, 0)
             .expect_err("missing collection list");
@@ -15916,8 +15974,8 @@ mod tests {
                 "albumId": 120605500,
                 "albumName": "冀西南林路行",
                 "artistId": 13223,
-                "artistName": "万能青年旅店",
-                "artistNames": "万能青年旅店",
+                "artistName": "摘要艺人",
+                "artistNames": "万能青年旅店/合作艺人",
                 "coverUrl": "https://example.test/album.jpg"
             },
             "product": {
@@ -15947,7 +16005,7 @@ mod tests {
         let album = map_digital_album(response, &raw, 120605500).expect("map digital album");
 
         assert_eq!(album.resource_ref.to_string(), "netease:120605500");
-        assert_eq!(album.artists[0].name, "万能青年旅店");
+        assert_eq!(album.artists[0].name, "万能青年旅店/合作艺人");
         assert_eq!(album.price.expect("price").amount, 22.0);
         assert_eq!(album.purchasable, Some(true));
         assert_eq!(album.purchased, Some(false));
@@ -16145,6 +16203,8 @@ mod tests {
                     {
                         "id": 0,
                         "name": "实体专辑榜",
+                        "firstCoverUrl": "https://example.test/old-album-chart.jpg",
+                        "newFirstCoverUrl": "https://example.test/new-album-chart.jpg",
                         "canPlay": false,
                         "targetType": "H5",
                         "targetUrl": "https://example.test/store",
@@ -16197,6 +16257,10 @@ mod tests {
         assert_eq!(external.resource_ref, None);
         assert_eq!(external.playable, Some(false));
         assert_eq!(external.target_kind.as_deref(), Some("h5"));
+        assert_eq!(
+            external.cover_url.as_deref(),
+            Some("https://example.test/new-album-chart.jpg")
+        );
         assert_eq!(
             external.target_url.as_deref(),
             Some("https://example.test/store")
@@ -17232,7 +17296,8 @@ mod tests {
                 "code": 200,
                 "data": {
                     "songId": "9001",
-                    "url": "https://example.test/cloud.flac",
+                    "url": "https://example.test/generic-preview.mp3",
+                    "downloadUrl": "https://example.test/cloud.flac",
                     "fileType": ".FLAC",
                     "encodeType": "flac",
                     "br": "999000",
