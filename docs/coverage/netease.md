@@ -110,7 +110,7 @@
 | `dj_program_detail` | `/dj/program/detail` | `verified` | `GET /v1/episodes/{ref}`、`GET /v1/episodes/{ref}/stream` 及 `/stream/redirect`（固定 WeAPI `/api/dj/program/detail` 和节目 `id`，复用节目目录的完整稳定映射及节目/音频身份一致性校验；播放先取得独立 `audio.ref`，再复用统一歌曲的全部音质、VIP、账户、严格跨平台回退及 302 链，详情原文与整份响应保存在扩展；2026-07-17 provider 显式联网测试及真实二进制 HTTP 验证节目 `netease:1367665101` 成功，所属播客为 `netease:336355127`、独立音频为 `netease:530692704`、上游 `code=200`；JSON 流命中网易云且尝试状态为 `success`，重定向返回 302） |
 | `dj_program_toplist` | `/dj/program/toplist` | `pending` | — |
 | `dj_program_toplist_hours` | `/dj/program/toplist/hours` | `pending` | — |
-| `dj_radio_hot` | `/dj/radio/hot` | `pending` | — |
+| `dj_radio_hot` | `/dj/radio/hot` | `implemented` | `GET /v1/podcasts?catalog=category_hot&category_id=...`（要求数字分类 ID，固定 WeAPI `/api/djradio/hot` 并精确提交参考 `cateId/limit/offset`；统一 `Podcast` 保留完整分类播客与原文，`count/hasMore` 映射为真实分页；上游首屏会在请求窗口外插入推荐项，TuneWeave 不截断，返回数超过请求量时标记 `limit_applied=false`，下一偏移仍严格使用 `offset+limit` 而非返回项数，避免跳过正常窗口；缺失/非数字分类、非法 limit 及错误响应稳定拒绝；协议、异常边界、映射和统一 HTTP 离线测试已完成，2026-07-18 底层原始 API 对分类 2 实测 `limit=3/offset=0` 返回 8 项、`count=1000/hasMore=true`，offset 3 与 8 的续页结果证明必须按请求窗口推进，按集中验收安排留待 Basic 代码收口后复跑 provider 与真实统一 HTTP） |
 | `dj_recommend` | `/dj/recommend` | `implemented` | `GET /v1/podcasts?catalog=featured`（固定无参数 WeAPI `/api/djradio/recommend/v1`；该上游返回不可续页的完整精选快照，统一端点要求 `offset=0` 且拒绝 `category_id`，保留请求 `limit` 但以 `limit_applied=false` 明示平台未应用，`total` 为实际返回项数、`next_offset=null/has_more=false`；复用完整 `Podcast` 映射并保留栏目名称、单项原文与顶层响应；协议、异常边界、映射和统一 HTTP 离线测试已完成，2026-07-18 底层原始 API 实测 `code=200`、10 项及栏目“精选电台 - 谈情说爱”，按集中验收安排留待 Basic 代码收口后复跑 provider 与真实统一 HTTP） |
 | `dj_recommend_type` | `/dj/recommend/type` | `pending` | — |
 | `dj_sub` | `/dj/sub` | `pending` | — |

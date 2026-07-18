@@ -4336,6 +4336,24 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
                 json!({ "limit": request.limit, "offset": request.offset }),
             ))
         }
+        PodcastCatalog::CategoryHot => {
+            let category_id = request.category_id.as_deref().ok_or_else(|| {
+                TuneWeaveError::invalid_request(
+                    "the NetEase category hot podcast catalog requires category_id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "catalog": request.catalog }))
+            })?;
+            let category_id = parse_numeric_id("podcast category", category_id)?.to_string();
+            Ok((
+                "/api/djradio/hot",
+                json!({
+                    "cateId": category_id,
+                    "limit": request.limit,
+                    "offset": request.offset
+                }),
+            ))
+        }
         PodcastCatalog::Personalized => {
             if request.category_id.is_some() {
                 return Err(TuneWeaveError::invalid_request(
@@ -4857,6 +4875,21 @@ fn map_netease_podcast_catalog_response(
                 });
             (total, has_more.then_some(candidate_offset), has_more, true)
         }
+        PodcastCatalog::CategoryHot => {
+            let total = body.get("count").and_then(json_u64);
+            let candidate_offset = request.offset.saturating_add(request.limit);
+            let upstream_has_more = body.get("hasMore").and_then(json_bool);
+            let has_more = consumed > 0
+                && upstream_has_more.unwrap_or_else(|| {
+                    total.is_some_and(|total| u64::from(candidate_offset) < total)
+                });
+            (
+                total,
+                has_more.then_some(candidate_offset),
+                has_more,
+                consumed <= request.limit,
+            )
+        }
         PodcastCatalog::Personalized => (None, None, false, true),
         catalog => {
             return Err(TuneWeaveError::invalid_request(format!(
@@ -4871,6 +4904,11 @@ fn map_netease_podcast_catalog_response(
         ("returned_count".to_owned(), json!(items.len())),
         ("limit_applied".to_owned(), json!(limit_applied)),
     ]);
+    insert_extension(
+        &mut extensions,
+        "category_id",
+        request.category_id.as_deref(),
+    );
     extensions.insert("response".to_owned(), body);
     Ok(Page {
         items,
@@ -13929,6 +13967,16 @@ mod tests {
                 .expect("personalized podcast request"),
             ("/api/djradio/personalize/rcmd", json!({"limit": 6}))
         );
+        let mut category_hot_request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 30, 60);
+        category_hot_request.category_id = Some("2".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&category_hot_request)
+                .expect("category hot podcast request"),
+            (
+                "/api/djradio/hot",
+                json!({"cateId": "2", "limit": 30, "offset": 60})
+            )
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -13963,6 +14011,7 @@ mod tests {
             PodcastListRequest::new(PodcastCatalog::Hot, 101, 0),
             PodcastListRequest::new(PodcastCatalog::Featured, 20, 1),
             PodcastListRequest::new(PodcastCatalog::Personalized, 20, 1),
+            PodcastListRequest::new(PodcastCatalog::CategoryHot, 20, 0),
             PodcastListRequest::new(PodcastCatalog::TodayPreferred, 20, 0),
         ] {
             assert_eq!(
@@ -13972,10 +14021,10 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
-        let mut category_hot = PodcastListRequest::new(PodcastCatalog::Hot, 20, 0);
-        category_hot.category_id = Some("2".to_owned());
+        let mut hot_with_category = PodcastListRequest::new(PodcastCatalog::Hot, 20, 0);
+        hot_with_category.category_id = Some("2".to_owned());
         assert_eq!(
-            netease_podcast_catalog_request(&category_hot)
+            netease_podcast_catalog_request(&hot_with_category)
                 .expect_err("hot catalog rejects category")
                 .code,
             ErrorCode::InvalidRequest
@@ -13994,6 +14043,14 @@ mod tests {
         assert_eq!(
             netease_podcast_catalog_request(&category_personalized)
                 .expect_err("personalized catalog rejects category")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let mut invalid_category_hot = PodcastListRequest::new(PodcastCatalog::CategoryHot, 20, 0);
+        invalid_category_hot.category_id = Some("music".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&invalid_category_hot)
+                .expect_err("category hot catalog rejects non-numeric category")
                 .code,
             ErrorCode::InvalidRequest
         );
@@ -14152,6 +14209,36 @@ mod tests {
         );
         assert_eq!(personalized.pagination.extensions["returned_count"], 2);
         assert_eq!(personalized.pagination.extensions["limit_applied"], true);
+
+        let mut category_hot_request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 2, 4);
+        category_hot_request.category_id = Some("2".to_owned());
+        let category_hot = map_netease_podcast_catalog_response(
+            json!({
+                "code": 200,
+                "count": 1000,
+                "hasMore": true,
+                "djRadios": [
+                    fixture_podcast_radio(988_389_326, "分类置顶一"),
+                    fixture_podcast_radio(795_678_845, "分类置顶二"),
+                    fixture_podcast_radio(978_246_340, "分类置顶三")
+                ]
+            }),
+            &category_hot_request,
+        )
+        .expect("map category hot podcasts");
+        assert_eq!(category_hot.items.len(), 3);
+        assert_eq!(category_hot.pagination.limit, 2);
+        assert_eq!(category_hot.pagination.offset, 4);
+        assert_eq!(category_hot.pagination.total, Some(1000));
+        assert_eq!(category_hot.pagination.next_offset, Some(6));
+        assert!(category_hot.pagination.has_more);
+        assert_eq!(
+            category_hot.pagination.extensions["catalog"],
+            "category_hot"
+        );
+        assert_eq!(category_hot.pagination.extensions["category_id"], "2");
+        assert_eq!(category_hot.pagination.extensions["returned_count"], 3);
+        assert_eq!(category_hot.pagination.extensions["limit_applied"], false);
 
         let empty = map_netease_podcast_catalog_response(
             json!({"code": 200, "djRadios": [], "hasMore": true}),
@@ -19594,6 +19681,28 @@ mod tests {
         assert_eq!(page.pagination.extensions["catalog"], "personalized");
         assert_eq!(page.pagination.extensions["returned_count"], 3);
         assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_category_hot_podcast_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let mut request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 3, 0);
+        request.category_id = Some("2".to_owned());
+        let page = MusicProvider::podcasts(&provider, &request)
+            .await
+            .expect("live public category hot podcasts");
+        assert!(page.items.len() >= 3);
+        assert!(page.items.iter().all(|podcast| {
+            !podcast.id.is_empty() && !podcast.name.is_empty() && podcast.cover_url.is_some()
+        }));
+        assert!(page.pagination.total.is_some_and(|total| total > 0));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert_eq!(page.pagination.extensions["catalog"], "category_hot");
+        assert_eq!(page.pagination.extensions["category_id"], "2");
+        assert_eq!(page.pagination.extensions["limit_applied"], false);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 

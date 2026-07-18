@@ -7239,44 +7239,73 @@ mod tests {
         async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
             let featured = request.catalog == PodcastCatalog::Featured;
             let personalized = request.catalog == PodcastCatalog::Personalized;
-            let paged = request.catalog == PodcastCatalog::Hot;
+            let category_hot = request.catalog == PodcastCatalog::CategoryHot;
+            let hot = request.catalog == PodcastCatalog::Hot;
+            let paged = hot || category_hot;
+            let category_valid = if category_hot {
+                request.category_id.is_some()
+            } else {
+                request.category_id.is_none()
+            };
             if !matches!(
                 request.catalog,
-                PodcastCatalog::Featured | PodcastCatalog::Hot | PodcastCatalog::Personalized
-            ) || request.category_id.is_some()
+                PodcastCatalog::Featured
+                    | PodcastCatalog::Hot
+                    | PodcastCatalog::CategoryHot
+                    | PodcastCatalog::Personalized
+            ) || !category_valid
                 || ((featured || personalized) && request.offset != 0)
             {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports featured, hot, and personalized podcast catalogs",
+                    "test provider only supports featured, hot, category hot, and personalized podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
             podcast
                 .extensions
                 .insert("request".to_owned(), json!(request));
+            let mut pagination_extensions = Extensions::from([
+                ("catalog".to_owned(), json!(request.catalog)),
+                ("returned_count".to_owned(), json!(1)),
+                (
+                    "limit_applied".to_owned(),
+                    json!(!featured && !category_hot),
+                ),
+                (
+                    "response".to_owned(),
+                    if featured {
+                        json!({"code": 200, "name": "精选电台 - 测试"})
+                    } else if personalized {
+                        json!({"code": 200, "data": [{"id": 336355127}]})
+                    } else if category_hot {
+                        json!({"code": 200, "count": 1000, "hasMore": true})
+                    } else {
+                        json!({"code": 200, "hasMore": true})
+                    },
+                ),
+            ]);
+            if let Some(category_id) = request.category_id.as_deref() {
+                pagination_extensions.insert("category_id".to_owned(), json!(category_id));
+            }
             Ok(Page {
                 items: vec![podcast],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
-                    total: featured.then_some(1),
-                    next_offset: paged.then_some(request.offset.saturating_add(1)),
+                    total: if featured {
+                        Some(1)
+                    } else if category_hot {
+                        Some(1000)
+                    } else {
+                        None
+                    },
+                    next_offset: if category_hot {
+                        Some(request.offset.saturating_add(request.limit))
+                    } else {
+                        paged.then_some(request.offset.saturating_add(1))
+                    },
                     has_more: paged,
-                    extensions: Extensions::from([
-                        ("catalog".to_owned(), json!(request.catalog)),
-                        ("returned_count".to_owned(), json!(1)),
-                        ("limit_applied".to_owned(), json!(!featured)),
-                        (
-                            "response".to_owned(),
-                            if featured {
-                                json!({"code": 200, "name": "精选电台 - 测试"})
-                            } else if personalized {
-                                json!({"code": 200, "data": [{"id": 336355127}]})
-                            } else {
-                                json!({"code": 200, "hasMore": true})
-                            },
-                        ),
-                    ]),
+                    extensions: pagination_extensions,
                 },
             })
         }
@@ -10660,6 +10689,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn category_hot_podcast_catalog_preserves_insertions_and_request_window() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=category_hot&categoryId=2&limit=3&offset=6&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["catalog"],
+            "category_hot"
+        );
+        assert_eq!(json["data"][0]["extensions"]["request"]["category_id"], "2");
+        assert_eq!(json["meta"]["pagination"]["limit"], 3);
+        assert_eq!(json["meta"]["pagination"]["offset"], 6);
+        assert_eq!(json["meta"]["pagination"]["total"], 1000);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 9);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["catalog"],
+            "category_hot"
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["category_id"], "2");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["limit_applied"],
+            false
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
         for path in [
             "/v1/podcasts",
@@ -10668,6 +10729,7 @@ mod tests {
             "/v1/podcasts?catalog=featured&category_id=2",
             "/v1/podcasts?catalog=personalized&offset=1",
             "/v1/podcasts?catalog=personalized&category_id=2",
+            "/v1/podcasts?catalog=category_hot",
             "/v1/podcasts?catalog=hot&limit=0",
             "/v1/podcasts?catalog=hot&limit=101",
             "/v1/podcasts?catalog=hot&offset=invalid",
