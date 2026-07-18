@@ -685,6 +685,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn account_created_podcasts(&self, _request: &PageRequest) -> Result<Page<Podcast>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCreatedPodcasts,
+        ))
+    }
+
     async fn account_following_artists(&self, _request: &PageRequest) -> Result<Page<Artist>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

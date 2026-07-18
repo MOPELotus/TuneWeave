@@ -408,6 +408,7 @@ pub fn build_router(state: AppState) -> Router {
             get(account_radio_stations),
         )
         .route("/account/library/podcasts", get(account_podcasts))
+        .route("/account/podcasts/created", get(account_created_podcasts))
         .route(
             "/account/podcast-episodes",
             get(account_podcast_episode_search),
@@ -5900,6 +5901,41 @@ async fn account_podcasts(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AccountCreatedPodcastsParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+}
+
+async fn account_created_podcasts(
+    State(state): State<AppState>,
+    params: Result<Query<AccountCreatedPodcastsParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
+    if limit == 0 {
+        return Err(TuneWeaveError::invalid_request("limit must be greater than zero").into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_created_podcasts(&PageRequest {
+            limit,
+            offset: 0,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AccountPodcastEpisodeSearchParams {
     platform: Option<String>,
     account: Option<String>,
@@ -7408,6 +7444,7 @@ mod tests {
                 Capability::AccountAlbums,
                 Capability::AccountRadioStations,
                 Capability::AccountPodcasts,
+                Capability::AccountCreatedPodcasts,
                 Capability::AccountFollowingArtists,
                 Capability::AccountArtistNewVideos,
                 Capability::AccountArtistNewTracks,
@@ -8980,6 +9017,28 @@ mod tests {
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Extensions::from([("response".to_owned(), json!({"code": 200}))]),
+                },
+            })
+        }
+
+        async fn account_created_podcasts(&self, request: &PageRequest) -> Result<Page<Podcast>> {
+            let mut podcast = sample_podcast("336355127");
+            podcast.extensions.insert("created".to_owned(), json!(true));
+            podcast
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
+            Ok(Page {
+                items: vec![podcast],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "continuation_supported".to_owned(),
+                        json!(false),
+                    )]),
                 },
             })
         }
@@ -14761,6 +14820,44 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["code"],
             200
         );
+    }
+
+    #[tokio::test]
+    async fn account_created_podcasts_are_a_fixed_account_snapshot() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/podcasts/created?platform=netease&account=studio&limit=20",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["extensions"]["created"], true);
+        assert_eq!(json["data"][0]["extensions"]["account"], "studio");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "studio");
+        assert_eq!(json["meta"]["pagination"]["limit"], 20);
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["continuation_supported"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn account_created_podcasts_reject_unsupported_controls() {
+        for path in [
+            "/v1/account/podcasts/created?limit=0",
+            "/v1/account/podcasts/created?offset=1",
+            "/v1/account/podcasts/created?platform=unknown",
+            "/v1/account/podcasts/created?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]

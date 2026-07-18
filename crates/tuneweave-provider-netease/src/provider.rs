@@ -471,6 +471,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountAlbums,
             Capability::AccountRadioStations,
             Capability::AccountPodcasts,
+            Capability::AccountCreatedPodcasts,
             Capability::AccountFollowingArtists,
             Capability::AccountArtistNewVideos,
             Capability::AccountArtistNewTracks,
@@ -1946,6 +1947,28 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_weapi(path, payload).await?;
         ensure_account_access(&client, &response.body, "subscribed podcast catalog")?;
         map_netease_subscribed_podcasts(response.body, limit, request.offset)
+    }
+
+    async fn account_created_podcasts(&self, request: &PageRequest) -> Result<Page<Podcast>> {
+        if request.limit == 0 {
+            return Err(TuneWeaveError::invalid_request(
+                "created podcast limit must be greater than zero",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if request.offset != 0 {
+            return Err(TuneWeaveError::invalid_request(
+                "the NetEase created podcast catalog does not support offset",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "offset": request.offset })));
+        }
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        require_authenticated_client(&client, "created podcast catalog")?;
+        let (path, payload) = netease_created_podcasts_request(request.limit);
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_created_podcasts(response.body, request.limit)
     }
 
     async fn account_following_artists(&self, request: &PageRequest) -> Result<Page<Artist>> {
@@ -4760,6 +4783,13 @@ fn netease_subscribed_podcasts_request(limit: u32, offset: u32) -> (&'static str
     )
 }
 
+fn netease_created_podcasts_request(limit: u32) -> (&'static str, Value) {
+    (
+        "/api/social/my/created/voicelist/v1",
+        json!({ "limit": limit }),
+    )
+}
+
 fn netease_podcast_episodes_request(
     id: u64,
     request: &PodcastEpisodeListRequest,
@@ -5661,6 +5691,96 @@ fn map_netease_subscribed_podcasts(body: Value, limit: u32, offset: u32) -> Resu
     })
 }
 
+fn map_netease_created_podcasts(body: Value, limit: u32) -> Result<Page<Podcast>> {
+    ensure_success(&body)?;
+    let data = body.get("data");
+    let candidates = [
+        data.and_then(|value| value.get("list")),
+        data.and_then(|value| value.get("voiceLists")),
+        data.and_then(|value| value.get("voicelists")),
+        data.and_then(|value| value.get("records")),
+        data.filter(|value| value.is_array()),
+        body.get("voiceLists"),
+        body.get("voicelists"),
+        body.get("list"),
+    ];
+    let mut saw_array = false;
+    let mut saw_empty_array = false;
+    let mut last_error = None;
+    let mut mapped_items = None;
+    for candidate in candidates.into_iter().flatten() {
+        let Some(raw_items) = candidate.as_array() else {
+            continue;
+        };
+        saw_array = true;
+        if raw_items.is_empty() {
+            saw_empty_array = true;
+            continue;
+        }
+        let items = raw_items
+            .iter()
+            .map(created_podcast_item)
+            .map(map_netease_podcast)
+            .collect::<Result<Vec<_>>>();
+        match items {
+            Ok(items) => {
+                mapped_items = Some(items);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if mapped_items.is_none() && saw_empty_array {
+        mapped_items = Some(Vec::new());
+    }
+    let items = match mapped_items {
+        Some(items) => items,
+        None if saw_array => return Err(last_error.expect("failed array mapping records an error")),
+        None => return Err(podcast_item_error("created podcast list array", &body)),
+    };
+    let total = data
+        .and_then(|value| {
+            value
+                .get("total")
+                .and_then(json_u64)
+                .or_else(|| value.get("count").and_then(json_u64))
+        })
+        .or_else(|| body.get("total").and_then(json_u64))
+        .or_else(|| body.get("count").and_then(json_u64));
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: false,
+            extensions: Extensions::from([
+                ("continuation_supported".to_owned(), json!(false)),
+                ("response".to_owned(), body),
+            ]),
+        },
+    })
+}
+
+fn created_podcast_item(raw: &Value) -> Value {
+    let nested = ["voiceList", "voicelist", "baseInfo"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(Value::as_object));
+    let Some(nested) = nested else {
+        return raw.clone();
+    };
+    let mut merged = nested.clone();
+    if let Some(wrapper) = raw.as_object() {
+        for (key, value) in wrapper {
+            if !matches!(key.as_str(), "voiceList" | "voicelist" | "baseInfo") {
+                merged.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    Value::Object(merged)
+}
+
 fn map_podcast_subscription_result(
     id: u64,
     subscribed: bool,
@@ -5776,6 +5896,7 @@ fn map_netease_podcast_episodes_workbench(
         body.get("voices"),
     ];
     let mut saw_array = false;
+    let mut saw_empty_array = false;
     let mut last_error = None;
     let mut mapped_items = None;
     for candidate in candidates.into_iter().flatten() {
@@ -5783,6 +5904,10 @@ fn map_netease_podcast_episodes_workbench(
             continue;
         };
         saw_array = true;
+        if raw_items.is_empty() {
+            saw_empty_array = true;
+            continue;
+        }
         let items = raw_items
             .iter()
             .map(workbench_voice_item)
@@ -5795,6 +5920,9 @@ fn map_netease_podcast_episodes_workbench(
             }
             Err(error) => last_error = Some(error),
         }
+    }
+    if mapped_items.is_none() && saw_empty_array {
+        mapped_items = Some(Vec::new());
     }
     let items = match mapped_items {
         Some(items) => items,
@@ -15283,6 +15411,10 @@ mod tests {
                 json!({"limit": 30, "offset": 60, "total": true})
             )
         );
+        assert_eq!(
+            netease_created_podcasts_request(20),
+            ("/api/social/my/created/voicelist/v1", json!({"limit": 20}))
+        );
 
         let mut request = PodcastEpisodeListRequest::new(25, 50);
         request.ascending = true;
@@ -16280,6 +16412,27 @@ mod tests {
         assert_eq!(fallback.pagination.total, Some(1));
         assert!(!fallback.pagination.has_more);
 
+        let nonempty_after_empty = map_netease_podcast_episodes_workbench(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [],
+                    "voices": [{
+                        "voiceId": 2_058_695_204_u64,
+                        "songName": "非空兼容列表",
+                        "voiceListId": 336_355_127
+                    }]
+                }
+            }),
+            200,
+            0,
+        )
+        .expect("empty preferred array must not shadow nonempty compatible list");
+        assert_eq!(
+            nonempty_after_empty.items[0].resource_ref.to_string(),
+            "netease:2058695204"
+        );
+
         for invalid in [
             json!({"code": 200}),
             json!({"code": 200, "data": {}}),
@@ -16360,6 +16513,70 @@ mod tests {
             assert_eq!(
                 map_netease_subscribed_podcasts(invalid, 20, 0)
                     .expect_err("invalid subscribed podcast response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_created_podcasts_without_empty_primary_list_shadowing_content() {
+        let page = map_netease_created_podcasts(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [],
+                    "voiceLists": [{
+                        "displayStatus": "ONLINE",
+                        "futureWrapperField": "preserved",
+                        "voiceList": {
+                            "voiceListId": 336_355_127,
+                            "name": "我创建的声音歌单",
+                            "coverImgUrl": "https://example.test/created.jpg",
+                            "voiceCount": 12,
+                            "creatorName": "创作者"
+                        }
+                    }],
+                    "total": 1
+                }
+            }),
+            20,
+        )
+        .expect("map created podcasts");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:336355127");
+        assert_eq!(page.items[0].name, "我创建的声音歌单");
+        assert_eq!(page.items[0].episode_count, Some(12));
+        assert_eq!(
+            page.items[0].extensions["podcast"]["displayStatus"],
+            "ONLINE"
+        );
+        assert_eq!(
+            page.items[0].extensions["podcast"]["futureWrapperField"],
+            "preserved"
+        );
+        assert_eq!(page.pagination.limit, 20);
+        assert_eq!(page.pagination.offset, 0);
+        assert_eq!(page.pagination.total, Some(1));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["continuation_supported"], false);
+
+        let empty = map_netease_created_podcasts(
+            json!({"code": 200, "data": {"list": [], "total": 0}}),
+            20,
+        )
+        .expect("map empty created podcast list");
+        assert!(empty.items.is_empty());
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": {}}),
+            json!({"code": 200, "data": {"list": [{"name": "缺少 ID"}]}}),
+        ] {
+            assert_eq!(
+                map_netease_created_podcasts(invalid, 20)
+                    .expect_err("invalid created podcast response")
                     .code,
                 ErrorCode::UpstreamError
             );
@@ -21260,6 +21477,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
         assert!(capabilities.contains(&Capability::PodcastEpisodeLyrics));
+        assert!(capabilities.contains(&Capability::AccountCreatedPodcasts));
     }
 
     #[test]
@@ -21523,6 +21741,41 @@ mod tests {
         .await
         .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn created_podcasts_require_supported_controls_and_a_logged_in_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for request in [
+            PageRequest {
+                limit: 0,
+                offset: 0,
+                account: None,
+            },
+            PageRequest {
+                limit: 20,
+                offset: 1,
+                account: None,
+            },
+        ] {
+            let error = MusicProvider::account_created_podcasts(&provider, &request)
+                .await
+                .expect_err("invalid created podcast controls");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        for account in [None, Some("missing")] {
+            let error = MusicProvider::account_created_podcasts(
+                &provider,
+                &PageRequest {
+                    limit: 20,
+                    offset: 0,
+                    account: account.map(str::to_owned),
+                },
+            )
+            .await
+            .expect_err("created podcasts require authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
     }
 
     #[tokio::test]
