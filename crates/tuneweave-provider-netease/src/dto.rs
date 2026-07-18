@@ -1004,6 +1004,18 @@ pub(crate) struct PersonalFmEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct PersonalizedEnvelope {
+    pub result: Vec<Value>,
+    pub category: Option<Value>,
+    #[serde(rename = "hasTaste")]
+    pub has_taste: Option<Value>,
+    pub more: Option<Value>,
+    pub offset: Option<Value>,
+    pub name: Option<Value>,
+    pub trp: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct RecommendedTracksData {
     #[serde(rename = "dailySongs", default)]
     pub daily_songs: Vec<Song>,
@@ -1049,7 +1061,7 @@ pub(crate) struct PlaylistDetail {
     #[serde(rename = "specialType")]
     pub special_type: Option<i64>,
     #[serde(rename = "playCount")]
-    pub play_count: Option<u64>,
+    pub play_count: Option<Value>,
     pub copywriter: Option<String>,
     pub alg: Option<String>,
     #[serde(rename = "trackIds", default)]

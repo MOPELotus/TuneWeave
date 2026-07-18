@@ -57,15 +57,16 @@ use tuneweave_core::{
     PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
-    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -89,11 +90,11 @@ use crate::{
         DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
         DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
         LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope,
-        PersonalFmEnvelope, PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail,
-        PlaylistEnvelope, Privilege, RecommendationReason, RecommendedPlaylistsEnvelope,
-        RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData, StreamEnvelope,
-        SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
-        VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
+        PersonalFmEnvelope, PersonalizedEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
+        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
+        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
+        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
+        UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -565,6 +566,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::Favorites,
             Capability::ListeningHistory,
             Capability::Recommendations,
+            Capability::VideoRecommendations,
+            Capability::PodcastEpisodeRecommendations,
             Capability::PersonalFm,
             Capability::RecommendationFeedback,
             Capability::CommentWrite,
@@ -2316,31 +2319,58 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
-        let account = request.account.as_deref().unwrap_or("default");
-        let client = self.client_for(Some(account))?;
-        let response = client
-            .request_weapi(
-                "/api/v3/discovery/recommend/songs",
-                json!({ "afresh": request.refresh }),
-            )
-            .await?;
-        ensure_account_access(&client, &response.body, "daily track recommendations")?;
-        let response: RecommendedTracksEnvelope = parse_body(response.body)?;
-        map_recommended_tracks(response, request.limit, request.offset)
+        let (path, payload) = netease_track_recommendation_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        match request.source {
+            RecommendationSource::Daily => {
+                ensure_account_access(&client, &response.body, "daily track recommendations")?;
+                let response: RecommendedTracksEnvelope = parse_body(response.body)?;
+                map_recommended_tracks(response, request.limit, request.offset)
+            }
+            RecommendationSource::Personalized => map_personalized_tracks(response.body, request),
+        }
     }
 
     async fn recommended_playlists(
         &self,
         request: &RecommendationRequest,
     ) -> Result<Page<Playlist>> {
-        let account = request.account.as_deref().unwrap_or("default");
-        let client = self.client_for(Some(account))?;
+        let (path, payload) = netease_playlist_recommendation_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        match request.source {
+            RecommendationSource::Daily => {
+                ensure_account_access(&client, &response.body, "daily playlist recommendations")?;
+                let response: RecommendedPlaylistsEnvelope = parse_body(response.body)?;
+                map_recommended_playlists(response, request.limit, request.offset)
+            }
+            RecommendationSource::Personalized => {
+                map_personalized_playlists(response.body, request)
+            }
+        }
+    }
+
+    async fn recommended_videos(
+        &self,
+        request: &VideoRecommendationRequest,
+    ) -> Result<Page<Video>> {
+        let (path, payload, catalog) = netease_video_recommendation_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        map_personalized_videos(response.body, request, catalog)
+    }
+
+    async fn recommended_podcast_episodes(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<PodcastEpisode>> {
+        validate_fixed_recommendation_page(request, "personalized podcast episodes")?;
+        let client = self.client_for(request.account.as_deref())?;
         let response = client
-            .request_weapi("/api/v1/discovery/recommend/resource", json!({}))
+            .request_weapi("/api/personalized/djprogram", json!({}))
             .await?;
-        ensure_account_access(&client, &response.body, "daily playlist recommendations")?;
-        let response: RecommendedPlaylistsEnvelope = parse_body(response.body)?;
-        map_recommended_playlists(response, request.limit, request.offset)
+        map_personalized_podcast_episodes(response.body, request)
     }
 
     async fn personal_fm(&self, request: &PersonalFmRequest) -> Result<Page<Track>> {
@@ -4639,6 +4669,416 @@ fn map_recommended_playlists(
     let limit = limit.clamp(1, 100);
     let (items, pagination) = select_page(playlists, limit, offset);
     Ok(Page { items, pagination })
+}
+
+fn netease_track_recommendation_request(
+    request: &RecommendationRequest,
+) -> Result<(&'static str, Value)> {
+    validate_recommendation_request(request, true)?;
+    match request.source {
+        RecommendationSource::Daily => Ok((
+            "/api/v3/discovery/recommend/songs",
+            json!({ "afresh": request.refresh }),
+        )),
+        RecommendationSource::Personalized => Ok((
+            "/api/personalized/newsong",
+            json!({
+                "type": "recommend",
+                "limit": request.limit,
+                "areaId": request.area_id.unwrap_or(0),
+            }),
+        )),
+    }
+}
+
+fn netease_playlist_recommendation_request(
+    request: &RecommendationRequest,
+) -> Result<(&'static str, Value)> {
+    validate_recommendation_request(request, false)?;
+    match request.source {
+        RecommendationSource::Daily => Ok(("/api/v1/discovery/recommend/resource", json!({}))),
+        RecommendationSource::Personalized => Ok((
+            "/api/personalized/playlist",
+            json!({ "limit": request.limit, "total": true, "n": 1000 }),
+        )),
+    }
+}
+
+fn validate_recommendation_request(request: &RecommendationRequest, tracks: bool) -> Result<()> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "recommendation limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.area_id.is_some()
+        && (!tracks || request.source != RecommendationSource::Personalized)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "area_id is only supported by personalized track recommendations",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.source == RecommendationSource::Personalized {
+        if request.offset != 0 {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase personalized recommendations do not support offset",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if request.refresh {
+            return Err(TuneWeaveError::invalid_request(
+                "refresh is only supported by daily track recommendations",
+            )
+            .with_platform(Platform::Netease));
+        }
+    }
+    Ok(())
+}
+
+fn map_personalized_tracks(
+    raw_response: Value,
+    request: &RecommendationRequest,
+) -> Result<Page<Track>> {
+    ensure_success(&raw_response)?;
+    let response: PersonalizedEnvelope = parse_body(raw_response.clone())?;
+    let mut items = Vec::with_capacity(response.result.len());
+    for raw in &response.result {
+        let song = raw
+            .get("song")
+            .filter(|song| song.is_object())
+            .cloned()
+            .ok_or_else(|| personalized_item_error("track", raw))?;
+        let mut track = map_song(parse_body(song)?, None)?;
+        attach_personalized_item(&mut track.extensions, raw.clone());
+        items.push(track);
+    }
+    Ok(fixed_personalized_page(
+        items,
+        request.limit,
+        "tracks",
+        response,
+        raw_response,
+        true,
+    ))
+}
+
+fn map_personalized_playlists(
+    raw_response: Value,
+    request: &RecommendationRequest,
+) -> Result<Page<Playlist>> {
+    ensure_success(&raw_response)?;
+    let response: PersonalizedEnvelope = parse_body(raw_response.clone())?;
+    let mut items = Vec::with_capacity(response.result.len());
+    for raw in &response.result {
+        let mut playlist = map_playlist(parse_body(raw.clone())?)?;
+        attach_personalized_item(&mut playlist.extensions, raw.clone());
+        items.push(playlist);
+    }
+    Ok(fixed_personalized_page(
+        items,
+        request.limit,
+        "playlists",
+        response,
+        raw_response,
+        true,
+    ))
+}
+
+fn netease_video_recommendation_request(
+    request: &VideoRecommendationRequest,
+) -> Result<(&'static str, Value, &'static str)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "video recommendation limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease));
+    }
+    match (request.kind, request.view) {
+        (VideoRecommendationKind::Mv, VideoRecommendationView::Featured) => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase personalized MV recommendations do not support offset",
+                )
+                .with_platform(Platform::Netease));
+            }
+            Ok(("/api/personalized/mv", json!({}), "mv"))
+        }
+        (VideoRecommendationKind::Mv, VideoRecommendationView::Catalog) => {
+            Err(TuneWeaveError::invalid_request(
+                "NetEase does not expose a paginated personalized MV catalog",
+            )
+            .with_platform(Platform::Netease))
+        }
+        (VideoRecommendationKind::Exclusive, VideoRecommendationView::Featured) => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase exclusive featured recommendations do not support offset",
+                )
+                .with_platform(Platform::Netease));
+            }
+            Ok((
+                "/api/personalized/privatecontent",
+                json!({}),
+                "exclusive_featured",
+            ))
+        }
+        (VideoRecommendationKind::Exclusive, VideoRecommendationView::Catalog) => Ok((
+            "/api/v2/privatecontent/list",
+            json!({
+                "offset": request.offset,
+                "total": "true",
+                "limit": request.limit,
+            }),
+            "exclusive_catalog",
+        )),
+    }
+}
+
+fn map_personalized_videos(
+    raw_response: Value,
+    request: &VideoRecommendationRequest,
+    catalog: &str,
+) -> Result<Page<Video>> {
+    ensure_success(&raw_response)?;
+    let response: PersonalizedEnvelope = parse_body(raw_response.clone())?;
+    let mut items = response
+        .result
+        .iter()
+        .cloned()
+        .map(|raw| map_personalized_video(raw, request.kind, catalog))
+        .collect::<Result<Vec<_>>>()?;
+    if request.view == VideoRecommendationView::Catalog {
+        let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let has_more = response.more.as_ref().and_then(json_bool).unwrap_or(false);
+        let next_offset =
+            (has_more && consumed > 0).then_some(request.offset.saturating_add(consumed));
+        let mut extensions =
+            personalized_page_extensions(catalog, &response, raw_response, true, false);
+        extensions.insert("continuation_supported".to_owned(), Value::Bool(true));
+        return Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: None,
+                next_offset,
+                has_more,
+                extensions,
+            },
+        });
+    }
+    let total = items.len();
+    items.truncate(usize::try_from(request.limit).unwrap_or(usize::MAX));
+    let truncated = items.len() < total;
+    let extensions =
+        personalized_page_extensions(catalog, &response, raw_response, false, truncated);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total: u64::try_from(total).ok(),
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
+fn map_personalized_video(
+    raw: Value,
+    kind: VideoRecommendationKind,
+    catalog: &str,
+) -> Result<Video> {
+    let id = raw
+        .get("id")
+        .and_then(usable_resource_id)
+        .ok_or_else(|| personalized_item_error("video", &raw))?;
+    let title = radio_text_field(&raw, &["name", "title"])
+        .ok_or_else(|| personalized_item_error("video title", &raw))?;
+    let resource_ref = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid personalized video id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let mut creators = raw
+        .get("artists")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(personalized_video_creator)
+        .collect::<Vec<_>>();
+    if creators.is_empty()
+        && let Some(name) = radio_text_field(&raw, &["artistName"])
+    {
+        creators.push(CreatorSummary {
+            resource_ref: raw
+                .get("artistId")
+                .and_then(usable_resource_id)
+                .and_then(|id| ResourceRef::new(Platform::Netease, id).ok()),
+            name,
+            avatar_url: None,
+        });
+    }
+    let mut extensions = Extensions::from([
+        ("recommendation_kind".to_owned(), json!(kind)),
+        ("recommendation_catalog".to_owned(), json!(catalog)),
+    ]);
+    attach_personalized_item(&mut extensions, raw.clone());
+    Ok(Video {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        title,
+        creators,
+        description: radio_text_field(&raw, &["copywriter", "description"]).unwrap_or_default(),
+        cover_url: radio_text_field(&raw, &["picUrl", "sPicUrl", "coverUrl"]),
+        duration_ms: podcast_positive_u64_field(&raw, &["duration", "durationMs"]),
+        published_at: podcast_positive_u64_field(&raw, &["time", "publishTime"])
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000)),
+        play_count: podcast_u64_field(&raw, &["playCount"]),
+        subscribed: radio_bool_field(&raw, &["subed", "subscribed"]),
+        extensions,
+    })
+}
+
+fn personalized_video_creator(raw: &Value) -> Option<CreatorSummary> {
+    let name = radio_text_field(raw, &["name", "artistName"])?;
+    Some(CreatorSummary {
+        resource_ref: raw
+            .get("id")
+            .and_then(usable_resource_id)
+            .and_then(|id| ResourceRef::new(Platform::Netease, id).ok()),
+        name,
+        avatar_url: radio_text_field(raw, &["avatarUrl"]),
+    })
+}
+
+fn validate_fixed_recommendation_page(request: &PageRequest, label: &str) -> Result<()> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "{label} limit must be between 1 and 100",
+        ))
+        .with_platform(Platform::Netease));
+    }
+    if request.offset != 0 {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "NetEase {label} do not support offset",
+        ))
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
+}
+
+fn map_personalized_podcast_episodes(
+    raw_response: Value,
+    request: &PageRequest,
+) -> Result<Page<PodcastEpisode>> {
+    ensure_success(&raw_response)?;
+    let response: PersonalizedEnvelope = parse_body(raw_response.clone())?;
+    let mut items = Vec::with_capacity(response.result.len());
+    for raw in &response.result {
+        let program = raw
+            .get("program")
+            .filter(|program| program.is_object())
+            .cloned()
+            .ok_or_else(|| personalized_item_error("podcast episode", raw))?;
+        let mut episode = map_netease_podcast_episode(program)?;
+        attach_personalized_item(&mut episode.extensions, raw.clone());
+        items.push(episode);
+    }
+    Ok(fixed_personalized_page(
+        items,
+        request.limit,
+        "podcast_episodes",
+        response,
+        raw_response,
+        false,
+    ))
+}
+
+fn fixed_personalized_page<T>(
+    mut items: Vec<T>,
+    limit: u32,
+    catalog: &str,
+    response: PersonalizedEnvelope,
+    raw_response: Value,
+    upstream_limit_applied: bool,
+) -> Page<T> {
+    let total = items.len();
+    items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let truncated = items.len() < total;
+    let extensions = personalized_page_extensions(
+        catalog,
+        &response,
+        raw_response,
+        upstream_limit_applied,
+        truncated,
+    );
+    Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: 0,
+            total: u64::try_from(total).ok(),
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    }
+}
+
+fn personalized_page_extensions(
+    catalog: &str,
+    response: &PersonalizedEnvelope,
+    raw_response: Value,
+    limit_applied: bool,
+    truncated: bool,
+) -> Extensions {
+    let mut extensions = Extensions::from([
+        ("catalog".to_owned(), json!(catalog)),
+        ("continuation_supported".to_owned(), Value::Bool(false)),
+        ("limit_applied".to_owned(), Value::Bool(limit_applied)),
+        ("truncated".to_owned(), Value::Bool(truncated)),
+        ("response".to_owned(), raw_response),
+    ]);
+    insert_extension(&mut extensions, "category", response.category.clone());
+    insert_extension(&mut extensions, "has_taste", response.has_taste.clone());
+    insert_extension(&mut extensions, "upstream_offset", response.offset.clone());
+    insert_extension(&mut extensions, "name", response.name.clone());
+    insert_extension(&mut extensions, "trp", response.trp.clone());
+    extensions
+}
+
+fn attach_personalized_item(extensions: &mut Extensions, raw: Value) {
+    insert_extension(
+        extensions,
+        "recommendation_algorithm",
+        radio_text_field(&raw, &["alg"]),
+    );
+    insert_extension(
+        extensions,
+        "recommendation_copywriter",
+        radio_text_field(&raw, &["copywriter"]),
+    );
+    insert_extension(
+        extensions,
+        "can_dislike",
+        radio_bool_field(&raw, &["canDislike"]),
+    );
+    extensions.insert("personalized".to_owned(), raw);
+}
+
+fn personalized_item_error(label: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase personalized response did not contain a valid {label}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "item": raw }))
 }
 
 fn map_audio_recognition(
@@ -22659,6 +23099,8 @@ mod tests {
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
+        assert!(capabilities.contains(&Capability::VideoRecommendations));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeRecommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
         assert!(capabilities.contains(&Capability::AlbumList));
         assert!(capabilities.contains(&Capability::AlbumStats));
@@ -23216,6 +23658,8 @@ mod tests {
             offset: 0,
             account: Some("missing".to_owned()),
             refresh: true,
+            source: RecommendationSource::Daily,
+            area_id: None,
         };
         let track_error = MusicProvider::recommended_tracks(&provider, &request)
             .await
@@ -23274,6 +23718,275 @@ mod tests {
         assert_eq!(
             playlists.items[0].extensions["copywriter"],
             "根据你的口味生成"
+        );
+    }
+
+    #[test]
+    fn personalized_recommendation_requests_match_all_six_reference_modules() {
+        let tracks = RecommendationRequest {
+            limit: 10,
+            offset: 0,
+            account: None,
+            refresh: false,
+            source: RecommendationSource::Personalized,
+            area_id: Some(7),
+        };
+        assert_eq!(
+            netease_track_recommendation_request(&tracks).expect("personalized track request"),
+            (
+                "/api/personalized/newsong",
+                json!({"type": "recommend", "limit": 10, "areaId": 7})
+            )
+        );
+
+        let playlists = RecommendationRequest {
+            area_id: None,
+            ..tracks.clone()
+        };
+        assert_eq!(
+            netease_playlist_recommendation_request(&playlists)
+                .expect("personalized playlist request"),
+            (
+                "/api/personalized/playlist",
+                json!({"limit": 10, "total": true, "n": 1000})
+            )
+        );
+
+        for (request, expected) in [
+            (
+                VideoRecommendationRequest::default(),
+                ("/api/personalized/mv", json!({}), "mv"),
+            ),
+            (
+                VideoRecommendationRequest {
+                    kind: VideoRecommendationKind::Exclusive,
+                    ..VideoRecommendationRequest::default()
+                },
+                (
+                    "/api/personalized/privatecontent",
+                    json!({}),
+                    "exclusive_featured",
+                ),
+            ),
+            (
+                VideoRecommendationRequest {
+                    kind: VideoRecommendationKind::Exclusive,
+                    view: VideoRecommendationView::Catalog,
+                    limit: 60,
+                    offset: 120,
+                    account: None,
+                },
+                (
+                    "/api/v2/privatecontent/list",
+                    json!({"offset": 120, "total": "true", "limit": 60}),
+                    "exclusive_catalog",
+                ),
+            ),
+        ] {
+            assert_eq!(
+                netease_video_recommendation_request(&request).expect("personalized video request"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn personalized_recommendations_map_every_stable_resource_without_fake_pagination() {
+        let tracks = map_personalized_tracks(
+            json!({
+                "code": 200,
+                "category": 0,
+                "result": [{
+                    "alg": "server_doudi",
+                    "copywriter": "推荐新歌",
+                    "canDislike": false,
+                    "song": fixture_song_value()
+                }]
+            }),
+            &RecommendationRequest {
+                limit: 10,
+                offset: 0,
+                account: None,
+                refresh: false,
+                source: RecommendationSource::Personalized,
+                area_id: Some(0),
+            },
+        )
+        .expect("map personalized tracks");
+        assert_eq!(tracks.items[0].resource_ref.to_string(), "netease:123");
+        assert_eq!(
+            tracks.items[0].extensions["recommendation_algorithm"],
+            "server_doudi"
+        );
+        assert_eq!(tracks.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            tracks.pagination.extensions["continuation_supported"],
+            false
+        );
+
+        let playlists = map_personalized_playlists(
+            json!({
+                "code": 200,
+                "hasTaste": true,
+                "result": [{
+                    "id": 99,
+                    "name": "私人雷达",
+                    "picUrl": "https://example.test/radar.jpg",
+                    "trackCount": 35,
+                    "alg": "official_image_album"
+                }]
+            }),
+            &RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(30, 0)
+            },
+        )
+        .expect("map personalized playlists");
+        assert_eq!(playlists.items[0].resource_ref.to_string(), "netease:99");
+        assert_eq!(playlists.items[0].name, "私人雷达");
+        assert_eq!(playlists.pagination.extensions["has_taste"], true);
+
+        let mvs = map_personalized_videos(
+            json!({
+                "code": 200,
+                "result": [{
+                    "id": 10973299,
+                    "name": "Mute",
+                    "artistId": 12098023,
+                    "artistName": "孟美岐",
+                    "artists": [{"id": 12098023, "name": "孟美岐"}],
+                    "picUrl": "https://example.test/mute.jpg",
+                    "duration": 184000,
+                    "playCount": 3301022,
+                    "subed": false
+                }]
+            }),
+            &VideoRecommendationRequest::default(),
+            "mv",
+        )
+        .expect("map personalized MVs");
+        assert_eq!(mvs.items[0].resource_ref.to_string(), "netease:10973299");
+        assert_eq!(mvs.items[0].creators[0].name, "孟美岐");
+        assert_eq!(mvs.items[0].duration_ms, Some(184_000));
+
+        let exclusive = map_personalized_videos(
+            json!({
+                "code": 200,
+                "more": true,
+                "offset": 0,
+                "result": [{
+                    "id": 14514232,
+                    "name": "超级面对面",
+                    "picUrl": "https://example.test/exclusive.jpg",
+                    "time": 1648546294107_u64,
+                    "type": 5
+                }]
+            }),
+            &VideoRecommendationRequest {
+                kind: VideoRecommendationKind::Exclusive,
+                view: VideoRecommendationView::Catalog,
+                limit: 1,
+                offset: 0,
+                account: None,
+            },
+            "exclusive_catalog",
+        )
+        .expect("map exclusive catalog");
+        assert!(exclusive.pagination.has_more);
+        assert_eq!(exclusive.pagination.next_offset, Some(1));
+        assert_eq!(exclusive.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            exclusive.pagination.extensions["continuation_supported"],
+            true
+        );
+
+        let episodes = map_personalized_podcast_episodes(
+            json!({
+                "code": 200,
+                "result": [{
+                    "alg": "featured",
+                    "program": {
+                        "id": 3724590117_u64,
+                        "name": "罪案信条",
+                        "mainTrackId": 123,
+                        "mainSong": fixture_song_value(),
+                        "radio": {"id": 6611037},
+                        "duration": 449985
+                    }
+                }]
+            }),
+            &PageRequest::new(10, 0),
+        )
+        .expect("map personalized podcast episodes");
+        assert_eq!(
+            episodes.items[0].resource_ref.to_string(),
+            "netease:3724590117"
+        );
+        assert_eq!(
+            episodes.items[0]
+                .audio
+                .as_ref()
+                .expect("episode audio")
+                .resource_ref
+                .to_string(),
+            "netease:123"
+        );
+        assert_eq!(episodes.pagination.extensions["limit_applied"], false);
+    }
+
+    #[test]
+    fn personalized_recommendations_reject_unsupported_controls_and_bad_items() {
+        for request in [
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                offset: 1,
+                ..RecommendationRequest::new(10, 0)
+            },
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                refresh: true,
+                ..RecommendationRequest::new(10, 0)
+            },
+        ] {
+            assert_eq!(
+                netease_track_recommendation_request(&request)
+                    .expect_err("unsupported personalized control")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let bad_playlist_area = RecommendationRequest {
+            source: RecommendationSource::Personalized,
+            area_id: Some(7),
+            ..RecommendationRequest::new(10, 0)
+        };
+        assert_eq!(
+            netease_playlist_recommendation_request(&bad_playlist_area)
+                .expect_err("playlist area id")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            netease_video_recommendation_request(&VideoRecommendationRequest {
+                kind: VideoRecommendationKind::Mv,
+                view: VideoRecommendationView::Catalog,
+                ..VideoRecommendationRequest::default()
+            })
+            .expect_err("missing MV catalog")
+            .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            map_personalized_tracks(
+                json!({"code": 200, "result": [{}]}),
+                &RecommendationRequest {
+                    source: RecommendationSource::Personalized,
+                    ..RecommendationRequest::new(10, 0)
+                },
+            )
+            .expect_err("missing song")
+            .code,
+            ErrorCode::UpstreamError
         );
     }
 
@@ -25204,6 +25917,81 @@ mod tests {
             .expect("anonymous daily tracks");
         assert!(!tracks.items.is_empty());
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_anonymous_personalized_homepage_covers_all_six_modules() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let tracks = MusicProvider::recommended_tracks(
+            &provider,
+            &RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                area_id: Some(0),
+                ..RecommendationRequest::new(3, 0)
+            },
+        )
+        .await
+        .expect("live personalized tracks");
+        assert!(!tracks.items.is_empty());
+
+        let playlists = MusicProvider::recommended_playlists(
+            &provider,
+            &RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(3, 0)
+            },
+        )
+        .await
+        .expect("live personalized playlists");
+        assert!(!playlists.items.is_empty());
+
+        for request in [
+            VideoRecommendationRequest {
+                limit: 3,
+                ..VideoRecommendationRequest::default()
+            },
+            VideoRecommendationRequest {
+                kind: VideoRecommendationKind::Exclusive,
+                limit: 3,
+                ..VideoRecommendationRequest::default()
+            },
+            VideoRecommendationRequest {
+                kind: VideoRecommendationKind::Exclusive,
+                view: VideoRecommendationView::Catalog,
+                limit: 2,
+                ..VideoRecommendationRequest::default()
+            },
+        ] {
+            let videos = MusicProvider::recommended_videos(&provider, &request)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "live {:?}/{:?} personalized videos failed: {error:?}",
+                        request.kind, request.view
+                    )
+                });
+            assert!(
+                !videos.items.is_empty(),
+                "{:?}/{:?}",
+                request.kind,
+                request.view
+            );
+            assert!(videos.items.iter().all(|video| !video.title.is_empty()));
+        }
+
+        let episodes =
+            MusicProvider::recommended_podcast_episodes(&provider, &PageRequest::new(10, 0))
+                .await
+                .expect("live personalized podcast episodes");
+        assert!(!episodes.items.is_empty());
+        assert!(
+            episodes
+                .items
+                .iter()
+                .all(|episode| !episode.name.is_empty())
+        );
+        assert!(episodes.items.iter().all(|episode| episode.audio.is_some()));
     }
 
     #[tokio::test]

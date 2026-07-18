@@ -1643,6 +1643,9 @@ pub struct RecommendationRequest {
     pub offset: u32,
     pub account: Option<String>,
     pub refresh: bool,
+    #[serde(default)]
+    pub source: RecommendationSource,
+    pub area_id: Option<u64>,
 }
 
 impl RecommendationRequest {
@@ -1653,6 +1656,53 @@ impl RecommendationRequest {
             offset,
             account: None,
             refresh: false,
+            source: RecommendationSource::Daily,
+            area_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecommendationSource {
+    #[default]
+    Daily,
+    Personalized,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoRecommendationKind {
+    #[default]
+    Mv,
+    Exclusive,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoRecommendationView {
+    #[default]
+    Featured,
+    Catalog,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoRecommendationRequest {
+    pub kind: VideoRecommendationKind,
+    pub view: VideoRecommendationView,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl Default for VideoRecommendationRequest {
+    fn default() -> Self {
+        Self {
+            kind: VideoRecommendationKind::Mv,
+            view: VideoRecommendationView::Featured,
+            limit: 30,
+            offset: 0,
+            account: None,
         }
     }
 }
@@ -3224,6 +3274,31 @@ mod tests {
 
     #[test]
     fn personal_fm_and_dislike_contracts_keep_mode_and_track_identity_explicit() {
+        let recommendations = RecommendationRequest {
+            limit: 10,
+            offset: 0,
+            account: Some("default".to_owned()),
+            refresh: false,
+            source: RecommendationSource::Personalized,
+            area_id: Some(7),
+        };
+        let value =
+            serde_json::to_value(recommendations).expect("serialize recommendation request");
+        assert_eq!(value["source"], "personalized");
+        assert_eq!(value["area_id"], 7);
+
+        let videos = VideoRecommendationRequest {
+            kind: VideoRecommendationKind::Exclusive,
+            view: VideoRecommendationView::Catalog,
+            limit: 60,
+            offset: 120,
+            account: Some("default".to_owned()),
+        };
+        let value = serde_json::to_value(videos).expect("serialize video recommendation request");
+        assert_eq!(value["kind"], "exclusive");
+        assert_eq!(value["view"], "catalog");
+        assert_eq!(value["offset"], 120);
+
         let request = PersonalFmRequest {
             variant: PersonalFmVariant::Mode,
             mode: Some("SCENE_RCMD".to_owned()),

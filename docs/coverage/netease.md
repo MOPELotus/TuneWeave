@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=249`、`partial=3`、`implemented=64`、`verified=100`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=243`、`partial=3`、`implemented=64`、`verified=106`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -199,12 +199,12 @@
 | `nickname_check` | `/nickname/check` | `pending` | — |
 | `personal_fm` | `/personal_fm` | `verified` | `GET /v1/recommendations/personal-fm`（缺省 `backend=classic`，也接受 `default/personal_fm`；固定 WeAPI `/api/v1/radio/get` 和空载荷，不伪造参考实现不存在的分页参数；统一返回当前 `Track[]` 队列快照，`total` 为本次数量，`has_more=false/next_offset=null/continuation_supported=false`，完整响应保留在分页扩展；请求协议、能力发现、歌曲映射、截取语义、账户隔离、冲突和未知字段均有测试；2026-07-18 匿名真实 provider 联网返回非空统一曲目队列） |
 | `personal_fm_mode` | `/personal/fm/mode` | `verified` | `GET /v1/recommendations/personal-fm?backend=mode`（也接受 `personal_fm_mode`；固定 EAPI `/api/v1/radio/get`，按参考实现保留可选 `mode/subMode/limit`，统一字段兼容 `sub_mode/submode/subMode`；模式值采用可扩展字符串校验，不把未来平台模式锁死在本地枚举；响应沿用不可续页队列快照并在扩展保留实际后端、协议、参数和完整原文；精确协议、可选参数、校验、统一 HTTP 与匿名真实联网均已覆盖，2026-07-18 返回非空统一曲目队列） |
-| `personalized` | `/personalized` | `pending` | — |
-| `personalized_djprogram` | `/personalized/djprogram` | `pending` | — |
-| `personalized_mv` | `/personalized/mv` | `pending` | — |
-| `personalized_newsong` | `/personalized/newsong` | `pending` | — |
-| `personalized_privatecontent` | `/personalized/privatecontent` | `pending` | — |
-| `personalized_privatecontent_list` | `/personalized/privatecontent/list` | `pending` | — |
+| `personalized` | `/personalized` | `verified` | `GET /v1/recommendations/playlists?source=personalized`（固定 WeAPI `/api/personalized/playlist`，精确提交 `limit/total=true/n=1000`；首页歌单快照不支持 offset，统一分页固定无续页并保留算法、文案、可反馈态、`hasTaste/category` 及完整响应；播放量兼容当前上游浮点 JSON 并无损保留；协议、映射、输入边界、统一 HTTP 和 2026-07-18 匿名真实非空目录均已验证） |
+| `personalized_djprogram` | `/personalized/djprogram` | `verified` | `GET /v1/recommendations/podcast-episodes`（固定无参数 WeAPI `/api/personalized/djprogram`；外层 `program` 完整映射为 `PodcastEpisode`，节目、播客和承载音频引用严格分离，推荐包装保留在扩展；接口无分页控制，非零 offset 被拒绝且 `continuation_supported=false/limit_applied=false`；离线包装/播放身份和 2026-07-18 匿名真实非空节目及音频均已验证） |
+| `personalized_mv` | `/personalized/mv` | `verified` | `GET /v1/recommendations/videos?kind=mv&view=featured`（固定无参数 WeAPI `/api/personalized/mv`，不可续页快照不伪造目录；统一 `Video` 保留真实 MV ID、艺人、封面、正时长、播放量、收藏态、算法和完整条目；平台不存在对应分页目录，`mv/catalog` 明确拒绝；2026-07-18 匿名真实返回非空类型化 MV） |
+| `personalized_newsong` | `/personalized/newsong` | `verified` | `GET /v1/recommendations/tracks?source=personalized`（固定 WeAPI `/api/personalized/newsong`，精确提交 `type=recommend/limit/areaId`，`area_id` 缺省 0 并只用于此分支；外层 `song` 映射完整 `Track`，算法、文案、可反馈态和原包装不丢失；不可续页快照拒绝 offset/refresh；协议、映射、边界、统一 HTTP 和 2026-07-18 匿名真实非空新歌均已验证） |
+| `personalized_privatecontent` | `/personalized/privatecontent` | `verified` | `GET /v1/recommendations/videos?kind=exclusive&view=featured`（固定无参数 WeAPI `/api/personalized/privatecontent`，独家放送入口以 `Video` 表达并保留大小封面、文案、类型、时间和完整包装；不可续页快照拒绝非零 offset；2026-07-18 匿名真实返回非空入口） |
+| `personalized_privatecontent_list` | `/personalized/privatecontent/list` | `verified` | `GET /v1/recommendations/videos?kind=exclusive&view=catalog`（固定 WeAPI `/api/v2/privatecontent/list`，精确提交 `offset/limit/total="true"`；统一分页按真实 `more` 生成 `next_offset`，返回项保留 ID、标题、大小封面、文案、时间、类型及完整原文；协议、分页、输入边界、统一 HTTP 和 2026-07-18 匿名真实分页目录均已验证） |
 | `pl_count` | `/pl/count` | `pending` | — |
 | `playlist_category_list` | `/playlist/category/list` | `pending` | — |
 | `playlist_catlist` | `/playlist/catlist` | `pending` | — |

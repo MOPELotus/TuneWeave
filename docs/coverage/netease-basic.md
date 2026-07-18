@@ -4,15 +4,15 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=1`、`partial=6`、`implemented=21`、`verified=36`。
+当前共 64 个验收单元：`pending=0`、`partial=6`、`implemented=21`、`verified=37`。
 
-- 完整实现率：`(implemented + verified) / 64 = 57 / 64 = 89.06%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 63 / 64 = 98.44%`。
-- 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
+- 完整实现率：`(implemented + verified) / 64 = 58 / 64 = 90.63%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
+- 完整联网验收率：`verified / 64 = 37 / 64 = 57.81%`。
 
 这些百分比是 Basic 能力验收口径，不是 416 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：L11/L12 云盘写入、读取、详情、源文件下载、直接播放和删除已经用 TuneWeave 自建音频完成真实事务及完整回滚；匹配和文件内嵌歌词在 TuneWeave 与参考实现中均返回相同业务失败，不伪造成功态。私人 FM 的经典/模式队列已完成统一映射并真实联网验收，跳过/不喜欢反馈已验证匿名认证边界。下一步先完成唯一仍为 `pending` 的 S08 首页个性化模块族，再依重要度把 C07、C10、C11、C12、P10、A10 六个 `partial` 单元补齐；账户写入、完整权益及工作台成功态在 Basic 末尾使用现有持久化账户集中验收。
+当前剩余功能排序以完整播放体验为准：全部 64 个 Basic 单元现已触达，S08 六个首页个性化模块也已通过同一次匿名真实联网验收。下一步依重要度把 C07、C10、C11、C12、P10、A10 六个 `partial` 单元补齐，优先完成常用内容目录、公开/账户资料和声音播放链；账户写入、完整权益及工作台成功态在 Basic 末尾使用现有持久化账户集中验收。只有这六项全部清零后才进入 Uni Playlist。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -23,7 +23,7 @@
 | S05 | 搜索与发现 | 多重匹配与本地歌曲匹配 | `verified` | `search_multimatch/search_match` 命中和空结果均已验收；`orders=null` 会回退有效 `order` |
 | S06 | 搜索与发现 | PC/Android/iPhone/iPad 横幅 | `verified` | `banner` 四分支已验收；并存时优先非空大图和主标题，空白首选值会继续回退普通图片/类型标题 |
 | S07 | 搜索与发现 | 普通音乐榜单目录及详情 | `verified` | `toplist/toplist_detail/toplist_detail_v2/toplist_artist` 三类目录、四地区歌手榜及榜单曲目均已真实 HTTP 验收；新版首图优先于旧版首图 |
-| S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `pending` | `personalized*` 模块族未接入 |
+| S08 | 搜索与发现 | 首页个性化货架、新歌和 MV 推荐 | `verified` | `personalized/personalized_newsong/personalized_mv/personalized_djprogram/personalized_privatecontent/personalized_privatecontent_list` 六模块已按资源类型接入统一歌单、曲目、视频和播客节目端点，严格区分不可续页快照与独家放送真实分页；算法、文案、可反馈态及完整平台包装不丢失，浮点播放量不会被整数 DTO 拒绝。2026-07-18 匿名真实联网一次覆盖六分支，全部返回非空类型化资源 |
 | S09 | 搜索与发现 | 每日歌曲及歌单推荐 | `verified` | `recommend_songs` 已验证；2026-07-17 持久化真实账户实测 `recommend_resource` 返回 5 项 |
 | S10 | 搜索与发现 | 音频指纹识别 | `implemented` | 无命中真实路径及映射已验证；无效 `startTime` 会回退可解析的 `start_time`，待有效指纹成功命中 |
 | C01 | 内容展示 | 歌曲详情 | `verified` | `song_detail` 与统一 `Track` 已验收 |

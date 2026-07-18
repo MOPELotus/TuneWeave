@@ -58,14 +58,16 @@ use tuneweave_core::{
     PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
-    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -353,6 +355,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
+        .route("/recommendations/videos", get(recommended_videos))
+        .route(
+            "/recommendations/podcast-episodes",
+            get(recommended_podcast_episodes),
+        )
         .route("/recommendations/personal-fm", get(personal_fm))
         .route(
             "/recommendations/tracks/{reference}/dislike",
@@ -4436,18 +4443,24 @@ async fn user_history(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecommendationParams {
     platform: Option<String>,
     account: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
     refresh: Option<String>,
+    #[serde(alias = "backend", alias = "variant")]
+    source: Option<String>,
+    #[serde(alias = "areaId")]
+    area_id: Option<String>,
 }
 
 async fn recommended_tracks(
     State(state): State<AppState>,
-    Query(params): Query<RecommendationParams>,
+    params: Result<Query<RecommendationParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
     let request = recommendation_request(&params, account.clone())?;
@@ -4463,8 +4476,9 @@ async fn recommended_tracks(
 
 async fn recommended_playlists(
     State(state): State<AppState>,
-    Query(params): Query<RecommendationParams>,
+    params: Result<Query<RecommendationParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
     let request = recommendation_request(&params, account.clone())?;
@@ -4493,7 +4507,142 @@ fn recommendation_request(
         offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
         account: Some(account),
         refresh: parse_bool_parameter("refresh", params.refresh.as_deref(), false)?,
+        source: parse_recommendation_source(params.source.as_deref())?,
+        area_id: parse_optional_u64_parameter("area_id", params.area_id.as_deref())?,
     })
+}
+
+fn parse_recommendation_source(
+    value: Option<&str>,
+) -> Result<RecommendationSource, TuneWeaveError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("daily" | "default") => Ok(RecommendationSource::Daily),
+        Some("personalized" | "personalised" | "homepage" | "home") => {
+            Ok(RecommendationSource::Personalized)
+        }
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported recommendation source: {value}",
+        ))),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoRecommendationParams {
+    platform: Option<String>,
+    account: Option<String>,
+    kind: Option<String>,
+    #[serde(alias = "catalog")]
+    view: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn recommended_videos(
+    State(state): State<AppState>,
+    params: Result<Query<VideoRecommendationParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let kind = parse_video_recommendation_kind(params.kind.as_deref())?;
+    let view = parse_video_recommendation_view(params.view.as_deref())?;
+    let default_limit =
+        if kind == VideoRecommendationKind::Exclusive && view == VideoRecommendationView::Catalog {
+            60
+        } else {
+            30
+        };
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), default_limit)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "video recommendation limit must be between 1 and 100",
+        )
+        .into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .recommended_videos(&VideoRecommendationRequest {
+            kind,
+            view,
+            limit,
+            offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+fn parse_video_recommendation_kind(
+    value: Option<&str>,
+) -> Result<VideoRecommendationKind, ApiError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("mv" | "music_video") => Ok(VideoRecommendationKind::Mv),
+        Some("exclusive" | "privatecontent" | "private_content") => {
+            Ok(VideoRecommendationKind::Exclusive)
+        }
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported video recommendation kind: {value}",
+        ))
+        .into()),
+    }
+}
+
+fn parse_video_recommendation_view(
+    value: Option<&str>,
+) -> Result<VideoRecommendationView, ApiError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("featured" | "head" | "entry") => Ok(VideoRecommendationView::Featured),
+        Some("catalog" | "list" | "all") => Ok(VideoRecommendationView::Catalog),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported video recommendation view: {value}",
+        ))
+        .into()),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastEpisodeRecommendationParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn recommended_podcast_episodes(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastEpisodeRecommendationParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode recommendation limit must be between 1 and 100",
+        )
+        .into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .recommended_podcast_episodes(&PageRequest {
+            limit,
+            offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -8038,6 +8187,8 @@ mod tests {
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
+                Capability::VideoRecommendations,
+                Capability::PodcastEpisodeRecommendations,
                 Capability::PersonalFm,
                 Capability::RecommendationFeedback,
                 Capability::CommentWrite,
@@ -9891,6 +10042,12 @@ mod tests {
             track
                 .extensions
                 .insert("refresh".to_owned(), json!(request.refresh));
+            track
+                .extensions
+                .insert("source".to_owned(), json!(request.source));
+            track
+                .extensions
+                .insert("area_id".to_owned(), json!(request.area_id));
             Ok(Page {
                 items: vec![track],
                 pagination: PageMeta {
@@ -9908,8 +10065,57 @@ mod tests {
             &self,
             request: &RecommendationRequest,
         ) -> Result<Page<Playlist>> {
+            let mut playlist = sample_playlist("99");
+            playlist
+                .extensions
+                .insert("source".to_owned(), json!(request.source));
             Ok(Page {
-                items: vec![sample_playlist("99")],
+                items: vec![playlist],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn recommended_videos(
+            &self,
+            request: &VideoRecommendationRequest,
+        ) -> Result<Page<Video>> {
+            let mut video = sample_video("10973299");
+            video
+                .extensions
+                .insert("kind".to_owned(), json!(request.kind));
+            video
+                .extensions
+                .insert("view".to_owned(), json!(request.view));
+            Ok(Page {
+                items: vec![video],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn recommended_podcast_episodes(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<PodcastEpisode>> {
+            Ok(Page {
+                items: vec![sample_podcast_episode(
+                    "3724590117",
+                    "6611037",
+                    "3407777157",
+                )],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -15953,6 +16159,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(tracks["data"][0]["ref"], "netease:185809");
         assert_eq!(tracks["data"][0]["extensions"]["refresh"], true);
+        assert_eq!(tracks["data"][0]["extensions"]["source"], "daily");
         assert_eq!(tracks["meta"]["platform"], "netease");
         assert_eq!(tracks["meta"]["account"], "personal");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 10);
@@ -15964,7 +16171,90 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(playlists["data"][0]["ref"], "netease:99");
+        assert_eq!(playlists["data"][0]["extensions"]["source"], "daily");
         assert_eq!(playlists["meta"]["pagination"]["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn personalized_homepage_resources_share_stable_recommendation_endpoints() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/tracks?source=homepage&areaId=7&limit=3&account=listener",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["ref"], "netease:185809");
+        assert_eq!(tracks["data"][0]["extensions"]["source"], "personalized");
+        assert_eq!(tracks["data"][0]["extensions"]["area_id"], 7);
+        assert_eq!(tracks["meta"]["account"], "listener");
+
+        let (status, playlists) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/playlists?backend=personalized&limit=4",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(playlists["data"][0]["ref"], "netease:99");
+        assert_eq!(playlists["data"][0]["extensions"]["source"], "personalized");
+
+        for (path, kind, view, offset) in [
+            (
+                "/v1/recommendations/videos?kind=mv&view=featured&limit=3",
+                "mv",
+                "featured",
+                0,
+            ),
+            (
+                "/v1/recommendations/videos?kind=exclusive&catalog=entry&limit=3",
+                "exclusive",
+                "featured",
+                0,
+            ),
+            (
+                "/v1/recommendations/videos?kind=privatecontent&view=list&limit=2&offset=4",
+                "exclusive",
+                "catalog",
+                4,
+            ),
+        ] {
+            let (status, videos) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(videos["data"][0]["ref"], "netease:10973299", "{path}");
+            assert_eq!(videos["data"][0]["extensions"]["kind"], kind, "{path}");
+            assert_eq!(videos["data"][0]["extensions"]["view"], view, "{path}");
+            assert_eq!(videos["meta"]["pagination"]["offset"], offset, "{path}");
+        }
+
+        let (status, episodes) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/podcast-episodes?limit=6&account=listener",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(episodes["data"][0]["ref"], "netease:3724590117");
+        assert_eq!(episodes["data"][0]["audio"]["ref"], "netease:3407777157");
+        assert_eq!(episodes["meta"]["pagination"]["limit"], 6);
+        assert_eq!(episodes["meta"]["account"], "listener");
+    }
+
+    #[tokio::test]
+    async fn personalized_homepage_routes_reject_unknown_or_malformed_controls() {
+        for path in [
+            "/v1/recommendations/tracks?source=unknown",
+            "/v1/recommendations/tracks?source=personalized&area_id=not-a-number",
+            "/v1/recommendations/tracks?unknown=true",
+            "/v1/recommendations/playlists?unknown=true",
+            "/v1/recommendations/videos?kind=unknown",
+            "/v1/recommendations/videos?view=unknown",
+            "/v1/recommendations/videos?limit=0",
+            "/v1/recommendations/videos?unknown=true",
+            "/v1/recommendations/podcast-episodes?limit=101",
+            "/v1/recommendations/podcast-episodes?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
