@@ -3045,7 +3045,7 @@ fn map_comment_mutation_result(
         ]
         .into_iter()
         .flatten()
-        .find_map(json_scalar_string)
+        .find_map(usable_resource_id)
     });
     let mut extensions = Extensions::new();
     extensions.insert("response".to_owned(), response);
@@ -3423,11 +3423,10 @@ fn map_optional_comment(raw: Option<&Value>) -> Result<Option<Comment>> {
 }
 
 fn map_netease_comment(raw: Value) -> Result<Comment> {
-    let id = raw
-        .get("commentId")
-        .or_else(|| raw.get("id"))
-        .and_then(json_scalar_string)
-        .filter(|id| !id.trim().is_empty())
+    let id = [raw.get("commentId"), raw.get("id")]
+        .into_iter()
+        .flatten()
+        .find_map(usable_resource_id)
         .ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -3490,8 +3489,7 @@ fn map_netease_comment(raw: Value) -> Result<Comment> {
 fn map_comment_reply_reference(raw: Value) -> CommentReplyReference {
     let comment_id = ["beRepliedCommentId", "commentId", "id"]
         .into_iter()
-        .find_map(|field| raw.get(field).and_then(json_scalar_string))
-        .filter(|id| !id.trim().is_empty());
+        .find_map(|field| raw.get(field).and_then(usable_resource_id));
     let content = raw
         .get("content")
         .and_then(Value::as_str)
@@ -3509,11 +3507,10 @@ fn map_comment_reply_reference(raw: Value) -> CommentReplyReference {
 }
 
 fn map_netease_comment_user(raw: &Value) -> Option<User> {
-    let id = raw
-        .get("userId")
-        .or_else(|| raw.get("id"))
-        .and_then(json_scalar_string)
-        .filter(|id| !id.trim().is_empty())?;
+    let id = [raw.get("userId"), raw.get("id")]
+        .into_iter()
+        .flatten()
+        .find_map(usable_resource_id)?;
     let resource_ref = ResourceRef::new(Platform::Netease, id.clone()).ok()?;
     let mut extensions = Extensions::new();
     extensions.insert("response".to_owned(), raw.clone());
@@ -3521,11 +3518,7 @@ fn map_netease_comment_user(raw: &Value) -> Option<User> {
         resource_ref,
         platform: Platform::Netease,
         id,
-        name: ["nickname", "userName", "name"]
-            .into_iter()
-            .find_map(|field| raw.get(field).and_then(Value::as_str))
-            .unwrap_or_default()
-            .to_owned(),
+        name: radio_text_field(raw, &["nickname", "userName", "name"]).unwrap_or_default(),
         avatar_url: raw
             .get("avatarUrl")
             .and_then(Value::as_str)
@@ -3981,13 +3974,15 @@ async fn authenticated_user_id(client: &NeteaseClient, account: &str) -> Result<
         .with_platform(Platform::Netease)
         .with_details(json!({ "account": account })));
     }
-    status.account.user_id.or(status.account.id).ok_or_else(|| {
-        TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            "NetEase account status did not contain a user id",
-        )
-        .with_platform(Platform::Netease)
-    })
+    usable_owned_resource_id(status.account.user_id)
+        .or_else(|| usable_owned_resource_id(status.account.id))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase account status did not contain a user id",
+            )
+            .with_platform(Platform::Netease)
+        })
 }
 
 async fn fetch_album_content(client: &NeteaseClient, id: u64) -> Result<AlbumEnvelope> {
@@ -4162,14 +4157,13 @@ fn map_audio_recognition(
             track
                 .extensions
                 .insert("audio_recognition_song".to_owned(), song_raw);
-            let start_time_ms = raw
-                .get("startTime")
-                .or_else(|| raw.get("start_time"))
-                .and_then(|value| {
+            let start_time_ms = ["startTime", "start_time"].into_iter().find_map(|field| {
+                raw.get(field).and_then(|value| {
                     value
                         .as_u64()
                         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-                });
+                })
+            });
             let mut extensions = Extensions::new();
             extensions.insert("match".to_owned(), raw);
             Ok(AudioRecognitionMatch {
@@ -4597,9 +4591,11 @@ fn preferred_array_field<'a>(container: &'a Value, fields: &[&str]) -> Option<&'
 fn radio_collection_scalar<'a>(body: &'a Value, fields: &[&str]) -> Option<&'a Value> {
     let data = body.get("data").unwrap_or(&Value::Null);
     let nested_data = data.get("data").unwrap_or(&Value::Null);
-    [data, nested_data, body]
-        .into_iter()
-        .find_map(|container| fields.iter().find_map(|field| container.get(field)))
+    [data, nested_data, body].into_iter().find_map(|container| {
+        fields
+            .iter()
+            .find_map(|field| container.get(field).filter(|value| !value.is_null()))
+    })
 }
 
 fn map_collected_radio_station(raw: Value) -> Result<RadioStation> {
@@ -4695,10 +4691,10 @@ fn embedded_radio_station(raw: &Value) -> Value {
         .into_iter()
         .filter_map(|field| current.get(field))
         .find_map(|candidate| match candidate {
-            Value::Object(_) => Some(candidate.clone()),
-            Value::String(candidate) => serde_json::from_str(candidate)
+            Value::Object(object) if !object.is_empty() => Some(candidate.clone()),
+            Value::String(candidate) => serde_json::from_str::<Value>(candidate)
                 .ok()
-                .filter(Value::is_object),
+                .filter(|value| value.as_object().is_some_and(|object| !object.is_empty())),
             _ => None,
         }) else {
             break;
@@ -5170,8 +5166,8 @@ fn map_podcast_creator(raw: Option<&Value>) -> Result<Option<CreatorSummary>> {
     };
     let resource_ref = raw
         .get("userId")
-        .or_else(|| raw.get("id"))
-        .and_then(json_scalar_string)
+        .and_then(usable_resource_id)
+        .or_else(|| raw.get("id").and_then(usable_resource_id))
         .map(|id| ResourceRef::new(Platform::Netease, id))
         .transpose()
         .map_err(|error| {
@@ -6291,7 +6287,8 @@ fn select_page<T>(items: Vec<T>, limit: u32, offset: u32) -> (Vec<T>, PageMeta) 
 
 fn map_account_profile(account: &str, summary: NeteaseAccountSummary) -> AccountProfile {
     let mut profile = AccountProfile::authenticated(Platform::Netease, account);
-    profile.user_id = summary.user_id.or(summary.id);
+    profile.user_id =
+        usable_owned_resource_id(summary.user_id).or_else(|| usable_owned_resource_id(summary.id));
     profile.nickname = summary.nickname;
     profile.avatar_url = summary.avatar_url;
     profile
@@ -9056,6 +9053,12 @@ fn json_scalar_string(value: &Value) -> Option<String> {
 
 fn usable_resource_id(value: &Value) -> Option<String> {
     json_scalar_string(value)
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty() && id != "0")
+}
+
+fn usable_owned_resource_id(value: Option<String>) -> Option<String> {
+    value
         .map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty() && id != "0")
 }
@@ -12373,6 +12376,19 @@ mod tests {
         assert_eq!(result.action, CommentMutationAction::Create);
         assert_eq!(result.extensions["response"]["code"], 200);
 
+        let fallback_result = map_comment_mutation_result(
+            &target,
+            CommentMutationAction::Create,
+            None,
+            json!({
+                "code": 200,
+                "comment": {"commentId": 0},
+                "data": {"commentId": "1535550516320"}
+            }),
+        )
+        .expect("skip unusable primary comment id");
+        assert_eq!(fallback_result.comment_id.as_deref(), Some("1535550516320"));
+
         let invalid_platform = CommentWriteRequest {
             target: CommentTarget::new(
                 ResourceRef::new(Platform::Qq, "185809").expect("valid QQ reference"),
@@ -13400,6 +13416,44 @@ mod tests {
     }
 
     #[test]
+    fn comment_mapping_skips_empty_primary_ids_and_names() {
+        let comment = map_netease_comment(json!({
+            "commentId": null,
+            "id": "3160990055",
+            "content": "兼容字段",
+            "user": {
+                "userId": " ",
+                "id": "278612322",
+                "nickname": " ",
+                "userName": "有效昵称"
+            },
+            "beReplied": [{
+                "beRepliedCommentId": "",
+                "commentId": 0,
+                "id": "100",
+                "content": "原评论",
+                "user": {"userId": null, "id": "200", "nickname": "被回复者"}
+            }]
+        }))
+        .expect("map compatible comment aliases");
+
+        assert_eq!(comment.id, "3160990055");
+        let author = comment.author.expect("comment author");
+        assert_eq!(author.resource_ref.to_string(), "netease:278612322");
+        assert_eq!(author.name, "有效昵称");
+        assert_eq!(comment.replied_to[0].comment_id.as_deref(), Some("100"));
+        assert_eq!(
+            comment.replied_to[0]
+                .author
+                .as_ref()
+                .expect("reply author")
+                .resource_ref
+                .to_string(),
+            "netease:200"
+        );
+    }
+
+    #[test]
     fn maps_modern_hot_and_floor_comment_pagination_honestly() {
         let target = CommentTarget::new(
             ResourceRef::new(Platform::Netease, "185809").expect("valid track target"),
@@ -13615,7 +13669,8 @@ mod tests {
                             "mvid": 186001,
                             "status": 0
                         },
-                        "startTime": 1500,
+                        "startTime": null,
+                        "start_time": "1500",
                         "score": 0.97
                     }
                 ],
@@ -13927,8 +13982,10 @@ mod tests {
                 "desc": "面向开发者的播客",
                 "picUrl": "https://example.test/podcast.jpg",
                 "dj": {
-                    "userId": 32_953_014,
-                    "nickname": "主播",
+                    "userId": null,
+                    "id": 32_953_014,
+                    "nickname": " ",
+                    "name": "主播",
                     "avatarUrl": "https://example.test/avatar.jpg"
                 },
                 "category": "科技",
@@ -13946,7 +14003,15 @@ mod tests {
         .expect("map podcast detail");
         assert_eq!(podcast.resource_ref.to_string(), "netease:336355127");
         assert_eq!(podcast.description, "面向开发者的播客");
-        assert_eq!(podcast.creator.expect("podcast creator").name, "主播");
+        let creator = podcast.creator.expect("podcast creator");
+        assert_eq!(creator.name, "主播");
+        assert_eq!(
+            creator
+                .resource_ref
+                .expect("podcast creator reference")
+                .to_string(),
+            "netease:32953014"
+        );
         assert_eq!(podcast.category.as_deref(), Some("科技"));
         assert_eq!(podcast.secondary_category.as_deref(), Some("互联网"));
         assert_eq!(podcast.episode_count, Some(120));
@@ -14295,11 +14360,14 @@ mod tests {
                             }
                         },
                         {
+                            "content": {},
                             "resourceJson": r#"{"id":1069201,"channelName":"24小时资讯热点","channelCoverUrl":"https://example.test/1069201.jpg","regionName":"网络台"}"#
                         }
                     ],
-                    "total": 53,
-                    "hasMore": true
+                    "total": null,
+                    "count": 53,
+                    "hasMore": null,
+                    "more": true
                 }
             }),
             25,
@@ -18681,6 +18749,17 @@ mod tests {
         assert_eq!(profile.user_id.as_deref(), Some("456"));
         assert_eq!(profile.nickname.as_deref(), Some("TuneWeave"));
         assert!(profile.authenticated);
+
+        let fallback_profile = map_account_profile(
+            "fallback",
+            NeteaseAccountSummary {
+                id: Some("123".to_owned()),
+                user_id: Some("  ".to_owned()),
+                nickname: None,
+                avatar_url: None,
+            },
+        );
+        assert_eq!(fallback_profile.user_id.as_deref(), Some("123"));
     }
 
     #[test]
