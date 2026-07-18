@@ -1149,16 +1149,61 @@ async fn podcast_episode_chart(
     Ok(Json(response))
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PodcastDetailBackend {
+    #[default]
+    Default,
+    Workbench,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastParams {
+    account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
+}
+
+fn parse_podcast_detail_backend(
+    value: Option<&str>,
+) -> Result<PodcastDetailBackend, TuneWeaveError> {
+    match value
+        .unwrap_or("default")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "default" | "program" | "dj" => Ok(PodcastDetailBackend::Default),
+        "workbench" | "voice" | "creator" => Ok(PodcastDetailBackend::Workbench),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast detail backend: {value}"
+        ))
+        .with_details(json!({ "allowed": ["default", "workbench"] }))),
+    }
+}
+
 async fn podcast(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<AccountParams>,
+    params: Result<Query<PodcastParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Podcast>>, ApiError> {
+    let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
+    let backend = parse_podcast_detail_backend(params.backend.as_deref())?;
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
-    let podcast = provider.podcast(reference.id(), account.as_deref()).await?;
+    let podcast = match backend {
+        PodcastDetailBackend::Default => {
+            provider.podcast(reference.id(), account.as_deref()).await?
+        }
+        PodcastDetailBackend::Workbench => {
+            provider
+                .podcast_workbench(reference.id(), account.as_deref())
+                .await?
+        }
+    };
     let mut response = ApiResponse::new(podcast).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
@@ -1210,38 +1255,12 @@ async fn podcast_episodes(
     Ok(Json(response))
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum PodcastEpisodeDetailBackend {
-    #[default]
-    Default,
-    Workbench,
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PodcastEpisodeParams {
     account: Option<String>,
     #[serde(alias = "variant", alias = "source")]
     backend: Option<String>,
-}
-
-fn parse_podcast_episode_detail_backend(
-    value: Option<&str>,
-) -> Result<PodcastEpisodeDetailBackend, TuneWeaveError> {
-    match value
-        .unwrap_or("default")
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .as_str()
-    {
-        "default" | "program" | "dj" => Ok(PodcastEpisodeDetailBackend::Default),
-        "workbench" | "voice" | "creator" => Ok(PodcastEpisodeDetailBackend::Workbench),
-        value => Err(TuneWeaveError::invalid_request(format!(
-            "unsupported podcast episode detail backend: {value}"
-        ))
-        .with_details(json!({ "allowed": ["default", "workbench"] }))),
-    }
 }
 
 async fn podcast_episode(
@@ -1252,16 +1271,16 @@ async fn podcast_episode(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
-    let backend = parse_podcast_episode_detail_backend(params.backend.as_deref())?;
+    let backend = parse_podcast_detail_backend(params.backend.as_deref())?;
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
     let episode = match backend {
-        PodcastEpisodeDetailBackend::Default => {
+        PodcastDetailBackend::Default => {
             provider
                 .podcast_episode(reference.id(), account.as_deref())
                 .await?
         }
-        PodcastEpisodeDetailBackend::Workbench => {
+        PodcastDetailBackend::Workbench => {
             provider
                 .podcast_episode_workbench(reference.id(), account.as_deref())
                 .await?
@@ -7165,6 +7184,7 @@ mod tests {
                 Capability::PodcastCharts,
                 Capability::PodcastCreatorCharts,
                 Capability::PodcastDetail,
+                Capability::PodcastWorkbenchDetail,
                 Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeCharts,
@@ -7579,6 +7599,17 @@ mod tests {
             podcast
                 .extensions
                 .insert("account".to_owned(), json!(account));
+            Ok(podcast)
+        }
+
+        async fn podcast_workbench(&self, id: &str, account: Option<&str>) -> Result<Podcast> {
+            let mut podcast = sample_podcast(id);
+            podcast
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            podcast
+                .extensions
+                .insert("detail_backend".to_owned(), json!("workbench"));
             Ok(podcast)
         }
 
@@ -11469,6 +11500,19 @@ mod tests {
         assert_eq!(podcast["meta"]["platform"], "netease");
         assert_eq!(podcast["meta"]["account"], "podcast-user");
 
+        let (status, workbench_podcast) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/netease:336355127?source=creator&account=studio-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(workbench_podcast["data"]["ref"], "netease:336355127");
+        assert_eq!(
+            workbench_podcast["data"]["extensions"]["detail_backend"],
+            "workbench"
+        );
+        assert_eq!(workbench_podcast["meta"]["account"], "studio-user");
+
         let (status, episode) = json_response_from(
             test_app_with_provider(),
             "/v1/episodes/netease:1367665101?account=podcast-user",
@@ -11738,6 +11782,8 @@ mod tests {
             "/v1/episodes?catalog=popular&unknown=true",
             "/v1/episodes?catalog=popular&platform=unknown",
             "/v1/podcasts/336355127",
+            "/v1/podcasts/netease:336355127?backend=unknown",
+            "/v1/podcasts/netease:336355127?unknown=true",
             "/v1/episodes/1367665101",
             "/v1/episodes/netease:1367665101?backend=unknown",
             "/v1/episodes/netease:1367665101?unknown=true",

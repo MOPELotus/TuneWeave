@@ -235,6 +235,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn podcast_workbench(&self, _id: &str, _account: Option<&str>) -> Result<Podcast> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastWorkbenchDetail,
+        ))
+    }
+
     async fn set_podcast_subscription(
         &self,
         _id: &str,
