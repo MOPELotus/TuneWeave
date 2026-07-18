@@ -362,10 +362,13 @@ fn map_account(body: &Value) -> NeteaseAccountSummary {
         nickname: body
             .pointer("/profile/nickname")
             .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
             .map(str::to_owned),
         avatar_url: body
             .pointer("/profile/avatarUrl")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_owned),
     }
 }
@@ -390,19 +393,26 @@ fn session_status_from_body(body: &Value) -> Result<NeteaseSessionStatus> {
 }
 
 fn value_as_id(value: Option<&Value>) -> Option<String> {
-    value.and_then(|value| match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    })
+    value
+        .and_then(|value| match value {
+            Value::String(value) => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && value != "0")
 }
 
 fn response_message(body: &Value) -> Option<String> {
-    body.get("message")
-        .or_else(|| body.get("msg"))
-        .and_then(Value::as_str)
-        .filter(|message| !message.is_empty())
-        .map(str::to_owned)
+    [body.get("message"), body.get("msg")]
+        .into_iter()
+        .flatten()
+        .find_map(|value| {
+            value
+                .as_str()
+                .filter(|message| !message.trim().is_empty())
+                .map(str::to_owned)
+        })
 }
 
 fn required_value<'a>(name: &str, value: &'a str) -> Result<&'a str> {
@@ -471,7 +481,8 @@ mod tests {
 
         let invalid = captcha_verification_from_body(json!({
             "code": 503,
-            "message": "验证码错误"
+            "message": " ",
+            "msg": "验证码错误"
         }))
         .expect("invalid captcha response is still a result");
         assert!(!invalid.valid);
@@ -602,6 +613,16 @@ mod tests {
         }))
         .expect("anonymous status");
         assert!(!anonymous.authenticated);
+
+        let blank = session_status_from_body(&json!({
+            "code": 200,
+            "account": {"id": 0},
+            "profile": {"userId": " ", "nickname": " "}
+        }))
+        .expect("blank account status");
+        assert!(!blank.authenticated);
+        assert!(blank.account.id.is_none());
+        assert!(blank.account.user_id.is_none());
     }
 
     #[test]

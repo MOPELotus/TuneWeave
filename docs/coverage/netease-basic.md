@@ -51,12 +51,12 @@
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收；空白编码与零时长回退有效元数据 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
-| A03 | 账户与身份 | 验证码独立校验 | `implemented` | 错误码真实路径已验收，待有效验证码成功态 |
+| A03 | 账户与身份 | 验证码独立校验 | `implemented` | 错误码真实路径已验收；空白 `message` 不遮蔽有效 `msg`，待有效验证码成功态 |
 | A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `implemented` | 完整代码和认证前置已覆盖，自动测试不主动发送短信 |
 | A05 | 账户与身份 | 邮箱/账号密码登录 | `implemented` | `login` 已实现并脱敏，待真实账户成功态 |
 | A06 | 账户与身份 | 手机号密码登录 | `implemented` | `login_cellphone` 密码分支已实现，待真实账户成功态 |
-| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
-| A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收 |
+| A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；空顶层 key/业务码不遮蔽嵌套有效值，真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
+| A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收；空白/零账户身份不会误报已登录 |
 | A09 | 账户与身份 | 会话刷新及退出 | `implemented` | 2026-07-17 真实账户刷新、凭据代际替换和重启恢复均已验收；退出会删除登录态，留待需要重新扫码时受控验证 |
 | A10 | 账户与身份 | 当前账户资料 | `partial` | 2026-07-17 持久化真实账户的当前资料成功态已验收；空 `userId` 不遮蔽有效账户 ID，`user_detail/user_detail_new` 仍未接入 |
 | L01 | 个人音乐库 | 喜欢歌曲 ID 及统一歌曲列表 | `verified` | 2026-07-17 持久化真实账户实测返回 5 项，ID 获取、详情映射和分页链路成功 |

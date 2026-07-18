@@ -801,20 +801,13 @@ impl NeteaseClient {
             .request_eapi("/api/login/qrcode/unikey", json!({ "type": 3 }))
             .await?;
         ensure_response_code(&response.body, 200, "create QR login")?;
-        let key = response
-            .body
-            .get("unikey")
-            .or_else(|| response.body.pointer("/data/unikey"))
-            .and_then(Value::as_str)
-            .filter(|key| !key.is_empty())
-            .ok_or_else(|| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    "NetEase QR login response did not contain a key",
-                )
-                .with_platform(Platform::Netease)
-            })?
-            .to_owned();
+        let key = qr_login_key(&response.body).ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase QR login response did not contain a key",
+            )
+            .with_platform(Platform::Netease)
+        })?;
         let url = format!("https://music.163.com/login?codekey={key}");
         Ok(NeteaseQrLogin { key, url })
     }
@@ -932,9 +925,27 @@ async fn parse_response_with_encryption(
 }
 
 pub(crate) fn response_code(body: &Value) -> Option<i64> {
-    body.get("code")
-        .or_else(|| body.pointer("/data/code"))
-        .and_then(Value::as_i64)
+    [body.get("code"), body.pointer("/data/code")]
+        .into_iter()
+        .flatten()
+        .find_map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+}
+
+fn qr_login_key(body: &Value) -> Option<String> {
+    [body.get("unikey"), body.pointer("/data/unikey")]
+        .into_iter()
+        .flatten()
+        .find_map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 pub(crate) fn ensure_response_code(body: &Value, expected: i64, operation: &str) -> Result<()> {
@@ -1348,6 +1359,22 @@ mod tests {
         assert_eq!(qr_state(802), NeteaseQrState::Scanned);
         assert_eq!(qr_state(803), NeteaseQrState::Confirmed);
         assert_eq!(qr_state(500), NeteaseQrState::Failed);
+    }
+
+    #[test]
+    fn qr_login_and_response_codes_skip_empty_primary_aliases() {
+        assert_eq!(
+            qr_login_key(&json!({
+                "unikey": " ",
+                "data": {"unikey": "fallback-key"}
+            }))
+            .as_deref(),
+            Some("fallback-key")
+        );
+        assert_eq!(
+            response_code(&json!({"code": null, "data": {"code": "200"}})),
+            Some(200)
+        );
     }
 
     #[test]
