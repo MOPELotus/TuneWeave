@@ -208,6 +208,32 @@ pub struct MembershipSummary {
     pub extensions: Extensions,
 }
 
+/// A provider-managed anonymous session used for public requests.
+///
+/// The cookie is returned for compatibility with platform registration APIs, but providers own
+/// its lifecycle and callers cannot inject it into subsequent unified requests.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AnonymousSession {
+    pub device_id: String,
+    pub cookie: String,
+    pub registered: bool,
+    pub refreshed: bool,
+    pub extensions: Extensions,
+}
+
+impl fmt::Debug for AnonymousSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnonymousSession")
+            .field("device_id", &self.device_id)
+            .field("cookie", &"[REDACTED]")
+            .field("registered", &self.registered)
+            .field("refreshed", &self.refreshed)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AntiCheatTokenVersion {
@@ -3170,6 +3196,23 @@ mod tests {
         let debug = format!("{token:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("temporary-secret-token"));
+    }
+
+    #[test]
+    fn anonymous_sessions_serialize_for_compatibility_but_redact_debug_output() {
+        let session = AnonymousSession {
+            device_id: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123".to_owned(),
+            cookie: "MUSIC_A=anonymous-secret".to_owned(),
+            registered: true,
+            refreshed: false,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(&session).expect("serialize anonymous session");
+        assert_eq!(value["cookie"], "MUSIC_A=anonymous-secret");
+        assert_eq!(value["registered"], true);
+        let debug = format!("{session:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("anonymous-secret"));
     }
 
     #[test]

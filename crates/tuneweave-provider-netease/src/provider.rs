@@ -11,40 +11,40 @@ use lofty::{file::TaggedFileExt, probe::Probe, tag::Accessor};
 use md5::{Digest, Md5};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use qrcode::{QrCode, render::svg};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary,
-    AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistBiographySection,
-    ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry, ArtistChartRequest,
-    ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
-    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
-    ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition, AudioRecognitionMatch,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
-    BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest,
-    ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationAction,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReplyReference, CommentReportRequest, CommentReportResult,
-    CommentSort, CommentTarget, CommentTargetKind, CommentThreadStats, CommentThreadStatsBatch,
-    CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCode, CountryCallingCodeGroup,
-    CountryCallingCodeListRequest, CreatorSummary, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackEntry,
-    DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
-    ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest,
-    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsTimestamp,
-    LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta, PageRequest,
-    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea,
+    ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry,
+    ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart,
+    ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
+    CommentReactionKind, CommentReactionListRequest, CommentReactionMutationRequest,
+    CommentReactionMutationResult, CommentReactionPage, CommentReplyReference,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStats, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    CountryCallingCode, CountryCallingCodeGroup, CountryCallingCodeListRequest, CreatorSummary,
+    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
+    ImageUploadRequest, ImageUploadResult, ListeningRightsAd, ListeningRightsAdCatalog,
+    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
+    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor,
+    Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta,
+    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
     PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
@@ -98,20 +98,32 @@ use crate::{
 
 const CLOUD_UPLOAD_BUCKET: &str = "jd-musicrep-privatecloud-audio-public";
 const NETEASE_CREDENTIAL_KIND: &str = "cookie";
+const NETEASE_ANONYMOUS_CREDENTIAL_KIND: &str = "anonymous_cookie_v1";
+const NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT: &str = "__tuneweave_anonymous__";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct StoredAnonymousIdentity {
+    device_id: String,
+    cookie: String,
+}
 
 #[derive(Clone)]
 pub struct NeteaseProvider {
     client: NeteaseClient,
     accounts: Arc<RwLock<BTreeMap<String, NeteaseClient>>>,
+    anonymous_identity: Arc<RwLock<Option<StoredAnonymousIdentity>>>,
     credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl NeteaseProvider {
     pub fn new(config: NeteaseConfig) -> Result<Self> {
         let credential_store = config.credential_store.clone();
+        let client = NeteaseClient::new(config)?;
+        let anonymous_identity = configured_anonymous_identity(&client);
         let provider = Self {
-            client: NeteaseClient::new(config)?,
+            client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
+            anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
             credential_store,
         };
         provider.restore_sessions()?;
@@ -120,9 +132,11 @@ impl NeteaseProvider {
 
     #[must_use]
     pub fn from_client(client: NeteaseClient) -> Self {
+        let anonymous_identity = configured_anonymous_identity(&client);
         Self {
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
+            anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
             credential_store: None,
         }
     }
@@ -262,6 +276,17 @@ impl NeteaseProvider {
             return Ok(client.clone());
         }
         if account == "default" {
+            if let Some(identity) = self
+                .anonymous_identity
+                .read()
+                .map_err(|_| account_store_error())?
+                .as_ref()
+            {
+                return Ok(self
+                    .client
+                    .with_cookie(identity.cookie.clone())
+                    .with_device_id(identity.device_id.clone()));
+            }
             return Ok(self.client.clone());
         }
         Err(TuneWeaveError::new(
@@ -324,19 +349,61 @@ impl NeteaseProvider {
             return Ok(());
         };
         for credential in store.load_platform(Platform::Netease)? {
-            if credential.kind != NETEASE_CREDENTIAL_KIND {
-                return Err(TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    format!(
-                        "unsupported NetEase account credential kind: {}",
-                        credential.kind
-                    ),
-                )
-                .with_platform(Platform::Netease));
+            match credential.kind.as_str() {
+                NETEASE_CREDENTIAL_KIND => {
+                    let account = normalize_account_label(Some(&credential.account))?.to_owned();
+                    self.install_session_in_memory(account, credential.into_secret())?;
+                }
+                NETEASE_ANONYMOUS_CREDENTIAL_KIND => {
+                    if credential.account != NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT {
+                        return Err(anonymous_identity_error(
+                            "stored credential uses an unexpected account key",
+                        ));
+                    }
+                    let identity =
+                        serde_json::from_str::<StoredAnonymousIdentity>(credential.secret())
+                            .map_err(|_| {
+                                anonymous_identity_error("stored credential is invalid JSON")
+                            })?;
+                    validate_anonymous_identity(&identity)?;
+                    *self
+                        .anonymous_identity
+                        .write()
+                        .map_err(|_| account_store_error())? = Some(identity);
+                }
+                kind => {
+                    return Err(TuneWeaveError::new(
+                        ErrorCode::InternalError,
+                        format!("unsupported NetEase account credential kind: {kind}"),
+                    )
+                    .with_platform(Platform::Netease));
+                }
             }
-            let account = normalize_account_label(Some(&credential.account))?.to_owned();
-            self.install_session_in_memory(account, credential.into_secret())?;
         }
+        Ok(())
+    }
+
+    fn install_anonymous_identity(&self, identity: StoredAnonymousIdentity) -> Result<()> {
+        validate_anonymous_identity(&identity)?;
+        if let Some(store) = &self.credential_store {
+            let secret = serde_json::to_string(&identity).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!("failed to serialize NetEase anonymous identity: {error}"),
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            store.put(&StoredAccountCredential::new(
+                Platform::Netease,
+                NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT,
+                NETEASE_ANONYMOUS_CREDENTIAL_KIND,
+                secret,
+            )?)?;
+        }
+        *self
+            .anonymous_identity
+            .write()
+            .map_err(|_| account_store_error())? = Some(identity);
         Ok(())
     }
 
@@ -410,6 +477,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchLocalTrackMatch,
             Capability::UserMembership,
             Capability::UserMembershipClientInfo,
+            Capability::AnonymousSession,
             Capability::AntiCheatToken,
             Capability::ListeningRightsAds,
             Capability::ListeningRightsGain,
@@ -718,6 +786,31 @@ impl MusicProvider for NeteaseProvider {
             refreshed,
             extensions: Extensions::new(),
         })
+    }
+
+    async fn anonymous_session(&self, refresh: bool) -> Result<AnonymousSession> {
+        if !refresh
+            && let Some(identity) = self
+                .anonymous_identity
+                .read()
+                .map_err(|_| account_store_error())?
+                .clone()
+        {
+            return Ok(map_anonymous_session(identity, false, false, None));
+        }
+
+        let registration = self.client.register_anonymous().await?;
+        let identity = StoredAnonymousIdentity {
+            device_id: registration.device_id.clone(),
+            cookie: registration.session_cookie().to_owned(),
+        };
+        self.install_anonymous_identity(identity.clone())?;
+        Ok(map_anonymous_session(
+            identity,
+            true,
+            refresh,
+            Some(registration.body),
+        ))
     }
 
     async fn listening_rights_ads(
@@ -8275,6 +8368,68 @@ fn account_store_error() -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::InternalError,
         "NetEase account store lock is poisoned",
+    )
+    .with_platform(Platform::Netease)
+}
+
+fn configured_anonymous_identity(client: &NeteaseClient) -> Option<StoredAnonymousIdentity> {
+    let cookie = client.configured_cookie()?;
+    (!client.is_authenticated() && crate::client::has_anonymous_cookie(Some(cookie))).then(|| {
+        StoredAnonymousIdentity {
+            device_id: client.device_id().to_owned(),
+            cookie: cookie.to_owned(),
+        }
+    })
+}
+
+fn validate_anonymous_identity(identity: &StoredAnonymousIdentity) -> Result<()> {
+    let valid_device_id = (16..=128).contains(&identity.device_id.len())
+        && identity
+            .device_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !valid_device_id {
+        return Err(anonymous_identity_error(
+            "device ID is empty or unsafe for an HTTP header",
+        ));
+    }
+    if !crate::client::has_anonymous_cookie(Some(&identity.cookie))
+        || identity.cookie.contains(['\r', '\n'])
+    {
+        return Err(anonymous_identity_error(
+            "cookie does not contain a safe MUSIC_A value",
+        ));
+    }
+    Ok(())
+}
+
+fn map_anonymous_session(
+    identity: StoredAnonymousIdentity,
+    registered: bool,
+    refreshed: bool,
+    response: Option<Value>,
+) -> AnonymousSession {
+    let mut extensions = Extensions::new();
+    extensions.insert(
+        Platform::Netease.as_str().to_owned(),
+        json!({
+            "source": if registered { "registration" } else { "persistent_cache" },
+            "response": response,
+        }),
+    );
+    AnonymousSession {
+        device_id: identity.device_id,
+        cookie: identity.cookie,
+        registered,
+        refreshed,
+        extensions,
+    }
+}
+
+fn anonymous_identity_error(message: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::InternalError,
+        format!("NetEase anonymous identity {message}"),
     )
     .with_platform(Platform::Netease)
 }
@@ -22268,6 +22423,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anonymous_identity_persists_without_becoming_an_account_session() {
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build persistent provider");
+        let identity = StoredAnonymousIdentity {
+            device_id: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123".to_owned(),
+            cookie: "MUSIC_A=persistent-anonymous".to_owned(),
+        };
+        provider
+            .install_anonymous_identity(identity.clone())
+            .expect("persist anonymous identity");
+        let client = provider.client_for(None).expect("anonymous client");
+        assert!(!client.is_authenticated());
+        assert_eq!(client.device_id(), identity.device_id);
+        assert_eq!(client.configured_cookie(), Some(identity.cookie.as_str()));
+        drop(provider);
+
+        let restored = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store),
+            ..NeteaseConfig::default()
+        })
+        .expect("restore persistent provider");
+        let session = MusicProvider::anonymous_session(&restored, false)
+            .await
+            .expect("read cached anonymous session");
+        assert_eq!(session.device_id, identity.device_id);
+        assert_eq!(session.cookie, identity.cookie);
+        assert!(!session.registered);
+        assert!(!session.refreshed);
+        assert!(restored.client_for(Some("missing-account")).is_err());
+    }
+
+    #[tokio::test]
     async fn logout_removes_the_local_persisted_session_when_upstream_is_unavailable() {
         let directory = TestCredentialDirectory::new();
         let store = directory.store();
@@ -22331,6 +22523,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountCloudRead));
         assert!(capabilities.contains(&Capability::AccountCloudDelete));
         assert!(capabilities.contains(&Capability::AccountCloudDownload));
+        assert!(capabilities.contains(&Capability::AnonymousSession));
         assert!(capabilities.contains(&Capability::PlaylistWrite));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));

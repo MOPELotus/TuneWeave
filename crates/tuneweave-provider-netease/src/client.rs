@@ -137,6 +137,36 @@ pub struct NeteaseResponse {
     pub cookies: Vec<String>,
 }
 
+#[derive(Clone)]
+pub struct NeteaseAnonymousRegistration {
+    pub device_id: String,
+    pub body: Value,
+    session_cookie: String,
+}
+
+impl fmt::Debug for NeteaseAnonymousRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NeteaseAnonymousRegistration")
+            .field("device_id", &self.device_id)
+            .field("code", &response_code(&self.body))
+            .field("has_session_cookie", &true)
+            .finish()
+    }
+}
+
+impl NeteaseAnonymousRegistration {
+    #[must_use]
+    pub fn session_cookie(&self) -> &str {
+        &self.session_cookie
+    }
+
+    #[must_use]
+    pub fn into_session_cookie(self) -> String {
+        self.session_cookie
+    }
+}
+
 impl fmt::Debug for NeteaseResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -697,6 +727,32 @@ impl NeteaseClient {
         self.request_xeapi_inner(path, payload, None).await
     }
 
+    pub async fn register_anonymous(&self) -> Result<NeteaseAnonymousRegistration> {
+        let device_id = generate_anonymous_device_id();
+        let client = self.without_cookie().with_device_id(device_id.clone());
+        let response = client
+            .request_xeapi(
+                "/api/register/anonimous",
+                json!({ "username": anonymous_username(&device_id) }),
+            )
+            .await?;
+        ensure_response_code(&response.body, 200, "anonymous registration")?;
+        let session_cookie = merge_cookie_headers(None, &response.cookies)
+            .filter(|cookie| has_anonymous_cookie(Some(cookie)))
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase anonymous registration did not return MUSIC_A",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+        Ok(NeteaseAnonymousRegistration {
+            device_id,
+            body: response.body,
+            session_cookie,
+        })
+    }
+
     pub async fn request_xeapi_with_check_token(
         &self,
         path: &str,
@@ -970,6 +1026,16 @@ impl NeteaseClient {
         client
     }
 
+    pub(crate) fn with_device_id(&self, device_id: String) -> Self {
+        let mut client = self.clone();
+        client.device_id = device_id;
+        client
+    }
+
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
     pub(crate) fn without_cookie(&self) -> Self {
         let mut client = self.clone();
         client.cookie = None;
@@ -1105,6 +1171,12 @@ pub(crate) fn has_authenticated_cookie(cookie: Option<&str>) -> bool {
     CookieValues::parse(cookie)
         .music_u
         .is_some_and(|music_u| !music_u.is_empty())
+}
+
+pub(crate) fn has_anonymous_cookie(cookie: Option<&str>) -> bool {
+    CookieValues::parse(cookie)
+        .music_a
+        .is_some_and(|music_a| !music_a.is_empty())
 }
 
 fn insert_cookie_pair(cookies: &mut BTreeMap<String, String>, pair: &str) {
@@ -1456,6 +1528,25 @@ fn request_id() -> String {
     format!("{}_{sequence:04}", unix_time_millis())
 }
 
+fn generate_anonymous_device_id() -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    (0..52)
+        .map(|_| char::from(HEX[rand::random_range(0_usize..HEX.len())]))
+        .collect()
+}
+
+fn anonymous_username(device_id: &str) -> String {
+    const XOR_KEY: &[u8] = b"3go8&$8*3*3h0k(2)2";
+    let xored = device_id
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ XOR_KEY[index % XOR_KEY.len()])
+        .collect::<Vec<_>>();
+    let digest = BASE64.encode(Md5::digest(&xored));
+    BASE64.encode(format!("{device_id} {digest}"))
+}
+
 fn unix_time_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1517,6 +1608,36 @@ mod tests {
         .expect("build anonymous client");
         assert!(account.is_authenticated());
         assert!(!anonymous.is_authenticated());
+    }
+
+    #[test]
+    fn anonymous_registration_identity_matches_the_reference_encoding() {
+        let device_id = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123";
+        assert_eq!(
+            anonymous_username(device_id),
+            "MDEyMzQ1Njc4OUFCQ0RFRjAxMjM0NTY3ODlBQkNERUYwMTIzNDU2Nzg5QUJDREVGMDEyMyBYa2pIc2o5dnlXcTVRNDdCdXYyVWNnPT0="
+        );
+        for _ in 0..16 {
+            let generated = generate_anonymous_device_id();
+            assert_eq!(generated.len(), 52);
+            assert!(
+                generated
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_registration_debug_output_redacts_the_cookie() {
+        let registration = NeteaseAnonymousRegistration {
+            device_id: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123".to_owned(),
+            body: json!({"code": 200}),
+            session_cookie: "MUSIC_A=must-not-appear".to_owned(),
+        };
+        let debug = format!("{registration:?}");
+        assert!(debug.contains("has_session_cookie: true"));
+        assert!(!debug.contains("must-not-appear"));
     }
 
     #[test]
@@ -1765,6 +1886,26 @@ mod tests {
                 .expect("refresh anti-cheat token");
             assert!(refreshed);
             assert!(!second.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_anonymous_registration_preserves_success_or_the_current_business_boundary() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
+        match client.register_anonymous().await {
+            Ok(registration) => {
+                assert_eq!(response_code(&registration.body), Some(200));
+                assert_eq!(registration.device_id.len(), 52);
+                assert!(has_anonymous_cookie(Some(registration.session_cookie())));
+                assert!(!has_authenticated_cookie(Some(
+                    registration.session_cookie()
+                )));
+            }
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::UpstreamError);
+                assert_eq!(error.details["code"], 400);
+            }
         }
     }
 

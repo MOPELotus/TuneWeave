@@ -23,6 +23,7 @@ pub enum Capability {
     SearchLocalTrackMatch,
     UserMembership,
     UserMembershipClientInfo,
+    AnonymousSession,
     AntiCheatToken,
     ListeningRightsAds,
     ListeningRightsGain,
@@ -160,6 +161,11 @@ mod tests {
             serde_json::to_value(Capability::UserMembershipClientInfo)
                 .expect("serialize client membership capability"),
             serde_json::json!("user_membership_client_info")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AnonymousSession)
+                .expect("serialize anonymous session capability"),
+            serde_json::json!("anonymous_session")
         );
         assert_eq!(
             serde_json::to_value(Capability::AntiCheatToken)

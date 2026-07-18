@@ -9,6 +9,7 @@ pub use auth::{
     NeteaseSessionRefresh, NeteaseSessionStatus,
 };
 pub use client::{
-    NeteaseClient, NeteaseConfig, NeteaseQrCheck, NeteaseQrLogin, NeteaseQrState, NeteaseResponse,
+    NeteaseAnonymousRegistration, NeteaseClient, NeteaseConfig, NeteaseQrCheck, NeteaseQrLogin,
+    NeteaseQrState, NeteaseResponse,
 };
 pub use provider::NeteaseProvider;

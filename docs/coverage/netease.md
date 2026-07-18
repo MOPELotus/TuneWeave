@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=253`、`partial=3`、`implemented=62`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=252`、`partial=3`、`implemented=63`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -248,7 +248,7 @@
 | `record_recent_song` | `/record/recent/song` | `pending` | — |
 | `record_recent_video` | `/record/recent/video` | `pending` | — |
 | `record_recent_voice` | `/record/recent/voice` | `pending` | — |
-| `register_anonimous` | `/register/anonimous` | `pending` | — |
+| `register_anonimous` | `/register/anonimous` | `implemented` | `GET/POST /v1/extensions/netease/anonymous-session`，兼容正确拼写 `/register/anonymous` 与参考拼写 `/register/anonimous`（独立 `AnonymousSession` 能力完整复刻 52 位大写十六进制设备 ID、循环 XOR、MD5、双层 Base64 用户名及 XEAPI `/api/register/anonimous`；GET 缺省读取进程/持久化身份，`refresh=true` 与 POST 强刷；设备 ID 和 `MUSIC_A` 作为单一版本化凭据原子落盘，重启恢复后自动供默认公开请求使用，不进入登录账户映射，也不覆盖显式账户；参考兼容响应保留 Cookie，但 Debug/错误不泄漏且客户端不能注入；核心契约、固定编码向量、随机设备格式、Cookie/设备校验、凭据恢复、账户隔离、能力发现、三个路由别名、GET/POST/强刷及非法查询均有测试；2026-07-18 TuneWeave 真实请求与同机当前参考实现均返回上游 `code=400` 且无 Cookie，稳定拒绝伪造身份，待上游恢复后补成功注册验收） |
 | `register_cellphone` | `/register/cellphone` | `pending` | — |
 | `register_checktoken_v2` | `/register/checktoken/v2` | `verified` | `GET/POST /v1/extensions/netease/register/checktoken/v2`，也可在通用 `/v1/extensions/netease/check-token` 以 `version=v2` 选择（固定请求易盾 `/v2/config/js?pn=YD00000558929251`，严格要求成功 JSON 的非空 `result.conf` 并校验安全 HTTP 头值；v2/v3 使用独立 URL 和共享于账户 client 的独立缓存，返回体以 `version` 明示版本，固定版本路由拒绝冲突参数，旧端点缺省仍为 v3；EAPI 可由 provider 受控取得并注入 v2 token，客户端不能提交 token；核心版本契约、双解析器、畸形响应、缓存隔离、通用/固定版本 GET/POST 和冲突输入均有测试；2026-07-18 真实易盾联网验证 v2/v3 首次注册、缓存命中与强制刷新全部成功） |
 | `register_checktoken_v3` | `/register/checktoken/v3` | `verified` | `GET/POST /v1/extensions/netease/check-token`，并兼容 `/v1/extensions/netease/register/checktoken`（当前明确对应 v3；GET 缺省复用进程内缓存，`refresh=1|true` 及 POST 强制刷新；固定请求官方易盾 `/v3/b?pn=YD00000558929251`，严格解析成功 JSONP 并校验安全 HTTP 头值；账户 client 共享缓存，要求 v3 checkToken 的 XEAPI 请求由 provider 自动取得并注入 `X-antiCheatToken`，不接受客户端传 token；稳定结果返回 `token/registered/refreshed`，序列化仍满足参考响应，Debug 和普通日志强制脱敏；核心模型、能力名、有效/字符串业务码、畸形/失败响应、共享缓存、查询布尔值、双路径 GET/POST、未知字段和 HTTP 包络均有测试；2026-07-18 真实易盾联网验证首次注册、缓存命中及强制刷新全部成功） |

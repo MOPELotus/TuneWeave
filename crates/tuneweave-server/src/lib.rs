@@ -21,13 +21,13 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AntiCheatToken, AntiCheatTokenVersion,
-    Artist, ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
-    ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistTrackOrder,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AnonymousSession, AntiCheatToken,
+    AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea,
+    ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
+    ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
+    ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
+    BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
     ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
@@ -445,6 +445,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
         .route("/extensions/netease/calendar", get(netease_calendar))
+        .route(
+            "/extensions/netease/anonymous-session",
+            get(netease_anonymous_session).post(netease_anonymous_session_refresh),
+        )
+        .route(
+            "/extensions/netease/register/anonymous",
+            get(netease_anonymous_session).post(netease_anonymous_session_refresh),
+        )
+        .route(
+            "/extensions/netease/register/anonimous",
+            get(netease_anonymous_session).post(netease_anonymous_session_refresh),
+        )
         .route(
             "/extensions/netease/check-token",
             get(netease_check_token).post(netease_check_token_refresh),
@@ -6610,6 +6622,40 @@ struct NeteaseCheckTokenQuery {
     version: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeteaseAnonymousSessionQuery {
+    refresh: Option<String>,
+}
+
+async fn netease_anonymous_session(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseAnonymousSessionQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AnonymousSession>>, ApiError> {
+    let params = query_params(params)?;
+    let refresh = parse_bool_parameter("refresh", params.refresh.as_deref(), false)?;
+    let provider = state.registry.require(Platform::Netease)?;
+    let session = provider.anonymous_session(refresh).await?;
+    Ok(Json(
+        ApiResponse::new(session).with_platform(Platform::Netease),
+    ))
+}
+
+async fn netease_anonymous_session_refresh(
+    State(state): State<AppState>,
+    params: Result<Query<NeteaseAnonymousSessionQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<AnonymousSession>>, ApiError> {
+    let params = query_params(params)?;
+    if params.refresh.is_some() {
+        parse_bool_parameter("refresh", params.refresh.as_deref(), true)?;
+    }
+    let provider = state.registry.require(Platform::Netease)?;
+    let session = provider.anonymous_session(true).await?;
+    Ok(Json(
+        ApiResponse::new(session).with_platform(Platform::Netease),
+    ))
+}
+
 async fn netease_check_token(
     State(state): State<AppState>,
     params: Result<Query<NeteaseCheckTokenQuery>, QueryRejection>,
@@ -7887,6 +7933,7 @@ mod tests {
                 Capability::AccountCloudRead,
                 Capability::AccountCloudDelete,
                 Capability::AccountCloudDownload,
+                Capability::AnonymousSession,
                 Capability::AntiCheatToken,
                 Capability::ListeningRightsAds,
                 Capability::ListeningRightsGain,
@@ -8123,6 +8170,21 @@ mod tests {
                 }
                 .to_owned(),
                 registered: true,
+                refreshed: refresh,
+                extensions: Extensions::new(),
+            })
+        }
+
+        async fn anonymous_session(&self, refresh: bool) -> Result<AnonymousSession> {
+            Ok(AnonymousSession {
+                device_id: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123".to_owned(),
+                cookie: if refresh {
+                    "MUSIC_A=refreshed-anonymous"
+                } else {
+                    "MUSIC_A=cached-anonymous"
+                }
+                .to_owned(),
+                registered: refresh,
                 refreshed: refresh,
                 extensions: Extensions::new(),
             })
@@ -15924,6 +15986,55 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn netease_anonymous_session_supports_cache_refresh_and_reference_aliases() {
+        let (status, cached) = json_response_from(
+            test_app_with_provider(),
+            "/v1/extensions/netease/anonymous-session",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cached["data"]["cookie"], "MUSIC_A=cached-anonymous");
+        assert_eq!(cached["data"]["registered"], false);
+        assert_eq!(cached["data"]["refreshed"], false);
+        assert_eq!(cached["meta"]["platform"], "netease");
+
+        for path in [
+            "/v1/extensions/netease/anonymous-session?refresh=true",
+            "/v1/extensions/netease/register/anonymous?refresh=1",
+            "/v1/extensions/netease/register/anonimous?refresh=1",
+        ] {
+            let (status, refreshed) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(refreshed["data"]["cookie"], "MUSIC_A=refreshed-anonymous");
+            assert_eq!(refreshed["data"]["registered"], true);
+            assert_eq!(refreshed["data"]["refreshed"], true);
+        }
+
+        let (status, posted) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/extensions/netease/register/anonimous",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(posted["data"]["refreshed"], true);
+    }
+
+    #[tokio::test]
+    async fn netease_anonymous_session_rejects_invalid_and_unknown_query_fields() {
+        for path in [
+            "/v1/extensions/netease/anonymous-session?refresh=sometimes",
+            "/v1/extensions/netease/register/anonymous?account=default",
+            "/v1/extensions/netease/register/anonimous?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
     }
 

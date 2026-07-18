@@ -4,9 +4,9 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=3`、`partial=7`、`implemented=18`、`verified=36`。
+当前共 64 个验收单元：`pending=3`、`partial=6`、`implemented=19`、`verified=36`。
 
-- 完整实现率：`(implemented + verified) / 64 = 54 / 64 = 84.38%`。
+- 完整实现率：`(implemented + verified) / 64 = 55 / 64 = 85.94%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 61 / 64 = 95.31%`。
 - 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
 
@@ -78,7 +78,7 @@
 | F05 | 平台基础协议 | XEAPI 密钥注册、签名和响应解密 | `verified` | 公钥注册和真实请求已验收 |
 | F06 | 平台基础协议 | `e_r` 加密响应解包 | `verified` | EAPI 真实加密响应已验收 |
 | F07 | 平台基础协议 | 安全原始 API 与批量 API 扩展 | `verified` | 五协议、动态键、域名和凭据边界已验收 |
-| F08 | 平台基础协议 | 设备身份、匿名 token 与实时 checkToken | `partial` | 请求层设备默认值已有；`register_checktoken_v2/v3` 已完成分版本路由、独立缓存、日志脱敏、EAPI/XEAPI 受控头注入及真实注册/缓存/强刷验收，`register_anonimous` 仍待接入 |
+| F08 | 平台基础协议 | 设备身份、匿名 token 与实时 checkToken | `implemented` | `register_checktoken_v2/v3` 已完成分版本路由、独立缓存、日志脱敏、EAPI/XEAPI 受控头注入及真实注册/缓存/强刷验收；`register_anonimous` 已完整接入参考设备编码、独立能力、三路由别名、私有持久化、重启恢复和默认公开请求自动复用，匿名身份不混入或覆盖多账户登录态。2026-07-18 TuneWeave 与当前参考实现同机实测均收到上游 `code=400` 且无 Cookie，代码会明确失败而不伪造身份，待上游恢复后补成功态验收 |
 | F09 | 平台基础协议 | 随机中国 IP 与安全服务端代理/真实 IP 配置 | `pending` | 不允许客户端注入；受控服务端配置和随机 IP 能力未实现 |
 
 ## 更新规则
