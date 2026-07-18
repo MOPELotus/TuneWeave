@@ -744,6 +744,7 @@ pub struct Podcast {
     pub subscribed: Option<bool>,
     pub paid: Option<bool>,
     pub purchased: Option<bool>,
+    pub price: Option<Money>,
     pub created_at: Option<String>,
     pub extensions: Extensions,
 }
@@ -767,6 +768,7 @@ impl Podcast {
             subscribed: None,
             paid: None,
             purchased: None,
+            price: None,
             created_at: None,
             extensions: Extensions::new(),
         }
@@ -2567,12 +2569,19 @@ mod tests {
             ResourceRef::new(Platform::Netease, "1367665101").expect("valid episode reference");
         let audio_ref =
             ResourceRef::new(Platform::Netease, "478446370").expect("valid audio reference");
-        let podcast = Podcast::new(podcast_ref.clone(), "代码时间");
+        let mut podcast = Podcast::new(podcast_ref.clone(), "代码时间");
+        podcast.price = Some(Money {
+            amount: 12.9,
+            currency: "CNY".to_owned(),
+        });
         let mut episode = PodcastEpisode::new(episode_ref.clone(), "一期节目");
         episode.podcast_ref = Some(podcast_ref.clone());
         episode.audio = Some(Track::new(audio_ref.clone(), "一期节目"));
 
         assert_eq!(podcast.resource_ref, podcast_ref);
+        let podcast_value = serde_json::to_value(podcast).expect("serialize podcast");
+        assert_eq!(podcast_value["price"]["amount"], 12.9);
+        assert_eq!(podcast_value["price"]["currency"], "CNY");
         assert_eq!(episode.resource_ref, episode_ref);
         assert_eq!(
             episode.audio.as_ref().map(|audio| &audio.resource_ref),

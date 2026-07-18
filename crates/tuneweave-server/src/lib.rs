@@ -7246,7 +7246,8 @@ mod tests {
             let category_featured = request.catalog == PodcastCatalog::CategoryFeatured;
             let category_hot = request.catalog == PodcastCatalog::CategoryHot;
             let hot = request.catalog == PodcastCatalog::Hot;
-            let paged = hot || category_hot;
+            let paid = request.catalog == PodcastCatalog::Paid;
+            let paged = hot || category_hot || paid;
             let category_valid = if category_featured || category_hot {
                 request.category_id.is_some()
             } else {
@@ -7261,16 +7262,24 @@ mod tests {
                     | PodcastCatalog::CategoryHot
                     | PodcastCatalog::Personalized
                     | PodcastCatalog::TodayPreferred
+                    | PodcastCatalog::Paid
             ) || !category_valid
                 || !page_valid
                 || ((featured || category_featured || personalized || today_preferred)
                     && request.offset != 0)
             {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports featured, hot, category featured, category hot, personalized, and today preferred podcast catalogs",
+                    "test provider only supports featured, hot, category featured, category hot, personalized, today preferred, and paid podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
+            if paid {
+                podcast.paid = Some(true);
+                podcast.price = Some(tuneweave_core::Money {
+                    amount: 12.9,
+                    currency: "CNY".to_owned(),
+                });
+            }
             podcast
                 .extensions
                 .insert("request".to_owned(), json!(request));
@@ -7289,6 +7298,8 @@ mod tests {
                         json!({"code": 200, "data": [{"id": 336355127}]})
                     } else if today_preferred {
                         json!({"code": 200, "data": [{"id": 336355127}], "msg": null})
+                    } else if paid {
+                        json!({"code": 200, "data": {"hasMore": true, "list": [{"id": 336355127}]}})
                     } else if category_featured {
                         json!({"code": 200, "hasMore": true})
                     } else if category_hot {
@@ -10815,6 +10826,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paid_podcast_catalog_exposes_price_and_offset_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=paygift&limit=3&offset=6&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["paid"], true);
+        assert_eq!(json["data"][0]["price"]["amount"], 12.9);
+        assert_eq!(json["data"][0]["price"]["currency"], "CNY");
+        assert_eq!(json["data"][0]["extensions"]["request"]["catalog"], "paid");
+        assert_eq!(json["meta"]["pagination"]["limit"], 3);
+        assert_eq!(json["meta"]["pagination"]["offset"], 6);
+        assert_eq!(json["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 7);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(json["meta"]["pagination"]["extensions"]["catalog"], "paid");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["limit_applied"],
+            true
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
         for path in [
             "/v1/podcasts",
@@ -10828,6 +10866,7 @@ mod tests {
             "/v1/podcasts?catalog=category_featured&category_id=2&offset=1",
             "/v1/podcasts?catalog=today&offset=1",
             "/v1/podcasts?catalog=today&category_id=2",
+            "/v1/podcasts?catalog=paid&category_id=2",
             "/v1/podcasts?catalog=today&page=invalid",
             "/v1/podcasts?catalog=hot&page=2",
             "/v1/podcasts?catalog=hot&limit=0",

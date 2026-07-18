@@ -4424,12 +4424,25 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
                 json!({ "page": request.page.unwrap_or(0) }),
             ))
         }
-        catalog => Err(TuneWeaveError::invalid_request(format!(
-            "unsupported NetEase podcast catalog: {}",
-            podcast_catalog_name(catalog)
-        ))
-        .with_platform(Platform::Netease)
-        .with_details(json!({ "catalog": catalog, "allowed": ["hot"] }))),
+        PodcastCatalog::Paid => {
+            if request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase paid podcast catalog does not accept category_id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(
+                    json!({ "catalog": request.catalog, "category_id": request.category_id }),
+                ));
+            }
+            Ok((
+                "/api/djradio/home/paygift/list",
+                json!({
+                    "limit": request.limit,
+                    "offset": request.offset,
+                    "_nmclfl": 1
+                }),
+            ))
+        }
     }
 }
 
@@ -4897,6 +4910,10 @@ fn map_netease_podcast_catalog_response(
         PodcastCatalog::Personalized | PodcastCatalog::TodayPreferred => {
             (body.get("data"), "data array")
         }
+        PodcastCatalog::Paid => (
+            body.get("data").and_then(|data| data.get("list")),
+            "data.list array",
+        ),
         _ => (body.get("djRadios"), "djRadios array"),
     };
     let raw_items = raw_items
@@ -4946,12 +4963,20 @@ fn map_netease_podcast_catalog_response(
         }
         PodcastCatalog::Personalized => (None, None, false, true),
         PodcastCatalog::TodayPreferred => (None, None, false, false),
-        catalog => {
-            return Err(TuneWeaveError::invalid_request(format!(
-                "unsupported NetEase podcast catalog response: {}",
-                podcast_catalog_name(catalog)
-            ))
-            .with_platform(Platform::Netease));
+        PodcastCatalog::Paid => {
+            let candidate_offset = request.offset.saturating_add(consumed);
+            let has_more = consumed > 0
+                && body
+                    .get("data")
+                    .and_then(|data| data.get("hasMore"))
+                    .and_then(json_bool)
+                    .unwrap_or(false);
+            (
+                None,
+                has_more.then_some(candidate_offset),
+                has_more,
+                consumed <= request.limit,
+            )
         }
     };
     let mut extensions = Extensions::from([
@@ -5024,6 +5049,7 @@ fn map_netease_podcast(raw: Value) -> Result<Podcast> {
     podcast.subscribed = radio_bool_field(&raw, &["subed", "subscribed"]);
     podcast.paid = podcast_paid_field(&raw, &["radioFeeType", "feeScope"]);
     podcast.purchased = radio_bool_field(&raw, &["buyed", "purchased"]);
+    podcast.price = podcast_price(&raw);
     podcast.created_at = podcast_positive_u64_field(&raw, &["createTime"])
         .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
     podcast.extensions.insert("podcast".to_owned(), raw);
@@ -5370,6 +5396,13 @@ fn podcast_paid_field(raw: &Value, fields: &[&str]) -> Option<bool> {
         .iter()
         .find_map(|field| raw.get(field).and_then(json_i64))
         .map(|fee_type| fee_type > 0)
+}
+
+fn podcast_price(raw: &Value) -> Option<Money> {
+    podcast_u64_field(raw, &["discountPrice", "originalPrice"]).map(|cents| Money {
+        amount: cents as f64 / 100.0,
+        currency: "CNY".to_owned(),
+    })
 }
 
 fn podcast_item_error(field: &str, raw: &Value) -> TuneWeaveError {
@@ -14054,6 +14087,14 @@ mod tests {
                 .expect("today preferred podcast request"),
             ("/api/djradio/home/today/perfered", json!({"page": 2}))
         );
+        let paid_request = PodcastListRequest::new(PodcastCatalog::Paid, 3, 6);
+        assert_eq!(
+            netease_podcast_catalog_request(&paid_request).expect("paid podcast request"),
+            (
+                "/api/djradio/home/paygift/list",
+                json!({"limit": 3, "offset": 6, "_nmclfl": 1})
+            )
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -14090,7 +14131,6 @@ mod tests {
             PodcastListRequest::new(PodcastCatalog::Personalized, 20, 1),
             PodcastListRequest::new(PodcastCatalog::CategoryHot, 20, 0),
             PodcastListRequest::new(PodcastCatalog::CategoryFeatured, 20, 0),
-            PodcastListRequest::new(PodcastCatalog::Paid, 20, 0),
         ] {
             assert_eq!(
                 netease_podcast_catalog_request(&invalid)
@@ -14162,6 +14202,14 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+        let mut paid_with_category = PodcastListRequest::new(PodcastCatalog::Paid, 20, 0);
+        paid_with_category.category_id = Some("2".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&paid_with_category)
+                .expect_err("paid catalog rejects category")
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
@@ -14410,6 +14458,68 @@ mod tests {
         assert_eq!(today.pagination.extensions["page_control_supported"], true);
         assert_eq!(today.pagination.extensions["returned_count"], 2);
         assert_eq!(today.pagination.extensions["limit_applied"], false);
+
+        let paid_request = PodcastListRequest::new(PodcastCatalog::Paid, 2, 4);
+        let paid = map_netease_podcast_catalog_response(
+            json!({
+                "code": 200,
+                "data": {
+                    "hasMore": true,
+                    "list": [
+                        {
+                            "id": 795_086_635,
+                            "name": "广播剧《青梅屿》",
+                            "picUrl": "https://example.test/paid.jpg",
+                            "programCount": 14,
+                            "radioFeeType": 2,
+                            "feeScope": 1,
+                            "originalPrice": 1290,
+                            "discountPrice": null,
+                            "futureField": "preserved"
+                        },
+                        {
+                            "id": 795_568_115,
+                            "name": "折扣播客",
+                            "radioFeeType": 2,
+                            "originalPrice": 990,
+                            "discountPrice": 490
+                        }
+                    ]
+                },
+                "msg": null
+            }),
+            &paid_request,
+        )
+        .expect("map paid podcasts");
+        assert_eq!(paid.items.len(), 2);
+        assert_eq!(paid.items[0].paid, Some(true));
+        assert_eq!(
+            paid.items[0].price.as_ref().map(|price| price.amount),
+            Some(12.9)
+        );
+        assert_eq!(
+            paid.items[0]
+                .price
+                .as_ref()
+                .map(|price| price.currency.as_str()),
+            Some("CNY")
+        );
+        assert_eq!(
+            paid.items[1].price.as_ref().map(|price| price.amount),
+            Some(4.9)
+        );
+        assert_eq!(
+            paid.items[0].extensions["podcast"]["futureField"],
+            "preserved"
+        );
+        assert_eq!(paid.pagination.limit, 2);
+        assert_eq!(paid.pagination.offset, 4);
+        assert_eq!(paid.pagination.total, None);
+        assert_eq!(paid.pagination.next_offset, Some(6));
+        assert!(paid.pagination.has_more);
+        assert_eq!(paid.pagination.extensions["catalog"], "paid");
+        assert_eq!(paid.pagination.extensions["returned_count"], 2);
+        assert_eq!(paid.pagination.extensions["limit_applied"], true);
 
         let empty = map_netease_podcast_catalog_response(
             json!({"code": 200, "djRadios": [], "hasMore": true}),
@@ -19917,6 +20027,33 @@ mod tests {
         assert_eq!(page.pagination.extensions["catalog"], "today_preferred");
         assert_eq!(page.pagination.extensions["page"], 0);
         assert_eq!(page.pagination.extensions["limit_applied"], false);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_paid_podcast_catalog_preserves_price_and_pagination() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = PodcastListRequest::new(PodcastCatalog::Paid, 3, 0);
+        let page = MusicProvider::podcasts(&provider, &request)
+            .await
+            .expect("live public paid podcasts");
+        assert_eq!(page.items.len(), 3);
+        assert!(page.items.iter().all(|podcast| {
+            !podcast.id.is_empty()
+                && !podcast.name.is_empty()
+                && podcast.cover_url.is_some()
+                && podcast.paid == Some(true)
+                && podcast
+                    .price
+                    .as_ref()
+                    .is_some_and(|price| price.amount > 0.0 && price.currency == "CNY")
+        }));
+        assert_eq!(page.pagination.total, None);
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert_eq!(page.pagination.extensions["catalog"], "paid");
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 
