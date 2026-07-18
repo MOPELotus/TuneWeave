@@ -47,18 +47,18 @@ use tuneweave_core::{
     PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastEpisode,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastTaxonomy,
-    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    PodcastEpisode, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastListRequest, PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -210,6 +210,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/podcasts/categories", get(podcast_categories))
+        .route("/podcasts", get(podcasts))
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
         .route("/episodes/{reference}", get(podcast_episode))
@@ -954,6 +955,50 @@ async fn podcast_categories(
     let provider = state.registry.require(platform)?;
     let taxonomy = provider.podcast_categories(account.as_deref()).await?;
     let mut response = ApiResponse::new(taxonomy).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    catalog: Option<String>,
+    #[serde(alias = "categoryId")]
+    category_id: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn podcasts(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastListParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
+    let params = query_params(params)?;
+    let catalog = parse_podcast_catalog(params.catalog.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .podcasts(&PodcastListRequest {
+            catalog,
+            category_id: optional_trimmed(params.category_id),
+            limit,
+            offset,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -6600,6 +6645,39 @@ fn parse_banner_client(value: Option<&str>) -> Result<BannerClient, TuneWeaveErr
     }
 }
 
+fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeaveError> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| TuneWeaveError::invalid_request("catalog must not be empty"))?
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "featured" | "recommend" | "recommended" => Ok(PodcastCatalog::Featured),
+        "hot" => Ok(PodcastCatalog::Hot),
+        "category_featured" | "category_recommend" | "category_recommended" => {
+            Ok(PodcastCatalog::CategoryFeatured)
+        }
+        "category_hot" => Ok(PodcastCatalog::CategoryHot),
+        "personalized" | "personalize" => Ok(PodcastCatalog::Personalized),
+        "today_preferred" | "today" => Ok(PodcastCatalog::TodayPreferred),
+        "paid" | "paygift" => Ok(PodcastCatalog::Paid),
+        _ => Err(
+            TuneWeaveError::invalid_request(format!("unsupported podcast catalog: {value}"))
+                .with_details(json!({
+                    "allowed": [
+                        "featured",
+                        "hot",
+                        "category_featured",
+                        "category_hot",
+                        "personalized",
+                        "today_preferred",
+                        "paid"
+                    ]
+                })),
+        ),
+    }
+}
+
 fn parse_u32_parameter(
     name: &str,
     value: Option<&str>,
@@ -6749,6 +6827,7 @@ mod tests {
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
                 Capability::PodcastCategories,
+                Capability::PodcastList,
                 Capability::PodcastDetail,
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeDetail,
@@ -7154,6 +7233,32 @@ mod tests {
                     ("account".to_owned(), json!(account)),
                     ("response".to_owned(), json!({"code": 200})),
                 ]),
+            })
+        }
+
+        async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
+            if request.catalog != PodcastCatalog::Hot || request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "test provider only supports the hot podcast catalog",
+                ));
+            }
+            let mut podcast = sample_podcast("336355127");
+            podcast
+                .extensions
+                .insert("request".to_owned(), json!(request));
+            Ok(Page {
+                items: vec![podcast],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([
+                        ("catalog".to_owned(), json!(request.catalog)),
+                        ("response".to_owned(), json!({"code": 200, "hasMore": true})),
+                    ]),
+                },
             })
         }
 
@@ -10440,6 +10545,49 @@ mod tests {
         for path in [
             "/v1/podcasts/categories?platform=unknown",
             "/v1/podcasts/categories?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_podcast_catalog_uses_platform_account_and_real_pagination() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=hot&limit=2&offset=4&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(json["data"][0]["extensions"]["request"]["catalog"], "hot");
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["account"],
+            "podcast-user"
+        );
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["offset"], 4);
+        assert_eq!(json["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 5);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(json["meta"]["pagination"]["extensions"]["catalog"], "hot");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
+        for path in [
+            "/v1/podcasts",
+            "/v1/podcasts?catalog=unknown",
+            "/v1/podcasts?catalog=featured",
+            "/v1/podcasts?catalog=hot&limit=0",
+            "/v1/podcasts?catalog=hot&limit=101",
+            "/v1/podcasts?catalog=hot&offset=invalid",
+            "/v1/podcasts?catalog=hot&category_id=2",
+            "/v1/podcasts?catalog=hot&unknown=true",
+            "/v1/podcasts?catalog=hot&platform=unknown",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");

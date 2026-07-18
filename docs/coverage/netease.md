@@ -103,7 +103,7 @@
 | `dj_difm_channel_unsubscribe` | `/dj/difm/channel/unsubscribe` | `pending` | — |
 | `dj_difm_playing_tracks_list` | `/dj/difm/playing/tracks/list` | `pending` | — |
 | `dj_difm_subscribe_channels_get` | `/dj/difm/subscribe/channels/get` | `pending` | — |
-| `dj_hot` | `/dj/hot` | `pending` | — |
+| `dj_hot` | `/dj/hot` | `verified` | `GET /v1/podcasts?catalog=hot`（统一 `PodcastCatalog` 保留后续平台目录扩展能力，网易云固定 WeAPI `/api/djradio/hot/v1` 并精确提交 `limit=1..100/offset`，不接受该上游不支持的 `category_id`；统一 `Podcast` 映射封面、主播、分类、节目/订阅/播放统计、付费态及创建时间，缺失 ID/名称或目录数组稳定拒绝，每项原文、真实 `count/hasMore` 和完整响应均保存在扩展；2026-07-18 provider 显式联网及真实二进制统一 HTTP 均返回上游 `code=200`，请求 2 项得到“`四只烤翅`”“`利胜`”、`total=null`、`next_offset=2`、`has_more=true`，能力发现同步声明 `podcast_list`） |
 | `dj_paygift` | `/dj/paygift` | `pending` | — |
 | `dj_personalize_recommend` | `/dj/personalize/recommend` | `pending` | — |
 | `dj_program` | `/dj/program` | `verified` | `GET /v1/podcasts/{ref}/episodes`（固定 WeAPI `/api/dj/program/byradio`，完整支持 `limit=1..100/offset/ascending` 并兼容参考 `asc`；统一 `PodcastEpisode` 明确分离节目 `ref`、所属 `podcast_ref` 与 `mainTrackId/mainSong` 对应的可播放 `audio.ref`，映射封面、主播、时长、发布时间、序号、收听/点赞/评论/分享数、歌词、订阅和付费态，零节目摘要时长/创建时间不会遮住完整音频时长或有效计划发布时间，分页保留 `count/more` 与完整响应；`mainTrackId` 和 `mainSong.id` 冲突时拒绝而不猜测；2026-07-17 provider 联网及真实二进制 HTTP 对 `netease:336355127` 请求 2 项成功，总数 36，首项节目 `netease:1367665101` 与音频 `netease:530692704` 保持独立，上游 `code=200`） |
