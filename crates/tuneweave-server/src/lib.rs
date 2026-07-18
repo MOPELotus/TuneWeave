@@ -39,19 +39,20 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, PageRequest,
-    PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
-    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
+    ListeningRightsAdRequest, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
+    MediaStream, MembershipSummary, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
+    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastChartEntry,
+    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
+    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
+    PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
     PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
@@ -350,6 +351,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
+        .route("/listening-rights/ads", get(listening_rights_ads))
         .route("/auth/country-codes", get(auth_country_calling_codes))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
@@ -4109,6 +4111,74 @@ async fn account_membership(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListeningRightsAdParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "typeIds")]
+    type_ids: Option<String>,
+}
+
+fn parse_listening_rights_type_ids(value: Option<&str>) -> Result<Vec<String>, TuneWeaveError> {
+    let Some(value) = value else {
+        return Ok(vec!["400002_0".to_owned()]);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "type_ids must not be empty when provided",
+        ));
+    }
+    let type_ids = if value.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(value).map_err(|error| {
+            TuneWeaveError::invalid_request(format!(
+                "type_ids must be a JSON string array: {error}"
+            ))
+        })?
+    } else {
+        value.split(',').map(str::to_owned).collect()
+    };
+    if type_ids.is_empty() || type_ids.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "type_ids must contain between 1 and 100 values",
+        ));
+    }
+    type_ids
+        .into_iter()
+        .map(|type_id| {
+            let type_id = type_id.trim();
+            if type_id.is_empty() || type_id.len() > 256 {
+                return Err(TuneWeaveError::invalid_request(
+                    "type ids must be non-empty and at most 256 bytes",
+                ));
+            }
+            Ok(type_id.to_owned())
+        })
+        .collect()
+}
+
+async fn listening_rights_ads(
+    State(state): State<AppState>,
+    params: Result<Query<ListeningRightsAdParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<ListeningRightsAdCatalog>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let catalog = provider
+        .listening_rights_ads(&ListeningRightsAdRequest {
+            type_ids: parse_listening_rights_type_ids(params.type_ids.as_deref())?,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct HistoryParams {
     period: Option<String>,
     limit: Option<String>,
@@ -7548,6 +7618,7 @@ mod tests {
                 Capability::AccountCloudDelete,
                 Capability::AccountCloudDownload,
                 Capability::AntiCheatToken,
+                Capability::ListeningRightsAds,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -7778,6 +7849,25 @@ mod tests {
                 registered: true,
                 refreshed: refresh,
                 extensions: Extensions::new(),
+            })
+        }
+
+        async fn listening_rights_ads(
+            &self,
+            request: &ListeningRightsAdRequest,
+        ) -> Result<ListeningRightsAdCatalog> {
+            Ok(ListeningRightsAdCatalog {
+                request_uid: Some("request-uid".to_owned()),
+                ads: vec![tuneweave_core::ListeningRightsAd {
+                    id: "ad-1".to_owned(),
+                    request_uid: Some("request-uid".to_owned()),
+                    extensions: Extensions::from([(
+                        "type_ids".to_owned(),
+                        json!(request.type_ids),
+                    )]),
+                }],
+                message: Some("ok".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -15395,6 +15485,68 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_ads_accept_default_json_and_reference_type_id_inputs() {
+        let (status, defaulted) =
+            json_response_from(test_app_with_provider(), "/v1/listening-rights/ads").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaulted["data"]["request_uid"], "request-uid");
+        assert_eq!(
+            defaulted["data"]["ads"][0]["extensions"]["type_ids"],
+            json!(["400002_0"])
+        );
+        assert_eq!(defaulted["meta"]["platform"], "netease");
+        assert!(defaulted["meta"].get("account").is_none());
+
+        let (status, json_array) = json_response_from(
+            test_app_with_provider(),
+            "/v1/listening-rights/ads?platform=netease&account=ad-user&type_ids=%5B%22400002_0%22%2C%22400003_1%22%5D",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json_array["data"]["ads"][0]["extensions"]["type_ids"],
+            json!(["400002_0", "400003_1"])
+        );
+        assert_eq!(json_array["data"]["extensions"]["account"], "ad-user");
+        assert_eq!(json_array["meta"]["account"], "ad-user");
+
+        let (status, comma_list) = json_response_from(
+            test_app_with_provider(),
+            "/v1/listening-rights/ads?typeIds=400002_0%2C%20400003_1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            comma_list["data"]["ads"][0]["extensions"]["type_ids"],
+            json!(["400002_0", "400003_1"])
+        );
+    }
+
+    #[tokio::test]
+    async fn listening_rights_ads_reject_invalid_type_ids_platforms_and_query_fields() {
+        let too_many = (0..101)
+            .map(|index| format!("type-{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        for path in [
+            "/v1/listening-rights/ads?type_ids=",
+            "/v1/listening-rights/ads?type_ids=%5B%5D",
+            "/v1/listening-rights/ads?type_ids=%5B1%5D",
+            "/v1/listening-rights/ads?type_ids=400002_0%2C%20",
+            "/v1/listening-rights/ads?platform=unknown",
+            "/v1/listening-rights/ads?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+        let path = format!("/v1/listening-rights/ads?type_ids={too_many}");
+        let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

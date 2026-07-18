@@ -228,6 +228,27 @@ impl fmt::Debug for AntiCheatToken {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsAdRequest {
+    pub type_ids: Vec<String>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsAd {
+    pub id: String,
+    pub request_uid: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsAdCatalog {
+    pub request_uid: Option<String>,
+    pub ads: Vec<ListeningRightsAd>,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -3080,6 +3101,24 @@ mod tests {
         let debug = format!("{token:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("temporary-secret-token"));
+    }
+
+    #[test]
+    fn listening_rights_ads_keep_the_request_uid_and_opaque_platform_payload() {
+        let catalog = ListeningRightsAdCatalog {
+            request_uid: Some("req-1".to_owned()),
+            ads: vec![ListeningRightsAd {
+                id: "400002_0".to_owned(),
+                request_uid: Some("req-1".to_owned()),
+                extensions: Extensions::from([("raw".to_owned(), serde_json::json!({"id": 1}))]),
+            }],
+            message: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(catalog).expect("serialize listening-rights ads");
+        assert_eq!(value["request_uid"], "req-1");
+        assert_eq!(value["ads"][0]["id"], "400002_0");
+        assert_eq!(value["ads"][0]["extensions"]["raw"]["id"], 1);
     }
 
     #[test]

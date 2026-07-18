@@ -37,14 +37,14 @@ use tuneweave_core::{
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackEntry,
     DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
-    LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta, PageRequest,
-    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest, LocalTrackMatchRequest,
+    LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary,
+    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
+    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
@@ -409,6 +409,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::UserMembership,
             Capability::UserMembershipClientInfo,
             Capability::AntiCheatToken,
+            Capability::ListeningRightsAds,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -709,6 +710,17 @@ impl MusicProvider for NeteaseProvider {
             refreshed,
             extensions: Extensions::new(),
         })
+    }
+
+    async fn listening_rights_ads(
+        &self,
+        request: &ListeningRightsAdRequest,
+    ) -> Result<ListeningRightsAdCatalog> {
+        let (path, payload) = netease_listening_rights_ads_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_xeapi_with_check_token(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_listening_rights_ads(&request.type_ids, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -12147,6 +12159,117 @@ fn map_netease_user_membership_client(
     })
 }
 
+fn netease_listening_rights_ads_request(
+    request: &ListeningRightsAdRequest,
+) -> Result<(&'static str, Value)> {
+    if request.type_ids.is_empty() || request.type_ids.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "listening-rights type_ids must contain between 1 and 100 values",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let type_ids = request
+        .type_ids
+        .iter()
+        .map(|type_id| {
+            let type_id = type_id.trim();
+            if type_id.is_empty() || type_id.len() > 256 {
+                return Err(TuneWeaveError::invalid_request(
+                    "listening-rights type ids must be non-empty and at most 256 bytes",
+                )
+                .with_platform(Platform::Netease));
+            }
+            Ok(type_id.to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let type_ids = serde_json::to_string(&type_ids).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize NetEase ad type ids: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok(("/api/ad/get", json!({ "type_ids": type_ids })))
+}
+
+fn map_netease_listening_rights_ads(
+    type_ids: &[String],
+    response: Value,
+) -> Result<ListeningRightsAdCatalog> {
+    let raw_ads = response.get("ads").cloned().unwrap_or(Value::Null);
+    let entries = match &raw_ads {
+        Value::Null => Vec::new(),
+        Value::Object(ads) => ads
+            .iter()
+            .enumerate()
+            .map(|(index, (id, ad))| {
+                let id = if id.trim().is_empty() {
+                    index.to_string()
+                } else {
+                    id.clone()
+                };
+                (id, ad.clone())
+            })
+            .collect::<Vec<_>>(),
+        Value::Array(ads) => ads
+            .iter()
+            .enumerate()
+            .map(|(index, ad)| (index.to_string(), ad.clone()))
+            .collect::<Vec<_>>(),
+        _ => {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase listening-rights ad response contains an invalid ads container",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response })));
+        }
+    };
+    let ads = entries
+        .into_iter()
+        .map(|(id, raw)| {
+            let ext_json = raw
+                .get("extJson")
+                .or_else(|| raw.get("ext_json"))
+                .and_then(|value| match value {
+                    Value::Object(_) => Some(value.clone()),
+                    Value::String(value) => serde_json::from_str::<Value>(value).ok(),
+                    _ => None,
+                });
+            let request_uid = ext_json
+                .as_ref()
+                .and_then(|value| value.get("contextInfo"))
+                .and_then(|value| value.get("req_id"))
+                .and_then(json_scalar_string);
+            let mut extensions = Extensions::from([("raw".to_owned(), raw)]);
+            if let Some(ext_json) = ext_json {
+                extensions.insert("ext_json".to_owned(), ext_json);
+            }
+            ListeningRightsAd {
+                id,
+                request_uid,
+                extensions,
+            }
+        })
+        .collect::<Vec<_>>();
+    let request_uid = ads.iter().find_map(|ad| ad.request_uid.clone());
+    let message = ["message", "msg"]
+        .into_iter()
+        .filter_map(|field| response.get(field).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|message| !message.is_empty())
+        .map(str::to_owned);
+    Ok(ListeningRightsAdCatalog {
+        request_uid,
+        ads,
+        message,
+        extensions: Extensions::from([
+            ("type_ids".to_owned(), json!(type_ids)),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -13523,6 +13646,112 @@ mod tests {
     }
 
     #[test]
+    fn listening_rights_ads_match_the_reference_xeapi_payload_and_extract_request_uids() {
+        let request = ListeningRightsAdRequest {
+            type_ids: vec!["400002_0".to_owned(), "400003_1".to_owned()],
+            account: None,
+        };
+        assert_eq!(
+            netease_listening_rights_ads_request(&request).expect("ad request"),
+            (
+                "/api/ad/get",
+                json!({"type_ids": "[\"400002_0\",\"400003_1\"]"})
+            )
+        );
+
+        let catalog = map_netease_listening_rights_ads(
+            &request.type_ids,
+            json!({
+                "code": 200,
+                "message": "",
+                "msg": "success",
+                "ads": {
+                    "first": {"extJson": "not-json", "creativeType": 2},
+                    "second": {
+                        "extJson": "{\"contextInfo\":{\"req_id\":\"request-2\"},\"future\":true}",
+                        "creativeType": 3
+                    }
+                }
+            }),
+        )
+        .expect("map listening-rights ads");
+        assert_eq!(catalog.request_uid.as_deref(), Some("request-2"));
+        assert_eq!(catalog.ads.len(), 2);
+        assert_eq!(catalog.ads[0].id, "first");
+        assert!(catalog.ads[0].request_uid.is_none());
+        assert_eq!(catalog.ads[1].request_uid.as_deref(), Some("request-2"));
+        assert_eq!(catalog.ads[1].extensions["ext_json"]["future"], true);
+        assert_eq!(catalog.ads[1].extensions["raw"]["creativeType"], 3);
+        assert_eq!(catalog.message.as_deref(), Some("success"));
+        assert_eq!(catalog.extensions["type_ids"], json!(request.type_ids));
+        assert_eq!(catalog.extensions["response"]["code"], 200);
+
+        let empty = map_netease_listening_rights_ads(
+            &["400002_0".to_owned()],
+            json!({"code": 200, "ads": null}),
+        )
+        .expect("map empty ad catalog");
+        assert!(empty.ads.is_empty());
+        assert!(empty.request_uid.is_none());
+
+        let array = map_netease_listening_rights_ads(
+            &["400002_0".to_owned()],
+            json!({
+                "code": 200,
+                "ads": [{"extJson": {"contextInfo": {"req_id": 42}}}]
+            }),
+        )
+        .expect("map array ad catalog");
+        assert_eq!(array.ads[0].id, "0");
+        assert_eq!(array.request_uid.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn listening_rights_ads_reject_invalid_type_ids_and_malformed_containers() {
+        for type_ids in [
+            Vec::new(),
+            vec![String::new()],
+            vec!["x".repeat(257)],
+            vec!["valid".to_owned(); 101],
+        ] {
+            let request = ListeningRightsAdRequest {
+                type_ids,
+                account: None,
+            };
+            assert_eq!(
+                netease_listening_rights_ads_request(&request)
+                    .expect_err("invalid type ids")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        assert_eq!(
+            map_netease_listening_rights_ads(
+                &["400002_0".to_owned()],
+                json!({"code": 200, "ads": "invalid"}),
+            )
+            .expect_err("invalid ads container")
+            .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[tokio::test]
+    async fn listening_rights_ads_reject_unknown_account_aliases_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::listening_rights_ads(
+            &provider,
+            &ListeningRightsAdRequest {
+                type_ids: vec!["400002_0".to_owned()],
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("unknown account should not reach the ad endpoint");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -14013,6 +14242,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::UserMembership));
         assert!(capabilities.contains(&Capability::UserMembershipClientInfo));
         assert!(capabilities.contains(&Capability::AntiCheatToken));
+        assert!(capabilities.contains(&Capability::ListeningRightsAds));
     }
 
     #[test]
@@ -23186,6 +23416,24 @@ mod tests {
             .expect_err("anonymous current membership should require authentication");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["upstream_code"], 301);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_listening_rights_ads_register_a_check_token_and_return_the_ad_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let catalog = MusicProvider::listening_rights_ads(
+            &provider,
+            &ListeningRightsAdRequest {
+                type_ids: vec!["400002_0".to_owned()],
+                account: None,
+            },
+        )
+        .await
+        .expect("live listening-rights ad catalog");
+        assert_eq!(catalog.extensions["response"]["code"], 200);
+        assert_eq!(catalog.extensions["type_ids"], json!(["400002_0"]));
+        assert!(catalog.ads.iter().all(|ad| !ad.id.is_empty()));
     }
 
     #[tokio::test]
