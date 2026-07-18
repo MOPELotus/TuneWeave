@@ -763,6 +763,45 @@ pub struct PodcastChartEntry {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastCreatorChartKind {
+    #[default]
+    Newcomer,
+    Popular,
+    Trending24Hours,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCreatorChartRequest {
+    pub kind: PodcastCreatorChartKind,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastCreatorChartRequest {
+    #[must_use]
+    pub const fn new(kind: PodcastCreatorChartKind, limit: u32, offset: u32) -> Self {
+        Self {
+            kind,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCreatorChartEntry {
+    pub rank: u32,
+    pub previous_rank: Option<i64>,
+    pub score: Option<u64>,
+    pub follower_count: Option<u64>,
+    pub creator: User,
+    pub extensions: Extensions,
+}
+
 /// An on-demand spoken-audio show. This is intentionally separate from a live radio station.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Podcast {
@@ -2734,6 +2773,43 @@ mod tests {
         assert_eq!(entry_value["previous_rank"], -1);
         assert_eq!(entry_value["score"], 193_200);
         assert_eq!(entry_value["podcast"]["ref"], "netease:1490425014");
+    }
+
+    #[test]
+    fn podcast_creator_chart_keeps_rank_followers_and_user_identity_explicit() {
+        let mut request =
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Trending24Hours, 30, 0);
+        request.account = Some("spoken-word".to_owned());
+        let creator_ref =
+            ResourceRef::new(Platform::Netease, "287921940").expect("valid creator reference");
+        let entry = PodcastCreatorChartEntry {
+            rank: 1,
+            previous_rank: Some(7),
+            score: Some(1_339_233),
+            follower_count: Some(76_488),
+            creator: User {
+                platform: Platform::Netease,
+                id: "287921940".to_owned(),
+                resource_ref: creator_ref,
+                name: "开心锤锤".to_owned(),
+                avatar_url: Some("https://example.test/avatar.jpg".to_owned()),
+                signature: None,
+                followed: None,
+                mutual: None,
+                extensions: Extensions::new(),
+            },
+            extensions: Extensions::new(),
+        };
+
+        let request_value = serde_json::to_value(request).expect("serialize chart request");
+        assert_eq!(request_value["kind"], "trending24_hours");
+        assert_eq!(request_value["account"], "spoken-word");
+        let entry_value = serde_json::to_value(entry).expect("serialize chart entry");
+        assert_eq!(entry_value["rank"], 1);
+        assert_eq!(entry_value["previous_rank"], 7);
+        assert_eq!(entry_value["score"], 1_339_233);
+        assert_eq!(entry_value["follower_count"], 76_488);
+        assert_eq!(entry_value["creator"]["ref"], "netease:287921940");
     }
 
     #[test]

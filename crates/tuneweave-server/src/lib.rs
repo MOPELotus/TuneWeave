@@ -48,12 +48,13 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
-    PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
+    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, PrincipalType,
+    ProviderRegistry, Quality, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
@@ -247,6 +248,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/digital-albums/{reference}", get(digital_album))
         .route("/charts", get(chart_catalog))
         .route("/charts/podcasts", get(podcast_chart))
+        .route("/charts/podcast-creators", get(podcast_creator_chart))
         .route("/charts/artists", get(artist_chart))
         .route("/charts/digital-albums", get(digital_album_chart))
         .route("/charts/dimensions/{chart_code}", get(dimension_chart))
@@ -1044,6 +1046,48 @@ async fn podcast_chart(
     let provider = state.registry.require(platform)?;
     let page = provider
         .podcast_chart(&PodcastChartRequest {
+            kind,
+            limit,
+            offset,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastCreatorChartParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn podcast_creator_chart(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastCreatorChartParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastCreatorChartEntry>>>, ApiError> {
+    let params = query_params(params)?;
+    let kind = parse_podcast_creator_chart_kind(params.kind.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .podcast_creator_chart(&PodcastCreatorChartRequest {
             kind,
             limit,
             offset,
@@ -6854,6 +6898,30 @@ fn parse_podcast_chart_kind(value: Option<&str>) -> Result<PodcastChartKind, Tun
     }
 }
 
+fn parse_podcast_creator_chart_kind(
+    value: Option<&str>,
+) -> Result<PodcastCreatorChartKind, TuneWeaveError> {
+    match value
+        .unwrap_or("newcomer")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "newcomer" | "new" => Ok(PodcastCreatorChartKind::Newcomer),
+        "popular" | "hot" => Ok(PodcastCreatorChartKind::Popular),
+        "trending24_hours" | "trending_24_hours" | "hours" | "24h" => {
+            Ok(PodcastCreatorChartKind::Trending24Hours)
+        }
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast creator chart kind: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["newcomer", "popular", "trending24_hours"]
+        }))),
+    }
+}
+
 fn parse_podcast_episode_chart_kind(
     value: Option<&str>,
 ) -> Result<PodcastEpisodeChartKind, TuneWeaveError> {
@@ -7027,6 +7095,7 @@ mod tests {
                 Capability::PodcastCategories,
                 Capability::PodcastList,
                 Capability::PodcastCharts,
+                Capability::PodcastCreatorCharts,
                 Capability::PodcastDetail,
                 Capability::PodcastSubscriptionWrite,
                 Capability::PodcastEpisodeList,
@@ -7600,6 +7669,53 @@ mod tests {
                         ("offset_control_supported".to_owned(), json!(false)),
                         ("continuation_supported".to_owned(), json!(false)),
                         ("updated_at".to_owned(), json!("2024-01-01T00:00:00Z")),
+                        ("request".to_owned(), json!(request)),
+                    ]),
+                },
+            })
+        }
+
+        async fn podcast_creator_chart(
+            &self,
+            request: &PodcastCreatorChartRequest,
+        ) -> Result<Page<PodcastCreatorChartEntry>> {
+            if request.kind != PodcastCreatorChartKind::Newcomer && request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "this test podcast creator chart does not support offset",
+                ));
+            }
+            let mut creator = sample_user("287921940");
+            creator.name = "开心锤锤".to_owned();
+            let entry = PodcastCreatorChartEntry {
+                rank: 1,
+                previous_rank: Some(7),
+                score: Some(1_339_233),
+                follower_count: Some(76_488),
+                creator,
+                extensions: Extensions::from([(
+                    "chart_entry".to_owned(),
+                    json!({"rank": 1, "lastRank": 7, "score": 1339233}),
+                )]),
+            };
+            Ok(Page {
+                items: vec![entry],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(3),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([
+                        ("kind".to_owned(), json!(request.kind)),
+                        ("requested_offset".to_owned(), json!(request.offset)),
+                        (
+                            "offset_submitted".to_owned(),
+                            json!(request.kind == PodcastCreatorChartKind::Newcomer),
+                        ),
+                        ("offset_applied".to_owned(), json!(false)),
+                        ("offset_control_supported".to_owned(), json!(false)),
+                        ("continuation_supported".to_owned(), json!(false)),
+                        ("updated_at".to_owned(), json!("2026-07-18T06:58:00Z")),
                         ("request".to_owned(), json!(request)),
                     ]),
                 },
@@ -11341,6 +11457,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn podcast_creator_charts_preserve_user_rank_and_real_pagination_controls() {
+        let (status, newcomer) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/podcast-creators?kind=new&limit=3&offset=40&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(newcomer["data"][0]["rank"], 1);
+        assert_eq!(newcomer["data"][0]["previous_rank"], 7);
+        assert_eq!(newcomer["data"][0]["score"], 1_339_233);
+        assert_eq!(newcomer["data"][0]["follower_count"], 76_488);
+        assert_eq!(newcomer["data"][0]["creator"]["ref"], "netease:287921940");
+        assert_eq!(newcomer["data"][0]["creator"]["name"], "开心锤锤");
+        assert_eq!(newcomer["meta"]["pagination"]["limit"], 3);
+        assert_eq!(newcomer["meta"]["pagination"]["offset"], 0);
+        assert_eq!(newcomer["meta"]["pagination"]["total"], 3);
+        assert_eq!(newcomer["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(newcomer["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            newcomer["meta"]["pagination"]["extensions"]["kind"],
+            "newcomer"
+        );
+        assert_eq!(
+            newcomer["meta"]["pagination"]["extensions"]["requested_offset"],
+            40
+        );
+        assert_eq!(
+            newcomer["meta"]["pagination"]["extensions"]["offset_submitted"],
+            true
+        );
+        assert_eq!(
+            newcomer["meta"]["pagination"]["extensions"]["offset_applied"],
+            false
+        );
+        assert_eq!(newcomer["meta"]["platform"], "netease");
+        assert_eq!(newcomer["meta"]["account"], "podcast-user");
+
+        let (status, hours) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/podcast-creators?type=24h&limit=10&platform=netease",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            hours["meta"]["pagination"]["extensions"]["kind"],
+            "trending24_hours"
+        );
+        assert_eq!(
+            hours["meta"]["pagination"]["extensions"]["offset_submitted"],
+            false
+        );
+    }
+
+    #[tokio::test]
     async fn podcast_episode_charts_preserve_rank_and_real_pagination_controls() {
         let (status, popular) = json_response_from(
             test_app_with_provider(),
@@ -11404,6 +11574,14 @@ mod tests {
     #[tokio::test]
     async fn podcast_routes_reject_invalid_references_pagination_and_order() {
         for path in [
+            "/v1/charts/podcast-creators?kind=unknown",
+            "/v1/charts/podcast-creators?kind=newcomer&limit=0",
+            "/v1/charts/podcast-creators?kind=newcomer&limit=101",
+            "/v1/charts/podcast-creators?kind=newcomer&offset=invalid",
+            "/v1/charts/podcast-creators?kind=popular&offset=1",
+            "/v1/charts/podcast-creators?kind=hours&offset=1",
+            "/v1/charts/podcast-creators?kind=newcomer&unknown=true",
+            "/v1/charts/podcast-creators?kind=newcomer&platform=unknown",
             "/v1/charts/podcasts?kind=unknown",
             "/v1/charts/podcasts?kind=new&limit=0",
             "/v1/charts/podcasts?kind=new&limit=101",

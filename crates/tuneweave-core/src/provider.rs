@@ -25,17 +25,17 @@ use crate::{
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, Podcast, PodcastChartEntry, PodcastChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest, ResolutionStatus, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoStats, VideoStream,
-    VideoStreamRequest,
+    PlaylistUpdateRequest, Podcast, PodcastChartEntry, PodcastChartRequest,
+    PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartRequest, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, ProviderDescriptor, ProviderQrPoll,
+    ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -215,6 +215,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PodcastCharts,
+        ))
+    }
+
+    async fn podcast_creator_chart(
+        &self,
+        _request: &PodcastCreatorChartRequest,
+    ) -> Result<Page<PodcastCreatorChartEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastCreatorCharts,
         ))
     }
 

@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=259`、`partial=3`、`implemented=50`、`verified=95`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=256`、`partial=3`、`implemented=53`、`verified=95`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -118,10 +118,10 @@
 | `dj_subscriber` | `/dj/subscriber` | `pending` | — |
 | `dj_today_perfered` | `/dj/today/perfered` | `implemented` | `GET /v1/podcasts?catalog=today_preferred&page=...`（固定 WeAPI `/api/djradio/home/today/perfered` 并保留参考模块零基 `page`，省略时为 0；统一 `PodcastListRequest` 新增独立可选页码而不与 offset 混淆，该目录要求 `offset=0` 且拒绝分类筛选，从顶层 `data` 数组映射完整播客并保留原文；上游不应用 limit，也不返回总数、hasMore 或可靠下一页，稳定表达为 `total=null/next_offset=null/has_more=false/limit_applied=false`，页码位于扩展；协议、页码/异常边界、空与非空映射和统一 HTTP 离线测试已完成，2026-07-18 底层原始 API 对匿名 page 0/1 均实测 `code=200` 合法空数组，登录态成功内容按集中验收安排留待 Basic 代码收口后验证） |
 | `dj_toplist` | `/dj/toplist` | `implemented` | `GET /v1/charts/podcasts?kind=new|hot&limit=...&offset=...`（固定 WeAPI `/api/djradio/toplist`；`new` 精确提交参考实现因 JavaScript 默认值语义产生的字符串 `type="0"`，`hot` 提交数字 `type=1`，两者均提交 `limit/offset`；统一 `PodcastChartEntry` 将正排名、允许 `-1` 的上期排名、分值与完整 `Podcast` 分离，主播、付费态、统计及完整榜单条目/响应不丢失；2026-07-18 底层原始 API 分别实测新晋榜与热门榜 `code=200`，首项为“一条小团团OvO的翻唱合集”和“清音悦耳”，但 `limit=3` 的 offset 0 与 3 返回相同 ID，故兼容接收 offset 而稳定表达 `offset=0/requested_offset/offset_submitted=true/offset_applied=false/continuation_supported=false`，绝不伪造续页；协议、稀疏字段、排名边界和统一 HTTP 离线测试已完成，provider 与真实二进制联网按 Basic 收口集中验收） |
-| `dj_toplist_hours` | `/dj/toplist/hours` | `pending` | — |
-| `dj_toplist_newcomer` | `/dj/toplist/newcomer` | `pending` | — |
+| `dj_toplist_hours` | `/dj/toplist/hours` | `implemented` | `GET /v1/charts/podcast-creators?kind=trending24_hours&limit=...`（也接受 `hours/24h`；固定 WeAPI `/api/dj/toplist/hours`，只提交参考支持的 `limit` 并在发网前拒绝非零 offset；统一 `PodcastCreatorChartEntry` 将排名、上期排名、分值、粉丝数与完整 `User` 身份分离，用户认证、直播和未来字段完整保留在扩展；返回 `data.total/updateTime`，但无续页控制，稳定表达 `offset=0/next_offset=null/has_more=false/offset_submitted=false/continuation_supported=false`；2026-07-18 底层原始 API 以 `limit=3` 实测 `code=200/total=3`，首位“开心锤锤”排名 1、上期 7、粉丝 76488；协议、映射、异常边界和统一 HTTP 离线测试已完成，provider 与真实二进制统一端点按 Basic 收口集中验收） |
+| `dj_toplist_newcomer` | `/dj/toplist/newcomer` | `implemented` | `GET /v1/charts/podcast-creators?kind=newcomer&limit=...&offset=...`（也接受 `new`；固定 WeAPI `/api/dj/toplist/newcomer` 并按参考提交 `limit/offset`，映射完整主播身份、排名、上期排名、分值及粉丝数；2026-07-18 底层原始 API 对 `limit=3` 的 offset 0 与 3 实测返回完全相同的三个用户 ID，故保留输入兼容但稳定返回 `offset=0/requested_offset/offset_submitted=true/offset_applied=false/continuation_supported=false`，不伪造续页；首位“煎包比比”排名 1、上期 1、分值 862097；协议、映射、异常边界和统一 HTTP 离线测试已完成，provider 与真实二进制统一端点按 Basic 收口集中验收） |
 | `dj_toplist_pay` | `/dj/toplist/pay` | `implemented` | `GET /v1/charts/podcasts?kind=paid&limit=...`（固定 WeAPI `/api/djradio/toplist/pay` 并只提交参考支持的 `limit`，非零 offset 在发网前拒绝；从 `data.list` 的稀疏付费榜条目映射 `PodcastChartEntry`，榜单容器明确覆盖 `podcast.paid=true`，缺少 `dj` 对象时以 `creatorName` 保留无平台 ID 的主播摘要，同时保留 `rank/lastRank/score` 和完整原文；真实 `data.total/updateTime` 进入分页及扩展，但上游没有续页参数，稳定返回 `next_offset=null/has_more=false/continuation_supported=false`；2026-07-18 底层原始 API 以 `limit=3` 实测 `code=200/total=3`，首项“猫平安逆袭传奇”；协议、稀疏映射、错误边界和统一 HTTP 离线测试已完成，provider 与真实二进制联网按 Basic 收口集中验收） |
-| `dj_toplist_popular` | `/dj/toplist/popular` | `pending` | — |
+| `dj_toplist_popular` | `/dj/toplist/popular` | `implemented` | `GET /v1/charts/podcast-creators?kind=popular&limit=...`（也接受 `hot`；固定 WeAPI `/api/dj/toplist/popular`，只提交 `limit` 并拒绝非零 offset；与新人及 24 小时榜共用不丢字段的 `PodcastCreatorChartEntry`，真实 `data.total/updateTime` 进入分页与扩展，榜单快照不伪装为可续页目录；2026-07-18 底层原始 API 以 `limit=3` 实测 `code=200/total=3`，首位“应萤”排名 1、上期 1、粉丝 843；协议、映射、异常边界和统一 HTTP 离线测试已完成，provider 与真实二进制统一端点按 Basic 收口集中验收） |
 | `djRadio_top` | `/djRadio/top` | `pending` | — |
 | `eapi_decrypt` | `/eapi/decrypt` | `pending` | — |
 | `event` | `/event` | `pending` | — |

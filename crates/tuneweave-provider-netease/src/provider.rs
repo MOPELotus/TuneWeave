@@ -46,20 +46,21 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest,
-    PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationRequest, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
+    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastListRequest, PodcastTaxonomy, PrincipalType,
+    ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationRequest,
+    ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest,
+    SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResolution, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest,
 };
 use url::Url;
 
@@ -413,6 +414,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastCategories,
             Capability::PodcastList,
             Capability::PodcastCharts,
+            Capability::PodcastCreatorCharts,
             Capability::PodcastDetail,
             Capability::PodcastSubscriptionWrite,
             Capability::PodcastEpisodeList,
@@ -808,6 +810,16 @@ impl MusicProvider for NeteaseProvider {
         let client = self.client_for(request.account.as_deref())?;
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_chart(response.body, request)
+    }
+
+    async fn podcast_creator_chart(
+        &self,
+        request: &PodcastCreatorChartRequest,
+    ) -> Result<Page<PodcastCreatorChartEntry>> {
+        let (path, payload) = netease_podcast_creator_chart_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        map_netease_podcast_creator_chart(response.body, request)
     }
 
     async fn set_podcast_subscription(
@@ -4545,6 +4557,41 @@ fn netease_podcast_chart_request(request: &PodcastChartRequest) -> Result<(&'sta
     }
 }
 
+fn netease_podcast_creator_chart_request(
+    request: &PodcastCreatorChartRequest,
+) -> Result<(&'static str, Value)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast creator chart limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    match request.kind {
+        PodcastCreatorChartKind::Newcomer => Ok((
+            "/api/dj/toplist/newcomer",
+            json!({ "limit": request.limit, "offset": request.offset }),
+        )),
+        PodcastCreatorChartKind::Popular | PodcastCreatorChartKind::Trending24Hours => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "this NetEase podcast creator chart does not support offset",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "kind": request.kind, "offset": request.offset })));
+            }
+            Ok((
+                match request.kind {
+                    PodcastCreatorChartKind::Popular => "/api/dj/toplist/popular",
+                    PodcastCreatorChartKind::Trending24Hours => "/api/dj/toplist/hours",
+                    PodcastCreatorChartKind::Newcomer => unreachable!(),
+                },
+                json!({ "limit": request.limit }),
+            ))
+        }
+    }
+}
+
 fn netease_podcast_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
     (
         if subscribed {
@@ -5234,6 +5281,100 @@ fn map_netease_podcast_chart_entry(
         previous_rank: raw.get("lastRank").and_then(json_i64),
         score: raw.get("score").and_then(json_u64),
         podcast,
+        extensions: Extensions::from([("chart_entry".to_owned(), raw)]),
+    })
+}
+
+fn map_netease_podcast_creator_chart(
+    body: Value,
+    request: &PodcastCreatorChartRequest,
+) -> Result<Page<PodcastCreatorChartEntry>> {
+    ensure_success(&body)?;
+    let data = body
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| podcast_item_error("podcast creator chart data", &body))?;
+    let raw_items = data
+        .get("list")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("podcast creator chart list", &body))?;
+    let entries = raw_items
+        .into_iter()
+        .map(map_netease_podcast_creator_chart_entry)
+        .collect::<Result<Vec<_>>>()?;
+    let total = data.get("total").and_then(json_u64);
+    let update_time_ms = data.get("updateTime").and_then(json_u64);
+    let offset_submitted = request.kind == PodcastCreatorChartKind::Newcomer;
+    let mut extensions = Extensions::from([
+        ("kind".to_owned(), json!(request.kind)),
+        ("returned_count".to_owned(), json!(entries.len())),
+        (
+            "limit_applied".to_owned(),
+            json!(entries.len() <= request.limit as usize),
+        ),
+        ("requested_offset".to_owned(), json!(request.offset)),
+        ("offset_submitted".to_owned(), json!(offset_submitted)),
+        ("offset_applied".to_owned(), json!(false)),
+        ("offset_control_supported".to_owned(), json!(false)),
+        ("continuation_supported".to_owned(), json!(false)),
+    ]);
+    insert_extension(&mut extensions, "update_time_ms", update_time_ms);
+    if let Some(updated_at) = update_time_ms.and_then(|value| unix_rfc3339(value / 1_000)) {
+        extensions.insert("updated_at".to_owned(), json!(updated_at));
+    }
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items: entries,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
+fn map_netease_podcast_creator_chart_entry(raw: Value) -> Result<PodcastCreatorChartEntry> {
+    let id = raw
+        .get("id")
+        .and_then(usable_resource_id)
+        .ok_or_else(|| podcast_item_error("podcast creator id", &raw))?;
+    let name = radio_text_field(&raw, &["nickName", "nickname", "name"])
+        .ok_or_else(|| podcast_item_error("podcast creator name", &raw))?;
+    let resource_ref = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid podcast creator id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "item": raw }))
+    })?;
+    let rank = raw
+        .get("rank")
+        .and_then(json_u64)
+        .and_then(|rank| u32::try_from(rank).ok())
+        .filter(|rank| *rank > 0)
+        .ok_or_else(|| podcast_item_error("positive podcast creator chart rank", &raw))?;
+    let creator = User {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        name,
+        avatar_url: radio_text_field(&raw, &["avatarUrl"]),
+        signature: radio_text_field(&raw, &["signature"]),
+        followed: raw.get("followed").and_then(json_bool),
+        mutual: raw.get("mutual").and_then(json_bool),
+        extensions: Extensions::from([("creator".to_owned(), raw.clone())]),
+    };
+    Ok(PodcastCreatorChartEntry {
+        rank,
+        previous_rank: raw.get("lastRank").and_then(json_i64),
+        score: raw.get("score").and_then(json_u64),
+        follower_count: raw.get("userFollowedCount").and_then(json_u64),
+        creator,
         extensions: Extensions::from([("chart_entry".to_owned(), raw)]),
     })
 }
@@ -14508,6 +14649,49 @@ mod tests {
             );
         }
         assert_eq!(
+            netease_podcast_creator_chart_request(&PodcastCreatorChartRequest::new(
+                PodcastCreatorChartKind::Newcomer,
+                20,
+                40,
+            ))
+            .expect("newcomer podcast creator chart request"),
+            (
+                "/api/dj/toplist/newcomer",
+                json!({"limit": 20, "offset": 40})
+            )
+        );
+        assert_eq!(
+            netease_podcast_creator_chart_request(&PodcastCreatorChartRequest::new(
+                PodcastCreatorChartKind::Popular,
+                30,
+                0,
+            ))
+            .expect("popular podcast creator chart request"),
+            ("/api/dj/toplist/popular", json!({"limit": 30}))
+        );
+        assert_eq!(
+            netease_podcast_creator_chart_request(&PodcastCreatorChartRequest::new(
+                PodcastCreatorChartKind::Trending24Hours,
+                10,
+                0,
+            ))
+            .expect("24-hour podcast creator chart request"),
+            ("/api/dj/toplist/hours", json!({"limit": 10}))
+        );
+        for invalid in [
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Newcomer, 0, 0),
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Newcomer, 101, 0),
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Popular, 20, 1),
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Trending24Hours, 20, 1),
+        ] {
+            assert_eq!(
+                netease_podcast_creator_chart_request(&invalid)
+                    .expect_err("invalid podcast creator chart request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        assert_eq!(
             netease_podcast_subscription_request(336_355_127, true),
             ("/api/djradio/sub", json!({"id": 336_355_127}))
         );
@@ -15322,6 +15506,123 @@ mod tests {
             assert_eq!(
                 map_netease_podcast_chart(invalid, request)
                     .expect_err("invalid podcast chart response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_podcast_creator_charts_without_faking_ignored_offset_or_losing_user_fields() {
+        let newcomer_request =
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Newcomer, 1, 40);
+        let newcomer = map_netease_podcast_creator_chart(
+            json!({
+                "code": 200,
+                "data": {
+                    "total": 3,
+                    "updateTime": 1_704_067_200_000_u64,
+                    "list": [{
+                        "id": 401_590_285,
+                        "rank": 1,
+                        "lastRank": 1,
+                        "score": 862_097,
+                        "userFollowedCount": 32,
+                        "nickName": "煎包比比",
+                        "avatarUrl": "https://example.test/newcomer.jpg",
+                        "userType": 0,
+                        "liveStatus": -1,
+                        "futureField": "preserved"
+                    }]
+                }
+            }),
+            &newcomer_request,
+        )
+        .expect("map newcomer podcast creator chart");
+        assert_eq!(newcomer.items.len(), 1);
+        assert_eq!(newcomer.items[0].rank, 1);
+        assert_eq!(newcomer.items[0].previous_rank, Some(1));
+        assert_eq!(newcomer.items[0].score, Some(862_097));
+        assert_eq!(newcomer.items[0].follower_count, Some(32));
+        assert_eq!(newcomer.items[0].creator.id, "401590285");
+        assert_eq!(newcomer.items[0].creator.name, "煎包比比");
+        assert_eq!(
+            newcomer.items[0].creator.avatar_url.as_deref(),
+            Some("https://example.test/newcomer.jpg")
+        );
+        assert_eq!(
+            newcomer.items[0].extensions["chart_entry"]["futureField"],
+            "preserved"
+        );
+        assert_eq!(newcomer.pagination.offset, 0);
+        assert_eq!(newcomer.pagination.total, Some(3));
+        assert_eq!(newcomer.pagination.next_offset, None);
+        assert!(!newcomer.pagination.has_more);
+        assert_eq!(newcomer.pagination.extensions["kind"], "newcomer");
+        assert_eq!(newcomer.pagination.extensions["requested_offset"], 40);
+        assert_eq!(newcomer.pagination.extensions["offset_submitted"], true);
+        assert_eq!(newcomer.pagination.extensions["offset_applied"], false);
+        assert_eq!(
+            newcomer.pagination.extensions["continuation_supported"],
+            false
+        );
+        assert_eq!(
+            newcomer.pagination.extensions["updated_at"],
+            "2024-01-01T00:00:00Z"
+        );
+
+        let hours_request =
+            PodcastCreatorChartRequest::new(PodcastCreatorChartKind::Trending24Hours, 3, 0);
+        let hours = map_netease_podcast_creator_chart(
+            json!({
+                "code": 200,
+                "data": {
+                    "total": 3,
+                    "updateTime": 1_704_067_260_000_u64,
+                    "list": [{
+                        "id": 287_921_940,
+                        "rank": 1,
+                        "lastRank": 7,
+                        "score": 1_339_233,
+                        "userFollowedCount": 76_488,
+                        "nickName": "开心锤锤",
+                        "avatarUrl": "https://example.test/hours.jpg",
+                        "avatarDetail": {"userType": 4, "identityLevel": 1}
+                    }]
+                }
+            }),
+            &hours_request,
+        )
+        .expect("map 24-hour podcast creator chart");
+        assert_eq!(hours.items[0].previous_rank, Some(7));
+        assert_eq!(hours.items[0].creator.id, "287921940");
+        assert_eq!(hours.items[0].follower_count, Some(76_488));
+        assert_eq!(
+            hours.items[0].creator.extensions["creator"]["avatarDetail"]["identityLevel"],
+            1
+        );
+        assert_eq!(hours.pagination.extensions["kind"], "trending24_hours");
+        assert_eq!(hours.pagination.extensions["offset_submitted"], false);
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": {}}),
+            json!({
+                "code": 200,
+                "data": {"list": [{"rank": 1, "nickName": "缺少 ID"}]}
+            }),
+            json!({
+                "code": 200,
+                "data": {"list": [{"id": 1, "rank": 1, "nickName": "   "}]}
+            }),
+            json!({
+                "code": 200,
+                "data": {"list": [{"id": 1, "rank": 0, "nickName": "非法排名"}]}
+            }),
+        ] {
+            assert_eq!(
+                map_netease_podcast_creator_chart(invalid, &hours_request)
+                    .expect_err("invalid podcast creator chart response")
                     .code,
                 ErrorCode::UpstreamError
             );
