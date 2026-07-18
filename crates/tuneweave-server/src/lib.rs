@@ -7239,10 +7239,11 @@ mod tests {
         async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
             let featured = request.catalog == PodcastCatalog::Featured;
             let personalized = request.catalog == PodcastCatalog::Personalized;
+            let category_featured = request.catalog == PodcastCatalog::CategoryFeatured;
             let category_hot = request.catalog == PodcastCatalog::CategoryHot;
             let hot = request.catalog == PodcastCatalog::Hot;
             let paged = hot || category_hot;
-            let category_valid = if category_hot {
+            let category_valid = if category_featured || category_hot {
                 request.category_id.is_some()
             } else {
                 request.category_id.is_none()
@@ -7251,13 +7252,14 @@ mod tests {
                 request.catalog,
                 PodcastCatalog::Featured
                     | PodcastCatalog::Hot
+                    | PodcastCatalog::CategoryFeatured
                     | PodcastCatalog::CategoryHot
                     | PodcastCatalog::Personalized
             ) || !category_valid
-                || ((featured || personalized) && request.offset != 0)
+                || ((featured || category_featured || personalized) && request.offset != 0)
             {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports featured, hot, category hot, and personalized podcast catalogs",
+                    "test provider only supports featured, hot, category featured, category hot, and personalized podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
@@ -7269,7 +7271,7 @@ mod tests {
                 ("returned_count".to_owned(), json!(1)),
                 (
                     "limit_applied".to_owned(),
-                    json!(!featured && !category_hot),
+                    json!(!featured && !category_featured && !category_hot),
                 ),
                 (
                     "response".to_owned(),
@@ -7277,6 +7279,8 @@ mod tests {
                         json!({"code": 200, "name": "精选电台 - 测试"})
                     } else if personalized {
                         json!({"code": 200, "data": [{"id": 336355127}]})
+                    } else if category_featured {
+                        json!({"code": 200, "hasMore": true})
                     } else if category_hot {
                         json!({"code": 200, "count": 1000, "hasMore": true})
                     } else {
@@ -7286,6 +7290,9 @@ mod tests {
             ]);
             if let Some(category_id) = request.category_id.as_deref() {
                 pagination_extensions.insert("category_id".to_owned(), json!(category_id));
+            }
+            if category_featured {
+                pagination_extensions.insert("continuation_supported".to_owned(), json!(false));
             }
             Ok(Page {
                 items: vec![podcast],
@@ -7304,7 +7311,7 @@ mod tests {
                     } else {
                         paged.then_some(request.offset.saturating_add(1))
                     },
-                    has_more: paged,
+                    has_more: paged || category_featured,
                     extensions: pagination_extensions,
                 },
             })
@@ -10721,6 +10728,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn category_featured_podcast_catalog_exposes_known_more_without_fake_cursor() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=category_recommend&category_id=2&limit=2&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["catalog"],
+            "category_featured"
+        );
+        assert_eq!(json["data"][0]["extensions"]["request"]["category_id"], "2");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(json["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["catalog"],
+            "category_featured"
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["category_id"], "2");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["limit_applied"],
+            false
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["continuation_supported"],
+            false
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
         for path in [
             "/v1/podcasts",
@@ -10730,6 +10773,8 @@ mod tests {
             "/v1/podcasts?catalog=personalized&offset=1",
             "/v1/podcasts?catalog=personalized&category_id=2",
             "/v1/podcasts?catalog=category_hot",
+            "/v1/podcasts?catalog=category_featured",
+            "/v1/podcasts?catalog=category_featured&category_id=2&offset=1",
             "/v1/podcasts?catalog=hot&limit=0",
             "/v1/podcasts?catalog=hot&limit=101",
             "/v1/podcasts?catalog=hot&offset=invalid",
