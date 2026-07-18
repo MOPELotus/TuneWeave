@@ -116,7 +116,7 @@
 | `dj_sub` | `/dj/sub` | `pending` | — |
 | `dj_sublist` | `/dj/sublist` | `pending` | — |
 | `dj_subscriber` | `/dj/subscriber` | `pending` | — |
-| `dj_today_perfered` | `/dj/today/perfered` | `pending` | — |
+| `dj_today_perfered` | `/dj/today/perfered` | `implemented` | `GET /v1/podcasts?catalog=today_preferred&page=...`（固定 WeAPI `/api/djradio/home/today/perfered` 并保留参考模块零基 `page`，省略时为 0；统一 `PodcastListRequest` 新增独立可选页码而不与 offset 混淆，该目录要求 `offset=0` 且拒绝分类筛选，从顶层 `data` 数组映射完整播客并保留原文；上游不应用 limit，也不返回总数、hasMore 或可靠下一页，稳定表达为 `total=null/next_offset=null/has_more=false/limit_applied=false`，页码位于扩展；协议、页码/异常边界、空与非空映射和统一 HTTP 离线测试已完成，2026-07-18 底层原始 API 对匿名 page 0/1 均实测 `code=200` 合法空数组，登录态成功内容按集中验收安排留待 Basic 代码收口后验证） |
 | `dj_toplist` | `/dj/toplist` | `pending` | — |
 | `dj_toplist_hours` | `/dj/toplist/hours` | `pending` | — |
 | `dj_toplist_newcomer` | `/dj/toplist/newcomer` | `pending` | — |

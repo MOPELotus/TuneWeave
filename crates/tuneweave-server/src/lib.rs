@@ -971,6 +971,7 @@ struct PodcastListParams {
     category_id: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
+    page: Option<String>,
 }
 
 async fn podcasts(
@@ -984,6 +985,7 @@ async fn podcasts(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let page = parse_optional_u32_parameter("page", params.page.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
     let provider = state.registry.require(platform)?;
@@ -993,6 +995,7 @@ async fn podcasts(
             category_id: optional_trimmed(params.category_id),
             limit,
             offset,
+            page,
             account: account.clone(),
         })
         .await?;
@@ -7239,6 +7242,7 @@ mod tests {
         async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
             let featured = request.catalog == PodcastCatalog::Featured;
             let personalized = request.catalog == PodcastCatalog::Personalized;
+            let today_preferred = request.catalog == PodcastCatalog::TodayPreferred;
             let category_featured = request.catalog == PodcastCatalog::CategoryFeatured;
             let category_hot = request.catalog == PodcastCatalog::CategoryHot;
             let hot = request.catalog == PodcastCatalog::Hot;
@@ -7248,6 +7252,7 @@ mod tests {
             } else {
                 request.category_id.is_none()
             };
+            let page_valid = today_preferred || request.page.is_none();
             if !matches!(
                 request.catalog,
                 PodcastCatalog::Featured
@@ -7255,11 +7260,14 @@ mod tests {
                     | PodcastCatalog::CategoryFeatured
                     | PodcastCatalog::CategoryHot
                     | PodcastCatalog::Personalized
+                    | PodcastCatalog::TodayPreferred
             ) || !category_valid
-                || ((featured || category_featured || personalized) && request.offset != 0)
+                || !page_valid
+                || ((featured || category_featured || personalized || today_preferred)
+                    && request.offset != 0)
             {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports featured, hot, category featured, category hot, and personalized podcast catalogs",
+                    "test provider only supports featured, hot, category featured, category hot, personalized, and today preferred podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
@@ -7271,7 +7279,7 @@ mod tests {
                 ("returned_count".to_owned(), json!(1)),
                 (
                     "limit_applied".to_owned(),
-                    json!(!featured && !category_featured && !category_hot),
+                    json!(!featured && !category_featured && !category_hot && !today_preferred),
                 ),
                 (
                     "response".to_owned(),
@@ -7279,6 +7287,8 @@ mod tests {
                         json!({"code": 200, "name": "精选电台 - 测试"})
                     } else if personalized {
                         json!({"code": 200, "data": [{"id": 336355127}]})
+                    } else if today_preferred {
+                        json!({"code": 200, "data": [{"id": 336355127}], "msg": null})
                     } else if category_featured {
                         json!({"code": 200, "hasMore": true})
                     } else if category_hot {
@@ -7293,6 +7303,11 @@ mod tests {
             }
             if category_featured {
                 pagination_extensions.insert("continuation_supported".to_owned(), json!(false));
+            }
+            if today_preferred {
+                pagination_extensions
+                    .insert("page".to_owned(), json!(request.page.unwrap_or_default()));
+                pagination_extensions.insert("page_control_supported".to_owned(), json!(true));
             }
             Ok(Page {
                 items: vec![podcast],
@@ -10764,6 +10779,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn today_preferred_podcast_catalog_preserves_page_without_fake_offset() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=today&page=2&limit=5&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:336355127");
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["catalog"],
+            "today_preferred"
+        );
+        assert_eq!(json["data"][0]["extensions"]["request"]["page"], 2);
+        assert_eq!(json["meta"]["pagination"]["limit"], 5);
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(json["meta"]["pagination"]["total"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["next_offset"], Value::Null);
+        assert_eq!(json["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["catalog"],
+            "today_preferred"
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["page"], 2);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["page_control_supported"],
+            true
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["limit_applied"],
+            false
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
     async fn podcast_catalog_rejects_missing_unknown_and_invalid_controls() {
         for path in [
             "/v1/podcasts",
@@ -10775,6 +10826,10 @@ mod tests {
             "/v1/podcasts?catalog=category_hot",
             "/v1/podcasts?catalog=category_featured",
             "/v1/podcasts?catalog=category_featured&category_id=2&offset=1",
+            "/v1/podcasts?catalog=today&offset=1",
+            "/v1/podcasts?catalog=today&category_id=2",
+            "/v1/podcasts?catalog=today&page=invalid",
+            "/v1/podcasts?catalog=hot&page=2",
             "/v1/podcasts?catalog=hot&limit=0",
             "/v1/podcasts?catalog=hot&limit=101",
             "/v1/podcasts?catalog=hot&offset=invalid",

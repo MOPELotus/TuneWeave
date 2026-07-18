@@ -4301,6 +4301,14 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
         .with_platform(Platform::Netease)
         .with_details(json!({ "limit": request.limit })));
     }
+    if request.page.is_some() && request.catalog != PodcastCatalog::TodayPreferred {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "the NetEase {} podcast catalog does not accept page",
+            podcast_catalog_name(request.catalog)
+        ))
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "catalog": request.catalog, "page": request.page })));
+    }
     match request.catalog {
         PodcastCatalog::Featured => {
             if request.category_id.is_some() {
@@ -4392,6 +4400,28 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
             Ok((
                 "/api/djradio/personalize/rcmd",
                 json!({ "limit": request.limit }),
+            ))
+        }
+        PodcastCatalog::TodayPreferred => {
+            if request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase today preferred podcast catalog does not accept category_id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(
+                    json!({ "catalog": request.catalog, "category_id": request.category_id }),
+                ));
+            }
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase today preferred podcast catalog uses page and requires offset=0",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "catalog": request.catalog, "offset": request.offset })));
+            }
+            Ok((
+                "/api/djradio/home/today/perfered",
+                json!({ "page": request.page.unwrap_or(0) }),
             ))
         }
         catalog => Err(TuneWeaveError::invalid_request(format!(
@@ -4864,7 +4894,9 @@ fn map_netease_podcast_catalog_response(
 ) -> Result<Page<Podcast>> {
     ensure_success(&body)?;
     let (raw_items, container) = match request.catalog {
-        PodcastCatalog::Personalized => (body.get("data"), "data array"),
+        PodcastCatalog::Personalized | PodcastCatalog::TodayPreferred => {
+            (body.get("data"), "data array")
+        }
         _ => (body.get("djRadios"), "djRadios array"),
     };
     let raw_items = raw_items
@@ -4913,6 +4945,7 @@ fn map_netease_podcast_catalog_response(
             )
         }
         PodcastCatalog::Personalized => (None, None, false, true),
+        PodcastCatalog::TodayPreferred => (None, None, false, false),
         catalog => {
             return Err(TuneWeaveError::invalid_request(format!(
                 "unsupported NetEase podcast catalog response: {}",
@@ -4933,6 +4966,10 @@ fn map_netease_podcast_catalog_response(
     );
     if request.catalog == PodcastCatalog::CategoryFeatured {
         extensions.insert("continuation_supported".to_owned(), json!(false));
+    }
+    if request.catalog == PodcastCatalog::TodayPreferred {
+        extensions.insert("page".to_owned(), json!(request.page.unwrap_or(0)));
+        extensions.insert("page_control_supported".to_owned(), json!(true));
     }
     extensions.insert("response".to_owned(), body);
     Ok(Page {
@@ -14010,6 +14047,13 @@ mod tests {
                 .expect("category featured podcast request"),
             ("/api/djradio/recommend", json!({"cateId": "2"}))
         );
+        let mut today_request = PodcastListRequest::new(PodcastCatalog::TodayPreferred, 30, 0);
+        today_request.page = Some(2);
+        assert_eq!(
+            netease_podcast_catalog_request(&today_request)
+                .expect("today preferred podcast request"),
+            ("/api/djradio/home/today/perfered", json!({"page": 2}))
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -14046,7 +14090,7 @@ mod tests {
             PodcastListRequest::new(PodcastCatalog::Personalized, 20, 1),
             PodcastListRequest::new(PodcastCatalog::CategoryHot, 20, 0),
             PodcastListRequest::new(PodcastCatalog::CategoryFeatured, 20, 0),
-            PodcastListRequest::new(PodcastCatalog::TodayPreferred, 20, 0),
+            PodcastListRequest::new(PodcastCatalog::Paid, 20, 0),
         ] {
             assert_eq!(
                 netease_podcast_catalog_request(&invalid)
@@ -14095,6 +14139,25 @@ mod tests {
             assert_eq!(
                 netease_podcast_catalog_request(&invalid_category_featured)
                     .expect_err("category featured catalog rejects invalid controls")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let mut hot_with_page = PodcastListRequest::new(PodcastCatalog::Hot, 20, 0);
+        hot_with_page.page = Some(2);
+        assert_eq!(
+            netease_podcast_catalog_request(&hot_with_page)
+                .expect_err("hot catalog rejects page")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        for (category_id, offset) in [(Some("2"), 0), (None, 1)] {
+            let mut invalid_today =
+                PodcastListRequest::new(PodcastCatalog::TodayPreferred, 20, offset);
+            invalid_today.category_id = category_id.map(str::to_owned);
+            assert_eq!(
+                netease_podcast_catalog_request(&invalid_today)
+                    .expect_err("today preferred catalog rejects invalid controls")
                     .code,
                 ErrorCode::InvalidRequest
             );
@@ -14321,6 +14384,32 @@ mod tests {
             category_featured.pagination.extensions["continuation_supported"],
             false
         );
+
+        let mut today_request = PodcastListRequest::new(PodcastCatalog::TodayPreferred, 30, 0);
+        today_request.page = Some(2);
+        let today = map_netease_podcast_catalog_response(
+            json!({
+                "code": 200,
+                "data": [
+                    fixture_podcast_radio(1_230_174_483, "今日播客一"),
+                    fixture_podcast_radio(1_225_587_488, "今日播客二")
+                ],
+                "msg": null
+            }),
+            &today_request,
+        )
+        .expect("map today preferred podcasts");
+        assert_eq!(today.items.len(), 2);
+        assert_eq!(today.pagination.limit, 30);
+        assert_eq!(today.pagination.offset, 0);
+        assert_eq!(today.pagination.total, None);
+        assert_eq!(today.pagination.next_offset, None);
+        assert!(!today.pagination.has_more);
+        assert_eq!(today.pagination.extensions["catalog"], "today_preferred");
+        assert_eq!(today.pagination.extensions["page"], 2);
+        assert_eq!(today.pagination.extensions["page_control_supported"], true);
+        assert_eq!(today.pagination.extensions["returned_count"], 2);
+        assert_eq!(today.pagination.extensions["limit_applied"], false);
 
         let empty = map_netease_podcast_catalog_response(
             json!({"code": 200, "djRadios": [], "hasMore": true}),
@@ -19808,6 +19897,26 @@ mod tests {
         assert_eq!(page.pagination.extensions["category_id"], "2");
         assert_eq!(page.pagination.extensions["limit_applied"], false);
         assert_eq!(page.pagination.extensions["continuation_supported"], false);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_today_preferred_podcast_catalog_preserves_public_business_state() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = PodcastListRequest::new(PodcastCatalog::TodayPreferred, 30, 0);
+        let page = MusicProvider::podcasts(&provider, &request)
+            .await
+            .expect("live today preferred podcasts");
+        assert!(page.items.iter().all(|podcast| {
+            !podcast.id.is_empty() && !podcast.name.is_empty() && podcast.cover_url.is_some()
+        }));
+        assert_eq!(page.pagination.total, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, None);
+        assert_eq!(page.pagination.extensions["catalog"], "today_preferred");
+        assert_eq!(page.pagination.extensions["page"], 0);
+        assert_eq!(page.pagination.extensions["limit_applied"], false);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 

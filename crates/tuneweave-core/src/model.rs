@@ -707,6 +707,7 @@ pub struct PodcastListRequest {
     pub category_id: Option<String>,
     pub limit: u32,
     pub offset: u32,
+    pub page: Option<u32>,
     pub account: Option<String>,
 }
 
@@ -718,6 +719,7 @@ impl PodcastListRequest {
             category_id: None,
             limit,
             offset,
+            page: None,
             account: None,
         }
     }
@@ -2602,12 +2604,14 @@ mod tests {
 
         let mut request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 30, 60);
         request.category_id = Some("2001".to_owned());
+        request.page = Some(2);
         request.account = Some("spoken-word".to_owned());
         let value = serde_json::to_value(request).expect("serialize podcast list request");
         assert_eq!(value["catalog"], "category_hot");
         assert_eq!(value["category_id"], "2001");
         assert_eq!(value["limit"], 30);
         assert_eq!(value["offset"], 60);
+        assert_eq!(value["page"], 2);
         assert_eq!(value["account"], "spoken-word");
     }
 
