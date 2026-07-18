@@ -31,7 +31,7 @@
 | C03 | 内容展示 | 数字专辑目录、详情及销量榜 | `verified` | `digitalAlbum*` 已接入的 Basic 展示链已验收 |
 | C04 | 内容展示 | 歌手目录、详情、专辑、歌曲及热门歌曲 | `verified` | 常规 `artist*` 展示链已验收 |
 | C05 | 内容展示 | 歌单详情及完整曲目列表 | `verified` | `playlist_detail/playlist_track_all` 已验收 |
-| C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收 |
+| C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收；YRC 与 LRC 并存时以 `format=yrc` 标记最高同步能力并同时保留两者 |
 | C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `partial` | 搜索与歌手目录已完成，独立目录/收藏列表仍缺 |
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `implemented` | MV 详情及统计已真实验收；站内视频离线成功映射、真实失效资源 404 及统计路径已覆盖，待当前有效视频 ID 的详情成功态 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收 |
@@ -43,7 +43,7 @@
 | P03 | 播放与权益 | 新版九档音质歌曲播放 URL | `implemented` | 九档真实 HTTP 均成功；跨平台成功源待后续 provider |
 | P04 | 播放与权益 | 原生批量取流、保序、重复项和逐项失败 | `verified` | GET/POST 批量及旧/新版真实 HTTP 已验收 |
 | P05 | 播放与权益 | 严格跨平台匹配、账户选择和失败回退 | `implemented` | 解析器、尝试轨迹和未注册来源回落已验收，待真实 QQ/酷狗等成功取流 |
-| P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收 |
+| P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收；192/320 kbps 分别映射 `higher/high`，可用档位固定按能力升序去重 |
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `partial` | `vip_info` 已验证，`vip_info_v2` 及完整权益仍缺 |
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `pending` | `ad_get/ad_listening_rights_gain` 等未接入 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `implemented` | MV 四档真实播放地址和 302 已验收；站内视频离线成功与真实空 URL 业务态已覆盖，待当前有效视频 ID 的可播放成功态 |

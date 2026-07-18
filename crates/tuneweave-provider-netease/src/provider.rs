@@ -7407,6 +7407,22 @@ fn quality_for_bitrate(bitrate: u64) -> Quality {
     }
 }
 
+const fn quality_rank(quality: Quality) -> u8 {
+    match quality {
+        Quality::Auto => 0,
+        Quality::Low => 1,
+        Quality::Standard => 2,
+        Quality::Higher => 3,
+        Quality::High => 4,
+        Quality::Lossless => 5,
+        Quality::Hires => 6,
+        Quality::Surround => 7,
+        Quality::Spatial => 8,
+        Quality::Dolby => 9,
+        Quality::Master => 10,
+    }
+}
+
 fn expiration_rfc3339(expires_in_seconds: u64) -> Option<String> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     unix_rfc3339(now.checked_add(expires_in_seconds)?)
@@ -7470,14 +7486,7 @@ fn map_lyrics(id: &str, lyrics: LyricsEnvelope) -> Result<Lyrics> {
     let translated = lyric_text(lyrics.tlyric.as_ref());
     let romanized = lyric_text(lyrics.romalrc.as_ref());
     let word_synced = lyric_text(lyrics.yrc.as_ref());
-    let format = if plain.is_some() {
-        "lrc"
-    } else if word_synced.is_some() {
-        "yrc"
-    } else {
-        "plain"
-    }
-    .to_owned();
+    let format = primary_lyric_format(word_synced.is_some(), plain.is_some()).to_owned();
     let mut contributors = Vec::new();
     if let Some(contributor) = map_lyric_user("lyrics", lyrics.lyric_user)? {
         contributors.push(contributor);
@@ -7520,6 +7529,14 @@ fn map_lyrics(id: &str, lyrics: LyricsEnvelope) -> Result<Lyrics> {
         contributors,
         extensions,
     })
+}
+
+const fn primary_lyric_format(has_word_synced: bool, has_plain_lrc: bool) -> &'static str {
+    match (has_word_synced, has_plain_lrc) {
+        (true, _) => "yrc",
+        (false, true) => "lrc",
+        (false, false) => "plain",
+    }
 }
 
 fn lyric_text(lyrics: Option<&LyricText>) -> Option<String> {
@@ -9177,6 +9194,7 @@ fn map_track_entitlement(raw: Value) -> Result<TrackEntitlement> {
             available_qualities.push(quality);
         }
     }
+    available_qualities.sort_by_key(|quality| quality_rank(*quality));
     let mut extensions = Extensions::new();
     extensions.insert("privilege".to_owned(), raw);
     Ok(TrackEntitlement {
@@ -9914,6 +9932,9 @@ fn map_qualities(song: &Song) -> Vec<Quality> {
         qualities.push(Quality::Standard);
     }
     if has_audio(&song.m) || has_audio(&song.h) {
+        qualities.push(Quality::Higher);
+    }
+    if has_audio(&song.h) {
         qualities.push(Quality::High);
     }
     if has_audio(&song.sq) {
@@ -11208,10 +11229,40 @@ mod tests {
         assert_eq!(track.duration_ms, Some(258000));
         assert_eq!(
             track.available_qualities,
-            vec![Quality::Standard, Quality::High, Quality::Lossless]
+            vec![
+                Quality::Standard,
+                Quality::Higher,
+                Quality::High,
+                Quality::Lossless
+            ]
         );
         assert_eq!(track.playable, Some(true));
         assert_eq!(track.extensions["fee"], 1);
+    }
+
+    #[test]
+    fn song_quality_mapping_keeps_the_192k_tier_distinct_from_320k() {
+        for (quality_fields, expected) in [
+            (json!({"l": {"br": 128_000}}), vec![Quality::Standard]),
+            (
+                json!({"m": {"br": 192_000}}),
+                vec![Quality::Standard, Quality::Higher],
+            ),
+            (
+                json!({"h": {"br": 320_000}}),
+                vec![Quality::Standard, Quality::Higher, Quality::High],
+            ),
+            (json!({"sq": {"br": 999_000}}), vec![Quality::Lossless]),
+            (json!({"hr": {"br": 1_999_000}}), vec![Quality::Hires]),
+        ] {
+            let mut fixture = json!({"id": 1, "name": "quality fixture"});
+            fixture
+                .as_object_mut()
+                .expect("song fixture object")
+                .extend(quality_fields.as_object().expect("quality fields").clone());
+            let song: Song = serde_json::from_value(fixture).expect("valid quality fixture");
+            assert_eq!(map_qualities(&song), expected);
+        }
     }
 
     #[test]
@@ -13366,7 +13417,12 @@ mod tests {
         assert_eq!(track.playable, Some(true));
         assert_eq!(
             track.available_qualities,
-            vec![Quality::Standard, Quality::High, Quality::Lossless]
+            vec![
+                Quality::Standard,
+                Quality::Higher,
+                Quality::High,
+                Quality::Lossless
+            ]
         );
     }
 
@@ -15448,6 +15504,29 @@ mod tests {
             entitlement.extensions["privilege"]["chargeInfoList"][4]["rate"],
             1999000
         );
+
+        let canonical = map_track_entitlement(json!({
+            "id": 2058263030,
+            "chargeInfoList": [
+                {"rate": 1999000},
+                {"rate": 320000},
+                {"rate": 128000},
+                {"rate": 999000},
+                {"rate": 192000},
+                {"rate": 320000}
+            ]
+        }))
+        .expect("map reversed and duplicated quality tiers");
+        assert_eq!(
+            canonical.available_qualities,
+            vec![
+                Quality::Standard,
+                Quality::Higher,
+                Quality::High,
+                Quality::Lossless,
+                Quality::Hires
+            ]
+        );
     }
 
     #[test]
@@ -17357,12 +17436,41 @@ mod tests {
 
         let lyrics = map_lyrics("185809", lyrics).expect("map lyrics");
         assert_eq!(lyrics.track_ref.to_string(), "netease:185809");
-        assert_eq!(lyrics.format, "lrc");
+        assert_eq!(lyrics.format, "yrc");
         assert!(lyrics.plain.is_some_and(|lyrics| lyrics.contains("青花")));
         assert!(lyrics.word_synced.is_some());
         assert_eq!(lyrics.contributors.len(), 2);
         assert_eq!(lyrics.contributors[1].role, "translation");
         assert_eq!(lyrics.extensions["word_synced_version"], 7);
+    }
+
+    #[test]
+    fn lyric_primary_format_always_prefers_word_sync_over_line_sync() {
+        assert_eq!(primary_lyric_format(true, true), "yrc");
+        assert_eq!(primary_lyric_format(true, false), "yrc");
+        assert_eq!(primary_lyric_format(false, true), "lrc");
+        assert_eq!(primary_lyric_format(false, false), "plain");
+
+        for (fixture, expected) in [
+            (
+                json!({
+                    "lrc": {"lyric": "[00:01.00]逐行歌词"},
+                    "yrc": {"lyric": "[1000,1000](1000,500,0)逐字歌词"}
+                }),
+                "yrc",
+            ),
+            (json!({"lrc": {"lyric": "[00:01.00]逐行歌词"}}), "lrc"),
+            (
+                json!({"yrc": {"lyric": "[1000,1000](1000,500,0)逐字歌词"}}),
+                "yrc",
+            ),
+            (json!({}), "plain"),
+        ] {
+            let envelope: LyricsEnvelope =
+                serde_json::from_value(fixture).expect("valid lyric format fixture");
+            let lyrics = map_lyrics("185809", envelope).expect("map lyric format fixture");
+            assert_eq!(lyrics.format, expected);
+        }
     }
 
     #[test]
@@ -20116,7 +20224,9 @@ mod tests {
             .await
             .expect("live track lyrics");
         assert_eq!(lyrics.track_ref.to_string(), "netease:185809");
-        assert!(lyrics.plain.is_some() || lyrics.word_synced.is_some());
+        assert!(lyrics.plain.is_some());
+        assert!(lyrics.word_synced.is_some());
+        assert_eq!(lyrics.format, "yrc");
     }
 
     #[tokio::test]

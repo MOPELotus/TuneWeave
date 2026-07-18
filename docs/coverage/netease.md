@@ -169,7 +169,7 @@
 | `login_status` | `/login/status` | `verified` | `GET /v1/auth/session`（匿名态已验证；2026-07-17 真实二维码确认后返回已认证，并在服务重启后从 `platform/account` 持久化存储恢复） |
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
 | `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖） |
-| `lyric_new` | `/lyric/new` | `verified` | `GET /v1/tracks/{ref}/lyrics` |
+| `lyric_new` | `/lyric/new` | `verified` | `GET /v1/tracks/{ref}/lyrics`（普通、翻译、罗马音、逐字及逐字翻译/罗马音均保留；YRC 与 LRC 并存时稳定标记 `format=yrc`，2026-07-18 以公开曲目 `185809` 真实验证两者同时存在且逐字能力不会再被逐行格式覆盖） |
 | `mlog_music_rcmd` | `/mlog/music/rcmd` | `pending` | — |
 | `mlog_to_video` | `/mlog/to/video` | `pending` | — |
 | `mlog_url` | `/mlog/url` | `pending` | — |
