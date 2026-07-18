@@ -19,11 +19,12 @@ use crate::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
-    ListeningRightsAdCatalog, ListeningRightsAdRequest, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary, Page,
-    PageRequest, PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
+    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
+    ListeningRightsGainResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics,
+    MediaDownload, MediaStream, MembershipSummary, Page, PageRequest, PasswordLoginRequest,
+    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, Podcast, PodcastChartEntry, PodcastChartRequest,
@@ -172,6 +173,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ListeningRightsAds,
+        ))
+    }
+
+    async fn gain_listening_rights(
+        &self,
+        _request: &ListeningRightsGainRequest,
+    ) -> Result<ListeningRightsGainResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ListeningRightsGain,
         ))
     }
 

@@ -37,14 +37,16 @@ use tuneweave_core::{
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackEntry,
     DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
-    ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest, LocalTrackMatchRequest,
-    LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary,
-    Money, MusicProvider, Page, PageMeta, PageRequest, ParseResourceRefError, PasswordFormat,
-    PasswordLoginRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest,
+    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsTimestamp,
+    LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload,
+    MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta, PageRequest,
+    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
     PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
@@ -410,6 +412,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::UserMembershipClientInfo,
             Capability::AntiCheatToken,
             Capability::ListeningRightsAds,
+            Capability::ListeningRightsGain,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -726,6 +729,48 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_xeapi_with_check_token(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_listening_rights_ads(&request.type_ids, response.body)
+    }
+
+    async fn gain_listening_rights(
+        &self,
+        request: &ListeningRightsGainRequest,
+    ) -> Result<ListeningRightsGainResult> {
+        let client = self.client_for(request.account.as_deref())?;
+        let explicit_request_uid =
+            normalize_listening_rights_request_uid(request.request_uid.as_deref())?;
+        let mut request_uid_source = if explicit_request_uid.is_some() {
+            "explicit"
+        } else {
+            "missing"
+        };
+        let mut request_uid = explicit_request_uid;
+        if request_uid.is_none() {
+            let ad_request = ListeningRightsAdRequest {
+                type_ids: request.type_ids.clone(),
+                account: request.account.clone(),
+            };
+            if let Ok((path, payload)) = netease_listening_rights_ads_request(&ad_request)
+                && let Ok(response) = client.request_xeapi_with_check_token(path, payload).await
+                && ensure_success(&response.body).is_ok()
+                && let Ok(catalog) =
+                    map_netease_listening_rights_ads(&request.type_ids, response.body)
+                && catalog.request_uid.is_some()
+            {
+                request_uid = catalog.request_uid;
+                request_uid_source = "ad_catalog";
+            }
+        }
+        let now = listening_rights_unix_time_millis()?;
+        let (path, payload, rights_param) =
+            netease_listening_rights_gain_request(request, request_uid.as_deref(), now)?;
+        let response = client.request_xeapi_with_check_token(path, payload).await?;
+        ensure_listening_rights_gain_access(&client, &response.body)?;
+        map_netease_listening_rights_gain(
+            request_uid.as_deref(),
+            request_uid_source,
+            rights_param,
+            response.body,
+        )
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -7542,6 +7587,23 @@ fn ensure_account_access(client: &NeteaseClient, body: &Value, operation: &str) 
     }
 }
 
+fn ensure_listening_rights_gain_access(client: &NeteaseClient, body: &Value) -> Result<()> {
+    match ensure_success(body) {
+        Err(error)
+            if !client.is_authenticated()
+                && error.details.get("upstream_code").and_then(json_i64) == Some(2001) =>
+        {
+            Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                "NetEase listening-rights gain requires a logged-in session",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(error.details))
+        }
+        result => result,
+    }
+}
+
 fn select_page<T>(items: Vec<T>, limit: u32, offset: u32) -> (Vec<T>, PageMeta) {
     let total = items.len() as u64;
     let selected = items
@@ -12279,6 +12341,160 @@ fn map_netease_listening_rights_ads(
     })
 }
 
+fn normalize_listening_rights_request_uid(value: Option<&str>) -> Result<Option<String>> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.len() > 2_048) {
+        return Err(TuneWeaveError::invalid_request(
+            "listening-rights request_uid cannot exceed 2048 bytes",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(value.map(str::to_owned))
+}
+
+fn listening_rights_unix_time_millis() -> Result<u64> {
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "system clock is before the Unix epoch",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    u64::try_from(duration.as_millis()).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "system time exceeds the supported millisecond range",
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+fn listening_rights_timestamp_value(
+    field: &str,
+    value: Option<&ListeningRightsTimestamp>,
+    now: u64,
+) -> Result<Value> {
+    match value {
+        None => Ok(json!(now)),
+        Some(ListeningRightsTimestamp::Milliseconds(value)) => Ok(json!(value)),
+        Some(ListeningRightsTimestamp::Reference(value)) => {
+            if value.is_empty() || value.len() > 64 {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "listening-rights {field} must be non-empty and at most 64 bytes",
+                ))
+                .with_platform(Platform::Netease));
+            }
+            Ok(json!(value))
+        }
+    }
+}
+
+fn netease_listening_rights_gain_request(
+    request: &ListeningRightsGainRequest,
+    request_uid: Option<&str>,
+    now: u64,
+) -> Result<(&'static str, Value, Value)> {
+    let mut rights_param = serde_json::Map::new();
+    rights_param.insert("reqUid".to_owned(), json!(request_uid.unwrap_or("")));
+    rights_param.insert("creativeType".to_owned(), json!(request.creative_type));
+    rights_param.insert(
+        "exposureTime".to_owned(),
+        listening_rights_timestamp_value("exposure_time", request.exposure_time.as_ref(), now)?,
+    );
+    rights_param.insert(
+        "clickTime".to_owned(),
+        listening_rights_timestamp_value("click_time", request.click_time.as_ref(), now)?,
+    );
+    rights_param.insert(
+        "rightsGainMethod".to_owned(),
+        json!(request.rights_gain_method),
+    );
+    for (name, value) in [
+        ("rightsGainDuration", request.rights_gain_duration),
+        ("extraRightsGainMethod", request.extra_rights_gain_method),
+        (
+            "extraRightsGainDuration",
+            request.extra_rights_gain_duration,
+        ),
+        ("nextRightsGainDuration", request.next_rights_gain_duration),
+        ("installed", request.installed),
+    ] {
+        if let Some(value) = value {
+            rights_param.insert(name.to_owned(), json!(value));
+        }
+    }
+    for (name, value) in [
+        ("source", request.source.as_deref()),
+        ("rightsExtJson", request.rights_ext_json.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            rights_param.insert(name.to_owned(), json!(value));
+        }
+    }
+    if let Some(app_info) = request.app_info.as_ref() {
+        rights_param.insert("appInfo".to_owned(), app_info.clone());
+    }
+    let rights_param = Value::Object(rights_param);
+    let serialized = serde_json::to_string(&rights_param).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize NetEase listening-rights request: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok((
+        "/api/ad/listening/rights/gain",
+        json!({ "reqParam": serialized }),
+        rights_param,
+    ))
+}
+
+fn map_netease_listening_rights_gain(
+    request_uid: Option<&str>,
+    request_uid_source: &str,
+    rights_param: Value,
+    response: Value,
+) -> Result<ListeningRightsGainResult> {
+    let data = response.get("data").unwrap_or(&response);
+    let granted = ["gainFlag", "granted", "success"]
+        .into_iter()
+        .find_map(|field| data.get(field).and_then(listening_rights_gain_flag));
+    let platform_code = response
+        .get("code")
+        .and_then(json_i64)
+        .or_else(|| data.get("code").and_then(json_i64));
+    let message = [data, &response]
+        .into_iter()
+        .flat_map(|value| ["message", "msg"].map(|field| value.get(field)))
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok(ListeningRightsGainResult {
+        request_uid: request_uid.map(str::to_owned),
+        granted,
+        platform_code,
+        message,
+        extensions: Extensions::from([
+            ("request_uid_source".to_owned(), json!(request_uid_source)),
+            ("request".to_owned(), rights_param),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
+fn listening_rights_gain_flag(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) if value.as_i64() == Some(0) => Some(false),
+        Value::Number(value) if value.as_i64() == Some(1) => Some(true),
+        Value::String(value) if value == "0" || value.eq_ignore_ascii_case("false") => Some(false),
+        Value::String(value) if value == "1" || value.eq_ignore_ascii_case("true") => Some(true),
+        _ => None,
+    }
+}
+
 fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
@@ -13761,6 +13977,144 @@ mod tests {
     }
 
     #[test]
+    fn listening_rights_gain_matches_the_reference_req_param_and_maps_explicit_flags() {
+        let request = ListeningRightsGainRequest {
+            request_uid: Some(" request-1 ".to_owned()),
+            creative_type: 3,
+            exposure_time: Some(ListeningRightsTimestamp::Reference(
+                "1784194692000".to_owned(),
+            )),
+            click_time: Some(ListeningRightsTimestamp::Milliseconds(1_784_194_692_001)),
+            rights_gain_method: 4,
+            rights_gain_duration: Some(30),
+            extra_rights_gain_method: Some(5),
+            extra_rights_gain_duration: Some(60),
+            next_rights_gain_duration: Some(90),
+            source: Some("player".to_owned()),
+            rights_ext_json: Some("{\"scene\":\"listen\"}".to_owned()),
+            app_info: Some(json!({"packageName": "com.example.music"})),
+            installed: Some(1),
+            type_ids: vec!["400002_0".to_owned()],
+            account: Some("personal".to_owned()),
+        };
+        let request_uid = normalize_listening_rights_request_uid(request.request_uid.as_deref())
+            .expect("normalize request uid");
+        let (path, payload, rights_param) = netease_listening_rights_gain_request(
+            &request,
+            request_uid.as_deref(),
+            1_784_194_692_999,
+        )
+        .expect("build listening-rights gain");
+        assert_eq!(path, "/api/ad/listening/rights/gain");
+        let serialized = payload["reqParam"].as_str().expect("serialized reqParam");
+        assert_eq!(
+            serde_json::from_str::<Value>(serialized).expect("parse reqParam"),
+            rights_param
+        );
+        assert_eq!(rights_param["reqUid"], "request-1");
+        assert_eq!(rights_param["creativeType"], 3);
+        assert_eq!(rights_param["exposureTime"], "1784194692000");
+        assert_eq!(rights_param["clickTime"], 1_784_194_692_001_u64);
+        assert_eq!(rights_param["rightsGainMethod"], 4);
+        assert_eq!(rights_param["rightsGainDuration"], 30);
+        assert_eq!(rights_param["extraRightsGainMethod"], 5);
+        assert_eq!(rights_param["extraRightsGainDuration"], 60);
+        assert_eq!(rights_param["nextRightsGainDuration"], 90);
+        assert_eq!(rights_param["source"], "player");
+        assert_eq!(rights_param["rightsExtJson"], "{\"scene\":\"listen\"}");
+        assert_eq!(rights_param["appInfo"]["packageName"], "com.example.music");
+        assert_eq!(rights_param["installed"], 1);
+
+        let result = map_netease_listening_rights_gain(
+            request_uid.as_deref(),
+            "explicit",
+            rights_param.clone(),
+            json!({
+                "code": 200,
+                "data": {"gainFlag": 1, "msg": "granted", "future": true}
+            }),
+        )
+        .expect("map listening-rights gain");
+        assert_eq!(result.request_uid.as_deref(), Some("request-1"));
+        assert_eq!(result.granted, Some(true));
+        assert_eq!(result.platform_code, Some(200));
+        assert_eq!(result.message.as_deref(), Some("granted"));
+        assert_eq!(result.extensions["request_uid_source"], "explicit");
+        assert_eq!(result.extensions["request"], rights_param);
+        assert_eq!(result.extensions["response"]["data"]["future"], true);
+    }
+
+    #[test]
+    fn listening_rights_gain_preserves_defaults_and_rejects_invalid_opaque_fields() {
+        let request = ListeningRightsGainRequest::default();
+        let (_, payload, rights_param) =
+            netease_listening_rights_gain_request(&request, None, 1_784_194_692_999)
+                .expect("build default listening-rights gain");
+        assert_eq!(rights_param["reqUid"], "");
+        assert_eq!(rights_param["creativeType"], 2);
+        assert_eq!(rights_param["exposureTime"], 1_784_194_692_999_u64);
+        assert_eq!(rights_param["clickTime"], 1_784_194_692_999_u64);
+        assert_eq!(rights_param["rightsGainMethod"], 2);
+        assert_eq!(rights_param.as_object().expect("rights object").len(), 5);
+        assert_eq!(
+            serde_json::from_str::<Value>(payload["reqParam"].as_str().expect("reqParam"))
+                .expect("parse reqParam"),
+            rights_param
+        );
+
+        let unknown = map_netease_listening_rights_gain(
+            None,
+            "missing",
+            rights_param,
+            json!({"code": 200, "data": {"gainFlag": 2}}),
+        )
+        .expect("map unknown gain flag");
+        assert_eq!(unknown.granted, None);
+        assert_eq!(unknown.extensions["request_uid_source"], "missing");
+
+        let anonymous = NeteaseClient::new(NeteaseConfig::default()).expect("anonymous client");
+        let auth_error = ensure_listening_rights_gain_access(
+            &anonymous,
+            &json!({"code": 2001, "message": "please log in"}),
+        )
+        .expect_err("anonymous 2001 must be authentication-required");
+        assert_eq!(auth_error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(auth_error.details["upstream_code"], 2001);
+
+        assert_eq!(
+            normalize_listening_rights_request_uid(Some(&"x".repeat(2_049)))
+                .expect_err("oversized request uid")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let invalid_time = ListeningRightsGainRequest {
+            exposure_time: Some(ListeningRightsTimestamp::Reference(String::new())),
+            ..ListeningRightsGainRequest::default()
+        };
+        assert_eq!(
+            netease_listening_rights_gain_request(&invalid_time, None, 1)
+                .expect_err("empty reference time")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn listening_rights_gain_rejects_unknown_accounts_before_auto_ad_lookup() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::gain_listening_rights(
+            &provider,
+            &ListeningRightsGainRequest {
+                account: Some("missing".to_owned()),
+                ..ListeningRightsGainRequest::default()
+            },
+        )
+        .await
+        .expect_err("unknown account should not start ad lookup");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -14252,6 +14606,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::UserMembershipClientInfo));
         assert!(capabilities.contains(&Capability::AntiCheatToken));
         assert!(capabilities.contains(&Capability::ListeningRightsAds));
+        assert!(capabilities.contains(&Capability::ListeningRightsGain));
     }
 
     #[test]
@@ -23443,6 +23798,18 @@ mod tests {
         assert_eq!(catalog.extensions["response"]["code"], 200);
         assert_eq!(catalog.extensions["type_ids"], json!(["400002_0"]));
         assert!(catalog.ads.iter().all(|ad| !ad.id.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_listening_rights_gain_runs_the_auto_ad_and_v3_xeapi_flow() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error =
+            MusicProvider::gain_listening_rights(&provider, &ListeningRightsGainRequest::default())
+                .await
+                .expect_err("anonymous gain must keep the real authentication boundary");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["upstream_code"], 2001);
     }
 
     #[tokio::test]

@@ -41,7 +41,8 @@ use tuneweave_core::{
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
-    ListeningRightsAdRequest, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
+    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
+    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
     MediaStream, MembershipSummary, PageRequest, PasswordFormat, PasswordLoginRequest, Platform,
     PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod,
     PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
@@ -353,6 +354,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
         .route("/listening-rights/ads", get(listening_rights_ads))
+        .route(
+            "/listening-rights/gains",
+            get(listening_rights_gain_get).post(listening_rights_gain_post),
+        )
         .route("/auth/country-codes", get(auth_country_calling_codes))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
@@ -4147,6 +4152,12 @@ fn parse_listening_rights_type_ids(value: Option<&str>) -> Result<Vec<String>, T
     } else {
         value.split(',').map(str::to_owned).collect()
     };
+    validate_listening_rights_type_ids(type_ids)
+}
+
+fn validate_listening_rights_type_ids(
+    type_ids: Vec<String>,
+) -> Result<Vec<String>, TuneWeaveError> {
     if type_ids.is_empty() || type_ids.len() > 100 {
         return Err(TuneWeaveError::invalid_request(
             "type_ids must contain between 1 and 100 values",
@@ -4181,6 +4192,184 @@ async fn listening_rights_ads(
         })
         .await?;
     let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListeningRightsGainQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "reqUid")]
+    request_uid: Option<String>,
+    #[serde(alias = "creativeType")]
+    creative_type: Option<String>,
+    #[serde(alias = "exposureTime")]
+    exposure_time: Option<String>,
+    #[serde(alias = "clickTime")]
+    click_time: Option<String>,
+    #[serde(alias = "rightsGainMethod")]
+    rights_gain_method: Option<String>,
+    #[serde(alias = "rightsGainDuration")]
+    rights_gain_duration: Option<String>,
+    #[serde(alias = "extraRightsGainMethod")]
+    extra_rights_gain_method: Option<String>,
+    #[serde(alias = "extraRightsGainDuration")]
+    extra_rights_gain_duration: Option<String>,
+    #[serde(alias = "nextRightsGainDuration")]
+    next_rights_gain_duration: Option<String>,
+    source: Option<String>,
+    #[serde(alias = "rightsExtJson")]
+    rights_ext_json: Option<String>,
+    #[serde(alias = "appInfo")]
+    app_info: Option<String>,
+    installed: Option<String>,
+    #[serde(alias = "typeIds")]
+    type_ids: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListeningRightsGainAccountQuery {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListeningRightsGainBody {
+    #[serde(alias = "reqUid")]
+    request_uid: Option<String>,
+    #[serde(alias = "creativeType")]
+    creative_type: Option<i64>,
+    #[serde(alias = "exposureTime")]
+    exposure_time: Option<ListeningRightsTimestamp>,
+    #[serde(alias = "clickTime")]
+    click_time: Option<ListeningRightsTimestamp>,
+    #[serde(alias = "rightsGainMethod")]
+    rights_gain_method: Option<i64>,
+    #[serde(alias = "rightsGainDuration")]
+    rights_gain_duration: Option<i64>,
+    #[serde(alias = "extraRightsGainMethod")]
+    extra_rights_gain_method: Option<i64>,
+    #[serde(alias = "extraRightsGainDuration")]
+    extra_rights_gain_duration: Option<i64>,
+    #[serde(alias = "nextRightsGainDuration")]
+    next_rights_gain_duration: Option<i64>,
+    source: Option<String>,
+    #[serde(alias = "rightsExtJson")]
+    rights_ext_json: Option<String>,
+    #[serde(alias = "appInfo")]
+    app_info: Option<Value>,
+    installed: Option<i64>,
+    #[serde(alias = "typeIds")]
+    type_ids: Option<Vec<String>>,
+}
+
+async fn listening_rights_gain_get(
+    State(state): State<AppState>,
+    params: Result<Query<ListeningRightsGainQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let app_info = params
+        .app_info
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::invalid_request(format!("appInfo must be valid JSON: {error}"))
+        })?;
+    let request = ListeningRightsGainRequest {
+        request_uid: params.request_uid,
+        creative_type: parse_optional_i64_parameter(
+            "creative_type",
+            params.creative_type.as_deref(),
+        )?
+        .unwrap_or(2),
+        exposure_time: reference_listening_rights_timestamp(params.exposure_time),
+        click_time: reference_listening_rights_timestamp(params.click_time),
+        rights_gain_method: parse_optional_i64_parameter(
+            "rights_gain_method",
+            params.rights_gain_method.as_deref(),
+        )?
+        .unwrap_or(2),
+        rights_gain_duration: parse_optional_i64_parameter(
+            "rights_gain_duration",
+            params.rights_gain_duration.as_deref(),
+        )?,
+        extra_rights_gain_method: parse_optional_i64_parameter(
+            "extra_rights_gain_method",
+            params.extra_rights_gain_method.as_deref(),
+        )?,
+        extra_rights_gain_duration: parse_optional_i64_parameter(
+            "extra_rights_gain_duration",
+            params.extra_rights_gain_duration.as_deref(),
+        )?,
+        next_rights_gain_duration: parse_optional_i64_parameter(
+            "next_rights_gain_duration",
+            params.next_rights_gain_duration.as_deref(),
+        )?,
+        source: params.source,
+        rights_ext_json: params.rights_ext_json,
+        app_info,
+        installed: parse_optional_i64_parameter("installed", params.installed.as_deref())?,
+        type_ids: parse_listening_rights_type_ids(params.type_ids.as_deref())?,
+        account: account.clone(),
+    };
+    listening_rights_gain_response(&state, platform, account, request).await
+}
+
+async fn listening_rights_gain_post(
+    State(state): State<AppState>,
+    params: Result<Query<ListeningRightsGainAccountQuery>, QueryRejection>,
+    body: Result<Json<ListeningRightsGainBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
+    let params = query_params(params)?;
+    let body = json_body(body)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let request = ListeningRightsGainRequest {
+        request_uid: body.request_uid,
+        creative_type: body.creative_type.unwrap_or(2),
+        exposure_time: body.exposure_time,
+        click_time: body.click_time,
+        rights_gain_method: body.rights_gain_method.unwrap_or(2),
+        rights_gain_duration: body.rights_gain_duration,
+        extra_rights_gain_method: body.extra_rights_gain_method,
+        extra_rights_gain_duration: body.extra_rights_gain_duration,
+        next_rights_gain_duration: body.next_rights_gain_duration,
+        source: body.source,
+        rights_ext_json: body.rights_ext_json,
+        app_info: body.app_info,
+        installed: body.installed,
+        type_ids: validate_listening_rights_type_ids(
+            body.type_ids.unwrap_or_else(|| vec!["400002_0".to_owned()]),
+        )?,
+        account: account.clone(),
+    };
+    listening_rights_gain_response(&state, platform, account, request).await
+}
+
+fn reference_listening_rights_timestamp(value: Option<String>) -> Option<ListeningRightsTimestamp> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(ListeningRightsTimestamp::Reference)
+}
+
+async fn listening_rights_gain_response(
+    state: &AppState,
+    platform: Platform,
+    account: Option<String>,
+    request: ListeningRightsGainRequest,
+) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
+    let provider = state.registry.require(platform)?;
+    let result = provider.gain_listening_rights(&request).await?;
+    let mut response = ApiResponse::new(result).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -7700,6 +7889,7 @@ mod tests {
                 Capability::AccountCloudDownload,
                 Capability::AntiCheatToken,
                 Capability::ListeningRightsAds,
+                Capability::ListeningRightsGain,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::Recommendations,
@@ -7954,6 +8144,30 @@ mod tests {
                 }],
                 message: Some("ok".to_owned()),
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn gain_listening_rights(
+            &self,
+            request: &ListeningRightsGainRequest,
+        ) -> Result<ListeningRightsGainResult> {
+            Ok(ListeningRightsGainResult {
+                request_uid: request.request_uid.clone(),
+                granted: Some(true),
+                platform_code: Some(200),
+                message: Some("granted".to_owned()),
+                extensions: Extensions::from([
+                    ("creative_type".to_owned(), json!(request.creative_type)),
+                    ("exposure_time".to_owned(), json!(request.exposure_time)),
+                    ("click_time".to_owned(), json!(request.click_time)),
+                    (
+                        "rights_gain_method".to_owned(),
+                        json!(request.rights_gain_method),
+                    ),
+                    ("type_ids".to_owned(), json!(request.type_ids)),
+                    ("app_info".to_owned(), json!(request.app_info)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -15633,6 +15847,84 @@ mod tests {
         let (status, response) = json_response_from(test_app_with_provider(), &path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_gain_accepts_reference_get_and_unified_post_inputs() {
+        let (status, get) = json_response_from(
+            test_app_with_provider(),
+            "/v1/listening-rights/gains?platform=netease&account=ad-user&reqUid=req-1&creativeType=3&exposureTime=1784194692000&clickTime=1784194692001&rightsGainMethod=4&rightsGainDuration=30&extraRightsGainMethod=5&extraRightsGainDuration=60&nextRightsGainDuration=90&source=player&rightsExtJson=%7B%22scene%22%3A%22listen%22%7D&appInfo=%7B%22package%22%3A%22music%22%7D&installed=1&typeIds=400002_0%2C400003_1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(get["data"]["request_uid"], "req-1");
+        assert_eq!(get["data"]["granted"], true);
+        assert_eq!(get["data"]["extensions"]["creative_type"], 3);
+        assert_eq!(get["data"]["extensions"]["exposure_time"], "1784194692000");
+        assert_eq!(get["data"]["extensions"]["rights_gain_method"], 4);
+        assert_eq!(
+            get["data"]["extensions"]["type_ids"],
+            json!(["400002_0", "400003_1"])
+        );
+        assert_eq!(get["data"]["extensions"]["app_info"]["package"], "music");
+        assert_eq!(get["data"]["extensions"]["account"], "ad-user");
+        assert_eq!(get["meta"]["platform"], "netease");
+        assert_eq!(get["meta"]["account"], "ad-user");
+
+        let (status, post) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/listening-rights/gains?platform=netease&account=post-user",
+            Some(json!({
+                "request_uid": "req-2",
+                "exposure_time": 1784194692002_u64,
+                "click_time": "1784194692003",
+                "app_info": {"package": "music"},
+                "type_ids": ["400002_0"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(post["data"]["request_uid"], "req-2");
+        assert_eq!(post["data"]["extensions"]["creative_type"], 2);
+        assert_eq!(
+            post["data"]["extensions"]["exposure_time"],
+            1_784_194_692_002_u64
+        );
+        assert_eq!(post["data"]["extensions"]["click_time"], "1784194692003");
+        assert_eq!(post["data"]["extensions"]["rights_gain_method"], 2);
+        assert_eq!(post["meta"]["account"], "post-user");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_gain_rejects_invalid_reference_and_json_inputs() {
+        for path in [
+            "/v1/listening-rights/gains?creativeType=invalid",
+            "/v1/listening-rights/gains?appInfo=not-json",
+            "/v1/listening-rights/gains?type_ids=",
+            "/v1/listening-rights/gains?platform=unknown",
+            "/v1/listening-rights/gains?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+
+        for body in [
+            json!({"type_ids": []}),
+            json!({"exposure_time": {"millis": 1}}),
+            json!({"unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/listening-rights/gains",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
     }
 
     #[tokio::test]

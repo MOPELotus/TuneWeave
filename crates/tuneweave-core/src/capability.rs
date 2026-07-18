@@ -25,6 +25,7 @@ pub enum Capability {
     UserMembershipClientInfo,
     AntiCheatToken,
     ListeningRightsAds,
+    ListeningRightsGain,
     AudioRecognition,
     Banners,
     RadioTaxonomy,
@@ -169,6 +170,11 @@ mod tests {
             serde_json::to_value(Capability::ListeningRightsAds)
                 .expect("serialize listening-rights ad capability"),
             serde_json::json!("listening_rights_ads")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::ListeningRightsGain)
+                .expect("serialize listening-rights gain capability"),
+            serde_json::json!("listening_rights_gain")
         );
         assert_eq!(
             serde_json::to_value(Capability::AudioStreamBatch)

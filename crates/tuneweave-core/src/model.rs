@@ -259,6 +259,63 @@ pub struct ListeningRightsAdCatalog {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ListeningRightsTimestamp {
+    Milliseconds(u64),
+    Reference(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsGainRequest {
+    pub request_uid: Option<String>,
+    pub creative_type: i64,
+    pub exposure_time: Option<ListeningRightsTimestamp>,
+    pub click_time: Option<ListeningRightsTimestamp>,
+    pub rights_gain_method: i64,
+    pub rights_gain_duration: Option<i64>,
+    pub extra_rights_gain_method: Option<i64>,
+    pub extra_rights_gain_duration: Option<i64>,
+    pub next_rights_gain_duration: Option<i64>,
+    pub source: Option<String>,
+    pub rights_ext_json: Option<String>,
+    pub app_info: Option<Value>,
+    pub installed: Option<i64>,
+    pub type_ids: Vec<String>,
+    pub account: Option<String>,
+}
+
+impl Default for ListeningRightsGainRequest {
+    fn default() -> Self {
+        Self {
+            request_uid: None,
+            creative_type: 2,
+            exposure_time: None,
+            click_time: None,
+            rights_gain_method: 2,
+            rights_gain_duration: None,
+            extra_rights_gain_method: None,
+            extra_rights_gain_duration: None,
+            next_rights_gain_duration: None,
+            source: None,
+            rights_ext_json: None,
+            app_info: None,
+            installed: None,
+            type_ids: vec!["400002_0".to_owned()],
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsGainResult {
+    pub request_uid: Option<String>,
+    pub granted: Option<bool>,
+    pub platform_code: Option<i64>,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -3131,6 +3188,35 @@ mod tests {
         assert_eq!(value["request_uid"], "req-1");
         assert_eq!(value["ads"][0]["id"], "400002_0");
         assert_eq!(value["ads"][0]["extensions"]["raw"]["id"], 1);
+    }
+
+    #[test]
+    fn listening_rights_gain_keeps_reference_timestamps_and_optional_status_explicit() {
+        let request = ListeningRightsGainRequest {
+            request_uid: Some("req-1".to_owned()),
+            exposure_time: Some(ListeningRightsTimestamp::Reference(
+                "1784194692000".to_owned(),
+            )),
+            click_time: Some(ListeningRightsTimestamp::Milliseconds(1_784_194_692_001)),
+            app_info: Some(serde_json::json!({"package": "music"})),
+            ..ListeningRightsGainRequest::default()
+        };
+        let request = serde_json::to_value(request).expect("serialize listening-rights gain");
+        assert_eq!(request["creative_type"], 2);
+        assert_eq!(request["exposure_time"], "1784194692000");
+        assert_eq!(request["click_time"], 1_784_194_692_001_u64);
+        assert_eq!(request["type_ids"], serde_json::json!(["400002_0"]));
+
+        let result = ListeningRightsGainResult {
+            request_uid: Some("req-1".to_owned()),
+            granted: None,
+            platform_code: Some(200),
+            message: None,
+            extensions: Extensions::new(),
+        };
+        let result = serde_json::to_value(result).expect("serialize listening-rights result");
+        assert!(result["granted"].is_null());
+        assert_eq!(result["platform_code"], 200);
     }
 
     #[test]

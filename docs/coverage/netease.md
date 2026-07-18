@@ -9,13 +9,13 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=254`、`partial=3`、`implemented=61`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=253`、`partial=3`、`implemented=62`、`verified=98`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
 | `activate_init_profile` | `/activate/init/profile` | `pending` | — |
 | `ad_get` | `/ad/get` | `implemented` | `GET /v1/listening-rights/ads`（以独立 `ListeningRightsAds` 能力和稳定 `ListeningRightsAdCatalog` 表达广告换听目录；`type_ids` 缺省 `400002_0`，兼容逗号列表、`typeIds` 与参考 JSON 字符串数组，保留顺序/重复项并限制 1–100 个非空值；固定调用带自动实时 checkToken 的 XEAPI `/api/ad/get`，精确把类型数组序列化为 `type_ids` JSON 字符串；兼容对象/数组/空广告包装，逐项解析字符串或对象 `extJson.contextInfo.req_id`，空/畸形前项不遮蔽后续有效请求 ID，原广告、可解析 extJson、类型和完整响应均保留；核心类型、能力、默认/多类型协议、空/非空/数组包装、无效 extJson、消息优先级、畸形容器、类型边界、账户选择、统一/参考查询和未知字段均有测试；2026-07-18 匿名真实 XEAPI 请求自动注册 checkToken 并返回上游 `code=200` 的合法空投放，待持久化账户验证非空广告及真实 `req_id`） |
-| `ad_listening_rights_gain` | `/ad/listening/rights/gain` | `pending` | 2026-07-17 上游新增；播放权益 Basic，可显式提交或经 `/ad/get` 自动取得 `reqUid`，完整参数分支必须保留 |
+| `ad_listening_rights_gain` | `/ad/listening/rights/gain` | `implemented` | `GET/POST /v1/listening-rights/gains`（独立 `ListeningRightsGain` 能力和稳定请求/结果模型；GET 完整兼容参考 `reqUid/creativeType/exposureTime/clickTime/rightsGainMethod`、四个可选时长/方式、`source/rightsExtJson/appInfo/installed/type_ids`，POST 提供 snake_case JSON 并接受 camelCase 别名；缺省创意类型/领取方式均为 2，缺省曝光/点击时间取同一当前毫秒值，参考 GET 的显式时间字符串保持字符串，所有可选整数、应用 JSON 和扩展文本进入精确 `reqParam` JSON 字符串；未给 `reqUid` 时先以同账户和类型调用广告目录，目录失败或无投放按参考行为继续提交空 ID，不伪造请求 ID；固定以 v3 checkToken 调用 XEAPI `/api/ad/listening/rights/gain`，只把明确布尔或 0/1 `gainFlag` 映射为可空 `granted`，其他值不猜测，完整请求/响应及 ID 来源保留；核心契约、完整/缺省载荷、字符串/数字时间、自动 ID 来源、未知 flag、边界、账户、GET/POST 和输入拒绝均有测试；2026-07-18 匿名真实自动广告 + v3 XEAPI 链返回上游登录边界 `code=2001` 并稳定映射 401，待持久化真实账户验证成功领取） |
 | `aidj_content_rcmd` | `/aidj/content/rcmd` | `pending` | — |
 | `album` | `/album` | `verified` | `GET /v1/albums/{ref}`、`GET /v1/albums/{ref}/tracks`（2026-07-16 HTTP 实测 `netease:18915` 返回《范特西》及 10 首曲目） |
 | `album_detail` | `/album/detail` | `verified` | `GET /v1/digital-albums/{ref}`（与 `/digitalAlbum/detail` 共用上游协议；`artistNames` 多艺人名称优先于 `artistName` 单艺人摘要；2026-07-16 HTTP 实测 `netease:120605500` 返回《冀西南林路行》及 22 CNY 商品信息） |

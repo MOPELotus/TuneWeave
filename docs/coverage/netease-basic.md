@@ -4,9 +4,9 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=3`、`partial=8`、`implemented=17`、`verified=36`。
+当前共 64 个验收单元：`pending=3`、`partial=7`、`implemented=18`、`verified=36`。
 
-- 完整实现率：`(implemented + verified) / 64 = 53 / 64 = 82.81%`。
+- 完整实现率：`(implemented + verified) / 64 = 54 / 64 = 84.38%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 61 / 64 = 95.31%`。
 - 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
 
@@ -45,7 +45,7 @@
 | P05 | 播放与权益 | 严格跨平台匹配、账户选择和失败回退 | `implemented` | 解析器、尝试轨迹和未注册来源回落已验收，待真实 QQ/酷狗等成功取流 |
 | P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收；192/320 kbps 分别映射 `higher/high`，可用档位固定按能力升序去重，零新版最高码率回退有效兼容值 |
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `implemented` | `vip_info` 已验证；`vip_info_v2` 以显式 `backend=client` 和独立能力接入，保留五类权益包并按服务器时间映射激活态/最长有效期，认证前置及离线成功映射已覆盖，待持久化真实账户成功态 |
-| P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `partial` | `ad_get` 已以统一广告权益目录、实时 checkToken、完整类型数组和 `req_id` 提取接入；匿名真实请求返回合法空投放，非空映射离线已覆盖，`ad_listening_rights_gain` 及账户成功投放仍待接入/验收 |
+| P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `implemented` | `ad_get` 与 `ad_listening_rights_gain` 已以独立统一能力接入，覆盖完整类型数组、`req_id` 提取、显式/自动请求 ID、完整领取参数、参考 GET/统一 POST、v3 checkToken 和不猜测未知 `gainFlag`；匿名真实目录返回合法空投放，领取链真实返回登录边界 `code=2001` 并映射 401，待持久化真实账户验证非空广告及成功领取 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `implemented` | MV 四档真实播放地址和 302 已验收；零首选清晰度/有效期不遮蔽兼容字段；站内视频离线成功与真实空 URL 业务态已覆盖，待当前有效视频 ID 的可播放成功态 |
 | P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；声音逐词转写已接入且真实验证，工作台详情、声音歌单目录及账户声音查询都会把 `songId/trackId` 稳定映射为独立 `audio.ref`，待登录成功态确认后即可复用现有取流；声音写入后的完整播放事务仍待验收 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收；空白编码与零时长回退有效元数据 |
