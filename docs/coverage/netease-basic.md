@@ -4,10 +4,10 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=3`、`partial=6`、`implemented=19`、`verified=36`。
+当前共 64 个验收单元：`pending=2`、`partial=6`、`implemented=20`、`verified=36`。
 
-- 完整实现率：`(implemented + verified) / 64 = 55 / 64 = 85.94%`。
-- 已触达率：`(partial + implemented + verified) / 64 = 61 / 64 = 95.31%`。
+- 完整实现率：`(implemented + verified) / 64 = 56 / 64 = 87.50%`。
+- 已触达率：`(partial + implemented + verified) / 64 = 62 / 64 = 96.88%`。
 - 完整联网验收率：`verified / 64 = 36 / 64 = 56.25%`。
 
 这些百分比是 Basic 能力验收口径，不是 416 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
@@ -79,7 +79,7 @@
 | F06 | 平台基础协议 | `e_r` 加密响应解包 | `verified` | EAPI 真实加密响应已验收 |
 | F07 | 平台基础协议 | 安全原始 API 与批量 API 扩展 | `verified` | 五协议、动态键、域名和凭据边界已验收 |
 | F08 | 平台基础协议 | 设备身份、匿名 token 与实时 checkToken | `implemented` | `register_checktoken_v2/v3` 已完成分版本路由、独立缓存、日志脱敏、EAPI/XEAPI 受控头注入及真实注册/缓存/强刷验收；`register_anonimous` 已完整接入参考设备编码、独立能力、三路由别名、私有持久化、重启恢复和默认公开请求自动复用，匿名身份不混入或覆盖多账户登录态。2026-07-18 TuneWeave 与当前参考实现同机实测均收到上游 `code=400` 且无 Cookie，代码会明确失败而不伪造身份，待上游恢复后补成功态验收 |
-| F09 | 平台基础协议 | 随机中国 IP 与安全服务端代理/真实 IP 配置 | `pending` | 不允许客户端注入；受控服务端配置和随机 IP 能力未实现 |
+| F09 | 平台基础协议 | 随机中国 IP 与安全服务端代理/真实 IP 配置 | `implemented` | 已接入仅启动时可配置的 HTTP(S) 代理、固定 IPv4 或逐请求随机中国 IPv4，固定/随机身份互斥并同时写入 `X-Real-IP/X-Forwarded-For`；五种协议和 XEAPI 密钥注册共用策略，媒体下载/NOS 上传不附加来源头；随机生成采用参考的 `116.25–94.*.*` 紧凑兜底而不嵌入 68 KiB CIDR 表。通用 API 继续拒绝 `proxy/realIP/randomCNIP/headers` 注入；默认关闭、固定头、随机范围、冲突、代理 URL/凭据脱敏和配置边界均有测试，待在受控代理环境补真实出口验收 |
 
 ## 更新规则
 

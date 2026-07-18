@@ -1,4 +1,11 @@
-use std::{env, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    error::Error,
+    io::{Error as IoError, ErrorKind},
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use tokio::net::TcpListener;
 use tracing::info;
@@ -30,6 +37,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         cookie: env::var("TUNEWEAVE_NETEASE_COOKIE")
             .ok()
             .filter(|cookie| !cookie.trim().is_empty()),
+        proxy_url: env::var("TUNEWEAVE_NETEASE_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
+        real_ip: env::var("TUNEWEAVE_NETEASE_REAL_IP")
+            .ok()
+            .filter(|ip| !ip.trim().is_empty())
+            .map(|ip| ip.trim().parse::<Ipv4Addr>())
+            .transpose()?,
+        random_cn_ip: env_bool("TUNEWEAVE_NETEASE_RANDOM_CN_IP")?,
         credential_store: Some(credential_store),
         ..NeteaseConfig::default()
     };
@@ -43,6 +59,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn env_bool(name: &str) -> Result<bool, IoError> {
+    let Some(value) = env::var(name).ok() else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        _ => Err(IoError::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be true/false, yes/no, on/off, or 1/0"),
+        )),
+    }
 }
 
 async fn shutdown_signal() {

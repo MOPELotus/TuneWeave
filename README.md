@@ -32,6 +32,9 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_BIND`：监听地址，默认 `127.0.0.1:7832`。
 - `TUNEWEAVE_DATA_DIR`：私有数据目录，默认 `.local/data`；成功登录的平台凭据按 `platform/account` 隔离保存并在重启时恢复。
 - `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云 `default` 账户启动 Cookie；不会写入响应或日志。通过登录端点取得的账户凭据则进入上述私有数据目录。
+- `TUNEWEAVE_NETEASE_PROXY`：可选的服务端 HTTP(S) 正向代理 URL；仅在启动配置中读取，API 调用方不能覆盖。
+- `TUNEWEAVE_NETEASE_REAL_IP`：可选的服务端固定 IPv4 请求身份，同时写入网易云协议请求的 `X-Real-IP` 与 `X-Forwarded-For`。
+- `TUNEWEAVE_NETEASE_RANDOM_CN_IP`：设为 `true/yes/on/1` 时，每次网易云协议请求生成一个中国 IPv4 请求身份；不能与固定真实 IP 同时启用。
 
 默认数据目录已由 Git 忽略。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
 

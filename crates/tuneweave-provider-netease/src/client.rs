@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    fmt, process,
+    fmt,
+    net::Ipv4Addr,
+    process,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -11,7 +13,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest, Md5};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client, StatusCode, header, redirect::Policy};
+use reqwest::{Client, ClientBuilder, Proxy, RequestBuilder, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tuneweave_core::{
@@ -63,6 +65,12 @@ pub struct NeteaseConfig {
     pub timeout: Duration,
     pub user_agent: String,
     pub web_user_agent: String,
+    /// A server-controlled forward proxy. It is never accepted from an API request.
+    pub proxy_url: Option<String>,
+    /// A fixed server-controlled IPv4 identity sent as X-Real-IP and X-Forwarded-For.
+    pub real_ip: Option<Ipv4Addr>,
+    /// Generate a fresh Chinese IPv4 identity for every platform API request.
+    pub random_cn_ip: bool,
     pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
@@ -78,6 +86,9 @@ impl Default for NeteaseConfig {
             timeout: Duration::from_secs(15),
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             web_user_agent: DEFAULT_WEB_USER_AGENT.to_owned(),
+            proxy_url: None,
+            real_ip: None,
+            random_cn_ip: false,
             credential_store: None,
         }
     }
@@ -96,6 +107,8 @@ pub struct NeteaseClient {
     cookie: Option<String>,
     device_id: String,
     web_client_id: String,
+    real_ip: Option<Ipv4Addr>,
+    random_cn_ip: bool,
     xeapi_state: Arc<RwLock<XeapiState>>,
     anti_cheat_v2_token: Arc<RwLock<Option<String>>>,
     anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
@@ -248,31 +261,43 @@ struct EapiHeader<'a> {
 
 impl NeteaseClient {
     pub fn new(config: NeteaseConfig) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(config.timeout)
-            .connect_timeout(Duration::from_secs(8))
-            .user_agent(config.user_agent)
-            .build()
-            .map_err(|error| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    format!("failed to build NetEase HTTP client: {error}"),
-                )
-                .with_platform(Platform::Netease)
-            })?;
-        let asset_http = Client::builder()
-            .timeout(config.timeout)
-            .connect_timeout(Duration::from_secs(8))
-            .user_agent(&config.web_user_agent)
-            .redirect(Policy::none())
-            .build()
-            .map_err(|error| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    format!("failed to build NetEase asset HTTP client: {error}"),
-                )
-                .with_platform(Platform::Netease)
-            })?;
+        if config.random_cn_ip && config.real_ip.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase fixed and random network identities are mutually exclusive",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let http = configure_proxy(
+            Client::builder()
+                .timeout(config.timeout)
+                .connect_timeout(Duration::from_secs(8))
+                .user_agent(config.user_agent),
+            config.proxy_url.as_deref(),
+        )?
+        .build()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to build NetEase HTTP client: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let asset_http = configure_proxy(
+            Client::builder()
+                .timeout(config.timeout)
+                .connect_timeout(Duration::from_secs(8))
+                .user_agent(&config.web_user_agent)
+                .redirect(Policy::none()),
+            config.proxy_url.as_deref(),
+        )?
+        .build()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to build NetEase asset HTTP client: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
 
         let seed = format!(
             "{}:{}:{}",
@@ -301,6 +326,8 @@ impl NeteaseClient {
             cookie: config.cookie,
             device_id,
             web_client_id,
+            real_ip: config.real_ip,
+            random_cn_ip: config.random_cn_ip,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
             anti_cheat_v2_token: Arc::new(RwLock::new(None)),
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
@@ -367,10 +394,11 @@ impl NeteaseClient {
             self.base_url,
             path.trim_start_matches("/api/")
         );
-        let mut request = self
-            .http
-            .post(endpoint)
-            .header(header::COOKIE, encode_cookie_header(&header));
+        let mut request = self.apply_network_identity(
+            self.http
+                .post(endpoint)
+                .header(header::COOKIE, encode_cookie_header(&header)),
+        );
         if let Some(token) = anti_cheat_token {
             request = request.header("X-antiCheatToken", token);
         }
@@ -407,27 +435,26 @@ impl NeteaseClient {
             self.web_base_url,
             path.trim_start_matches("/api/")
         );
-        let response = self
-            .http
-            .post(endpoint)
-            .header(header::REFERER, &self.web_base_url)
-            .header(header::USER_AGENT, &self.web_user_agent)
-            .header(
-                header::COOKIE,
-                weapi_cookie_header(
-                    self.cookie.as_deref(),
-                    &self.device_id,
-                    &self.web_client_id,
-                    path,
-                ),
-            )
-            .form(&[
-                ("params", encrypted.params),
-                ("encSecKey", encrypted.enc_sec_key),
-            ])
-            .send()
-            .await
-            .map_err(request_error)?;
+        let request = self.apply_network_identity(
+            self.http
+                .post(endpoint)
+                .header(header::REFERER, &self.web_base_url)
+                .header(header::USER_AGENT, &self.web_user_agent)
+                .header(
+                    header::COOKIE,
+                    weapi_cookie_header(
+                        self.cookie.as_deref(),
+                        &self.device_id,
+                        &self.web_client_id,
+                        path,
+                    ),
+                )
+                .form(&[
+                    ("params", encrypted.params),
+                    ("encSecKey", encrypted.enc_sec_key),
+                ]),
+        );
+        let response = request.send().await.map_err(request_error)?;
         parse_response_with_encryption(response, encrypted_response).await
     }
 
@@ -453,18 +480,17 @@ impl NeteaseClient {
         payload
             .entry("e_r".to_owned())
             .or_insert(Value::Bool(false));
-        let response = self
-            .http
-            .post(format!("{}{}", self.base_url, path))
-            .header(header::COOKIE, encode_cookie_header(&header))
-            .header(
-                header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded;charset=utf-8",
-            )
-            .body(encode_form(&payload, false))
-            .send()
-            .await
-            .map_err(request_error)?;
+        let request = self.apply_network_identity(
+            self.http
+                .post(format!("{}{}", self.base_url, path))
+                .header(header::COOKIE, encode_cookie_header(&header))
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded;charset=utf-8",
+                )
+                .body(encode_form(&payload, false)),
+        );
+        let response = request.send().await.map_err(request_error)?;
         parse_response(response).await
     }
 
@@ -480,8 +506,7 @@ impl NeteaseClient {
             self.base_url
         );
         let response = self
-            .http
-            .get(endpoint)
+            .apply_network_identity(self.http.get(endpoint))
             .send()
             .await
             .map_err(request_error)?;
@@ -662,23 +687,22 @@ impl NeteaseClient {
             params: &payload,
         };
         let plaintext = serde_json::to_string(&wrapper).map_err(json_error)?;
-        let response = self
-            .http
-            .post(format!("{}/api/linux/forward", self.web_base_url))
-            .header(header::USER_AGENT, LINUXAPI_USER_AGENT)
-            .header(
-                header::COOKIE,
-                weapi_cookie_header(
-                    self.cookie.as_deref(),
-                    &self.device_id,
-                    &self.web_client_id,
-                    path,
-                ),
-            )
-            .form(&[("eparams", encrypt_linuxapi(&plaintext))])
-            .send()
-            .await
-            .map_err(request_error)?;
+        let request = self.apply_network_identity(
+            self.http
+                .post(format!("{}/api/linux/forward", self.web_base_url))
+                .header(header::USER_AGENT, LINUXAPI_USER_AGENT)
+                .header(
+                    header::COOKIE,
+                    weapi_cookie_header(
+                        self.cookie.as_deref(),
+                        &self.device_id,
+                        &self.web_client_id,
+                        path,
+                    ),
+                )
+                .form(&[("eparams", encrypt_linuxapi(&plaintext))]),
+        );
+        let response = request.send().await.map_err(request_error)?;
         parse_response(response).await
     }
 
@@ -791,26 +815,27 @@ impl NeteaseClient {
         .map_err(|error| xeapi_crypto_error("encrypt request", error))?;
         let build_version = unix_time_seconds().to_string();
         let cookie = CookieValues::parse(self.cookie.as_deref());
-        let mut request = self
-            .http
-            .post(format!(
-                "{}/xeapi/{}",
-                self.xeapi_base_url,
-                path.trim_start_matches("/api/")
-            ))
-            .header(header::USER_AGENT, XEAPI_USER_AGENT)
-            .header("x-client-enc-state", "ENCRYPTED")
-            .header("x-aeapi", "true")
-            .header("x-deviceid", &self.device_id)
-            .header("x-os", "android")
-            .header("x-osver", "16")
-            .header("x-appver", "9.1.65")
-            .header("x-sdeviceid", &self.device_id)
-            .header("x-buildver", &build_version)
-            .header(
-                header::COOKIE,
-                xeapi_cookie_header(self.cookie.as_deref(), &self.device_id, &build_version),
-            );
+        let mut request = self.apply_network_identity(
+            self.http
+                .post(format!(
+                    "{}/xeapi/{}",
+                    self.xeapi_base_url,
+                    path.trim_start_matches("/api/")
+                ))
+                .header(header::USER_AGENT, XEAPI_USER_AGENT)
+                .header("x-client-enc-state", "ENCRYPTED")
+                .header("x-aeapi", "true")
+                .header("x-deviceid", &self.device_id)
+                .header("x-os", "android")
+                .header("x-osver", "16")
+                .header("x-appver", "9.1.65")
+                .header("x-sdeviceid", &self.device_id)
+                .header("x-buildver", &build_version)
+                .header(
+                    header::COOKIE,
+                    xeapi_cookie_header(self.cookie.as_deref(), &self.device_id, &build_version),
+                ),
+        );
         if let Some(music_u) = cookie.music_u {
             request = request.header("x-music-u", music_u);
         }
@@ -878,18 +903,17 @@ impl NeteaseClient {
             ("timestamp", timestamp),
             ("uid", String::new()),
         ];
-        let response = self
-            .http
-            .post(format!(
-                "{}/api/gorilla/anti/crawler/security/key/get",
-                self.base_url
-            ))
-            .header(header::USER_AGENT, XEAPI_USER_AGENT)
-            .header(header::COOKIE, format!("deviceId={}", self.device_id))
-            .form(&form)
-            .send()
-            .await
-            .map_err(request_error)?;
+        let request = self.apply_network_identity(
+            self.http
+                .post(format!(
+                    "{}/api/gorilla/anti/crawler/security/key/get",
+                    self.base_url
+                ))
+                .header(header::USER_AGENT, XEAPI_USER_AGENT)
+                .header(header::COOKIE, format!("deviceId={}", self.device_id))
+                .form(&form),
+        );
+        let response = request.send().await.map_err(request_error)?;
         let response = parse_response(response).await?;
         if response_code(&response.body) != Some(200) {
             return Err(TuneWeaveError::new(
@@ -1014,6 +1038,21 @@ impl NeteaseClient {
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
         has_authenticated_cookie(self.cookie.as_deref())
+    }
+
+    fn apply_network_identity(&self, request: RequestBuilder) -> RequestBuilder {
+        let ip = if self.random_cn_ip {
+            Some(random_chinese_ipv4())
+        } else {
+            self.real_ip
+        };
+        let Some(ip) = ip else {
+            return request;
+        };
+        let ip = ip.to_string();
+        request
+            .header("X-Real-IP", &ip)
+            .header("X-Forwarded-For", ip)
     }
 
     pub(crate) fn configured_cookie(&self) -> Option<&str> {
@@ -1515,6 +1554,31 @@ fn request_error(error: reqwest::Error) -> TuneWeaveError {
         .retryable(true)
 }
 
+fn configure_proxy(builder: ClientBuilder, proxy_url: Option<&str>) -> Result<ClientBuilder> {
+    let Some(proxy_url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(builder);
+    };
+    let url = Url::parse(proxy_url).map_err(|_| proxy_configuration_error())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err(proxy_configuration_error());
+    }
+    let proxy = Proxy::all(proxy_url).map_err(|_| proxy_configuration_error())?;
+    Ok(builder.proxy(proxy))
+}
+
+fn proxy_configuration_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::InvalidRequest,
+        "NetEase server proxy must be an HTTP(S) proxy URL without a path, query, or fragment",
+    )
+    .with_platform(Platform::Netease)
+}
+
 fn json_error(error: serde_json::Error) -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::InternalError,
@@ -1533,6 +1597,17 @@ fn generate_anonymous_device_id() -> String {
     (0..52)
         .map(|_| char::from(HEX[rand::random_range(0_usize..HEX.len())]))
         .collect()
+}
+
+fn random_chinese_ipv4() -> Ipv4Addr {
+    // Compact fallback range retained from the reference implementation. Keeping the generator
+    // avoids embedding its 4,000+ entry CIDR data file in TuneWeave's binary or package.
+    Ipv4Addr::new(
+        116,
+        rand::random_range(25_u8..=94),
+        rand::random_range(1_u8..=255),
+        rand::random_range(1_u8..=255),
+    )
 }
 
 fn anonymous_username(device_id: &str) -> String {
@@ -1763,6 +1838,9 @@ mod tests {
             config.anti_cheat_url,
             "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251"
         );
+        assert!(config.proxy_url.is_none());
+        assert!(config.real_ip.is_none());
+        assert!(!config.random_cn_ip);
 
         let cookie = xeapi_cookie_header(
             Some("MUSIC_U=account-session; os=pc"),
@@ -1774,6 +1852,123 @@ mod tests {
         assert!(cookie.contains("sDeviceId=device-id"));
         assert!(cookie.contains("buildver=1784194692"));
         assert!(cookie.contains("os=pc"));
+    }
+
+    #[test]
+    fn server_controlled_network_identity_sets_both_headers_without_client_input() {
+        let fixed = NeteaseClient::new(NeteaseConfig {
+            real_ip: Some(Ipv4Addr::new(116, 25, 1, 2)),
+            ..NeteaseConfig::default()
+        })
+        .expect("build fixed-IP client");
+        let request = fixed
+            .apply_network_identity(fixed.http.get("https://example.test/api"))
+            .build()
+            .expect("build fixed-IP request");
+        assert_eq!(request.headers()["X-Real-IP"], "116.25.1.2");
+        assert_eq!(request.headers()["X-Forwarded-For"], "116.25.1.2");
+
+        let plain = NeteaseClient::new(NeteaseConfig::default()).expect("build plain client");
+        let request = plain
+            .apply_network_identity(plain.http.get("https://example.test/api"))
+            .build()
+            .expect("build plain request");
+        assert!(!request.headers().contains_key("X-Real-IP"));
+        assert!(!request.headers().contains_key("X-Forwarded-For"));
+    }
+
+    #[tokio::test]
+    async fn fixed_network_identity_reaches_the_actual_platform_http_request() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept platform request");
+            let mut request = [0_u8; 16 * 1024];
+            let length = stream.read(&mut request).expect("read platform request");
+            let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+            assert!(request.contains("x-real-ip: 116.25.1.2\r\n"));
+            assert!(request.contains("x-forwarded-for: 116.25.1.2\r\n"));
+            let body = r#"{"code":200}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write platform response");
+        });
+        let client = NeteaseClient::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            real_ip: Some(Ipv4Addr::new(116, 25, 1, 2)),
+            ..NeteaseConfig::default()
+        })
+        .expect("build fixed-IP client");
+        let response = client
+            .request_api("/api/header/test", json!({"value": 1}))
+            .await
+            .expect("send fixed-IP platform request");
+        assert_eq!(response_code(&response.body), Some(200));
+        server.join().expect("join test server");
+    }
+
+    #[test]
+    fn compact_random_chinese_ip_generator_stays_inside_the_reference_fallback_range() {
+        let client = NeteaseClient::new(NeteaseConfig {
+            random_cn_ip: true,
+            ..NeteaseConfig::default()
+        })
+        .expect("build random-IP client");
+        for _ in 0..256 {
+            let request = client
+                .apply_network_identity(client.http.get("https://example.test/api"))
+                .build()
+                .expect("build random-IP request");
+            let real = request.headers()["X-Real-IP"]
+                .to_str()
+                .expect("ASCII IP header")
+                .parse::<Ipv4Addr>()
+                .expect("IPv4 header");
+            let forwarded = request.headers()["X-Forwarded-For"]
+                .to_str()
+                .expect("ASCII forwarded header");
+            assert_eq!(forwarded, real.to_string());
+            let octets = real.octets();
+            assert_eq!(octets[0], 116);
+            assert!((25..=94).contains(&octets[1]));
+            assert_ne!(octets[2], 0);
+            assert_ne!(octets[3], 0);
+        }
+    }
+
+    #[test]
+    fn network_identity_conflicts_and_unsafe_proxy_urls_fail_without_echoing_secrets() {
+        let conflict = NeteaseClient::new(NeteaseConfig {
+            real_ip: Some(Ipv4Addr::new(116, 25, 1, 2)),
+            random_cn_ip: true,
+            ..NeteaseConfig::default()
+        })
+        .err()
+        .expect("conflicting network identity");
+        assert_eq!(conflict.code, ErrorCode::InvalidRequest);
+
+        let proxy_secret = "super-secret-proxy-password";
+        let invalid = NeteaseClient::new(NeteaseConfig {
+            proxy_url: Some(format!(
+                "http://user:{proxy_secret}@proxy.example.test/unexpected-path"
+            )),
+            ..NeteaseConfig::default()
+        })
+        .err()
+        .expect("invalid proxy URL");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+        assert!(!format!("{invalid:?}").contains(proxy_secret));
+
+        NeteaseClient::new(NeteaseConfig {
+            proxy_url: Some("http://user:password@127.0.0.1:8080".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .expect("valid server proxy configuration");
     }
 
     #[test]
