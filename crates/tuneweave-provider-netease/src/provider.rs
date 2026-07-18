@@ -4336,6 +4336,28 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
                 json!({ "limit": request.limit, "offset": request.offset }),
             ))
         }
+        PodcastCatalog::Personalized => {
+            if request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase personalized podcast catalog does not accept category_id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(
+                    json!({ "catalog": request.catalog, "category_id": request.category_id }),
+                ));
+            }
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase personalized podcast catalog is a head recommendation and requires offset=0",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "catalog": request.catalog, "offset": request.offset })));
+            }
+            Ok((
+                "/api/djradio/personalize/rcmd",
+                json!({ "limit": request.limit }),
+            ))
+        }
         catalog => Err(TuneWeaveError::invalid_request(format!(
             "unsupported NetEase podcast catalog: {}",
             podcast_catalog_name(catalog)
@@ -4805,11 +4827,14 @@ fn map_netease_podcast_catalog_response(
     request: &PodcastListRequest,
 ) -> Result<Page<Podcast>> {
     ensure_success(&body)?;
-    let raw_items = body
-        .get("djRadios")
+    let (raw_items, container) = match request.catalog {
+        PodcastCatalog::Personalized => (body.get("data"), "data array"),
+        _ => (body.get("djRadios"), "djRadios array"),
+    };
+    let raw_items = raw_items
         .and_then(Value::as_array)
         .cloned()
-        .ok_or_else(|| podcast_item_error("djRadios array", &body))?;
+        .ok_or_else(|| podcast_item_error(container, &body))?;
     let items = raw_items
         .into_iter()
         .map(map_netease_podcast)
@@ -4832,6 +4857,7 @@ fn map_netease_podcast_catalog_response(
                 });
             (total, has_more.then_some(candidate_offset), has_more, true)
         }
+        PodcastCatalog::Personalized => (None, None, false, true),
         catalog => {
             return Err(TuneWeaveError::invalid_request(format!(
                 "unsupported NetEase podcast catalog response: {}",
@@ -13897,6 +13923,12 @@ mod tests {
             netease_podcast_catalog_request(&featured_request).expect("featured podcast request"),
             ("/api/djradio/recommend/v1", json!({}))
         );
+        let personalized_request = PodcastListRequest::new(PodcastCatalog::Personalized, 6, 0);
+        assert_eq!(
+            netease_podcast_catalog_request(&personalized_request)
+                .expect("personalized podcast request"),
+            ("/api/djradio/personalize/rcmd", json!({"limit": 6}))
+        );
         assert_eq!(
             netease_podcast_request(336_355_127),
             ("/api/djradio/v2/get", json!({"id": 336_355_127}))
@@ -13930,7 +13962,8 @@ mod tests {
             PodcastListRequest::new(PodcastCatalog::Hot, 0, 0),
             PodcastListRequest::new(PodcastCatalog::Hot, 101, 0),
             PodcastListRequest::new(PodcastCatalog::Featured, 20, 1),
-            PodcastListRequest::new(PodcastCatalog::Personalized, 20, 0),
+            PodcastListRequest::new(PodcastCatalog::Personalized, 20, 1),
+            PodcastListRequest::new(PodcastCatalog::TodayPreferred, 20, 0),
         ] {
             assert_eq!(
                 netease_podcast_catalog_request(&invalid)
@@ -13952,6 +13985,15 @@ mod tests {
         assert_eq!(
             netease_podcast_catalog_request(&category_featured)
                 .expect_err("featured catalog rejects category")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let mut category_personalized =
+            PodcastListRequest::new(PodcastCatalog::Personalized, 20, 0);
+        category_personalized.category_id = Some("2".to_owned());
+        assert_eq!(
+            netease_podcast_catalog_request(&category_personalized)
+                .expect_err("personalized catalog rejects category")
                 .code,
             ErrorCode::InvalidRequest
         );
@@ -14017,7 +14059,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_hot_and_featured_podcast_catalogs_without_losing_fields_or_pagination() {
+    fn maps_podcast_catalog_variants_without_losing_fields_or_pagination() {
         let request = PodcastListRequest::new(PodcastCatalog::Hot, 2, 4);
         let page = map_netease_podcast_catalog_response(
             json!({
@@ -14085,6 +14127,31 @@ mod tests {
             featured.pagination.extensions["response"]["name"],
             "精选电台 - 谈情说爱"
         );
+
+        let personalized_request = PodcastListRequest::new(PodcastCatalog::Personalized, 2, 0);
+        let personalized = map_netease_podcast_catalog_response(
+            json!({
+                "code": 200,
+                "data": [
+                    fixture_podcast_radio(792_734_685, "张家旺"),
+                    fixture_podcast_radio(794_532_838, "火羊瞌睡了")
+                ]
+            }),
+            &personalized_request,
+        )
+        .expect("map personalized podcast recommendations");
+        assert_eq!(personalized.items.len(), 2);
+        assert_eq!(personalized.pagination.limit, 2);
+        assert_eq!(personalized.pagination.offset, 0);
+        assert_eq!(personalized.pagination.total, None);
+        assert_eq!(personalized.pagination.next_offset, None);
+        assert!(!personalized.pagination.has_more);
+        assert_eq!(
+            personalized.pagination.extensions["catalog"],
+            "personalized"
+        );
+        assert_eq!(personalized.pagination.extensions["returned_count"], 2);
+        assert_eq!(personalized.pagination.extensions["limit_applied"], true);
 
         let empty = map_netease_podcast_catalog_response(
             json!({"code": 200, "djRadios": [], "hasMore": true}),
@@ -19506,6 +19573,27 @@ mod tests {
         assert_eq!(page.pagination.next_offset, None);
         assert_eq!(page.pagination.extensions["catalog"], "featured");
         assert_eq!(page.pagination.extensions["limit_applied"], false);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_personalized_podcast_catalog() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = PodcastListRequest::new(PodcastCatalog::Personalized, 3, 0);
+        let page = MusicProvider::podcasts(&provider, &request)
+            .await
+            .expect("live public personalized podcasts");
+        assert_eq!(page.items.len(), 3);
+        assert!(page.items.iter().all(|podcast| {
+            !podcast.id.is_empty() && !podcast.name.is_empty() && podcast.cover_url.is_some()
+        }));
+        assert_eq!(page.pagination.total, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, None);
+        assert_eq!(page.pagination.extensions["catalog"], "personalized");
+        assert_eq!(page.pagination.extensions["returned_count"], 3);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
         assert_eq!(page.pagination.extensions["response"]["code"], 200);
     }
 
