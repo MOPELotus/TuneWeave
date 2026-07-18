@@ -37,6 +37,7 @@ pub enum Capability {
     PodcastEpisodeList,
     PodcastEpisodeCharts,
     PodcastEpisodeDetail,
+    PodcastEpisodeWorkbenchDetail,
     PodcastEpisodeStream,
     PodcastEpisodeLyrics,
     TrackDetail,
@@ -234,6 +235,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::PodcastEpisodeDetail).expect("serialize capability"),
             serde_json::json!("podcast_episode_detail")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeWorkbenchDetail)
+                .expect("serialize capability"),
+            serde_json::json!("podcast_episode_workbench_detail")
         );
         assert_eq!(
             serde_json::to_value(Capability::PodcastEpisodeStream).expect("serialize capability"),

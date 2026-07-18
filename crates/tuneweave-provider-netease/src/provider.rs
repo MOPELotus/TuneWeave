@@ -420,6 +420,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeList,
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeDetail,
+            Capability::PodcastEpisodeWorkbenchDetail,
             Capability::PodcastEpisodeStream,
             Capability::PodcastEpisodeLyrics,
             Capability::TrackDetail,
@@ -898,6 +899,19 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_episode_request(id);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_episode_response(response.body)
+    }
+
+    async fn podcast_episode_workbench(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<PodcastEpisode> {
+        let id = parse_numeric_id("podcast voice", id)?;
+        let client = self.client_for(account)?;
+        require_authenticated_client(&client, "podcast voice detail")?;
+        let (path, payload) = netease_podcast_episode_workbench_request(id);
+        let response = client.request_eapi(path, payload).await?;
+        map_netease_podcast_episode_workbench_response(response.body)
     }
 
     async fn podcast_episode_stream(
@@ -4736,6 +4750,10 @@ fn netease_podcast_episode_request(id: u64) -> (&'static str, Value) {
     ("/api/dj/program/detail", json!({ "id": id }))
 }
 
+fn netease_podcast_episode_workbench_request(id: u64) -> (&'static str, Value) {
+    ("/api/voice/workbench/voice/detail", json!({ "id": id }))
+}
+
 fn netease_podcast_episode_lyrics_request(id: u64) -> (&'static str, Value) {
     ("/api/voice/lyric/get", json!({ "programId": id }))
 }
@@ -5688,6 +5706,32 @@ fn map_netease_podcast_episode_response(body: Value) -> Result<PodcastEpisode> {
     Ok(episode)
 }
 
+fn map_netease_podcast_episode_workbench_response(body: Value) -> Result<PodcastEpisode> {
+    ensure_success(&body)?;
+    let mut first_mapping_error = None;
+    for raw in [
+        body.pointer("/data/voice"),
+        body.get("data"),
+        body.get("voice"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+    {
+        match map_netease_podcast_episode(raw.clone()) {
+            Ok(mut episode) => {
+                episode
+                    .extensions
+                    .insert("workbench_response".to_owned(), body.clone());
+                return Ok(episode);
+            }
+            Err(error) if first_mapping_error.is_none() => first_mapping_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    Err(first_mapping_error.unwrap_or_else(|| podcast_item_error("workbench voice data", &body)))
+}
+
 fn map_netease_podcast_episode_stream(
     episode: PodcastEpisode,
     stream: MediaStream,
@@ -5844,11 +5888,11 @@ fn podcast_lyrics_error(field: &str, raw: &Value) -> TuneWeaveError {
 }
 
 fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
-    let id = raw
-        .get("id")
-        .and_then(json_scalar_string)
+    let id = ["id", "voiceId", "programId"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(usable_resource_id))
         .ok_or_else(|| podcast_item_error("program id", &raw))?;
-    let name = radio_text_field(&raw, &["name", "title"])
+    let name = radio_text_field(&raw, &["name", "title", "songName"])
         .ok_or_else(|| podcast_item_error("program name", &raw))?;
     let reference = ResourceRef::new(Platform::Netease, &id).map_err(|error| {
         TuneWeaveError::new(
@@ -5861,7 +5905,12 @@ fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
     let podcast_ref = raw
         .get("radio")
         .and_then(|radio| radio.get("id"))
-        .and_then(json_scalar_string)
+        .and_then(usable_resource_id)
+        .or_else(|| {
+            ["radioId", "voiceListId"]
+                .into_iter()
+                .find_map(|field| raw.get(field).and_then(usable_resource_id))
+        })
         .map(|id| ResourceRef::new(Platform::Netease, id))
         .transpose()
         .map_err(|error| {
@@ -5872,7 +5921,9 @@ fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
             .with_platform(Platform::Netease)
             .with_details(json!({ "item": raw }))
         })?;
-    let main_track_id = raw.get("mainTrackId").and_then(json_scalar_string);
+    let main_track_id = ["mainTrackId", "songId", "trackId"]
+        .into_iter()
+        .find_map(|field| raw.get(field).and_then(usable_resource_id));
     let mut audio = raw
         .get("mainSong")
         .filter(|song| song.is_object())
@@ -5906,30 +5957,33 @@ fn map_netease_podcast_episode(raw: Value) -> Result<PodcastEpisode> {
             .with_platform(Platform::Netease)
         })?;
         let mut fallback = Track::new(audio_ref, name.clone());
-        fallback.duration_ms = podcast_positive_u64_field(&raw, &["duration"]);
+        fallback.duration_ms = podcast_positive_u64_field(&raw, &["duration", "durationMs"]);
         audio = Some(fallback);
     }
 
     let mut episode = PodcastEpisode::new(reference, name);
     episode.podcast_ref = podcast_ref;
     episode.description =
-        radio_text_field(&raw, &["description", "programDesc"]).unwrap_or_default();
-    episode.cover_url = radio_text_field(&raw, &["coverUrl", "blurCoverUrl"]);
-    episode.creator = map_podcast_creator(raw.get("dj"))?;
-    episode.duration_ms = podcast_positive_u64_field(&raw, &["duration"])
+        radio_text_field(&raw, &["description", "programDesc", "desc"]).unwrap_or_default();
+    episode.cover_url = radio_text_field(&raw, &["coverUrl", "blurCoverUrl", "coverImgUrl"]);
+    episode.creator = match map_podcast_creator(raw.get("dj"))? {
+        Some(creator) => Some(creator),
+        None => map_podcast_creator(raw.get("creator"))?,
+    };
+    episode.duration_ms = podcast_positive_u64_field(&raw, &["duration", "durationMs"])
         .or_else(|| audio.as_ref().and_then(|audio| audio.duration_ms));
     episode.audio = audio;
     episode.published_at =
-        podcast_positive_u64_field(&raw, &["createTime", "scheduledPublishTime"])
+        podcast_positive_u64_field(&raw, &["createTime", "scheduledPublishTime", "publishTime"])
             .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
-    episode.serial_number = podcast_u64_field(&raw, &["serialNum", "seqNo"]);
+    episode.serial_number = podcast_u64_field(&raw, &["serialNum", "seqNo", "orderNo"]);
     episode.listener_count = podcast_u64_field(&raw, &["listenerCount", "playCount"]);
     episode.liked_count = podcast_u64_field(&raw, &["likedCount"]);
     episode.comment_count = podcast_u64_field(&raw, &["commentCount"]);
     episode.share_count = podcast_u64_field(&raw, &["shareCount"]);
     episode.subscribed = radio_bool_field(&raw, &["subscribed"]);
     episode.has_lyrics = radio_bool_field(&raw, &["existLyric"]);
-    episode.paid = podcast_paid_field(&raw, &["programFeeType", "feeScope"]);
+    episode.paid = podcast_paid_field(&raw, &["programFeeType", "feeScope", "voiceFeeType"]);
     episode.purchased = radio_bool_field(&raw, &["buyed", "buyedNew", "purchased"]);
     episode.extensions.insert("program".to_owned(), raw);
     Ok(episode)
@@ -14996,6 +15050,13 @@ mod tests {
             ("/api/dj/program/detail", json!({"id": 1_367_665_101}))
         );
         assert_eq!(
+            netease_podcast_episode_workbench_request(2_058_695_201),
+            (
+                "/api/voice/workbench/voice/detail",
+                json!({"id": 2_058_695_201})
+            )
+        );
+        assert_eq!(
             netease_podcast_episode_lyrics_request(1_367_665_101),
             ("/api/voice/lyric/get", json!({"programId": 1_367_665_101}))
         );
@@ -15598,6 +15659,102 @@ mod tests {
             .expect("recover podcast timing from richer fallback fields");
         assert_eq!(recovered.duration_ms, Some(258_000));
         assert_eq!(recovered.published_at, unix_rfc3339(1_704_067_200));
+    }
+
+    #[test]
+    fn maps_workbench_voice_detail_aliases_without_lower_priority_overrides() {
+        let episode = map_netease_podcast_episode_workbench_response(json!({
+            "code": 200,
+            "data": {
+                "id": 0,
+                "name": "低优先级包装",
+                "voice": {
+                    "voiceId": 2_058_695_201_u64,
+                    "songName": "工作台声音",
+                    "desc": "工作台介绍",
+                    "coverImgUrl": "https://example.test/workbench.jpg",
+                    "radioId": 336_355_127,
+                    "songId": 1_336_048_748,
+                    "durationMs": 61_250,
+                    "publishTime": 1_704_067_200_000_u64,
+                    "orderNo": 7,
+                    "playCount": 456,
+                    "voiceFeeType": 1,
+                    "creator": {
+                        "id": 32_953_014,
+                        "name": "主播",
+                        "avatarUrl": "https://example.test/avatar.jpg"
+                    },
+                    "displayStatus": "ONLINE",
+                    "futureField": {"preserved": true}
+                }
+            }
+        }))
+        .expect("map workbench voice detail");
+
+        assert_eq!(episode.resource_ref.to_string(), "netease:2058695201");
+        assert_eq!(episode.name, "工作台声音");
+        assert_eq!(
+            episode
+                .podcast_ref
+                .as_ref()
+                .expect("workbench podcast reference")
+                .to_string(),
+            "netease:336355127"
+        );
+        assert_eq!(
+            episode
+                .audio
+                .as_ref()
+                .expect("workbench audio reference")
+                .resource_ref
+                .to_string(),
+            "netease:1336048748"
+        );
+        assert_eq!(episode.duration_ms, Some(61_250));
+        assert_eq!(episode.serial_number, Some(7));
+        assert_eq!(episode.listener_count, Some(456));
+        assert_eq!(episode.paid, Some(true));
+        assert_eq!(
+            episode
+                .creator
+                .as_ref()
+                .map(|creator| creator.name.as_str()),
+            Some("主播")
+        );
+        assert_eq!(episode.extensions["program"]["displayStatus"], "ONLINE");
+        assert_eq!(
+            episode.extensions["program"]["futureField"]["preserved"],
+            true
+        );
+        assert_eq!(episode.extensions["workbench_response"]["code"], 200);
+
+        let fallback = map_netease_podcast_episode_workbench_response(json!({
+            "code": 200,
+            "data": {
+                "voice": {"songName": "无效嵌套摘要"},
+                "voiceId": 2_058_695_202_u64,
+                "songName": "有效直接详情",
+                "radioId": 336_355_127,
+                "songId": 1_336_048_749
+            }
+        }))
+        .expect("fall back after an invalid preferred wrapper");
+        assert_eq!(fallback.resource_ref.to_string(), "netease:2058695202");
+        assert_eq!(fallback.name, "有效直接详情");
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": {}}),
+            json!({"code": 200, "data": {"voice": {"songName": "缺少 ID"}}}),
+        ] {
+            assert_eq!(
+                map_netease_podcast_episode_workbench_response(invalid)
+                    .expect_err("invalid workbench voice response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
@@ -20560,6 +20717,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
         assert!(capabilities.contains(&Capability::PodcastEpisodeLyrics));
     }
@@ -20825,6 +20983,17 @@ mod tests {
         .await
         .expect_err("missing account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn podcast_workbench_detail_requires_a_logged_in_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for account in [None, Some("missing")] {
+            let error = MusicProvider::podcast_episode_workbench(&provider, "2058695201", account)
+                .await
+                .expect_err("workbench voice detail requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
     }
 
     #[tokio::test]

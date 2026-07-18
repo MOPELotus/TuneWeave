@@ -1210,18 +1210,63 @@ async fn podcast_episodes(
     Ok(Json(response))
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PodcastEpisodeDetailBackend {
+    #[default]
+    Default,
+    Workbench,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastEpisodeParams {
+    account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
+}
+
+fn parse_podcast_episode_detail_backend(
+    value: Option<&str>,
+) -> Result<PodcastEpisodeDetailBackend, TuneWeaveError> {
+    match value
+        .unwrap_or("default")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "default" | "program" | "dj" => Ok(PodcastEpisodeDetailBackend::Default),
+        "workbench" | "voice" | "creator" => Ok(PodcastEpisodeDetailBackend::Workbench),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode detail backend: {value}"
+        ))
+        .with_details(json!({ "allowed": ["default", "workbench"] }))),
+    }
+}
+
 async fn podcast_episode(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<AccountParams>,
+    params: Result<Query<PodcastEpisodeParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<PodcastEpisode>>, ApiError> {
+    let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
+    let backend = parse_podcast_episode_detail_backend(params.backend.as_deref())?;
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
-    let episode = provider
-        .podcast_episode(reference.id(), account.as_deref())
-        .await?;
+    let episode = match backend {
+        PodcastEpisodeDetailBackend::Default => {
+            provider
+                .podcast_episode(reference.id(), account.as_deref())
+                .await?
+        }
+        PodcastEpisodeDetailBackend::Workbench => {
+            provider
+                .podcast_episode_workbench(reference.id(), account.as_deref())
+                .await?
+        }
+    };
     let mut response = ApiResponse::new(episode).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
@@ -7124,6 +7169,7 @@ mod tests {
                 Capability::PodcastEpisodeList,
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeDetail,
+                Capability::PodcastEpisodeWorkbenchDetail,
                 Capability::PodcastEpisodeStream,
                 Capability::PodcastEpisodeLyrics,
                 Capability::TrackDetail,
@@ -7846,6 +7892,21 @@ mod tests {
                     .extensions
                     .insert("account".to_owned(), json!(account));
             }
+            Ok(episode)
+        }
+
+        async fn podcast_episode_workbench(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<PodcastEpisode> {
+            let mut episode = sample_podcast_episode(id, "336355127", "2603965162");
+            episode
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            episode
+                .extensions
+                .insert("detail_backend".to_owned(), json!("workbench"));
             Ok(episode)
         }
 
@@ -11421,6 +11482,17 @@ mod tests {
         assert_eq!(episode["data"]["extensions"]["account"], "podcast-user");
         assert_eq!(episode["meta"]["platform"], "netease");
         assert_eq!(episode["meta"]["account"], "podcast-user");
+
+        let (status, voice) = json_response_from(
+            test_app_with_provider(),
+            "/v1/episodes/netease:2058695201?backend=workbench&account=studio-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(voice["data"]["ref"], "netease:2058695201");
+        assert_eq!(voice["data"]["extensions"]["detail_backend"], "workbench");
+        assert_eq!(voice["data"]["extensions"]["account"], "studio-user");
+        assert_eq!(voice["meta"]["account"], "studio-user");
     }
 
     #[tokio::test]
@@ -11667,6 +11739,8 @@ mod tests {
             "/v1/episodes?catalog=popular&platform=unknown",
             "/v1/podcasts/336355127",
             "/v1/episodes/1367665101",
+            "/v1/episodes/netease:1367665101?backend=unknown",
+            "/v1/episodes/netease:1367665101?unknown=true",
             "/v1/episodes/1367665101/lyrics",
             "/v1/episodes/netease:1367665101/lyrics?unknown=true",
             "/v1/podcasts/netease:336355127/episodes?limit=0",
