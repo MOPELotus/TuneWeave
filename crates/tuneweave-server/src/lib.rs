@@ -4009,6 +4009,8 @@ async fn user_favorite_tracks(
 #[serde(deny_unknown_fields)]
 struct UserMembershipParams {
     account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4016,6 +4018,32 @@ struct UserMembershipParams {
 struct AccountMembershipParams {
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MembershipBackend {
+    #[default]
+    Front,
+    Client,
+}
+
+fn parse_membership_backend(value: Option<&str>) -> Result<MembershipBackend, TuneWeaveError> {
+    match value
+        .unwrap_or("front")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "default" | "front" | "public" | "v1" => Ok(MembershipBackend::Front),
+        "client" | "detail" | "v2" => Ok(MembershipBackend::Client),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported membership backend: {value}"
+        ))
+        .with_details(json!({ "allowed": ["front", "client"] }))),
+    }
 }
 
 async fn user_membership(
@@ -4027,10 +4055,20 @@ async fn user_membership(
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
     let account = account_alias(params.account.as_deref())?;
+    let backend = parse_membership_backend(params.backend.as_deref())?;
     let provider = state.registry.require(platform)?;
-    let membership = provider
-        .user_membership(Some(reference.id()), Some(&account))
-        .await?;
+    let membership = match backend {
+        MembershipBackend::Front => {
+            provider
+                .user_membership(Some(reference.id()), Some(&account))
+                .await?
+        }
+        MembershipBackend::Client => {
+            provider
+                .user_membership_client_info(Some(reference.id()), Some(&account))
+                .await?
+        }
+    };
     Ok(Json(
         ApiResponse::new(membership)
             .with_platform(platform)
@@ -4045,8 +4083,16 @@ async fn account_membership(
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
+    let backend = parse_membership_backend(params.backend.as_deref())?;
     let provider = state.registry.require(platform)?;
-    let membership = provider.user_membership(None, Some(&account)).await?;
+    let membership = match backend {
+        MembershipBackend::Front => provider.user_membership(None, Some(&account)).await?,
+        MembershipBackend::Client => {
+            provider
+                .user_membership_client_info(None, Some(&account))
+                .await?
+        }
+    };
     Ok(Json(
         ApiResponse::new(membership)
             .with_platform(platform)
@@ -7653,6 +7699,28 @@ mod tests {
                 expires_at: None,
                 icon_url: None,
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn user_membership_client_info(
+            &self,
+            id: Option<&str>,
+            account: Option<&str>,
+        ) -> Result<MembershipSummary> {
+            Ok(MembershipSummary {
+                user_ref: id
+                    .map(|id| ResourceRef::new(Platform::Netease, id))
+                    .transpose()
+                    .expect("valid mock client membership user reference"),
+                level: Some(7),
+                active: Some(true),
+                annual_count: Some(1),
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+                icon_url: Some("https://example.test/vip.png".to_owned()),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    ("backend".to_owned(), json!("client")),
+                ]),
             })
         }
 
@@ -15150,12 +15218,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn membership_endpoints_expose_the_authenticated_client_backend_explicitly() {
+        let (status, public) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014/membership?backend=client&account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(public["data"]["user_ref"], "netease:32953014");
+        assert_eq!(public["data"]["active"], true);
+        assert_eq!(public["data"]["expires_at"], "2030-01-01T00:00:00Z");
+        assert_eq!(public["data"]["extensions"]["backend"], "client");
+        assert_eq!(public["meta"]["account"], "viewer");
+
+        let (status, current) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/membership?platform=netease&account=vip-user&source=v2",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(current["data"]["user_ref"].is_null());
+        assert_eq!(current["data"]["icon_url"], "https://example.test/vip.png");
+        assert_eq!(current["data"]["extensions"]["backend"], "client");
+        assert_eq!(current["meta"]["account"], "vip-user");
+    }
+
+    #[tokio::test]
     async fn membership_endpoints_reject_bad_references_platforms_and_query_fields() {
         for path in [
             "/v1/users/invalid/membership",
             "/v1/users/netease:32953014/membership?platform=netease",
+            "/v1/users/netease:32953014/membership?backend=legacy-client",
             "/v1/users/netease:32953014/membership?unknown=true",
             "/v1/account/membership?platform=unknown",
+            "/v1/account/membership?backend=legacy-client",
             "/v1/account/membership?unknown=true",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;

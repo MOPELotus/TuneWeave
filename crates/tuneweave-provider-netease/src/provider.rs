@@ -406,6 +406,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchMultiMatch,
             Capability::SearchLocalTrackMatch,
             Capability::UserMembership,
+            Capability::UserMembershipClientInfo,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -678,6 +679,24 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_weapi(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_user_membership(id, response.body)
+    }
+
+    async fn user_membership_client_info(
+        &self,
+        id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<MembershipSummary> {
+        let id = id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| parse_numeric_id("user", id))
+            .transpose()?;
+        let client = self.client_for(account)?;
+        require_authenticated_client(&client, "client VIP information")?;
+        let (path, payload) = netease_user_membership_client_request(id);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_netease_user_membership_client(id, response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -11951,6 +11970,13 @@ fn netease_user_membership_request(id: Option<u64>) -> (&'static str, Value) {
     )
 }
 
+fn netease_user_membership_client_request(id: Option<u64>) -> (&'static str, Value) {
+    (
+        "/api/music-vip-membership/client/vip/info",
+        json!({ "userId": id.map(|id| id.to_string()).unwrap_or_default() }),
+    )
+}
+
 fn map_netease_user_membership(id: Option<u64>, response: Value) -> Result<MembershipSummary> {
     let data = response
         .get("data")
@@ -12001,6 +12027,111 @@ fn map_netease_user_membership(id: Option<u64>, response: Value) -> Result<Membe
         expires_at: None,
         icon_url,
         extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+fn map_netease_user_membership_client(
+    requested_id: Option<u64>,
+    response: Value,
+) -> Result<MembershipSummary> {
+    const PACKAGE_FIELDS: [&str; 5] = [
+        "redplus",
+        "musicPackage",
+        "associator",
+        "voiceBookVip",
+        "albumVip",
+    ];
+
+    let data = response
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase client membership response is missing its data object",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response }))
+        })?;
+    let package_objects = PACKAGE_FIELDS
+        .iter()
+        .filter_map(|field| data.get(field).filter(|value| value.is_object()))
+        .collect::<Vec<_>>();
+    let level = data
+        .get("redVipLevel")
+        .and_then(json_u64)
+        .or_else(|| {
+            package_objects
+                .iter()
+                .filter_map(|package| package.get("vipLevel").and_then(json_u64))
+                .max()
+        })
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase client membership level exceeds the supported range",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "level": data.get("redVipLevel") }))
+        })?;
+    let annual_count = data.get("redVipAnnualCount").and_then(json_i64);
+    let expiration_millis = package_objects
+        .iter()
+        .filter_map(|package| package.get("expireTime").and_then(json_u64))
+        .filter(|expires_at| *expires_at > 0)
+        .max();
+    let now_millis = data.get("now").and_then(json_u64);
+    let active = match (expiration_millis, now_millis) {
+        (Some(expires_at), Some(now)) => Some(expires_at > now),
+        _ => level.map(|level| level > 0),
+    };
+    let expires_at = expiration_millis
+        .map(|timestamp| {
+            if timestamp > 10_000_000_000 {
+                timestamp / 1_000
+            } else {
+                timestamp
+            }
+        })
+        .and_then(unix_rfc3339);
+    let icon_url = data
+        .get("redVipLevelIcon")
+        .and_then(Value::as_str)
+        .into_iter()
+        .chain(package_objects.iter().flat_map(|package| {
+            ["dynamicIconUrl", "iconUrl"]
+                .into_iter()
+                .filter_map(|field| package.get(field).and_then(Value::as_str))
+        }))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned);
+    let user_id =
+        requested_id.or_else(|| data.get("userId").and_then(json_u64).filter(|id| *id > 0));
+    let user_ref = user_id
+        .map(|id| ResourceRef::new(Platform::Netease, id.to_string()))
+        .transpose()
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid client membership user id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+
+    Ok(MembershipSummary {
+        user_ref,
+        level,
+        active,
+        annual_count,
+        expires_at,
+        icon_url,
+        extensions: Extensions::from([
+            ("backend".to_owned(), json!("client")),
+            ("response".to_owned(), response),
+        ]),
     })
 }
 
@@ -13228,6 +13359,158 @@ mod tests {
     }
 
     #[test]
+    fn client_membership_uses_the_v2_request_and_preserves_package_details() {
+        assert_eq!(
+            netease_user_membership_client_request(Some(32_953_014)),
+            (
+                "/api/music-vip-membership/client/vip/info",
+                json!({"userId": "32953014"})
+            )
+        );
+        assert_eq!(
+            netease_user_membership_client_request(None),
+            (
+                "/api/music-vip-membership/client/vip/info",
+                json!({"userId": ""})
+            )
+        );
+
+        let membership = map_netease_user_membership_client(
+            None,
+            json!({
+                "code": 200,
+                "data": {
+                    "userId": 32953014,
+                    "now": 1700000000000_u64,
+                    "redVipLevel": 7,
+                    "redVipAnnualCount": 1,
+                    "redplus": {
+                        "vipCode": 300,
+                        "vipLevel": 7,
+                        "expireTime": 1893456000000_u64,
+                        "dynamicIconUrl": "",
+                        "iconUrl": null
+                    },
+                    "musicPackage": {
+                        "vipCode": 230,
+                        "vipLevel": 7,
+                        "expireTime": 1893456000000_u64,
+                        "dynamicIconUrl": "https://example.test/dynamic-vip.png"
+                    },
+                    "associator": {
+                        "vipCode": 100,
+                        "vipLevel": 7,
+                        "expireTime": 1893456000000_u64
+                    },
+                    "voiceBookVip": {
+                        "vipCode": 210,
+                        "vipLevel": 1,
+                        "expireTime": 0
+                    },
+                    "albumVip": {
+                        "vipCode": 400,
+                        "vipLevel": 0,
+                        "expireTime": 0
+                    }
+                }
+            }),
+        )
+        .expect("map client membership");
+        assert_eq!(
+            membership
+                .user_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("netease:32953014")
+        );
+        assert_eq!(membership.level, Some(7));
+        assert_eq!(membership.active, Some(true));
+        assert_eq!(membership.annual_count, Some(1));
+        assert_eq!(
+            membership.expires_at.as_deref(),
+            Some("2030-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            membership.icon_url.as_deref(),
+            Some("https://example.test/dynamic-vip.png")
+        );
+        assert_eq!(membership.extensions["backend"], "client");
+        assert_eq!(
+            membership.extensions["response"]["data"]["musicPackage"]["vipCode"],
+            230
+        );
+
+        let expired = map_netease_user_membership_client(
+            Some(1),
+            json!({
+                "code": 200,
+                "data": {
+                    "now": 1893456000001_u64,
+                    "musicPackage": {
+                        "vipLevel": 3,
+                        "expireTime": 1893456000000_u64,
+                        "iconUrl": "https://example.test/static-vip.png"
+                    }
+                }
+            }),
+        )
+        .expect("map expired client membership");
+        assert_eq!(expired.level, Some(3));
+        assert_eq!(expired.active, Some(false));
+        assert_eq!(
+            expired.user_ref.expect("requested user ref").to_string(),
+            "netease:1"
+        );
+
+        let seconds = map_netease_user_membership_client(
+            Some(2),
+            json!({
+                "code": 200,
+                "data": {
+                    "now": 1700000000_u64,
+                    "redVipLevel": 1,
+                    "associator": {"expireTime": 1893456000_u64}
+                }
+            }),
+        )
+        .expect("map second precision client membership");
+        assert_eq!(seconds.active, Some(true));
+        assert_eq!(seconds.expires_at.as_deref(), Some("2030-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn client_membership_rejects_missing_data_and_out_of_range_levels() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": []}),
+            json!({"code": 200, "data": {"redVipLevel": 4294967296_u64}}),
+            json!({
+                "code": 200,
+                "data": {"musicPackage": {"vipLevel": 4294967296_u64}}
+            }),
+        ] {
+            assert_eq!(
+                map_netease_user_membership_client(Some(1), response)
+                    .expect_err("malformed client membership")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_membership_requires_the_selected_logged_in_account_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for (id, account) in [(Some("32953014"), None), (None, Some("missing"))] {
+            let error = MusicProvider::user_membership_client_info(&provider, id, account)
+                .await
+                .expect_err("client membership should require authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[test]
     fn catalog_search_variants_match_both_reference_protocols() {
         let mut query = SearchQuery::tracks("周杰伦", 2, 3);
         query.variant = SearchVariant::Legacy;
@@ -13716,6 +13999,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::SearchMultiMatch));
         assert!(capabilities.contains(&Capability::SearchLocalTrackMatch));
         assert!(capabilities.contains(&Capability::UserMembership));
+        assert!(capabilities.contains(&Capability::UserMembershipClientInfo));
     }
 
     #[test]

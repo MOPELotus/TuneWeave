@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=249`、`partial=3`、`implemented=59`、`verified=96`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=248`、`partial=3`、`implemented=60`、`verified=96`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -390,7 +390,7 @@
 | `vip_growthpoint_get` | `/vip/growthpoint/get` | `pending` | — |
 | `vip_growthpoint_getall` | `/vip/growthpoint/getall` | `pending` | — |
 | `vip_info` | `/vip/info` | `verified` | `GET /v1/users/{ref}/membership`、`GET /v1/account/membership`（统一 `MembershipSummary` 稳定表达用户引用、等级、激活态、年费次数、到期时间和图标，平台未明确提供的 `active/expires_at` 保持 `null` 而不按等级猜测；公开用户引用决定平台，当前账户由 `platform/account` 选择，完整覆盖参考 `uid` 指定用户和缺省空字符串两分支；固定 WeAPI `/api/music-vip-membership/front/vip/info` 并精确提交字符串 `userId`，映射 `redVipLevel/redVipAnnualCount/redVipLevelIcon`，动态图标和完整响应保留在扩展；核心可空契约、双协议负载、成功/畸形/数值越界、能力发现、公开/账户端点、默认选择和输入拒绝均有测试；2026-07-17 显式 provider 联网测试及真实二进制 HTTP 验证公开用户 `netease:32953014` 返回上游 `code=200`、等级 7、年费次数 -1，省略 `uid` 的当前账户匿名分支稳定返回 401 `authentication_required` 与上游码 301） |
-| `vip_info_v2` | `/vip/info/v2` | `pending` | — |
+| `vip_info_v2` | `/vip/info/v2` | `implemented` | `GET /v1/users/{ref}/membership?backend=client`、`GET /v1/account/membership?backend=client`（以显式后端和独立 `UserMembershipClientInfo` 能力与公开 `vip_info` 分开，不静默回退；兼容 `variant/source` 字段及 `detail/v2` 值；固定 WeAPI `/api/music-vip-membership/client/vip/info`，精确提交指定用户字符串 ID 或当前账户空字符串，并在请求前要求所选 `account` 已登录；统一 `MembershipSummary` 映射 `userId/redVipLevel/redVipAnnualCount`，从 `redplus/musicPackage/associator/voiceBookVip/albumVip` 取最长有效期并结合上游 `now` 计算激活态，空图标不会遮蔽后续非空动态/静态图标，完整五类权益和未来字段保留在原始响应扩展；协议、独立能力、登录前置、当前/公开用户、有效/过期、等级回退、秒/毫秒时间、空图标优先级、畸形响应、数值越界、统一端点及未知后端/字段拒绝均有测试，待 Basic 末尾用持久化真实账户验证成功态） |
 | `vip_sign` | `/vip/sign` | `pending` | — |
 | `vip_sign_detail` | `/vip/sign/detail` | `pending` | — |
 | `vip_sign_history` | `/vip/sign/history` | `pending` | — |

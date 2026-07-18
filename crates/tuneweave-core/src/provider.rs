@@ -142,6 +142,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn user_membership_client_info(
+        &self,
+        _id: Option<&str>,
+        _account: Option<&str>,
+    ) -> Result<MembershipSummary> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::UserMembershipClientInfo,
+        ))
+    }
+
     async fn recognize_audio(
         &self,
         _request: &AudioRecognitionRequest,
