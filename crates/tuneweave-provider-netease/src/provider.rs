@@ -43,19 +43,20 @@ use tuneweave_core::{
     Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, MusicVideoArea,
     MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
-    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
-    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
-    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
-    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
-    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackDevice,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationAction, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
+    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility,
+    Podcast, PodcastCatalog, PodcastCategory, PodcastCategoryRecommendation,
+    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
+    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
     PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
@@ -682,6 +683,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountCloudDownload,
             Capability::Favorites,
             Capability::ListeningHistory,
+            Capability::RecentPodcastEpisodeHistory,
             Capability::Recommendations,
             Capability::VideoRecommendations,
             Capability::PodcastEpisodeRecommendations,
@@ -2672,6 +2674,18 @@ impl MusicProvider for NeteaseProvider {
         let user_id = parse_numeric_id("user", user_id)?.to_string();
         let client = self.client_for(request.account.as_deref())?;
         fetch_play_history(&client, &user_id, request).await
+    }
+
+    async fn recent_podcast_episode_history(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<PodcastEpisodePlaybackHistoryEntry>> {
+        let (path, payload) = netease_recent_podcast_episode_history_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "recent podcast episode history")?;
+        map_recent_podcast_episode_history(response.body, request)
     }
 
     async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
@@ -4866,6 +4880,121 @@ async fn fetch_play_history(
         .map(map_play_history_record)
         .collect::<Result<Vec<_>>>()?;
     Ok(Page { items, pagination })
+}
+
+fn netease_recent_podcast_episode_history_request(
+    request: &PageRequest,
+) -> Result<(&'static str, Value)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "recent podcast episode history limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    if request.offset != 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase recent podcast episode history does not support offset",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "offset": request.offset })));
+    }
+    Ok((
+        "/api/play-record/voice/list",
+        json!({ "limit": request.limit }),
+    ))
+}
+
+fn map_recent_podcast_episode_history(
+    body: Value,
+    request: &PageRequest,
+) -> Result<Page<PodcastEpisodePlaybackHistoryEntry>> {
+    ensure_success(&body)?;
+    let data = body
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| podcast_item_error("recent voice history data", &body))?;
+    let raw_items = data
+        .get("list")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("recent voice history list", &body))?;
+    let total = data.get("total").and_then(json_u64);
+    let items = raw_items
+        .into_iter()
+        .map(map_recent_podcast_episode_history_entry)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total,
+            next_offset: None,
+            has_more: false,
+            extensions: Extensions::from([
+                ("continuation_supported".to_owned(), Value::Bool(false)),
+                ("limit_applied".to_owned(), Value::Bool(true)),
+                ("response".to_owned(), body),
+            ]),
+        },
+    })
+}
+
+fn map_recent_podcast_episode_history_entry(
+    raw: Value,
+) -> Result<PodcastEpisodePlaybackHistoryEntry> {
+    let record_data = raw
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(|| podcast_item_error("recent voice history record data", &raw))?;
+    let raw_episode = [
+        record_data.get("pubDJProgramData"),
+        record_data.get("program"),
+        record_data.get("voice"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|episode| episode.is_object())
+    .cloned()
+    .ok_or_else(|| podcast_item_error("recent voice history program", &raw))?;
+    let episode = map_netease_podcast_episode(raw_episode)?;
+    if let Some(resource_id) = raw.get("resourceId").and_then(json_scalar_string) {
+        if resource_id != episode.resource_ref.id() {
+            return Err(podcast_item_error(
+                "recent voice history resource identity",
+                &raw,
+            ));
+        }
+    }
+    let played_at = raw
+        .get("playTime")
+        .and_then(json_u64)
+        .filter(|timestamp| *timestamp > 0)
+        .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000));
+    let device_data = raw
+        .get("multiTerminalInfo")
+        .filter(|device| device.is_object());
+    let operating_system = radio_text_field(&raw, &["os"])
+        .or_else(|| device_data.and_then(|device| radio_text_field(device, &["os"])));
+    let name = device_data.and_then(|device| radio_text_field(device, &["osText", "name"]));
+    let icon_url = device_data.and_then(|device| radio_text_field(device, &["icon", "iconUrl"]));
+    let device = (operating_system.is_some() || name.is_some() || icon_url.is_some()).then(|| {
+        PlaybackDevice {
+            operating_system,
+            name,
+            icon_url,
+            extensions: device_data.cloned().map_or_else(Extensions::new, |device| {
+                Extensions::from([("record".to_owned(), device)])
+            }),
+        }
+    });
+    Ok(PodcastEpisodePlaybackHistoryEntry {
+        episode,
+        played_at,
+        device,
+        extensions: Extensions::from([("record".to_owned(), raw)]),
+    })
 }
 
 fn map_play_history_record(record: PlayHistoryRecord) -> Result<PlaybackHistoryEntry> {
@@ -25613,6 +25742,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PlaylistWrite));
         assert!(capabilities.contains(&Capability::Favorites));
         assert!(capabilities.contains(&Capability::ListeningHistory));
+        assert!(capabilities.contains(&Capability::RecentPodcastEpisodeHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::VideoRecommendations));
         assert!(capabilities.contains(&Capability::VideoCatalog));
@@ -26367,6 +26497,123 @@ mod tests {
         assert_eq!(entry.play_count, Some(42));
         assert_eq!(entry.score, Some(99));
         assert_eq!(entry.last_played_at, None);
+    }
+
+    #[test]
+    fn recent_podcast_episode_history_matches_protocol_and_preserves_record_metadata() {
+        assert_eq!(
+            netease_recent_podcast_episode_history_request(&PageRequest::new(100, 0))
+                .expect("recent podcast episode history request"),
+            ("/api/play-record/voice/list", json!({"limit": 100}))
+        );
+        let page = map_recent_podcast_episode_history(
+            json!({
+                "code": 200,
+                "data": {
+                    "total": 8,
+                    "list": [{
+                        "resourceId": "2059302984",
+                        "resourceType": "VOICE",
+                        "playTime": 1_704_067_200_000_u64,
+                        "os": "android",
+                        "multiTerminalInfo": {
+                            "os": "android",
+                            "osText": "Android",
+                            "icon": "https://example.test/android.png"
+                        },
+                        "data": {
+                            "pubDJProgramData": fixture_podcast_program(
+                                2_059_302_984,
+                                792_676_371,
+                                1_342_589_772
+                            )
+                        }
+                    }]
+                }
+            }),
+            &PageRequest::new(2, 0),
+        )
+        .expect("map recent podcast episode history");
+        assert_eq!(
+            page.items[0].episode.resource_ref.to_string(),
+            "netease:2059302984"
+        );
+        assert_eq!(
+            page.items[0]
+                .episode
+                .audio
+                .as_ref()
+                .expect("history episode audio")
+                .resource_ref
+                .to_string(),
+            "netease:1342589772"
+        );
+        assert_eq!(
+            page.items[0].played_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        let device = page.items[0].device.as_ref().expect("history device");
+        assert_eq!(device.operating_system.as_deref(), Some("android"));
+        assert_eq!(device.name.as_deref(), Some("Android"));
+        assert_eq!(
+            device.icon_url.as_deref(),
+            Some("https://example.test/android.png")
+        );
+        assert_eq!(page.items[0].extensions["record"]["resourceType"], "VOICE");
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 0);
+        assert_eq!(page.pagination.total, Some(8));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["continuation_supported"], false);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+    }
+
+    #[tokio::test]
+    async fn recent_podcast_episode_history_rejects_invalid_controls_and_missing_accounts() {
+        for request in [
+            PageRequest::new(0, 0),
+            PageRequest::new(101, 0),
+            PageRequest::new(10, 1),
+        ] {
+            assert_eq!(
+                netease_recent_podcast_episode_history_request(&request)
+                    .expect_err("invalid recent voice history request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        for invalid in [
+            json!({"code": 200, "data": {"total": 0}}),
+            json!({"code": 200, "data": {"total": 1, "list": [{}]}}),
+            json!({
+                "code": 200,
+                "data": {"total": 1, "list": [{
+                    "resourceId": "999",
+                    "data": {"pubDJProgramData": fixture_podcast_program(1, 2, 3)}
+                }]}
+            }),
+        ] {
+            assert_eq!(
+                map_recent_podcast_episode_history(invalid, &PageRequest::new(10, 0))
+                    .expect_err("malformed recent voice history")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::recent_podcast_episode_history(
+            &provider,
+            &PageRequest {
+                limit: 10,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing recent voice history account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]

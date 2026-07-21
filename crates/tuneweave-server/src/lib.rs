@@ -57,23 +57,23 @@ use tuneweave_core::{
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
     PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
     PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeRecommendationRequest,
-    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -489,6 +489,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
         .route("/account/history", get(account_history))
+        .route(
+            "/account/history/podcast-episodes",
+            get(account_recent_podcast_episode_history),
+        )
         .route("/extensions/netease/calendar", get(netease_calendar))
         .route(
             "/extensions/netease/anonymous-session",
@@ -5801,6 +5805,15 @@ struct AccountQuery {
     offset: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecentPodcastEpisodeHistoryQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AvatarUploadParams {
@@ -7545,6 +7558,43 @@ async fn account_history(
     let page = provider
         .account_history(&PlaybackHistoryRequest {
             period,
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn account_recent_podcast_episode_history(
+    State(state): State<AppState>,
+    params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<PodcastEpisodePlaybackHistoryEntry>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "recent podcast episode history limit must be between 1 and 100",
+        )
+        .into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    if offset != 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "recent podcast episode history does not support offset",
+        )
+        .into());
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .recent_podcast_episode_history(&PageRequest {
             limit,
             offset,
             account: Some(account.clone()),
@@ -11062,6 +11112,36 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn recent_podcast_episode_history(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<PodcastEpisodePlaybackHistoryEntry>> {
+            Ok(Page {
+                items: vec![PodcastEpisodePlaybackHistoryEntry {
+                    episode: sample_podcast_episode("2059302984", "792676371", "1342589772"),
+                    played_at: Some("2026-04-17T04:13:59Z".to_owned()),
+                    device: Some(tuneweave_core::PlaybackDevice {
+                        operating_system: Some("api_undbox".to_owned()),
+                        name: Some("未知".to_owned()),
+                        icon_url: Some("https://example.test/device.png".to_owned()),
+                        extensions: Extensions::new(),
+                    }),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "continuation_supported".to_owned(),
+                        Value::Bool(false),
+                    )]),
                 },
             })
         }
@@ -17785,6 +17865,46 @@ mod tests {
         assert_eq!(json["data"][0]["score"], 99);
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn recent_podcast_episode_history_preserves_episode_audio_time_and_device() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/history/podcast-episodes?platform=netease&account=personal&limit=2",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["episode"]["ref"], "netease:2059302984");
+        assert_eq!(
+            json["data"][0]["episode"]["audio"]["ref"],
+            "netease:1342589772"
+        );
+        assert_eq!(json["data"][0]["played_at"], "2026-04-17T04:13:59Z");
+        assert_eq!(json["data"][0]["device"]["operating_system"], "api_undbox");
+        assert_eq!(json["data"][0]["device"]["name"], "未知");
+        assert_eq!(json["data"][0]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 2);
+        assert_eq!(json["meta"]["pagination"]["offset"], 0);
+        assert_eq!(json["meta"]["pagination"]["has_more"], false);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["continuation_supported"],
+            false
+        );
+
+        for path in [
+            "/v1/account/history/podcast-episodes?limit=0",
+            "/v1/account/history/podcast-episodes?limit=101",
+            "/v1/account/history/podcast-episodes?offset=1",
+            "/v1/account/history/podcast-episodes?offset=invalid",
+            "/v1/account/history/podcast-episodes?unknown=true",
+            "/v1/account/history/podcast-episodes?platform=unknown",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

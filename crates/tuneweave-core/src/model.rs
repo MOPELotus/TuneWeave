@@ -1345,6 +1345,22 @@ pub struct PodcastEpisodeLyrics {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackDevice {
+    pub operating_system: Option<String>,
+    pub name: Option<String>,
+    pub icon_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodePlaybackHistoryEntry {
+    pub episode: PodcastEpisode,
+    pub played_at: Option<String>,
+    pub device: Option<PlaybackDevice>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PageMeta {
     pub limit: u32,
@@ -3608,6 +3624,30 @@ mod tests {
             PodcastEpisodeRecommendationSource::default(),
             PodcastEpisodeRecommendationSource::Personalized
         );
+    }
+
+    #[test]
+    fn podcast_episode_playback_history_keeps_episode_time_and_device_explicit() {
+        let entry = PodcastEpisodePlaybackHistoryEntry {
+            episode: PodcastEpisode::new(
+                ResourceRef::new(Platform::Netease, "2059302984").expect("valid episode reference"),
+                "叽叽 - 静悄悄",
+            ),
+            played_at: Some("2024-01-01T00:00:00Z".to_owned()),
+            device: Some(PlaybackDevice {
+                operating_system: Some("android".to_owned()),
+                name: Some("Android".to_owned()),
+                icon_url: Some("https://example.test/android.png".to_owned()),
+                extensions: Extensions::new(),
+            }),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(entry).expect("serialize episode playback history");
+        assert_eq!(value["episode"]["ref"], "netease:2059302984");
+        assert_eq!(value["played_at"], "2024-01-01T00:00:00Z");
+        assert_eq!(value["device"]["operating_system"], "android");
+        assert_eq!(value["device"]["name"], "Android");
     }
 
     #[test]

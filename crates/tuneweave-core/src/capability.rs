@@ -119,6 +119,7 @@ pub enum Capability {
     PlaylistWrite,
     Favorites,
     ListeningHistory,
+    RecentPodcastEpisodeHistory,
     Recommendations,
     VideoRecommendations,
     PodcastEpisodeRecommendations,
@@ -209,6 +210,11 @@ mod tests {
             serde_json::to_value(Capability::PodcastEpisodeRecommendations)
                 .expect("serialize podcast episode recommendations capability"),
             serde_json::json!("podcast_episode_recommendations")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::RecentPodcastEpisodeHistory)
+                .expect("serialize recent podcast episode history capability"),
+            serde_json::json!("recent_podcast_episode_history")
         );
         assert_eq!(
             serde_json::to_value(Capability::RecommendationFeedback)

@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=224`、`partial=2`、`implemented=65`、`verified=125`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=223`、`partial=2`、`implemented=65`、`verified=126`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -247,7 +247,7 @@
 | `record_recent_playlist` | `/record/recent/playlist` | `pending` | — |
 | `record_recent_song` | `/record/recent/song` | `pending` | — |
 | `record_recent_video` | `/record/recent/video` | `pending` | — |
-| `record_recent_voice` | `/record/recent/voice` | `pending` | — |
+| `record_recent_voice` | `/record/recent/voice` | `verified` | `GET /v1/account/history/podcast-episodes`（固定 WeAPI `/api/play-record/voice/list` 并提交 `limit=1..100`；独立 `PodcastEpisodePlaybackHistoryEntry` 完整分离节目、所属播客、承载音频、RFC 3339 播放时间与终端系统/名称/图标，平台记录和整份响应不丢失，`resourceId` 与节目 ID 冲突时拒绝而不猜测；上游没有 offset/续页参数，统一端点仅接受 `offset=0` 并固定 `next_offset=null/has_more=false/continuation_supported=false`，不会因 `total` 伪造续页；协议、包装、畸形结构、账户隔离和统一 HTTP 均有测试，2026-07-22 持久账户真实统一 HTTP 返回 2 条记录及 `code=200`，首条节目 `netease:2059302984`、音频 `netease:1342589772`、播放时间和终端均成功映射） |
 | `register_anonimous` | `/register/anonimous` | `implemented` | `GET/POST /v1/extensions/netease/anonymous-session`，兼容正确拼写 `/register/anonymous` 与参考拼写 `/register/anonimous`（独立 `AnonymousSession` 能力完整复刻 52 位大写十六进制设备 ID、循环 XOR、MD5、双层 Base64 用户名及 XEAPI `/api/register/anonimous`；GET 缺省读取进程/持久化身份，`refresh=true` 与 POST 强刷；设备 ID 和 `MUSIC_A` 作为单一版本化凭据原子落盘，重启恢复后自动供默认公开请求使用，不进入登录账户映射，也不覆盖显式账户；参考兼容响应保留 Cookie，但 Debug/错误不泄漏且客户端不能注入；核心契约、固定编码向量、随机设备格式、Cookie/设备校验、凭据恢复、账户隔离、能力发现、三个路由别名、GET/POST/强刷及非法查询均有测试；2026-07-18 TuneWeave 真实请求与同机当前参考实现均返回上游 `code=400` 且无 Cookie，稳定拒绝伪造身份，待上游恢复后补成功注册验收） |
 | `register_cellphone` | `/register/cellphone` | `pending` | — |
 | `register_checktoken_v2` | `/register/checktoken/v2` | `verified` | `GET/POST /v1/extensions/netease/register/checktoken/v2`，也可在通用 `/v1/extensions/netease/check-token` 以 `version=v2` 选择（固定请求易盾 `/v2/config/js?pn=YD00000558929251`，严格要求成功 JSON 的非空 `result.conf` 并校验安全 HTTP 头值；v2/v3 使用独立 URL 和共享于账户 client 的独立缓存，返回体以 `version` 明示版本，固定版本路由拒绝冲突参数，旧端点缺省仍为 v3；EAPI 可由 provider 受控取得并注入 v2 token，客户端不能提交 token；核心版本契约、双解析器、畸形响应、缓存隔离、通用/固定版本 GET/POST 和冲突输入均有测试；2026-07-18 真实易盾联网验证 v2/v3 首次注册、缓存命中与强制刷新全部成功） |
