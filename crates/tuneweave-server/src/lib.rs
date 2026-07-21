@@ -1,7 +1,7 @@
 mod response;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -73,10 +73,12 @@ use tuneweave_core::{
     SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
-    UniPlaylistCreateRequest, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    UniPlaylistCreateRequest, UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemSnapshot, UniPlaylistStore, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -327,6 +329,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/uni/playlists", post(uni_playlist_create))
+        .route(
+            "/uni/playlists/{reference}/items",
+            get(uni_playlist_items).post(uni_playlist_items_add),
+        )
         .route("/uni/playlists/{reference}", get(uni_playlist))
         .route("/playlists", post(playlist_create).delete(playlists_delete))
         .route(
@@ -3155,6 +3161,28 @@ struct UniPlaylistCreateBody {
     description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistItemBody {
+    #[serde(rename = "ref")]
+    resource_ref: ResourceRef,
+    kind: UniPlaylistItemKind,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistItemAddBody {
+    items: Option<Vec<UniPlaylistItemBody>>,
+    accounts: Option<BTreeMap<Platform, String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistItemsQuery {
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
 async fn uni_playlist_create(
     State(state): State<AppState>,
     params: Result<Query<NoQueryParams>, QueryRejection>,
@@ -3228,14 +3256,7 @@ async fn uni_playlist(
     params: Result<Query<NoQueryParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<UniPlaylist>>, ApiError> {
     let _ = query_params(params)?;
-    let reference = parse_reference(reference)?;
-    if reference.platform() != Platform::Uni {
-        return Err(TuneWeaveError::invalid_request(
-            "Uni Playlist reference must use the uni platform",
-        )
-        .with_details(json!({ "ref": reference }))
-        .into());
-    }
+    let reference = parse_uni_playlist_reference(reference)?;
     let playlist = state.uni_playlists.get(reference.id())?.ok_or_else(|| {
         TuneWeaveError::new(ErrorCode::ResourceNotFound, "Uni Playlist was not found")
             .with_details(json!({ "ref": reference }))
@@ -3245,6 +3266,287 @@ async fn uni_playlist(
     ))
 }
 
+async fn uni_playlist_items_add(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+    payload: Result<Json<UniPlaylistItemAddBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistItemAddResult>>, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_uni_playlist_reference(reference)?;
+    if state.uni_playlists.get(reference.id())?.is_none() {
+        return Err(
+            TuneWeaveError::new(ErrorCode::ResourceNotFound, "Uni Playlist was not found")
+                .with_details(json!({ "ref": reference }))
+                .into(),
+        );
+    }
+    let body = json_body(payload)?;
+    let inputs = body
+        .items
+        .ok_or_else(|| TuneWeaveError::invalid_request("items must be provided"))?;
+    if inputs.is_empty() || inputs.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "items must contain between 1 and 100 resources",
+        )
+        .into());
+    }
+    let accounts = normalize_uni_playlist_accounts(body.accounts.unwrap_or_default())?;
+    let request = UniPlaylistItemAddRequest {
+        items: inputs
+            .into_iter()
+            .map(|input| UniPlaylistItemInput {
+                resource_ref: input.resource_ref,
+                kind: input.kind,
+            })
+            .collect(),
+        accounts,
+    };
+    let source_platforms = request
+        .items
+        .iter()
+        .map(|item| item.resource_ref.platform())
+        .collect::<BTreeSet<_>>();
+    if source_platforms.contains(&Platform::Uni) {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist items must reference external platform resources",
+        )
+        .into());
+    }
+    if let Some(platform) = request
+        .accounts
+        .keys()
+        .find(|platform| !source_platforms.contains(platform))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "accounts may only select platforms present in items",
+        )
+        .with_details(json!({ "platform": platform }))
+        .into());
+    }
+
+    let mut resolved = Vec::with_capacity(request.items.len());
+    for input in &request.items {
+        let snapshot = resolve_uni_playlist_item_snapshot(&state, input, &request.accounts).await?;
+        resolved.push((input.clone(), snapshot));
+    }
+    let added_at_ms = unix_time_millis()?;
+    for _ in 0..8 {
+        let items = resolved
+            .iter()
+            .map(|(input, snapshot)| UniPlaylistItem {
+                id: allocate_uni_playlist_item_id(),
+                position: 0,
+                kind: input.kind,
+                source_ref: input.resource_ref.clone(),
+                snapshot: snapshot.clone(),
+                added_at_ms,
+                extensions: Extensions::new(),
+            })
+            .collect::<Vec<_>>();
+        let store = Arc::clone(&state.uni_playlists);
+        let playlist_id = reference.id().to_owned();
+        let result = tokio::task::spawn_blocking(move || store.append_items(&playlist_id, &items))
+            .await
+            .map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "Uni Playlist persistence task failed",
+                )
+            })?;
+        match result {
+            Ok(mut result) => {
+                result
+                    .extensions
+                    .insert("accounts".to_owned(), json!(request.accounts));
+                result
+                    .extensions
+                    .insert("source_platforms".to_owned(), json!(source_platforms));
+                return Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)));
+            }
+            Err(error) if error.code == ErrorCode::Conflict => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::InternalError,
+        "failed to allocate unique Uni Playlist item ids",
+    )
+    .into())
+}
+
+async fn uni_playlist_items(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UniPlaylistItemsQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<UniPlaylistItem>>>, ApiError> {
+    let reference = parse_uni_playlist_reference(reference)?;
+    let params = query_params(params)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 50)?;
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let page = state.uni_playlists.items(reference.id(), limit, offset)?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(Platform::Uni)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn resolve_uni_playlist_item_snapshot(
+    state: &AppState,
+    input: &UniPlaylistItemInput,
+    accounts: &BTreeMap<Platform, String>,
+) -> Result<UniPlaylistItemSnapshot, TuneWeaveError> {
+    let platform = input.resource_ref.platform();
+    let provider = state.registry.require(platform)?;
+    let account = accounts.get(&platform).map(String::as_str);
+    match input.kind {
+        UniPlaylistItemKind::Track => provider
+            .track(input.resource_ref.id(), account)
+            .await
+            .map(snapshot_from_track),
+        UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video => {
+            let kind = if input.kind == UniPlaylistItemKind::Mv {
+                VideoResourceKind::Mv
+            } else {
+                VideoResourceKind::Video
+            };
+            provider
+                .video(
+                    input.resource_ref.id(),
+                    &VideoDetailRequest {
+                        kind,
+                        account: account.map(str::to_owned),
+                    },
+                )
+                .await
+                .map(snapshot_from_video)
+        }
+        UniPlaylistItemKind::PodcastEpisode => provider
+            .podcast_episode(input.resource_ref.id(), account)
+            .await
+            .map(snapshot_from_podcast_episode),
+    }
+}
+
+fn snapshot_from_track(track: Track) -> UniPlaylistItemSnapshot {
+    let mut snapshot = UniPlaylistItemSnapshot::new(track.name.clone());
+    snapshot
+        .extensions
+        .insert("canonical_ref".to_owned(), json!(track.resource_ref));
+    snapshot.artists = track
+        .artists
+        .iter()
+        .map(|artist| artist.name.clone())
+        .collect();
+    snapshot.album = track.album.as_ref().map(|album| album.name.clone());
+    snapshot.duration_ms = track.duration_ms;
+    snapshot.isrc = track.isrc.clone();
+    snapshot.cover_url = track
+        .album
+        .as_ref()
+        .and_then(|album| album.cover_url.clone());
+    snapshot.version_tags = track.aliases.clone();
+    snapshot
+        .extensions
+        .insert("playable".to_owned(), json!(track.playable));
+    snapshot.extensions.insert(
+        "available_qualities".to_owned(),
+        json!(track.available_qualities),
+    );
+    snapshot
+        .extensions
+        .insert("mv_ref".to_owned(), json!(track.mv_ref));
+    snapshot
+}
+
+fn snapshot_from_video(detail: VideoDetail) -> UniPlaylistItemSnapshot {
+    let video = detail.video;
+    let mut snapshot = UniPlaylistItemSnapshot::new(video.title);
+    snapshot
+        .extensions
+        .insert("canonical_ref".to_owned(), json!(video.resource_ref));
+    snapshot.artists = video
+        .creators
+        .into_iter()
+        .map(|creator| creator.name)
+        .collect();
+    snapshot.duration_ms = video.duration_ms;
+    snapshot.cover_url = video.cover_url;
+    snapshot
+        .extensions
+        .insert("video_kind".to_owned(), json!(detail.kind));
+    snapshot
+        .extensions
+        .insert("published_at".to_owned(), json!(video.published_at));
+    snapshot
+}
+
+fn snapshot_from_podcast_episode(episode: PodcastEpisode) -> UniPlaylistItemSnapshot {
+    let mut snapshot = UniPlaylistItemSnapshot::new(episode.name);
+    snapshot
+        .extensions
+        .insert("canonical_ref".to_owned(), json!(episode.resource_ref));
+    if let Some(creator) = episode.creator {
+        snapshot.artists.push(creator.name);
+    }
+    snapshot.duration_ms = episode
+        .duration_ms
+        .or_else(|| episode.audio.as_ref().and_then(|audio| audio.duration_ms));
+    snapshot.cover_url = episode.cover_url.or_else(|| {
+        episode
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.album.as_ref())
+            .and_then(|album| album.cover_url.clone())
+    });
+    snapshot
+        .extensions
+        .insert("podcast_ref".to_owned(), json!(episode.podcast_ref));
+    snapshot.extensions.insert(
+        "audio_ref".to_owned(),
+        json!(episode.audio.map(|audio| audio.resource_ref)),
+    );
+    snapshot
+        .extensions
+        .insert("published_at".to_owned(), json!(episode.published_at));
+    snapshot
+        .extensions
+        .insert("serial_number".to_owned(), json!(episode.serial_number));
+    snapshot
+}
+
+fn normalize_uni_playlist_accounts(
+    mut accounts: BTreeMap<Platform, String>,
+) -> Result<BTreeMap<Platform, String>, TuneWeaveError> {
+    if accounts.contains_key(&Platform::Uni) {
+        return Err(TuneWeaveError::invalid_request(
+            "accounts cannot select the local uni platform",
+        ));
+    }
+    for account in accounts.values_mut() {
+        let normalized = account.trim();
+        if normalized.is_empty() || normalized.len() > 64 {
+            return Err(TuneWeaveError::invalid_request(
+                "item account aliases must contain at most 64 bytes",
+            ));
+        }
+        *account = normalized.to_owned();
+    }
+    Ok(accounts)
+}
+
+fn parse_uni_playlist_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
+    let reference = parse_reference(reference)?;
+    if reference.platform() != Platform::Uni {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist reference must use the uni platform",
+        )
+        .with_details(json!({ "ref": reference })));
+    }
+    Ok(reference)
+}
+
 fn allocate_uni_playlist_id() -> String {
     let suffix = rand::rng()
         .sample_iter(Alphanumeric)
@@ -3252,6 +3554,15 @@ fn allocate_uni_playlist_id() -> String {
         .map(char::from)
         .collect::<String>();
     format!("pl_{suffix}")
+}
+
+fn allocate_uni_playlist_item_id() -> String {
+    let suffix = rand::rng()
+        .sample_iter(Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect::<String>();
+    format!("item_{suffix}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -16224,6 +16535,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uni_playlist_items_preserve_types_order_duplicates_and_platform_accounts() {
+        let app = test_app_with_provider();
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists",
+            Some(json!({ "name": "混合播放队列" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let reference = created["data"]["ref"]
+            .as_str()
+            .expect("created Uni Playlist reference");
+        let item_path = format!("/v1/uni/playlists/{reference}/items");
+        let (status, added) = json_request_from(
+            app.clone(),
+            Method::POST,
+            &item_path,
+            Some(json!({
+                "items": [
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:5436712", "kind": "mv" },
+                    { "ref": "netease:1367665101", "kind": "podcast_episode" }
+                ],
+                "accounts": { "netease": " personal " }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(added["data"]["playlist"]["item_count"], 4);
+        assert_eq!(added["data"]["items"].as_array().map(Vec::len), Some(4));
+        assert_eq!(added["data"]["items"][0]["position"], 0);
+        assert_eq!(added["data"]["items"][1]["position"], 1);
+        assert_eq!(added["data"]["items"][0]["source_ref"], "netease:185809");
+        assert_eq!(added["data"]["items"][1]["source_ref"], "netease:185809");
+        assert_ne!(
+            added["data"]["items"][0]["id"],
+            added["data"]["items"][1]["id"]
+        );
+        assert_eq!(added["data"]["items"][0]["kind"], "track");
+        assert_eq!(added["data"]["items"][0]["snapshot"]["title"], "反方向的钟");
+        assert_eq!(
+            added["data"]["items"][0]["snapshot"]["artists"][0],
+            "周杰伦"
+        );
+        assert_eq!(
+            added["data"]["items"][0]["snapshot"]["duration_ms"],
+            258_000
+        );
+        assert_eq!(added["data"]["items"][2]["kind"], "mv");
+        assert_eq!(
+            added["data"]["items"][2]["snapshot"]["extensions"]["video_kind"],
+            "mv"
+        );
+        assert_eq!(added["data"]["items"][3]["kind"], "podcast_episode");
+        assert_eq!(
+            added["data"]["items"][3]["snapshot"]["extensions"]["audio_ref"],
+            "netease:2603965162"
+        );
+        assert_eq!(
+            added["data"]["extensions"]["accounts"]["netease"],
+            "personal"
+        );
+        assert_eq!(added["data"]["extensions"]["duplicates_preserved"], true);
+        assert_eq!(added["meta"]["platform"], "uni");
+
+        let (status, page) =
+            json_response_from(app.clone(), &format!("{item_path}?limit=2&offset=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["data"].as_array().map(Vec::len), Some(2));
+        assert_eq!(page["data"][0]["position"], 1);
+        assert_eq!(page["data"][1]["position"], 2);
+        assert_eq!(page["meta"]["pagination"]["total"], 4);
+        assert_eq!(page["meta"]["pagination"]["next_offset"], 3);
+        assert_eq!(page["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            page["meta"]["pagination"]["extensions"]["duplicates_preserved"],
+            true
+        );
+
+        let (status, playlist) =
+            json_response_from(app, &format!("/v1/uni/playlists/{reference}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(playlist["data"]["item_count"], 4);
+        assert!(
+            playlist["data"]["updated_at_ms"].as_u64()
+                >= playlist["data"]["created_at_ms"].as_u64()
+        );
+    }
+
+    #[tokio::test]
     async fn uni_playlist_routes_reject_invalid_or_unknown_inputs() {
         for (path, body) in [
             ("/v1/uni/playlists", json!({ "name": " " })),
@@ -16270,6 +16673,100 @@ mod tests {
             assert_eq!(status, expected_status, "path: {path}");
             assert_eq!(response["error"]["code"], expected_code, "path: {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_item_routes_reject_ambiguous_invalid_and_missing_resources() {
+        let app = test_app_with_provider();
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists",
+            Some(json!({ "name": "输入边界" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let reference = created["data"]["ref"]
+            .as_str()
+            .expect("created Uni Playlist reference");
+        let path = format!("/v1/uni/playlists/{reference}/items");
+        for (request_path, body) in [
+            (path.clone(), json!({})),
+            (path.clone(), json!({ "items": [] })),
+            (
+                path.clone(),
+                json!({
+                    "items": [{ "ref": "netease:185809", "kind": "track" }],
+                    "unknown": true
+                }),
+            ),
+            (
+                path.clone(),
+                json!({
+                    "items": [{
+                        "ref": "netease:185809",
+                        "kind": "track",
+                        "unknown": true
+                    }]
+                }),
+            ),
+            (
+                path.clone(),
+                json!({
+                    "items": [{ "ref": reference, "kind": "track" }]
+                }),
+            ),
+            (
+                path.clone(),
+                json!({
+                    "items": [{ "ref": "netease:185809", "kind": "track" }],
+                    "accounts": { "uni": "default" }
+                }),
+            ),
+            (
+                path.clone(),
+                json!({
+                    "items": [{ "ref": "netease:185809", "kind": "track" }],
+                    "accounts": { "qq": "green-diamond" }
+                }),
+            ),
+            (
+                format!("{path}?unknown=true"),
+                json!({
+                    "items": [{ "ref": "netease:185809", "kind": "track" }]
+                }),
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(app.clone(), Method::POST, &request_path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {request_path}");
+            assert_eq!(
+                response["error"]["code"], "invalid_request",
+                "path: {request_path}"
+            );
+        }
+
+        for request_path in [
+            format!("{path}?limit=0"),
+            format!("{path}?limit=101"),
+            format!("{path}?unknown=true"),
+        ] {
+            let (status, response) = json_response_from(app.clone(), &request_path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {request_path}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+
+        let (status, missing) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/uni/playlists/uni:pl_01abcdefghijklmnop/items",
+            Some(json!({
+                "items": [{ "ref": "netease:185809", "kind": "track" }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(missing["error"]["code"], "resource_not_found");
     }
 
     #[tokio::test]

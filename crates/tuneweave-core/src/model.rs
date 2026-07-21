@@ -3006,6 +3006,74 @@ impl UniPlaylist {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UniPlaylistItemKind {
+    Track,
+    Mv,
+    Video,
+    PodcastEpisode,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemSnapshot {
+    pub title: String,
+    pub artists: Vec<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub isrc: Option<String>,
+    pub cover_url: Option<String>,
+    pub version_tags: Vec<String>,
+    pub extensions: Extensions,
+}
+
+impl UniPlaylistItemSnapshot {
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            artists: Vec::new(),
+            album: None,
+            duration_ms: None,
+            isrc: None,
+            cover_url: None,
+            version_tags: Vec::new(),
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItem {
+    pub id: String,
+    pub position: u64,
+    pub kind: UniPlaylistItemKind,
+    pub source_ref: ResourceRef,
+    pub snapshot: UniPlaylistItemSnapshot,
+    pub added_at_ms: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemInput {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub kind: UniPlaylistItemKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemAddRequest {
+    pub items: Vec<UniPlaylistItemInput>,
+    pub accounts: BTreeMap<Platform, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemAddResult {
+    pub playlist: UniPlaylist,
+    pub items: Vec<UniPlaylistItem>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaylistVisibility {
@@ -4837,6 +4905,20 @@ mod tests {
 
         let request = UniPlaylistCreateRequest::new("Imported favorites");
         assert!(request.description.is_empty());
+
+        let input = UniPlaylistItemInput {
+            resource_ref: ResourceRef::new(Platform::Netease, "185809")
+                .expect("valid source reference"),
+            kind: UniPlaylistItemKind::Track,
+        };
+        let request = UniPlaylistItemAddRequest {
+            items: vec![input],
+            accounts: BTreeMap::from([(Platform::Netease, "vip".to_owned())]),
+        };
+        let value = serde_json::to_value(request).expect("serialize Uni Playlist item request");
+        assert_eq!(value["items"][0]["ref"], "netease:185809");
+        assert_eq!(value["items"][0]["kind"], "track");
+        assert_eq!(value["accounts"]["netease"], "vip");
     }
 
     #[test]
