@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=225`、`partial=2`、`implemented=65`、`verified=124`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=224`、`partial=2`、`implemented=65`、`verified=125`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -235,7 +235,7 @@
 | `playlist_video_recent` | `/playlist/video/recent` | `pending` | — |
 | `playmode_intelligence_list` | `/playmode/intelligence/list` | `pending` | — |
 | `playmode_song_vector` | `/playmode/song/vector` | `pending` | — |
-| `program_recommend` | `/program/recommend` | `pending` | — |
+| `program_recommend` | `/program/recommend` | `verified` | `GET /v1/recommendations/podcast-episodes?source=category`（固定 WeAPI `/api/program/recommend/v1`，精确提交参考 `cateId/limit/offset`；`category_id` 可省略以兼容参考文档示例，也接受 `categoryId/cateId/type`，仅提供分类字段时自动选择该分支；完整 `programs[]` 映射为节目、所属播客与承载音频引用彼此分离的 `PodcastEpisode[]`，完整响应和当前不可靠的 `more` 均不丢失；2026-07-22 匿名真实 provider 与统一 HTTP 验证分类 2 的 offset 0/2 返回两组不同节目及音频，上游两次均为 `code=200/more=false`，故允许显式偏移但不伪造下一页游标） |
 | `radio_sport_get` | `/radio/sport/get` | `pending` | — |
 | `rebind` | `/rebind` | `pending` | — |
 | `recent_listen_list` | `/recent/listen/list` | `pending` | — |

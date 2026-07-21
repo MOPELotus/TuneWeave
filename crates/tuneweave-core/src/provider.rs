@@ -32,19 +32,19 @@ use crate::{
     PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest,
     PodcastEpisodeDeleteResult, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor,
-    ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyRequest,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeRecommendationRequest,
+    PodcastEpisodeStream, PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy,
+    PodcastTaxonomyRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, ResolutionStatus, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -959,7 +959,7 @@ pub trait MusicProvider: Send + Sync {
 
     async fn recommended_podcast_episodes(
         &self,
-        _request: &PageRequest,
+        _request: &PodcastEpisodeRecommendationRequest,
     ) -> Result<Page<PodcastEpisode>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

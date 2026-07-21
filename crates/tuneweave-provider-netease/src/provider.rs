@@ -56,23 +56,23 @@ use tuneweave_core::{
     PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
     PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
     PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodeStream, PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult,
-    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
-    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -2719,14 +2719,19 @@ impl MusicProvider for NeteaseProvider {
 
     async fn recommended_podcast_episodes(
         &self,
-        request: &PageRequest,
+        request: &PodcastEpisodeRecommendationRequest,
     ) -> Result<Page<PodcastEpisode>> {
-        validate_fixed_recommendation_page(request, "personalized podcast episodes")?;
+        let (path, payload) = netease_podcast_episode_recommendation_request(request)?;
         let client = self.client_for(request.account.as_deref())?;
-        let response = client
-            .request_weapi("/api/personalized/djprogram", json!({}))
-            .await?;
-        map_personalized_podcast_episodes(response.body, request)
+        let response = client.request_weapi(path, payload).await?;
+        match request.source {
+            PodcastEpisodeRecommendationSource::Personalized => {
+                map_personalized_podcast_episodes(response.body, request)
+            }
+            PodcastEpisodeRecommendationSource::Category => {
+                map_category_podcast_episode_recommendations(response.body, request)
+            }
+        }
     }
 
     async fn personal_fm(&self, request: &PersonalFmRequest) -> Result<Page<Track>> {
@@ -5313,25 +5318,52 @@ fn personalized_video_creator(raw: &Value) -> Option<CreatorSummary> {
     })
 }
 
-fn validate_fixed_recommendation_page(request: &PageRequest, label: &str) -> Result<()> {
+fn netease_podcast_episode_recommendation_request(
+    request: &PodcastEpisodeRecommendationRequest,
+) -> Result<(&'static str, Value)> {
     if !(1..=100).contains(&request.limit) {
-        return Err(TuneWeaveError::invalid_request(format!(
-            "{label} limit must be between 1 and 100",
-        ))
-        .with_platform(Platform::Netease));
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode recommendation limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
     }
-    if request.offset != 0 {
-        return Err(TuneWeaveError::invalid_request(format!(
-            "NetEase {label} do not support offset",
-        ))
-        .with_platform(Platform::Netease));
+    match request.source {
+        PodcastEpisodeRecommendationSource::Personalized => {
+            if request.category_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "personalized podcast episode recommendations do not accept category_id",
+                )
+                .with_platform(Platform::Netease));
+            }
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase personalized podcast episodes do not support offset",
+                )
+                .with_platform(Platform::Netease));
+            }
+            Ok(("/api/personalized/djprogram", json!({})))
+        }
+        PodcastEpisodeRecommendationSource::Category => {
+            let mut payload = json!({
+                "limit": request.limit,
+                "offset": request.offset
+            });
+            if let Some(category_id) = request.category_id.as_deref() {
+                let category_id = parse_numeric_id("podcast category", category_id)?;
+                payload
+                    .as_object_mut()
+                    .expect("recommendation payload is an object")
+                    .insert("cateId".to_owned(), json!(category_id.to_string()));
+            }
+            Ok(("/api/program/recommend/v1", payload))
+        }
     }
-    Ok(())
 }
 
 fn map_personalized_podcast_episodes(
     raw_response: Value,
-    request: &PageRequest,
+    request: &PodcastEpisodeRecommendationRequest,
 ) -> Result<Page<PodcastEpisode>> {
     ensure_success(&raw_response)?;
     let response: PersonalizedEnvelope = parse_body(raw_response.clone())?;
@@ -5346,14 +5378,39 @@ fn map_personalized_podcast_episodes(
         attach_personalized_item(&mut episode.extensions, raw.clone());
         items.push(episode);
     }
-    Ok(fixed_personalized_page(
+    let mut page = fixed_personalized_page(
         items,
         request.limit,
         "podcast_episodes",
         response,
         raw_response,
         false,
-    ))
+    );
+    page.pagination
+        .extensions
+        .insert("source".to_owned(), json!(request.source));
+    Ok(page)
+}
+
+fn map_category_podcast_episode_recommendations(
+    body: Value,
+    request: &PodcastEpisodeRecommendationRequest,
+) -> Result<Page<PodcastEpisode>> {
+    let mut page = map_netease_podcast_episodes(body, request.limit, request.offset)?;
+    page.pagination
+        .extensions
+        .insert("source".to_owned(), json!(request.source));
+    page.pagination.extensions.insert(
+        "category_id".to_owned(),
+        request
+            .category_id
+            .as_ref()
+            .map_or(Value::Null, |id| json!(id)),
+    );
+    page.pagination
+        .extensions
+        .insert("offset_applied".to_owned(), Value::Bool(true));
+    Ok(page)
 }
 
 fn fixed_personalized_page<T>(
@@ -26344,6 +26401,20 @@ mod tests {
             .await
             .expect_err("missing playlist recommendation account");
         assert_eq!(playlist_error.code, ErrorCode::AuthenticationRequired);
+        let podcast_error = MusicProvider::recommended_podcast_episodes(
+            &provider,
+            &PodcastEpisodeRecommendationRequest {
+                account: Some("missing".to_owned()),
+                ..PodcastEpisodeRecommendationRequest::new(
+                    PodcastEpisodeRecommendationSource::Category,
+                    10,
+                    0,
+                )
+            },
+        )
+        .await
+        .expect_err("missing podcast recommendation account");
+        assert_eq!(podcast_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
@@ -26397,7 +26468,7 @@ mod tests {
     }
 
     #[test]
-    fn personalized_recommendation_requests_match_all_six_reference_modules() {
+    fn recommendation_requests_match_all_seven_reference_modules() {
         let tracks = RecommendationRequest {
             limit: 10,
             offset: 0,
@@ -26463,6 +26534,41 @@ mod tests {
                 expected
             );
         }
+
+        assert_eq!(
+            netease_podcast_episode_recommendation_request(
+                &PodcastEpisodeRecommendationRequest::new(
+                    PodcastEpisodeRecommendationSource::Personalized,
+                    10,
+                    0,
+                )
+            )
+            .expect("personalized podcast episode request"),
+            ("/api/personalized/djprogram", json!({}))
+        );
+        let mut category = PodcastEpisodeRecommendationRequest::new(
+            PodcastEpisodeRecommendationSource::Category,
+            5,
+            10,
+        );
+        category.category_id = Some("02".to_owned());
+        assert_eq!(
+            netease_podcast_episode_recommendation_request(&category)
+                .expect("category podcast episode request"),
+            (
+                "/api/program/recommend/v1",
+                json!({"cateId": "2", "limit": 5, "offset": 10})
+            )
+        );
+        category.category_id = None;
+        assert_eq!(
+            netease_podcast_episode_recommendation_request(&category)
+                .expect("unfiltered podcast episode request"),
+            (
+                "/api/program/recommend/v1",
+                json!({"limit": 5, "offset": 10})
+            )
+        );
     }
 
     #[test]
@@ -26590,7 +26696,11 @@ mod tests {
                     }
                 }]
             }),
-            &PageRequest::new(10, 0),
+            &PodcastEpisodeRecommendationRequest::new(
+                PodcastEpisodeRecommendationSource::Personalized,
+                10,
+                0,
+            ),
         )
         .expect("map personalized podcast episodes");
         assert_eq!(
@@ -26607,6 +26717,47 @@ mod tests {
             "netease:123"
         );
         assert_eq!(episodes.pagination.extensions["limit_applied"], false);
+        assert_eq!(episodes.pagination.extensions["source"], "personalized");
+
+        let category = map_category_podcast_episode_recommendations(
+            json!({
+                "code": 200,
+                "more": true,
+                "name": "recommendation-session",
+                "programs": [fixture_podcast_program(3724698638, 963360133, 3408967617)]
+            }),
+            &PodcastEpisodeRecommendationRequest {
+                source: PodcastEpisodeRecommendationSource::Category,
+                category_id: Some("2".to_owned()),
+                limit: 1,
+                offset: 4,
+                account: None,
+            },
+        )
+        .expect("map category podcast episode recommendations");
+        assert_eq!(
+            category.items[0].resource_ref.to_string(),
+            "netease:3724698638"
+        );
+        assert_eq!(
+            category.items[0]
+                .audio
+                .as_ref()
+                .expect("category episode audio")
+                .resource_ref
+                .to_string(),
+            "netease:3408967617"
+        );
+        assert_eq!(category.pagination.offset, 4);
+        assert_eq!(category.pagination.next_offset, Some(5));
+        assert!(category.pagination.has_more);
+        assert_eq!(category.pagination.extensions["source"], "category");
+        assert_eq!(category.pagination.extensions["category_id"], "2");
+        assert_eq!(category.pagination.extensions["offset_applied"], true);
+        assert_eq!(
+            category.pagination.extensions["response"]["name"],
+            "recommendation-session"
+        );
     }
 
     #[test]
@@ -26660,6 +26811,55 @@ mod tests {
                 },
             )
             .expect_err("missing song")
+            .code,
+            ErrorCode::UpstreamError
+        );
+
+        for request in [
+            PodcastEpisodeRecommendationRequest::new(
+                PodcastEpisodeRecommendationSource::Personalized,
+                10,
+                1,
+            ),
+            PodcastEpisodeRecommendationRequest {
+                category_id: Some("2".to_owned()),
+                ..PodcastEpisodeRecommendationRequest::new(
+                    PodcastEpisodeRecommendationSource::Personalized,
+                    10,
+                    0,
+                )
+            },
+            PodcastEpisodeRecommendationRequest::new(
+                PodcastEpisodeRecommendationSource::Category,
+                0,
+                0,
+            ),
+            PodcastEpisodeRecommendationRequest {
+                category_id: Some("not-a-number".to_owned()),
+                ..PodcastEpisodeRecommendationRequest::new(
+                    PodcastEpisodeRecommendationSource::Category,
+                    10,
+                    0,
+                )
+            },
+        ] {
+            assert_eq!(
+                netease_podcast_episode_recommendation_request(&request)
+                    .expect_err("invalid podcast episode recommendation request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        assert_eq!(
+            map_category_podcast_episode_recommendations(
+                json!({"code": 200, "more": false}),
+                &PodcastEpisodeRecommendationRequest::new(
+                    PodcastEpisodeRecommendationSource::Category,
+                    10,
+                    0,
+                ),
+            )
+            .expect_err("missing category programs")
             .code,
             ErrorCode::UpstreamError
         );
@@ -28620,7 +28820,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
-    async fn live_anonymous_personalized_homepage_covers_all_six_modules() {
+    async fn live_anonymous_personalized_homepage_covers_all_seven_modules() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let tracks = MusicProvider::recommended_tracks(
             &provider,
@@ -28679,10 +28879,16 @@ mod tests {
             assert!(videos.items.iter().all(|video| !video.title.is_empty()));
         }
 
-        let episodes =
-            MusicProvider::recommended_podcast_episodes(&provider, &PageRequest::new(10, 0))
-                .await
-                .expect("live personalized podcast episodes");
+        let episodes = MusicProvider::recommended_podcast_episodes(
+            &provider,
+            &PodcastEpisodeRecommendationRequest::new(
+                PodcastEpisodeRecommendationSource::Personalized,
+                10,
+                0,
+            ),
+        )
+        .await
+        .expect("live personalized podcast episodes");
         assert!(!episodes.items.is_empty());
         assert!(
             episodes
@@ -28691,6 +28897,38 @@ mod tests {
                 .all(|episode| !episode.name.is_empty())
         );
         assert!(episodes.items.iter().all(|episode| episode.audio.is_some()));
+
+        let category_request = |offset| PodcastEpisodeRecommendationRequest {
+            source: PodcastEpisodeRecommendationSource::Category,
+            category_id: Some("2".to_owned()),
+            limit: 2,
+            offset,
+            account: None,
+        };
+        let first = MusicProvider::recommended_podcast_episodes(&provider, &category_request(0))
+            .await
+            .expect("live category podcast episode recommendations");
+        let second = MusicProvider::recommended_podcast_episodes(&provider, &category_request(2))
+            .await
+            .expect("live category podcast episode recommendation offset");
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(second.items.len(), 2);
+        assert!(first.items.iter().all(|episode| episode.audio.is_some()));
+        assert!(second.items.iter().all(|episode| episode.audio.is_some()));
+        assert_ne!(
+            first
+                .items
+                .iter()
+                .map(|episode| &episode.resource_ref)
+                .collect::<Vec<_>>(),
+            second
+                .items
+                .iter()
+                .map(|episode| &episode.resource_ref)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(second.pagination.offset, 2);
+        assert_eq!(second.pagination.extensions["source"], "category");
     }
 
     #[tokio::test]

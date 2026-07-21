@@ -57,22 +57,23 @@ use tuneweave_core::{
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
     PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
     PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeRecommendationRequest,
+    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
+    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -5226,6 +5227,10 @@ fn parse_video_recommendation_view(
 struct PodcastEpisodeRecommendationParams {
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "backend")]
+    source: Option<String>,
+    #[serde(alias = "categoryId", alias = "cateId", alias = "type")]
+    category_id: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
 }
@@ -5244,9 +5249,28 @@ async fn recommended_podcast_episodes(
         )
         .into());
     }
+    let category_id = optional_trimmed(params.category_id);
+    let source_value = params
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source = if source_value.is_none() && category_id.is_some() {
+        PodcastEpisodeRecommendationSource::Category
+    } else {
+        parse_podcast_episode_recommendation_source(source_value)?
+    };
+    if source == PodcastEpisodeRecommendationSource::Personalized && category_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "personalized podcast episode recommendations do not accept category_id",
+        )
+        .into());
+    }
     let provider = state.registry.require(platform)?;
     let page = provider
-        .recommended_podcast_episodes(&PageRequest {
+        .recommended_podcast_episodes(&PodcastEpisodeRecommendationRequest {
+            source,
+            category_id,
             limit,
             offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
             account: Some(account.clone()),
@@ -5258,6 +5282,23 @@ async fn recommended_podcast_episodes(
             .with_account(account)
             .with_pagination(page.pagination),
     ))
+}
+
+fn parse_podcast_episode_recommendation_source(
+    value: Option<&str>,
+) -> Result<PodcastEpisodeRecommendationSource, ApiError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("personalized" | "personalised" | "personal") => {
+            Ok(PodcastEpisodeRecommendationSource::Personalized)
+        }
+        Some("category" | "catalog" | "program" | "programme") => {
+            Ok(PodcastEpisodeRecommendationSource::Category)
+        }
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast episode recommendation source: {value}",
+        ))
+        .into()),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -11114,7 +11155,7 @@ mod tests {
 
         async fn recommended_podcast_episodes(
             &self,
-            request: &PageRequest,
+            request: &PodcastEpisodeRecommendationRequest,
         ) -> Result<Page<PodcastEpisode>> {
             Ok(Page {
                 items: vec![sample_podcast_episode(
@@ -11128,7 +11169,10 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
-                    extensions: Default::default(),
+                    extensions: Extensions::from([
+                        ("source".to_owned(), json!(request.source)),
+                        ("category_id".to_owned(), json!(request.category_id)),
+                    ]),
                 },
             })
         }
@@ -17849,7 +17893,42 @@ mod tests {
         assert_eq!(episodes["data"][0]["ref"], "netease:3724590117");
         assert_eq!(episodes["data"][0]["audio"]["ref"], "netease:3407777157");
         assert_eq!(episodes["meta"]["pagination"]["limit"], 6);
+        assert_eq!(
+            episodes["meta"]["pagination"]["extensions"]["source"],
+            "personalized"
+        );
         assert_eq!(episodes["meta"]["account"], "listener");
+
+        let (status, category_episodes) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/podcast-episodes?source=category&categoryId=2&limit=5&offset=10&account=listener",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            category_episodes["meta"]["pagination"]["extensions"]["source"],
+            "category"
+        );
+        assert_eq!(
+            category_episodes["meta"]["pagination"]["extensions"]["category_id"],
+            "2"
+        );
+        assert_eq!(category_episodes["meta"]["pagination"]["offset"], 10);
+
+        let (status, alias_episodes) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/podcast-episodes?backend=program&type=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            alias_episodes["meta"]["pagination"]["extensions"]["source"],
+            "category"
+        );
+        assert_eq!(
+            alias_episodes["meta"]["pagination"]["extensions"]["category_id"],
+            "3"
+        );
     }
 
     #[tokio::test]
@@ -17864,6 +17943,9 @@ mod tests {
             "/v1/recommendations/videos?limit=0",
             "/v1/recommendations/videos?unknown=true",
             "/v1/recommendations/podcast-episodes?limit=101",
+            "/v1/recommendations/podcast-episodes?source=unknown",
+            "/v1/recommendations/podcast-episodes?source=personalized&categoryId=2",
+            "/v1/recommendations/podcast-episodes?source=category&categoryId=2&cateId=3",
             "/v1/recommendations/podcast-episodes?unknown=true",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;

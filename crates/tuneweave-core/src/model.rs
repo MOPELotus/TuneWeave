@@ -1296,6 +1296,37 @@ pub struct PodcastEpisodeChartEntry {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodcastEpisodeRecommendationSource {
+    #[default]
+    Personalized,
+    Category,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeRecommendationRequest {
+    #[serde(default)]
+    pub source: PodcastEpisodeRecommendationSource,
+    pub category_id: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PodcastEpisodeRecommendationRequest {
+    #[must_use]
+    pub const fn new(source: PodcastEpisodeRecommendationSource, limit: u32, offset: u32) -> Self {
+        Self {
+            source,
+            category_id: None,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PodcastEpisodeStream {
     #[serde(rename = "ref")]
@@ -3555,6 +3586,28 @@ mod tests {
         assert_eq!(entry_value["previous_rank"], -1);
         assert_eq!(entry_value["score"], 302_820);
         assert_eq!(entry_value["episode"]["ref"], "netease:3724712156");
+    }
+
+    #[test]
+    fn podcast_episode_recommendations_keep_source_category_and_page_controls_distinct() {
+        let mut request = PodcastEpisodeRecommendationRequest::new(
+            PodcastEpisodeRecommendationSource::Category,
+            10,
+            20,
+        );
+        request.category_id = Some("2".to_owned());
+        request.account = Some("spoken-word".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize episode recommendation");
+        assert_eq!(value["source"], "category");
+        assert_eq!(value["category_id"], "2");
+        assert_eq!(value["limit"], 10);
+        assert_eq!(value["offset"], 20);
+        assert_eq!(value["account"], "spoken-word");
+        assert_eq!(
+            PodcastEpisodeRecommendationSource::default(),
+            PodcastEpisodeRecommendationSource::Personalized
+        );
     }
 
     #[test]
