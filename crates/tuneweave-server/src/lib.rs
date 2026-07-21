@@ -4886,12 +4886,20 @@ async fn auth_password(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthChallengeStartBody {
     platform: String,
     account: Option<String>,
-    method: ChallengeMethod,
-    principal: String,
-    country_code: Option<String>,
+    method: Option<ChallengeMethod>,
+    #[serde(alias = "phone")]
+    principal: Value,
+    #[serde(
+        default,
+        alias = "ctcode",
+        alias = "countrycode",
+        alias = "countryCode"
+    )]
+    country_code: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -4907,12 +4915,19 @@ async fn auth_challenge_start(
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
     let account = account_alias(body.account.as_deref())?;
+    let principal = required_string_or_number("principal", &body.principal)?;
+    let country_code = match body.country_code.as_ref() {
+        None => "86".to_owned(),
+        Some(Value::String(value)) if value.trim().is_empty() => "86".to_owned(),
+        Some(value) => required_string_or_number("country_code", value)?,
+    };
+    let method = body.method.unwrap_or(ChallengeMethod::Sms);
     let provider = state.registry.require(platform)?;
     let request = AuthChallengeRequest {
         account: account.clone(),
-        method: body.method,
-        principal: body.principal,
-        country_code: optional_trimmed(body.country_code),
+        method,
+        principal,
+        country_code: Some(country_code),
     };
     provider.start_auth_challenge(&request).await?;
     let transaction_id = state
@@ -4920,7 +4935,7 @@ async fn auth_challenge_start(
         .insert(StoredAuthKind::Challenge { platform, request })?;
     let data = AuthChallengeStartData {
         transaction_id,
-        method: body.method,
+        method,
     };
     Ok(Json(
         ApiResponse::new(data)
@@ -4930,8 +4945,10 @@ async fn auth_challenge_start(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthChallengeVerifyBody {
-    code: String,
+    #[serde(alias = "captcha")]
+    code: Value,
 }
 
 #[derive(Serialize)]
@@ -5037,17 +5054,13 @@ async fn auth_challenge_verify(
     payload: Result<Json<AuthChallengeVerifyBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AuthChallengeVerifyData>>, ApiError> {
     let body = json_body(payload)?;
-    if body.code.trim().is_empty() {
-        return Err(TuneWeaveError::invalid_request("code must not be empty").into());
-    }
+    let code = required_string_or_number("code", &body.code)?;
     let stored = state.auth_transactions.get(&transaction_id)?;
     let StoredAuthKind::Challenge { platform, request } = stored else {
         return Err(auth_transaction_not_found().into());
     };
     let provider = state.registry.require(platform)?;
-    let profile = provider
-        .verify_auth_challenge(&request, body.code.trim())
-        .await?;
+    let profile = provider.verify_auth_challenge(&request, &code).await?;
     state.auth_transactions.remove(&transaction_id)?;
     let account = request.account;
     Ok(Json(
@@ -14821,6 +14834,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(verified["data"]["state"], "confirmed");
         assert_eq!(verified["data"]["profile"]["account"], "sms-account");
+    }
+
+    #[tokio::test]
+    async fn sms_challenge_transaction_accepts_reference_aliases_and_numeric_values() {
+        let app = test_app_with_provider();
+        let (status, start) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(json!({
+                "platform": "netease",
+                "account": "reference-sms",
+                "phone": 13800138000_u64,
+                "ctcode": 86
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(start["data"]["method"], "sms");
+        let transaction_id = start["data"]["transaction_id"]
+            .as_str()
+            .expect("transaction id");
+        let path = format!("/v1/auth/challenges/{transaction_id}/verify");
+        let (status, verified) =
+            json_request_from(app, Method::POST, &path, Some(json!({ "captcha": 1234 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["data"]["state"], "confirmed");
+        assert_eq!(verified["data"]["profile"]["account"], "reference-sms");
+        let serialized = serde_json::to_string(&verified).expect("serialize challenge response");
+        assert!(!serialized.contains("13800138000"));
+        assert!(!serialized.contains("1234"));
     }
 
     #[tokio::test]

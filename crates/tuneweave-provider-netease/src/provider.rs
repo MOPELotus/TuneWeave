@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Cursor,
     sync::{Arc, RwLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -102,6 +102,7 @@ const CLOUD_UPLOAD_BUCKET: &str = "jd-musicrep-privatecloud-audio-public";
 const NETEASE_CREDENTIAL_KIND: &str = "cookie";
 const NETEASE_ANONYMOUS_CREDENTIAL_KIND: &str = "anonymous_cookie_v1";
 const NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT: &str = "__tuneweave_anonymous__";
+const CAPTCHA_NETWORK_IDENTITY_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct StoredAnonymousIdentity {
@@ -110,10 +111,17 @@ struct StoredAnonymousIdentity {
 }
 
 #[derive(Clone)]
+struct PendingCaptchaClient {
+    client: NeteaseClient,
+    expires_at: Instant,
+}
+
+#[derive(Clone)]
 pub struct NeteaseProvider {
     client: NeteaseClient,
     accounts: Arc<RwLock<BTreeMap<String, NeteaseClient>>>,
     anonymous_identity: Arc<RwLock<Option<StoredAnonymousIdentity>>>,
+    pending_captcha_clients: Arc<RwLock<BTreeMap<String, PendingCaptchaClient>>>,
     credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
@@ -126,6 +134,7 @@ impl NeteaseProvider {
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
+            pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store,
         };
         provider.restore_sessions()?;
@@ -139,6 +148,7 @@ impl NeteaseProvider {
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
+            pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store: None,
         }
     }
@@ -164,7 +174,11 @@ impl NeteaseProvider {
     }
 
     pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
-        self.client.send_phone_captcha(phone, country_code).await
+        let client = self.client.clone();
+        let client = self.client_with_anonymous_identity(client).await?;
+        client.send_phone_captcha(phone, country_code).await?;
+        self.store_pending_captcha_client(phone, country_code, client)?;
+        Ok(())
     }
 
     pub async fn verify_phone_captcha(
@@ -173,7 +187,7 @@ impl NeteaseProvider {
         country_code: &str,
         captcha: &str,
     ) -> Result<NeteaseCaptchaVerification> {
-        self.client
+        self.captcha_client(phone, country_code)?
             .verify_phone_captcha(phone, country_code, captcha)
             .await
     }
@@ -245,10 +259,96 @@ impl NeteaseProvider {
     ) -> Result<NeteaseAccountSummary> {
         let account = normalize_account_label(Some(account))?;
         let login = self
-            .client
+            .captcha_client(phone, country_code)?
             .login_with_phone_captcha(phone, country_code, captcha)
             .await?;
-        self.persist_login(account, login)
+        let summary = self.persist_login(account, login)?;
+        self.remove_pending_captcha_client(phone, country_code)?;
+        Ok(summary)
+    }
+
+    fn store_pending_captcha_client(
+        &self,
+        phone: &str,
+        country_code: &str,
+        client: NeteaseClient,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let mut clients = self
+            .pending_captcha_clients
+            .write()
+            .map_err(|_| account_store_error())?;
+        clients.retain(|_, pending| pending.expires_at > now);
+        clients.insert(
+            captcha_client_key(phone, country_code),
+            PendingCaptchaClient {
+                client,
+                expires_at: now + CAPTCHA_NETWORK_IDENTITY_TTL,
+            },
+        );
+        Ok(())
+    }
+
+    fn captcha_client(&self, phone: &str, country_code: &str) -> Result<NeteaseClient> {
+        let now = Instant::now();
+        let mut clients = self
+            .pending_captcha_clients
+            .write()
+            .map_err(|_| account_store_error())?;
+        clients.retain(|_, pending| pending.expires_at > now);
+        if let Some(pending) = clients.get(&captcha_client_key(phone, country_code)) {
+            return Ok(pending.client.clone());
+        }
+        drop(clients);
+        self.client_with_cached_anonymous_identity(self.client.clone())
+    }
+
+    fn remove_pending_captcha_client(&self, phone: &str, country_code: &str) -> Result<()> {
+        self.pending_captcha_clients
+            .write()
+            .map_err(|_| account_store_error())?
+            .remove(&captcha_client_key(phone, country_code));
+        Ok(())
+    }
+
+    async fn client_with_anonymous_identity(&self, client: NeteaseClient) -> Result<NeteaseClient> {
+        let identity = self
+            .anonymous_identity
+            .read()
+            .map_err(|_| account_store_error())?
+            .clone();
+        let identity = match identity {
+            Some(identity) => identity,
+            None => {
+                let registration = client.register_anonymous().await?;
+                let identity = StoredAnonymousIdentity {
+                    device_id: registration.device_id.clone(),
+                    cookie: registration.session_cookie().to_owned(),
+                };
+                self.install_anonymous_identity(identity.clone())?;
+                identity
+            }
+        };
+        Ok(client
+            .with_cookie(identity.cookie)
+            .with_device_id(identity.device_id))
+    }
+
+    fn client_with_cached_anonymous_identity(
+        &self,
+        client: NeteaseClient,
+    ) -> Result<NeteaseClient> {
+        let identity = self
+            .anonymous_identity
+            .read()
+            .map_err(|_| account_store_error())?
+            .clone();
+        Ok(match identity {
+            Some(identity) => client
+                .with_cookie(identity.cookie)
+                .with_device_id(identity.device_id),
+            None => client,
+        })
     }
 
     pub async fn logout_account(&self, account: &str) -> Result<bool> {
@@ -8932,6 +9032,19 @@ fn normalize_account_label(account: Option<&str>) -> Result<&str> {
     Ok(account)
 }
 
+fn captcha_client_key(phone: &str, country_code: &str) -> String {
+    let country_code = match country_code.trim() {
+        "" => "86",
+        value => value,
+    };
+    let mut digest = Md5::new();
+    digest.update(b"tuneweave-netease-captcha\0");
+    digest.update(country_code.as_bytes());
+    digest.update(b"\0");
+    digest.update(phone.trim().as_bytes());
+    hex::encode(digest.finalize())
+}
+
 fn account_store_error() -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::InternalError,
@@ -13680,6 +13793,124 @@ fn parse_body<T: DeserializeOwned>(body: Value) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn captcha_send_verify_and_login_reuse_the_provider_network_and_device_identity() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let mut identities = Vec::new();
+            for request_index in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept captcha request");
+                let mut request = [0_u8; 16 * 1024];
+                let length = stream.read(&mut request).expect("read captcha request");
+                let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+                let real_ip = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("x-real-ip: "))
+                    .expect("X-Real-IP header")
+                    .trim()
+                    .to_owned();
+                let forwarded = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("x-forwarded-for: "))
+                    .expect("X-Forwarded-For header")
+                    .trim()
+                    .to_owned();
+                assert_eq!(real_ip, forwarded);
+                let cookie = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("cookie: "))
+                    .expect("Cookie header");
+                let cookie_value = |name: &str| {
+                    cookie
+                        .split(';')
+                        .filter_map(|pair| pair.trim().split_once('='))
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.to_owned())
+                        .unwrap_or_else(|| panic!("stable captcha cookie {name}"))
+                };
+                identities.push((real_ip, cookie_value("music_a"), cookie_value("deviceid")));
+                let body = if request_index == 2 {
+                    r#"{"code":200,"account":{"id":42},"profile":{"userId":42,"nickname":"test-user"}}"#
+                } else {
+                    r#"{"code":200,"data":true}"#
+                };
+                if request_index == 2 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: MUSIC_U=test-account-session; Path=/; HttpOnly\r\nSet-Cookie: __csrf=test-csrf; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("write captcha login response");
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("write captcha response");
+                }
+            }
+            identities
+        });
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            web_base_url: format!("http://{address}"),
+            cookie: Some("MUSIC_A=test-anonymous-session".to_owned()),
+            random_cn_ip: true,
+            ..NeteaseConfig::default()
+        })
+        .expect("build random-IP provider");
+
+        provider
+            .send_phone_captcha("13800138000", "86")
+            .await
+            .expect("send captcha");
+        let verification = provider
+            .verify_phone_captcha("13800138000", "86", "1234")
+            .await
+            .expect("verify captcha");
+        assert!(
+            verification.valid,
+            "unexpected verification response: {:?}",
+            verification.response
+        );
+        let account = provider
+            .login_with_phone_captcha("sms-account", "13800138000", "86", "1234")
+            .await
+            .expect("login with captcha");
+        assert_eq!(account.id.as_deref(), Some("42"));
+        assert_eq!(account.nickname.as_deref(), Some("test-user"));
+
+        let identities = server.join().expect("join captcha test server");
+        assert_eq!(identities.len(), 3);
+        assert_eq!(identities[0].1, "test-anonymous-session");
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.0 == identities[0].0)
+        );
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.1 == identities[0].1)
+        );
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.2 == identities[0].2)
+        );
+        assert!(
+            provider
+                .pending_captcha_clients
+                .read()
+                .expect("pending captcha clients")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn qr_login_image_is_a_self_contained_svg_data_url() {

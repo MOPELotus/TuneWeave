@@ -69,7 +69,7 @@ pub struct NeteaseConfig {
     pub proxy_url: Option<String>,
     /// A fixed server-controlled IPv4 identity sent as X-Real-IP and X-Forwarded-For.
     pub real_ip: Option<Ipv4Addr>,
-    /// Generate a fresh Chinese IPv4 identity for every platform API request.
+    /// Select one Chinese IPv4 identity when the client starts and reuse it for all requests.
     pub random_cn_ip: bool,
     pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
@@ -108,7 +108,6 @@ pub struct NeteaseClient {
     device_id: String,
     web_client_id: String,
     real_ip: Option<Ipv4Addr>,
-    random_cn_ip: bool,
     xeapi_state: Arc<RwLock<XeapiState>>,
     anti_cheat_v2_token: Arc<RwLock<Option<String>>>,
     anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
@@ -314,6 +313,12 @@ impl NeteaseClient {
             unix_time_millis()
         );
 
+        let real_ip = if config.random_cn_ip {
+            Some(random_chinese_ipv4())
+        } else {
+            config.real_ip
+        };
+
         Ok(Self {
             http,
             asset_http,
@@ -326,8 +331,7 @@ impl NeteaseClient {
             cookie: config.cookie,
             device_id,
             web_client_id,
-            real_ip: config.real_ip,
-            random_cn_ip: config.random_cn_ip,
+            real_ip,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
             anti_cheat_v2_token: Arc::new(RwLock::new(None)),
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
@@ -1041,12 +1045,7 @@ impl NeteaseClient {
     }
 
     fn apply_network_identity(&self, request: RequestBuilder) -> RequestBuilder {
-        let ip = if self.random_cn_ip {
-            Some(random_chinese_ipv4())
-        } else {
-            self.real_ip
-        };
-        let Some(ip) = ip else {
+        let Some(ip) = self.real_ip else {
             return request;
         };
         let ip = ip.to_string();
@@ -1913,12 +1912,13 @@ mod tests {
     }
 
     #[test]
-    fn compact_random_chinese_ip_generator_stays_inside_the_reference_fallback_range() {
+    fn random_chinese_network_identity_is_selected_once_per_client() {
         let client = NeteaseClient::new(NeteaseConfig {
             random_cn_ip: true,
             ..NeteaseConfig::default()
         })
         .expect("build random-IP client");
+        let mut selected = None;
         for _ in 0..256 {
             let request = client
                 .apply_network_identity(client.http.get("https://example.test/api"))
@@ -1938,6 +1938,7 @@ mod tests {
             assert!((25..=94).contains(&octets[1]));
             assert_ne!(octets[2], 0);
             assert_ne!(octets[3], 0);
+            assert_eq!(*selected.get_or_insert(real), real);
         }
     }
 
