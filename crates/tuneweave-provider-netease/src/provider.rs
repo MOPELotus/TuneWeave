@@ -71,11 +71,12 @@ use tuneweave_core::{
     SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
     SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
     StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -669,6 +670,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountAlbums,
             Capability::AccountVideos,
             Capability::AccountRadioStations,
+            Capability::AccountStyledRadioStations,
             Capability::AccountPodcasts,
             Capability::AccountCreatedPodcasts,
             Capability::AccountFollowingArtists,
@@ -1160,6 +1162,20 @@ impl MusicProvider for NeteaseProvider {
         subscribed: bool,
         account: Option<&str>,
     ) -> Result<SubscriptionResult> {
+        if id.starts_with("difm:") {
+            let (source, channel_id) = parse_netease_difm_channel_id(id)?;
+            let client = self.client_for(account)?;
+            require_authenticated_client(&client, "DiFM channel subscription")?;
+            let (path, payload) = netease_difm_channel_subscription_request(channel_id, subscribed);
+            let response = client.request_api(path, payload).await?;
+            ensure_account_access(&client, &response.body, "DiFM channel subscription")?;
+            return map_netease_difm_subscription_result(
+                source,
+                channel_id,
+                subscribed,
+                response.body,
+            );
+        }
         let id = parse_numeric_id("broadcast station", id)?;
         let client = self.client_for(account)?;
         let response = client
@@ -2512,6 +2528,19 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_account_access(&client, &response.body, "broadcast station collection")?;
         map_radio_collection_response(response.body, limit, request.offset)
+    }
+
+    async fn account_styled_radio_stations(
+        &self,
+        request: &StyledRadioStationLibraryRequest,
+    ) -> Result<Page<RadioStation>> {
+        let (path, payload) = netease_difm_subscribed_channels_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        require_authenticated_client(&client, "DiFM subscribed channel catalog")?;
+        let response = client.request_api(path, payload).await?;
+        ensure_account_access(&client, &response.body, "DiFM subscribed channel catalog")?;
+        map_netease_difm_subscribed_channels(response.body, request)
     }
 
     async fn account_podcasts(&self, request: &PageRequest) -> Result<Page<Podcast>> {
@@ -6375,23 +6404,28 @@ fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Resu
 fn netease_radio_style_catalog_request(
     request: &RadioStyleCatalogRequest,
 ) -> Result<(&'static str, Value)> {
-    if request.sources.is_empty() {
+    validate_difm_sources(&request.sources)?;
+    Ok((
+        "/api/dj/difm/all/style/channel/v2",
+        json!({ "sources": serde_json::to_string(&request.sources).expect("u32 list serializes") }),
+    ))
+}
+
+fn validate_difm_sources(sources: &[u32]) -> Result<()> {
+    if sources.is_empty() {
         return Err(TuneWeaveError::invalid_request(
             "DiFM sources must contain at least one value",
         )
         .with_platform(Platform::Netease));
     }
-    if let Some(source) = request.sources.iter().copied().find(|source| *source > 2) {
+    if let Some(source) = sources.iter().copied().find(|source| *source > 2) {
         return Err(
             TuneWeaveError::invalid_request("DiFM sources must only contain 0, 1, or 2")
                 .with_platform(Platform::Netease)
                 .with_details(json!({ "source": source, "allowed": [0, 1, 2] })),
         );
     }
-    Ok((
-        "/api/dj/difm/all/style/channel/v2",
-        json!({ "sources": serde_json::to_string(&request.sources).expect("u32 list serializes") }),
-    ))
+    Ok(())
 }
 
 fn map_netease_radio_style_catalog(
@@ -6747,6 +6781,143 @@ fn difm_playback_error(message: &str, response: &Value) -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::UpstreamError,
         format!("NetEase DiFM playback queue {message}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": response }))
+}
+
+fn netease_difm_subscribed_channels_request(
+    request: &StyledRadioStationLibraryRequest,
+) -> Result<(&'static str, Value)> {
+    validate_difm_sources(&request.sources)?;
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "DiFM subscribed channel limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    if request.offset != 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "the DiFM subscribed channel catalog does not support offset",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "offset": request.offset })));
+    }
+    Ok((
+        "/api/dj/difm/subscribe/channels/get/v2",
+        json!({ "sources": serde_json::to_string(&request.sources).expect("u32 list serializes") }),
+    ))
+}
+
+fn map_netease_difm_subscribed_channels(
+    body: Value,
+    request: &StyledRadioStationLibraryRequest,
+) -> Result<Page<RadioStation>> {
+    ensure_success(&body)?;
+    let raw_items = body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            difm_subscription_catalog_error("response did not contain its data array", &body)
+        })?;
+    let items = raw_items
+        .into_iter()
+        .map(|raw| map_netease_difm_subscribed_channel(raw, &request.sources))
+        .collect::<Result<Vec<_>>>()?;
+    let total = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    let mut extensions = Extensions::new();
+    extensions.insert("requested_sources".to_owned(), json!(request.sources));
+    extensions.insert("limit_applied".to_owned(), json!(false));
+    extensions.insert("continuation_supported".to_owned(), json!(false));
+    extensions.insert("response".to_owned(), body);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total: Some(total),
+            next_offset: None,
+            has_more: false,
+            extensions,
+        },
+    })
+}
+
+fn map_netease_difm_subscribed_channel(
+    raw: Value,
+    requested_sources: &[u32],
+) -> Result<RadioStation> {
+    let source = difm_u32_field(&raw, "source", "subscribed channel")?;
+    if !requested_sources.contains(&source) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase DiFM subscribed channel source was not requested",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(
+            json!({ "source": source, "requested_sources": requested_sources, "item": raw }),
+        ));
+    }
+    let channel_id = difm_u32_field(&raw, "id", "subscribed channel")?;
+    let name = difm_required_text(&raw, "name", "subscribed channel")?;
+    let mut station = RadioStation::new(netease_difm_station_ref(source, channel_id)?, name);
+    station.description = difm_optional_text(&raw, "description").unwrap_or_default();
+    station.cover_url = difm_optional_text(&raw, "cover");
+    station.subscribed = Some(true);
+    station
+        .extensions
+        .insert("difm_channel".to_owned(), raw.clone());
+    station
+        .extensions
+        .insert("source".to_owned(), json!(source));
+    station
+        .extensions
+        .insert("channel_id".to_owned(), json!(channel_id));
+    if let Some(localized_name) = difm_optional_text(&raw, "chineseName") {
+        station
+            .extensions
+            .insert("localized_name".to_owned(), json!(localized_name));
+    }
+    Ok(station)
+}
+
+fn netease_difm_channel_subscription_request(
+    channel_id: u32,
+    subscribed: bool,
+) -> (&'static str, Value) {
+    let path = if subscribed {
+        "/api/dj/difm/channel/subscribe"
+    } else {
+        "/api/dj/difm/channel/unsubscribe"
+    };
+    (path, json!({ "id": channel_id }))
+}
+
+fn map_netease_difm_subscription_result(
+    source: u32,
+    channel_id: u32,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = netease_difm_station_ref(source, channel_id)?;
+    let mut extensions = Extensions::new();
+    extensions.insert("catalog".to_owned(), json!("difm"));
+    extensions.insert("source".to_owned(), json!(source));
+    extensions.insert("channel_id".to_owned(), json!(channel_id));
+    extensions.insert("response".to_owned(), response);
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions,
+    })
+}
+
+fn difm_subscription_catalog_error(message: &str, response: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase DiFM subscribed channel catalog {message}"),
     )
     .with_platform(Platform::Netease)
     .with_details(json!({ "response": response }))
@@ -19451,6 +19622,168 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_maps_difm_subscribed_channel_catalog() {
+        let request = StyledRadioStationLibraryRequest {
+            sources: vec![0, 1, 2],
+            limit: 25,
+            offset: 0,
+            account: Some("radio-user".to_owned()),
+        };
+        assert_eq!(
+            netease_difm_subscribed_channels_request(&request)
+                .expect("build subscribed DiFM catalog request"),
+            (
+                "/api/dj/difm/subscribe/channels/get/v2",
+                json!({ "sources": "[0,1,2]" })
+            )
+        );
+
+        let page = map_netease_difm_subscribed_channels(
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 10505,
+                    "name": "Deep Progressive House",
+                    "chineseName": "深度前卫浩室",
+                    "description": "A continuous progressive mix",
+                    "cover": "https://example.test/10505.jpg",
+                    "source": 0,
+                    "futureField": { "kept": true }
+                }],
+                "message": ""
+            }),
+            &request,
+        )
+        .expect("map subscribed DiFM catalog");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].resource_ref.to_string(),
+            "netease:difm:0:10505"
+        );
+        assert_eq!(page.items[0].subscribed, Some(true));
+        assert_eq!(page.items[0].extensions["localized_name"], "深度前卫浩室");
+        assert_eq!(
+            page.items[0].extensions["difm_channel"]["futureField"]["kept"],
+            true
+        );
+        assert_eq!(page.pagination.limit, 25);
+        assert_eq!(page.pagination.offset, 0);
+        assert_eq!(page.pagination.total, Some(1));
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["limit_applied"], false);
+        assert_eq!(page.pagination.extensions["continuation_supported"], false);
+        assert_eq!(page.pagination.extensions["response"]["code"], 200);
+
+        let empty = map_netease_difm_subscribed_channels(
+            json!({ "code": 200, "data": [], "message": "" }),
+            &request,
+        )
+        .expect("map empty subscribed DiFM catalog");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.total, Some(0));
+    }
+
+    #[test]
+    fn difm_subscribed_catalog_rejects_unsupported_controls_and_bad_items() {
+        for request in [
+            StyledRadioStationLibraryRequest::new(vec![], 25),
+            StyledRadioStationLibraryRequest::new(vec![3], 25),
+            StyledRadioStationLibraryRequest::new(vec![0], 0),
+            StyledRadioStationLibraryRequest::new(vec![0], 101),
+            StyledRadioStationLibraryRequest {
+                sources: vec![0],
+                limit: 25,
+                offset: 1,
+                account: None,
+            },
+        ] {
+            assert_eq!(
+                netease_difm_subscribed_channels_request(&request)
+                    .expect_err("invalid subscribed DiFM catalog request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+
+        let request = StyledRadioStationLibraryRequest::new(vec![0], 25);
+        for response in [
+            json!({ "code": 200, "data": {} }),
+            json!({
+                "code": 200,
+                "data": [{ "id": 10505, "name": "Wrong source", "source": 1 }]
+            }),
+            json!({
+                "code": 200,
+                "data": [{ "id": 10505, "name": "Missing source" }]
+            }),
+            json!({
+                "code": 200,
+                "data": [{ "id": 10505, "name": " ", "source": 0 }]
+            }),
+        ] {
+            assert_eq!(
+                map_netease_difm_subscribed_channels(response, &request)
+                    .expect_err("invalid subscribed DiFM response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn builds_and_maps_difm_channel_subscription_actions() {
+        assert_eq!(
+            netease_difm_channel_subscription_request(10505, true),
+            ("/api/dj/difm/channel/subscribe", json!({ "id": 10505 }))
+        );
+        assert_eq!(
+            netease_difm_channel_subscription_request(10505, false),
+            ("/api/dj/difm/channel/unsubscribe", json!({ "id": 10505 }))
+        );
+        for subscribed in [true, false] {
+            let result =
+                map_netease_difm_subscription_result(0, 10505, subscribed, json!({ "code": 200 }))
+                    .expect("map DiFM subscription result");
+            assert_eq!(result.resource_ref.to_string(), "netease:difm:0:10505");
+            assert_eq!(result.subscribed, subscribed);
+            assert_eq!(result.extensions["catalog"], "difm");
+            assert_eq!(result.extensions["response"]["code"], 200);
+        }
+    }
+
+    #[tokio::test]
+    async fn difm_account_apis_require_authentication_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = StyledRadioStationLibraryRequest {
+            sources: vec![0],
+            limit: 25,
+            offset: 0,
+            account: Some("default".to_owned()),
+        };
+        assert_eq!(
+            MusicProvider::account_styled_radio_stations(&provider, &request)
+                .await
+                .expect_err("subscribed DiFM catalog requires login")
+                .code,
+            ErrorCode::AuthenticationRequired
+        );
+        for subscribed in [true, false] {
+            assert_eq!(
+                MusicProvider::set_radio_station_subscription(
+                    &provider,
+                    "difm:0:10505",
+                    subscribed,
+                    Some("default"),
+                )
+                .await
+                .expect_err("DiFM subscription mutation requires login")
+                .code,
+                ErrorCode::AuthenticationRequired
+            );
+        }
+    }
+
+    #[test]
     fn podcast_requests_match_reference_modules() {
         assert_eq!(
             netease_podcast_categories_request(PodcastTaxonomyKind::All),
@@ -26414,6 +26747,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AccountAlbums));
         assert!(capabilities.contains(&Capability::AccountVideos));
         assert!(capabilities.contains(&Capability::AccountRadioStations));
+        assert!(capabilities.contains(&Capability::AccountStyledRadioStations));
         assert!(capabilities.contains(&Capability::AccountArtistNewVideos));
         assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
         assert!(capabilities.contains(&Capability::AccountArtistNewWorks));

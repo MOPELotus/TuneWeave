@@ -70,11 +70,12 @@ use tuneweave_core::{
     SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -7260,10 +7261,48 @@ async fn account_videos(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountRadioStationQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+    catalog: Option<String>,
+    sources: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AccountRadioStationCatalog {
+    #[default]
+    Broadcast,
+    Styled,
+}
+
+fn parse_account_radio_station_catalog(
+    value: Option<&str>,
+) -> Result<AccountRadioStationCatalog, TuneWeaveError> {
+    match value
+        .unwrap_or("broadcast")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "broadcast" | "default" | "live" => Ok(AccountRadioStationCatalog::Broadcast),
+        "styled" | "style" | "difm" => Ok(AccountRadioStationCatalog::Styled),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported account radio station catalog: {value}"
+        ))
+        .with_details(json!({ "allowed": ["broadcast", "styled"] }))),
+    }
+}
+
 async fn account_radio_stations(
     State(state): State<AppState>,
-    Query(params): Query<AccountQuery>,
+    params: Result<Query<AccountRadioStationQuery>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<RadioStation>>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
@@ -7271,14 +7310,41 @@ async fn account_radio_stations(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let catalog = parse_account_radio_station_catalog(params.catalog.as_deref())?;
     let provider = state.registry.require(platform)?;
-    let page = provider
-        .account_radio_stations(&PageRequest {
-            limit,
-            offset,
-            account: Some(account.clone()),
-        })
-        .await?;
+    let page = match catalog {
+        AccountRadioStationCatalog::Broadcast => {
+            if params.sources.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "sources is only available for the styled radio station catalog",
+                )
+                .into());
+            }
+            provider
+                .account_radio_stations(&PageRequest {
+                    limit,
+                    offset,
+                    account: Some(account.clone()),
+                })
+                .await?
+        }
+        AccountRadioStationCatalog::Styled => {
+            if offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "offset is not supported for the styled radio station catalog",
+                )
+                .into());
+            }
+            provider
+                .account_styled_radio_stations(&StyledRadioStationLibraryRequest {
+                    sources: parse_radio_style_sources(params.sources.as_deref())?,
+                    limit,
+                    offset,
+                    account: Some(account.clone()),
+                })
+                .await?
+        }
+    };
     Ok(Json(
         ApiResponse::new(page.items)
             .with_platform(platform)
@@ -9170,6 +9236,7 @@ mod tests {
                 Capability::AccountAlbums,
                 Capability::AccountVideos,
                 Capability::AccountRadioStations,
+                Capability::AccountStyledRadioStations,
                 Capability::AccountPodcasts,
                 Capability::AccountCreatedPodcasts,
                 Capability::AccountFollowingArtists,
@@ -11097,6 +11164,33 @@ mod tests {
                     total: Some(53),
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions,
+                },
+            })
+        }
+
+        async fn account_styled_radio_stations(
+            &self,
+            request: &StyledRadioStationLibraryRequest,
+        ) -> Result<Page<RadioStation>> {
+            let source = request.sources[0];
+            let mut station = sample_radio_station(&format!("difm:{source}:10505"));
+            station.name = "Deep Progressive House".to_owned();
+            station.subscribed = Some(true);
+            station
+                .extensions
+                .insert("source".to_owned(), json!(source));
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("request".to_owned(), json!(request));
+            extensions.insert("limit_applied".to_owned(), json!(false));
+            Ok(Page {
+                items: vec![station],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
                     extensions,
                 },
             })
@@ -15613,6 +15707,20 @@ mod tests {
         assert_eq!(unsubscribed["data"]["resource_ref"], "netease:362");
         assert_eq!(unsubscribed["data"]["subscribed"], false);
         assert_eq!(unsubscribed["meta"]["account"], "collector");
+
+        for (method, subscribed) in [(Method::PUT, true), (Method::DELETE, false)] {
+            let (status, result) = json_request_from(
+                test_app_with_provider(),
+                method,
+                "/v1/account/library/radio-stations/netease:difm:0:10505?account=collector",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(result["data"]["resource_ref"], "netease:difm:0:10505");
+            assert_eq!(result["data"]["subscribed"], subscribed);
+            assert_eq!(result["meta"]["account"], "collector");
+        }
     }
 
     #[tokio::test]
@@ -17754,6 +17862,58 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["source"],
             "QT"
         );
+    }
+
+    #[tokio::test]
+    async fn account_styled_radio_stations_share_the_library_endpoint() {
+        for sources in ["sources=0,1,2", "sources=%5B1%2C2%5D"] {
+            let path = format!(
+                "/v1/account/library/radio-stations?platform=netease&account=personal&catalog=difm&limit=25&{sources}"
+            );
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "path: {path}");
+            let expected_source = if sources.contains("%5B1") { 1 } else { 0 };
+            assert_eq!(
+                json["data"][0]["ref"],
+                format!("netease:difm:{expected_source}:10505")
+            );
+            assert_eq!(json["data"][0]["subscribed"], true);
+            assert_eq!(json["meta"]["account"], "personal");
+            assert_eq!(json["meta"]["pagination"]["limit"], 25);
+            assert_eq!(json["meta"]["pagination"]["offset"], 0);
+            assert_eq!(json["meta"]["pagination"]["has_more"], false);
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["limit_applied"],
+                false
+            );
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["request"]["sources"][0],
+                expected_source
+            );
+        }
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/library/radio-stations?catalog=styled",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:difm:0:10505");
+    }
+
+    #[tokio::test]
+    async fn account_radio_station_catalog_rejects_conflicting_controls() {
+        for path in [
+            "/v1/account/library/radio-stations?catalog=unknown",
+            "/v1/account/library/radio-stations?sources=0",
+            "/v1/account/library/radio-stations?catalog=difm&sources=3",
+            "/v1/account/library/radio-stations?catalog=difm&offset=1",
+            "/v1/account/library/radio-stations?catalog=difm&unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]

@@ -42,10 +42,11 @@ use crate::{
     ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
-    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
+    StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -849,6 +850,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountRadioStations,
+        ))
+    }
+
+    async fn account_styled_radio_stations(
+        &self,
+        _request: &StyledRadioStationLibraryRequest,
+    ) -> Result<Page<RadioStation>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountStyledRadioStations,
         ))
     }
 

@@ -76,11 +76,11 @@ pub use model::{
     SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, UserProfile, UserProfileBackend,
+    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

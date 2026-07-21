@@ -102,6 +102,7 @@ pub enum Capability {
     AccountAlbums,
     AccountVideos,
     AccountRadioStations,
+    AccountStyledRadioStations,
     AccountPodcasts,
     AccountCreatedPodcasts,
     AccountFollowingArtists,

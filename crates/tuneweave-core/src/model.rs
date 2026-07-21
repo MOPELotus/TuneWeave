@@ -863,6 +863,26 @@ pub struct RadioPlaybackQueue {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StyledRadioStationLibraryRequest {
+    pub sources: Vec<u32>,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl StyledRadioStationLibraryRequest {
+    #[must_use]
+    pub fn new(sources: Vec<u32>, limit: u32) -> Self {
+        Self {
+            sources,
+            limit,
+            offset: 0,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RadioStation {
     #[serde(rename = "ref")]
@@ -3426,6 +3446,20 @@ mod tests {
         assert_eq!(value["items"][0]["duration_ms"], 351_000);
         assert_eq!(value["items"][0]["waveform"][1], 0.2434);
         assert_eq!(RadioPlaybackQueueRequest::default().limit, 5);
+    }
+
+    #[test]
+    fn styled_radio_station_library_request_keeps_sources_and_account_explicit() {
+        let mut request = StyledRadioStationLibraryRequest::new(vec![0, 1, 2], 25);
+        request.account = Some("radio-user".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize styled radio library request");
+        assert_eq!(value["sources"][0], 0);
+        assert_eq!(value["sources"][1], 1);
+        assert_eq!(value["sources"][2], 2);
+        assert_eq!(value["limit"], 25);
+        assert_eq!(value["offset"], 0);
+        assert_eq!(value["account"], "radio-user");
     }
 
     #[test]
