@@ -55,21 +55,22 @@ use tuneweave_core::{
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodeStream, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeStream,
+    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderRegistry,
+    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
+    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
+    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
     VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
     VideoTaxonomyRequest,
 };
@@ -452,7 +453,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/account/podcast-episodes",
-            get(account_podcast_episode_search),
+            get(account_podcast_episode_search).delete(podcast_episodes_delete),
+        )
+        .route(
+            "/account/podcast-episodes/{reference}",
+            axum::routing::delete(podcast_episode_delete),
         )
         .route("/account/following/artists", get(account_following_artists))
         .route(
@@ -3130,6 +3135,22 @@ struct PodcastEpisodeOrderBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PodcastEpisodeDeleteBody {
+    #[serde(
+        alias = "episode_refs",
+        alias = "episodeRefs",
+        alias = "episodes",
+        alias = "programs"
+    )]
+    refs: Option<PlaylistReferenceInput>,
+    #[serde(alias = "id", alias = "programIds", alias = "voiceIds")]
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlaylistAccountParams {
     account: Option<String>,
 }
@@ -3471,6 +3492,57 @@ async fn podcast_episode_order(
                 account: Some(account.clone()),
             },
         )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn podcast_episode_delete(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PlaylistAccountParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeDeleteResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let params = query_params(params)?;
+    let account = account_alias(params.account.as_deref())?;
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_podcast_episodes(&PodcastEpisodeDeleteRequest {
+            episode_refs: vec![reference],
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn podcast_episodes_delete(
+    State(state): State<AppState>,
+    payload: Result<Json<PodcastEpisodeDeleteBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeDeleteResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let episode_refs = parse_playlist_reference_fields(
+        body.refs,
+        body.ids,
+        body.platform.as_deref(),
+        state.default_platform,
+        "podcast episode",
+    )?;
+    let platform = single_reference_platform("podcast episode deletion", &episode_refs)?;
+    let account = account_alias(body.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .delete_podcast_episodes(&PodcastEpisodeDeleteRequest {
+            episode_refs,
+            account: Some(account.clone()),
+        })
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -8671,6 +8743,7 @@ mod tests {
                 Capability::PodcastEpisodeWorkbenchSearch,
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeOrderWrite,
+                Capability::PodcastEpisodeDeleteWrite,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeWorkbenchDetail,
                 Capability::PodcastEpisodeStream,
@@ -9574,6 +9647,17 @@ mod tests {
                     ("account".to_owned(), json!(request.account)),
                     ("response".to_owned(), json!({"code": 200})),
                 ]),
+            })
+        }
+
+        async fn delete_podcast_episodes(
+            &self,
+            request: &PodcastEpisodeDeleteRequest,
+        ) -> Result<PodcastEpisodeDeleteResult> {
+            Ok(PodcastEpisodeDeleteResult {
+                episode_refs: request.episode_refs.clone(),
+                deleted: true,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -13803,6 +13887,87 @@ mod tests {
                 test_app_with_provider(),
                 Method::PUT,
                 "/v1/account/podcasts/netease:336355127/episodes/order",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_delete_supports_single_and_ordered_batch_references() {
+        let (status, single) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/podcast-episodes/netease:2058695201?account=creator",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["episode_refs"][0], "netease:2058695201");
+        assert_eq!(single["data"]["deleted"], true);
+        assert_eq!(single["meta"]["account"], "creator");
+
+        let (status, refs) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/podcast-episodes",
+            Some(json!({
+                "episodeRefs": [
+                    "netease:2058695202",
+                    "netease:2058695201",
+                    "netease:2058695202"
+                ],
+                "account": "creator"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            refs["data"]["episode_refs"],
+            json!([
+                "netease:2058695202",
+                "netease:2058695201",
+                "netease:2058695202"
+            ])
+        );
+        assert_eq!(refs["data"]["extensions"]["account"], "creator");
+
+        let (status, ids) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/podcast-episodes",
+            Some(json!({
+                "ids": "2058695201, 2058695202",
+                "platform": "netease"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            ids["data"]["episode_refs"],
+            json!(["netease:2058695201", "netease:2058695202"])
+        );
+        assert_eq!(ids["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_delete_rejects_ambiguous_malformed_and_mixed_inputs() {
+        for body in [
+            json!({}),
+            json!({"refs": [], "account": "creator"}),
+            json!({"refs": ["netease:1"], "ids": [1]}),
+            json!({"refs": ["netease:1"], "platform": "netease"}),
+            json!({"refs": ["netease:1", "qq:2"]}),
+            json!({"ids": "1,,2", "platform": "netease"}),
+            json!({"refs": true}),
+            json!({"ids": [1], "unknown": true}),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::DELETE,
+                "/v1/account/podcast-episodes",
                 Some(body),
             )
             .await;

@@ -53,22 +53,23 @@ use tuneweave_core::{
     PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
     PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
     PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
-    PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeOrderRequest,
-    PodcastEpisodeOrderResult, PodcastEpisodeStream, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
+    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodeStream, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
     VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
     VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
@@ -608,6 +609,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeWorkbenchSearch,
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeOrderWrite,
+            Capability::PodcastEpisodeDeleteWrite,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeWorkbenchDetail,
             Capability::PodcastEpisodeStream,
@@ -1310,6 +1312,19 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_eapi(path, payload).await?;
         ensure_account_access(&client, &response.body, "podcast episode order update")?;
         map_netease_podcast_episode_order_result(podcast_id, episode_id, request, response.body)
+    }
+
+    async fn delete_podcast_episodes(
+        &self,
+        request: &PodcastEpisodeDeleteRequest,
+    ) -> Result<PodcastEpisodeDeleteResult> {
+        let ids = validate_podcast_episode_refs(&request.episode_refs)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "podcast episode deletion")?;
+        let (path, payload) = netease_podcast_episode_delete_request(&ids);
+        let response = client.request_eapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "podcast episode deletion")?;
+        map_netease_podcast_episode_delete_result(&request.episode_refs, response.body)
     }
 
     async fn podcast_episode_chart(
@@ -5871,6 +5886,35 @@ fn netease_podcast_episode_order_request(
     )
 }
 
+fn netease_podcast_episode_delete_request(ids: &[u64]) -> (&'static str, Value) {
+    (
+        "/api/content/voice/delete",
+        json!({ "ids": join_numeric_ids(ids) }),
+    )
+}
+
+fn validate_podcast_episode_refs(episode_refs: &[ResourceRef]) -> Result<Vec<u64>> {
+    if episode_refs.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode_refs must contain at least one reference",
+        )
+        .with_platform(Platform::Netease));
+    }
+    episode_refs
+        .iter()
+        .map(|reference| {
+            if reference.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(
+                    "podcast episode deletion requires NetEase references",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "episode_ref": reference })));
+            }
+            parse_numeric_id("podcast voice", reference.id())
+        })
+        .collect()
+}
+
 fn netease_podcast_episode_workbench_search_request(
     request: &PodcastEpisodeWorkbenchSearchRequest,
 ) -> Result<(&'static str, Value)> {
@@ -7108,6 +7152,18 @@ fn map_netease_podcast_episode_order_result(
             ("offset".to_owned(), json!(request.offset)),
             ("response".to_owned(), body),
         ]),
+    })
+}
+
+fn map_netease_podcast_episode_delete_result(
+    episode_refs: &[ResourceRef],
+    body: Value,
+) -> Result<PodcastEpisodeDeleteResult> {
+    ensure_success(&body)?;
+    Ok(PodcastEpisodeDeleteResult {
+        episode_refs: episode_refs.to_vec(),
+        deleted: true,
+        extensions: Extensions::from([("response".to_owned(), body)]),
     })
 }
 
@@ -18346,6 +18402,13 @@ mod tests {
                 })
             )
         );
+        assert_eq!(
+            netease_podcast_episode_delete_request(&[2_058_695_201, 2_058_695_202]),
+            (
+                "/api/content/voice/delete",
+                json!({"ids": "2058695201,2058695202"})
+            )
+        );
         let mut search = PodcastEpisodeWorkbenchSearchRequest::new(200, 40);
         search.query = Some(" 一期 ".to_owned());
         search.display_status = Some(PodcastEpisodeDisplayStatus::SchedulePublish);
@@ -19443,6 +19506,32 @@ mod tests {
                 json!({"code": 500, "message": "failed"}),
             )
             .expect_err("failed podcast episode order")
+            .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[test]
+    fn maps_podcast_episode_deletion_identity_and_complete_response() {
+        let refs = vec![
+            ResourceRef::new(Platform::Netease, "2058695201").expect("first episode reference"),
+            ResourceRef::new(Platform::Netease, "2058695202").expect("second episode reference"),
+        ];
+        let result = map_netease_podcast_episode_delete_result(
+            &refs,
+            json!({"code": 200, "futureField": {"kept": true}}),
+        )
+        .expect("map podcast episode deletion result");
+        assert_eq!(result.episode_refs, refs);
+        assert!(result.deleted);
+        assert_eq!(result.extensions["response"]["futureField"]["kept"], true);
+
+        assert_eq!(
+            map_netease_podcast_episode_delete_result(
+                &result.episode_refs,
+                json!({"code": 400, "message": "failed"}),
+            )
+            .expect_err("failed podcast episode deletion")
             .code,
             ErrorCode::UpstreamError
         );
@@ -24948,6 +25037,8 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastEpisodeList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchList));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchSearch));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeOrderWrite));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeDeleteWrite));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
@@ -25404,6 +25495,38 @@ mod tests {
             let error = MusicProvider::reorder_podcast_episode(&provider, "336355127", &order)
                 .await
                 .expect_err("podcast episode order requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_deletion_requires_valid_references_and_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for episode_refs in [
+            Vec::new(),
+            vec![ResourceRef::new(Platform::Qq, "2058695201").expect("foreign episode reference")],
+            vec![
+                ResourceRef::new(Platform::Netease, "not-a-number")
+                    .expect("opaque episode reference"),
+            ],
+        ] {
+            let error = MusicProvider::delete_podcast_episodes(
+                &provider,
+                &PodcastEpisodeDeleteRequest::new(episode_refs),
+            )
+            .await
+            .expect_err("invalid podcast episode deletion");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        for account in [None, Some("missing")] {
+            let mut request = PodcastEpisodeDeleteRequest::new(vec![
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+            ]);
+            request.account = account.map(str::to_owned);
+            let error = MusicProvider::delete_podcast_episodes(&provider, &request)
+                .await
+                .expect_err("podcast episode deletion requires authentication");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         }
     }

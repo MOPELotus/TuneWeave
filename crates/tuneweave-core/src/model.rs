@@ -1116,6 +1116,29 @@ pub struct PodcastEpisodeOrderResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeDeleteRequest {
+    pub episode_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+impl PodcastEpisodeDeleteRequest {
+    #[must_use]
+    pub fn new(episode_refs: Vec<ResourceRef>) -> Self {
+        Self {
+            episode_refs,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeDeleteResult {
+    pub episode_refs: Vec<ResourceRef>,
+    pub deleted: bool,
+    pub extensions: Extensions,
+}
+
 impl PodcastEpisodeListRequest {
     #[must_use]
     pub const fn new(limit: u32, offset: u32) -> Self {
@@ -3300,6 +3323,31 @@ mod tests {
         assert_eq!(value["podcast_ref"], "netease:336355127");
         assert_eq!(value["episode_ref"], "netease:2058695201");
         assert_eq!(value["position"], 4);
+    }
+
+    #[test]
+    fn podcast_episode_delete_keeps_ordered_cross_platform_identity_typed() {
+        let refs = vec![
+            ResourceRef::new(Platform::Netease, "2058695201").expect("first episode reference"),
+            ResourceRef::new(Platform::Netease, "2058695202").expect("second episode reference"),
+        ];
+        let mut request = PodcastEpisodeDeleteRequest::new(refs.clone());
+        request.account = Some("studio-user".to_owned());
+        let value = serde_json::to_value(&request).expect("serialize podcast episode deletion");
+        assert_eq!(
+            value["episode_refs"],
+            serde_json::json!(["netease:2058695201", "netease:2058695202"])
+        );
+        assert_eq!(value["account"], "studio-user");
+
+        let result = PodcastEpisodeDeleteResult {
+            episode_refs: refs,
+            deleted: true,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize podcast episode delete result");
+        assert_eq!(value["deleted"], true);
+        assert_eq!(value["episode_refs"][0], "netease:2058695201");
     }
 
     #[test]

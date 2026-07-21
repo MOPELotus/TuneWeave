@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=227`、`partial=2`、`implemented=63`、`verified=124`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=226`、`partial=2`、`implemented=64`、`verified=124`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -407,7 +407,7 @@
 | `vip_tasks` | `/vip/tasks` | `pending` | — |
 | `vip_tasks_v1` | `/vip/tasks/v1` | `pending` | — |
 | `vip_timemachine` | `/vip/timemachine` | `pending` | — |
-| `voice_delete` | `/voice/delete` | `pending` | — |
+| `voice_delete` | `/voice/delete` | `implemented` | `DELETE /v1/account/podcast-episodes/{ref}`、`DELETE /v1/account/podcast-episodes`（独立 `PodcastEpisodeDeleteWrite` 能力与稳定批量请求/结果；单条引用由路径决定平台，批量 `refs` 接受完整引用数组或逗号串，`ids` 接受所选平台的裸 ID 数组或逗号串，并兼容 `episode_refs/episodeRefs/episodes/programs/id/programIds/voiceIds`；严格拒绝空输入、`refs+ids` 冲突、完整引用同时指定 platform、空逗号项、畸形值、混合平台和未知字段，顺序及重复项不擅自改变；网易云侧要求全部引用属于本平台且为数字 ID，固定 EAPI `/api/content/voice/delete`，精确把有序 ID 拼成参考 `ids` 逗号字符串，要求 `account` 选择已登录隔离会话，成功结果保留删除标记、全部引用和完整响应；参考文档把 ids 误称为 voiceListId，但实际路径与同协议方法均明确删除声音，统一层未错误删除声音歌单；核心序列化、能力发现、协议、多 ID 映射、上游错误、账户前置、单条/批量 HTTP、别名/冲突/平台边界均有测试；2026-07-22 空凭据真实服务器验证缺失账户别名在发网前稳定返回 401，破坏性成功态待可丢弃的自有声音验证） |
 | `voice_detail` | `/voice/detail` | `implemented` | `GET /v1/episodes/{ref}?backend=workbench`（与缺省 `/dj/program/detail` 共用稳定 `PodcastEpisode` 输出，但以显式后端和独立 `PodcastEpisodeWorkbenchDetail` 能力保留创作者工作台语义，不静默合并两套上游功能；固定 EAPI `/api/voice/workbench/voice/detail` 并只提交数字 `id`，要求由 `account` 选择已登录隔离会话；按非空优先级解包 `data.voice/data/voice`，兼容 `voiceId/programId`、`songName`、`radioId/voiceListId`、`songId/trackId`、`durationMs`、`publishTime`、`orderNo`、`voiceFeeType` 和 `creator`，节目、所属播客及承载音频引用仍严格分离，完整工作台状态和未来字段保留在扩展；协议、能力、认证前置、包装优先级、全部别名、畸形响应、统一端点后端别名及未知字段拒绝均有测试；2026-07-18 匿名真实原始 API 以 `2058695201/1367665101` 验证上游均返回 301，稳定映射 401 `authentication_required`，成功详情留待 Basic 末尾使用持久化账户集中验收） |
 | `voice_lyric` | `/voice/lyric` | `verified` | `GET /v1/episodes/{ref}/lyrics`（EAPI `/api/voice/lyric/get`；节目与音频引用分离，受限下载网易媒体域名的完整 JSON 转写并生成句段 LRC，逐词/说话人原文保留于 `word_synced`；2026-07-17 provider 与真实 HTTP 实测 `2058695201` 返回 675 段、约 1.6 MB 转写，`1367665101` 正确保留 `data=null` 无歌词成功态） |
 | `voice_upload` | `/voice/upload` | `pending` | — |
