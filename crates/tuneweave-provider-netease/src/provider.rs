@@ -56,22 +56,23 @@ use tuneweave_core::{
     PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
     PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
     PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodeStream, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    PodcastEpisodeStream, PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult,
+    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
+    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -108,6 +109,7 @@ const NETEASE_CREDENTIAL_KIND: &str = "cookie";
 const NETEASE_ANONYMOUS_CREDENTIAL_KIND: &str = "anonymous_cookie_v1";
 const NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT: &str = "__tuneweave_anonymous__";
 const CAPTCHA_NETWORK_IDENTITY_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_VOICE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct StoredAnonymousIdentity {
@@ -610,6 +612,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeCharts,
             Capability::PodcastEpisodeOrderWrite,
             Capability::PodcastEpisodeDeleteWrite,
+            Capability::PodcastEpisodeUploadWrite,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeWorkbenchDetail,
             Capability::PodcastEpisodeStream,
@@ -1325,6 +1328,72 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_eapi(path, payload).await?;
         ensure_account_access(&client, &response.body, "podcast episode deletion")?;
         map_netease_podcast_episode_delete_result(&request.episode_refs, response.body)
+    }
+
+    async fn upload_podcast_episode(
+        &self,
+        podcast_id: &str,
+        request: &PodcastEpisodeUploadRequest,
+    ) -> Result<PodcastEpisodeUploadResult> {
+        let podcast_id = parse_numeric_id("podcast voice list", podcast_id)?;
+        let descriptor = validate_podcast_episode_upload_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "podcast episode upload")?;
+
+        let (path, payload) = netease_podcast_episode_upload_allocation_request(&descriptor);
+        let allocation_response = client.request_weapi(path, payload).await?;
+        ensure_account_access(
+            &client,
+            &allocation_response.body,
+            "podcast episode upload token",
+        )?;
+        let allocation: ImageUploadAllocationEnvelope = parse_body(allocation_response.body)?;
+        validate_podcast_episode_upload_allocation(&allocation)?;
+
+        let nos_response = client
+            .upload_voice_audio(
+                &allocation.result.object_key,
+                &allocation.result.token,
+                &descriptor.content_type,
+                &request.data,
+            )
+            .await?;
+        let voice_data = netease_podcast_episode_upload_voice_data(
+            podcast_id,
+            request,
+            &descriptor,
+            allocation.result.document_id.clone(),
+        )?;
+        let precheck_dupkey = random_uuid_v4();
+        let (path, payload) = netease_podcast_episode_upload_submit_request(
+            "/api/voice/workbench/voice/batch/upload/preCheck",
+            &precheck_dupkey,
+            &voice_data,
+        );
+        let precheck = client
+            .request_eapi_with_nos_token(path, payload, &allocation.result.token)
+            .await?;
+        ensure_account_access(&client, &precheck.body, "podcast episode upload precheck")?;
+
+        let submit_dupkey = random_uuid_v4();
+        let (path, payload) = netease_podcast_episode_upload_submit_request(
+            "/api/voice/workbench/voice/batch/upload/v2",
+            &submit_dupkey,
+            &voice_data,
+        );
+        let submit = client
+            .request_eapi_with_nos_token(path, payload, &allocation.result.token)
+            .await?;
+        ensure_account_access(&client, &submit.body, "podcast episode upload submission")?;
+        map_netease_podcast_episode_upload_result(
+            podcast_id,
+            &descriptor,
+            allocation,
+            nos_response,
+            precheck.body,
+            submit.body,
+            request.publish_time_ms,
+        )
     }
 
     async fn podcast_episode_chart(
@@ -5893,6 +5962,66 @@ fn netease_podcast_episode_delete_request(ids: &[u64]) -> (&'static str, Value) 
     )
 }
 
+fn netease_podcast_episode_upload_allocation_request(
+    descriptor: &PodcastEpisodeUploadDescriptor,
+) -> (&'static str, Value) {
+    (
+        "/api/nos/token/alloc",
+        json!({
+            "bucket": "ymusic",
+            "ext": descriptor.extension,
+            "filename": descriptor.name,
+            "local": false,
+            "nos_product": 0,
+            "type": "other"
+        }),
+    )
+}
+
+fn netease_podcast_episode_upload_voice_data(
+    podcast_id: u64,
+    request: &PodcastEpisodeUploadRequest,
+    descriptor: &PodcastEpisodeUploadDescriptor,
+    document_id: Value,
+) -> Result<String> {
+    serde_json::to_string(&json!([{
+        "name": descriptor.name,
+        "autoPublish": request.auto_publish,
+        "autoPublishText": request.auto_publish_text,
+        "description": descriptor.description,
+        "voiceListId": podcast_id,
+        "coverImgId": descriptor.cover_image_id,
+        "dfsId": document_id,
+        "categoryId": descriptor.category_id,
+        "secondCategoryId": descriptor.second_category_id,
+        "composedSongs": descriptor.composed_track_ids,
+        "privacy": request.privacy,
+        "publishTime": request.publish_time_ms,
+        "orderNo": request.order_no
+    }]))
+    .map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize NetEase podcast episode upload metadata: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+fn netease_podcast_episode_upload_submit_request(
+    path: &'static str,
+    dupkey: &str,
+    voice_data: &str,
+) -> (&'static str, Value) {
+    (
+        path,
+        json!({
+            "dupkey": dupkey,
+            "voiceData": voice_data
+        }),
+    )
+}
+
 fn validate_podcast_episode_refs(episode_refs: &[ResourceRef]) -> Result<Vec<u64>> {
     if episode_refs.is_empty() {
         return Err(TuneWeaveError::invalid_request(
@@ -7167,6 +7296,99 @@ fn map_netease_podcast_episode_delete_result(
     })
 }
 
+fn map_netease_podcast_episode_upload_result(
+    podcast_id: u64,
+    descriptor: &PodcastEpisodeUploadDescriptor,
+    allocation: ImageUploadAllocationEnvelope,
+    nos_response: Value,
+    precheck_response: Value,
+    submit_response: Value,
+    publish_time_ms: u64,
+) -> Result<PodcastEpisodeUploadResult> {
+    ensure_success(&precheck_response)?;
+    ensure_success(&submit_response)?;
+    let podcast_ref =
+        ResourceRef::new(Platform::Netease, podcast_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid podcast id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let episode_refs = netease_voice_upload_created_ids(submit_response.get("data"))
+        .into_iter()
+        .filter_map(|id| ResourceRef::new(Platform::Netease, id).ok())
+        .collect();
+    let document_id = json_scalar_string(&allocation.result.document_id).unwrap_or_default();
+    Ok(PodcastEpisodeUploadResult {
+        podcast_ref,
+        episode_refs,
+        name: descriptor.name.clone(),
+        uploaded: true,
+        publish_time_ms,
+        extensions: Extensions::from([
+            (
+                "allocation".to_owned(),
+                json!({
+                    "object_key": allocation.result.object_key,
+                    "document_id": document_id,
+                    "filename": descriptor.filename,
+                    "extension": descriptor.extension,
+                    "content_type": descriptor.content_type
+                }),
+            ),
+            ("nos_upload".to_owned(), nos_response),
+            ("precheck_response".to_owned(), precheck_response),
+            ("response".to_owned(), submit_response),
+        ]),
+    })
+}
+
+fn netease_voice_upload_created_ids(data: Option<&Value>) -> Vec<String> {
+    fn collect(value: &Value, ids: &mut Vec<String>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, ids);
+                }
+            }
+            Value::Object(object) => {
+                for key in ["voiceId", "voice_id", "programId", "program_id"] {
+                    if let Some(id) = object.get(key).and_then(json_scalar_string) {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                }
+                for value in object.values() {
+                    if value.is_array() || value.is_object() {
+                        collect(value, ids);
+                    }
+                }
+            }
+            Value::String(_) | Value::Number(_) if ids.is_empty() => {
+                if let Some(id) = json_scalar_string(value) {
+                    ids.push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut ids = Vec::new();
+    if let Some(data) = data {
+        if let Some(id) = data
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(json_scalar_string)
+        {
+            ids.push(id);
+        }
+        collect(data, &mut ids);
+    }
+    ids
+}
+
 fn workbench_voice_item(raw: &Value) -> Value {
     let Some(voice) = raw.get("voice").and_then(Value::as_object) else {
         return raw.clone();
@@ -7698,6 +7920,19 @@ struct CloudUploadDescriptor {
     allocation_filename: String,
     extension: String,
     content_type: String,
+}
+
+#[derive(Debug)]
+struct PodcastEpisodeUploadDescriptor {
+    filename: String,
+    name: String,
+    extension: String,
+    content_type: String,
+    cover_image_id: String,
+    category_id: String,
+    second_category_id: String,
+    description: String,
+    composed_track_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -8391,6 +8626,130 @@ fn cloud_upload_descriptor(
     })
 }
 
+fn validate_podcast_episode_upload_request(
+    request: &PodcastEpisodeUploadRequest,
+) -> Result<PodcastEpisodeUploadDescriptor> {
+    if request.data.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode audio body must not be empty",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.data.len() > MAX_VOICE_UPLOAD_BYTES {
+        return Err(
+            TuneWeaveError::invalid_request("podcast episode audio body exceeds 500 MiB")
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "max_bytes": MAX_VOICE_UPLOAD_BYTES })),
+        );
+    }
+    let filename = request.filename.trim();
+    if filename.is_empty()
+        || filename.len() > 255
+        || filename
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode filename must be a safe basename of at most 255 bytes",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let extension = filename
+        .rsplit_once('.')
+        .map_or("mp3", |(_, extension)| extension)
+        .trim()
+        .to_ascii_lowercase();
+    let extension = if extension.is_empty()
+        || extension.len() > 10
+        || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        "mp3".to_owned()
+    } else {
+        extension
+    };
+    let fallback_name = filename
+        .strip_suffix(&format!(".{extension}"))
+        .unwrap_or_else(|| filename.rsplit_once('.').map_or(filename, |(stem, _)| stem))
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| if character == '.' { '_' } else { character })
+        .collect::<String>();
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&fallback_name);
+    if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode name must be nonempty text of at most 255 bytes",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let content_type = request.content_type.trim();
+    let content_type = if content_type.is_empty() {
+        cloud_audio_content_type(&extension).to_owned()
+    } else {
+        content_type.to_owned()
+    };
+    if content_type.chars().any(char::is_control) {
+        return Err(
+            TuneWeaveError::invalid_request("podcast episode content type is invalid")
+                .with_platform(Platform::Netease),
+        );
+    }
+    let required_numeric = |name: &str, value: &str| -> Result<String> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "podcast episode {name} must not be empty"
+            ))
+            .with_platform(Platform::Netease));
+        }
+        parse_numeric_id(name, value)?;
+        Ok(value.to_owned())
+    };
+    let description = request.description.trim();
+    if description.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode description must not be empty",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if request.order_no == 0 {
+        return Err(
+            TuneWeaveError::invalid_request("podcast episode order_no must be at least 1")
+                .with_platform(Platform::Netease),
+        );
+    }
+    let composed_track_ids = request
+        .composed_track_refs
+        .iter()
+        .map(|reference| {
+            if reference.platform() != Platform::Netease {
+                return Err(TuneWeaveError::invalid_request(
+                    "podcast episode composed tracks must use NetEase references",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "track_ref": reference })));
+            }
+            parse_numeric_id("composed track", reference.id())?;
+            Ok(reference.id().to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PodcastEpisodeUploadDescriptor {
+        filename: filename.to_owned(),
+        name: name.to_owned(),
+        extension,
+        content_type,
+        cover_image_id: required_numeric("cover image", &request.cover_image_id)?,
+        category_id: required_numeric("category", &request.category_id)?,
+        second_category_id: required_numeric("second category", &request.second_category_id)?,
+        description: description.to_owned(),
+        composed_track_ids,
+    })
+}
+
 fn normalize_cloud_md5(md5: &str) -> Result<String> {
     let md5 = md5.trim().to_ascii_lowercase();
     if md5.len() != 32 || !md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -8617,6 +8976,24 @@ fn validate_image_allocation(response: &ImageUploadAllocationEnvelope) -> Result
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
             "NetEase image upload allocation is incomplete",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
+}
+
+fn validate_podcast_episode_upload_allocation(
+    response: &ImageUploadAllocationEnvelope,
+) -> Result<()> {
+    if response.result.object_key.trim().is_empty()
+        || response.result.token.trim().is_empty()
+        || json_scalar_string(&response.result.document_id)
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned an incomplete podcast episode upload allocation",
         )
         .with_platform(Platform::Netease));
     }
@@ -13042,6 +13419,21 @@ fn parse_numeric_id(resource: &str, id: &str) -> Result<u64> {
         .with_platform(Platform::Netease)
         .with_details(json!({ "resource": resource, "id": id }))
     })
+}
+
+fn random_uuid_v4() -> String {
+    let mut bytes = rand::random::<[u8; 16]>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let encoded = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &encoded[0..8],
+        &encoded[8..12],
+        &encoded[12..16],
+        &encoded[16..20],
+        &encoded[20..32]
+    )
 }
 
 fn validated_video_id(id: &str, kind: VideoResourceKind) -> Result<String> {
@@ -18409,6 +18801,86 @@ mod tests {
                 json!({"ids": "2058695201,2058695202"})
             )
         );
+        let upload = PodcastEpisodeUploadRequest {
+            filename: "一期 节目.mp3".to_owned(),
+            content_type: "audio/mpeg".to_owned(),
+            data: b"audio".to_vec(),
+            name: None,
+            cover_image_id: "109951168000000000".to_owned(),
+            category_id: "3".to_owned(),
+            second_category_id: "14".to_owned(),
+            description: "节目介绍".to_owned(),
+            privacy: true,
+            publish_time_ms: 1_784_194_692_000,
+            auto_publish: true,
+            auto_publish_text: "新节目".to_owned(),
+            order_no: 2,
+            composed_track_refs: vec![
+                ResourceRef::new(Platform::Netease, "1859245776")
+                    .expect("composed track reference"),
+                ResourceRef::new(Platform::Netease, "1859245776")
+                    .expect("duplicate composed track reference"),
+            ],
+            account: Some("studio-user".to_owned()),
+        };
+        let descriptor =
+            validate_podcast_episode_upload_request(&upload).expect("voice upload descriptor");
+        assert_eq!(descriptor.name, "一期节目");
+        assert_eq!(
+            netease_podcast_episode_upload_allocation_request(&descriptor),
+            (
+                "/api/nos/token/alloc",
+                json!({
+                    "bucket": "ymusic",
+                    "ext": "mp3",
+                    "filename": "一期节目",
+                    "local": false,
+                    "nos_product": 0,
+                    "type": "other"
+                })
+            )
+        );
+        let voice_data = netease_podcast_episode_upload_voice_data(
+            336_355_127,
+            &upload,
+            &descriptor,
+            json!("109951169000000000"),
+        )
+        .expect("voice upload metadata");
+        let voice_data_value: Value =
+            serde_json::from_str(&voice_data).expect("parse voice upload metadata");
+        assert_eq!(
+            voice_data_value,
+            json!([{
+                "name": "一期节目",
+                "autoPublish": true,
+                "autoPublishText": "新节目",
+                "description": "节目介绍",
+                "voiceListId": 336_355_127,
+                "coverImgId": "109951168000000000",
+                "dfsId": "109951169000000000",
+                "categoryId": "3",
+                "secondCategoryId": "14",
+                "composedSongs": ["1859245776", "1859245776"],
+                "privacy": true,
+                "publishTime": 1_784_194_692_000_u64,
+                "orderNo": 2
+            }])
+        );
+        assert_eq!(
+            netease_podcast_episode_upload_submit_request(
+                "/api/voice/workbench/voice/batch/upload/preCheck",
+                "00000000-0000-4000-8000-000000000000",
+                &voice_data,
+            ),
+            (
+                "/api/voice/workbench/voice/batch/upload/preCheck",
+                json!({
+                    "dupkey": "00000000-0000-4000-8000-000000000000",
+                    "voiceData": voice_data
+                })
+            )
+        );
         let mut search = PodcastEpisodeWorkbenchSearchRequest::new(200, 40);
         search.query = Some(" 一期 ".to_owned());
         search.display_status = Some(PodcastEpisodeDisplayStatus::SchedulePublish);
@@ -19535,6 +20007,88 @@ mod tests {
             .code,
             ErrorCode::UpstreamError
         );
+    }
+
+    #[test]
+    fn maps_podcast_episode_upload_without_exposing_nos_credentials() {
+        let request = PodcastEpisodeUploadRequest {
+            filename: "一期.mp3".to_owned(),
+            content_type: "audio/mpeg".to_owned(),
+            data: b"audio".to_vec(),
+            name: Some("第一期".to_owned()),
+            cover_image_id: "109951168000000000".to_owned(),
+            category_id: "3".to_owned(),
+            second_category_id: "14".to_owned(),
+            description: "节目介绍".to_owned(),
+            privacy: false,
+            publish_time_ms: 0,
+            auto_publish: false,
+            auto_publish_text: String::new(),
+            order_no: 1,
+            composed_track_refs: Vec::new(),
+            account: Some("studio-user".to_owned()),
+        };
+        let descriptor =
+            validate_podcast_episode_upload_request(&request).expect("voice upload descriptor");
+        let allocation: ImageUploadAllocationEnvelope = serde_json::from_value(json!({
+            "result": {
+                "objectKey": "folder/voice.mp3",
+                "token": "secret-nos-token",
+                "docId": "109951169000000000"
+            }
+        }))
+        .expect("voice upload allocation");
+        let result = map_netease_podcast_episode_upload_result(
+            336_355_127,
+            &descriptor,
+            allocation,
+            json!({"part_count": 2}),
+            json!({"code": 200, "data": {"allowed": true}}),
+            json!({
+                "code": 200,
+                "data": [
+                    {"voiceId": 2_058_695_201_u64},
+                    {"programId": "2058695202"},
+                    {"voiceId": 2_058_695_201_u64}
+                ],
+                "futureField": {"kept": true}
+            }),
+            0,
+        )
+        .expect("map voice upload result");
+        assert_eq!(result.podcast_ref.to_string(), "netease:336355127");
+        assert_eq!(
+            result
+                .episode_refs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["netease:2058695201", "netease:2058695202"]
+        );
+        assert_eq!(result.name, "第一期");
+        assert!(result.uploaded);
+        assert_eq!(result.extensions["nos_upload"]["part_count"], 2);
+        assert_eq!(result.extensions["response"]["futureField"]["kept"], true);
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serialize voice upload result")
+                .contains("secret-nos-token")
+        );
+
+        let error = map_netease_podcast_episode_upload_result(
+            336_355_127,
+            &descriptor,
+            serde_json::from_value(json!({
+                "result": {"objectKey": "voice", "token": "secret", "docId": "1"}
+            }))
+            .expect("allocation"),
+            json!({}),
+            json!({"code": 400, "message": "precheck failed"}),
+            json!({"code": 200}),
+            0,
+        )
+        .expect_err("failed voice upload precheck");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[test]
@@ -25039,6 +25593,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchSearch));
         assert!(capabilities.contains(&Capability::PodcastEpisodeOrderWrite));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDeleteWrite));
+        assert!(capabilities.contains(&Capability::PodcastEpisodeUploadWrite));
         assert!(capabilities.contains(&Capability::PodcastEpisodeDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeWorkbenchDetail));
         assert!(capabilities.contains(&Capability::PodcastEpisodeStream));
@@ -25528,6 +26083,82 @@ mod tests {
                 .await
                 .expect_err("podcast episode deletion requires authentication");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_upload_validates_complete_metadata_before_account_or_network() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let valid = || PodcastEpisodeUploadRequest {
+            filename: "一期.mp3".to_owned(),
+            content_type: "audio/mpeg".to_owned(),
+            data: b"audio".to_vec(),
+            name: Some("第一期".to_owned()),
+            cover_image_id: "109951168000000000".to_owned(),
+            category_id: "3".to_owned(),
+            second_category_id: "14".to_owned(),
+            description: "节目介绍".to_owned(),
+            privacy: false,
+            publish_time_ms: 0,
+            auto_publish: false,
+            auto_publish_text: String::new(),
+            order_no: 1,
+            composed_track_refs: Vec::new(),
+            account: None,
+        };
+
+        let mut invalid_requests = Vec::new();
+        let mut empty_audio = valid();
+        empty_audio.data.clear();
+        invalid_requests.push(empty_audio);
+        let mut unsafe_filename = valid();
+        unsafe_filename.filename = "folder/voice.mp3".to_owned();
+        invalid_requests.push(unsafe_filename);
+        let mut missing_description = valid();
+        missing_description.description = "  ".to_owned();
+        invalid_requests.push(missing_description);
+        let mut invalid_cover = valid();
+        invalid_cover.cover_image_id = "cover".to_owned();
+        invalid_requests.push(invalid_cover);
+        let mut zero_order = valid();
+        zero_order.order_no = 0;
+        invalid_requests.push(zero_order);
+        let mut foreign_track = valid();
+        foreign_track.composed_track_refs =
+            vec![ResourceRef::new(Platform::Qq, "1859245776").expect("foreign track reference")];
+        invalid_requests.push(foreign_track);
+
+        for request in invalid_requests {
+            let error = MusicProvider::upload_podcast_episode(&provider, "336355127", &request)
+                .await
+                .expect_err("invalid podcast episode upload");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let error = MusicProvider::upload_podcast_episode(&provider, "not-a-number", &valid())
+            .await
+            .expect_err("invalid podcast id");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        for account in [None, Some("missing")] {
+            let mut request = valid();
+            request.account = account.map(str::to_owned);
+            let error = MusicProvider::upload_podcast_episode(&provider, "336355127", &request)
+                .await
+                .expect_err("podcast episode upload requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[test]
+    fn podcast_episode_upload_dupkeys_are_rfc4122_v4_values() {
+        let first = random_uuid_v4();
+        let second = random_uuid_v4();
+        assert_ne!(first, second);
+        for value in [first, second] {
+            assert_eq!(value.len(), 36);
+            assert_eq!(&value[14..15], "4");
+            assert!(matches!(&value[19..20], "8" | "9" | "a" | "b"));
+            assert_eq!(value.matches('-').count(), 4);
         }
     }
 

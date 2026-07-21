@@ -49,6 +49,7 @@ pub enum Capability {
     PodcastEpisodeCharts,
     PodcastEpisodeOrderWrite,
     PodcastEpisodeDeleteWrite,
+    PodcastEpisodeUploadWrite,
     PodcastEpisodeDetail,
     PodcastEpisodeWorkbenchDetail,
     PodcastEpisodeStream,
@@ -341,6 +342,11 @@ mod tests {
             serde_json::to_value(Capability::PodcastEpisodeDeleteWrite)
                 .expect("serialize capability"),
             serde_json::json!("podcast_episode_delete_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PodcastEpisodeUploadWrite)
+                .expect("serialize capability"),
+            serde_json::json!("podcast_episode_upload_write")
         );
         assert_eq!(
             serde_json::to_value(Capability::PodcastEpisodeDetail).expect("serialize capability"),

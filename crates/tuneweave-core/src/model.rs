@@ -1139,6 +1139,58 @@ pub struct PodcastEpisodeDeleteResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct PodcastEpisodeUploadRequest {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+    pub name: Option<String>,
+    pub cover_image_id: String,
+    pub category_id: String,
+    pub second_category_id: String,
+    pub description: String,
+    pub privacy: bool,
+    pub publish_time_ms: u64,
+    pub auto_publish: bool,
+    pub auto_publish_text: String,
+    pub order_no: u32,
+    pub composed_track_refs: Vec<ResourceRef>,
+    pub account: Option<String>,
+}
+
+impl fmt::Debug for PodcastEpisodeUploadRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PodcastEpisodeUploadRequest")
+            .field("filename", &self.filename)
+            .field("content_type", &self.content_type)
+            .field("data_len", &self.data.len())
+            .field("name", &self.name)
+            .field("cover_image_id", &self.cover_image_id)
+            .field("category_id", &self.category_id)
+            .field("second_category_id", &self.second_category_id)
+            .field("description", &self.description)
+            .field("privacy", &self.privacy)
+            .field("publish_time_ms", &self.publish_time_ms)
+            .field("auto_publish", &self.auto_publish)
+            .field("auto_publish_text", &self.auto_publish_text)
+            .field("order_no", &self.order_no)
+            .field("composed_track_refs", &self.composed_track_refs)
+            .field("account", &self.account)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeUploadResult {
+    pub podcast_ref: ResourceRef,
+    pub episode_refs: Vec<ResourceRef>,
+    pub name: String,
+    pub uploaded: bool,
+    pub publish_time_ms: u64,
+    pub extensions: Extensions,
+}
+
 impl PodcastEpisodeListRequest {
     #[must_use]
     pub const fn new(limit: u32, offset: u32) -> Self {
@@ -3348,6 +3400,50 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize podcast episode delete result");
         assert_eq!(value["deleted"], true);
         assert_eq!(value["episode_refs"][0], "netease:2058695201");
+    }
+
+    #[test]
+    fn podcast_episode_upload_redacts_audio_and_keeps_metadata_typed() {
+        let request = PodcastEpisodeUploadRequest {
+            filename: "一期节目.mp3".to_owned(),
+            content_type: "audio/mpeg".to_owned(),
+            data: b"private-audio-content".to_vec(),
+            name: Some("第一期".to_owned()),
+            cover_image_id: "109951168000000000".to_owned(),
+            category_id: "3".to_owned(),
+            second_category_id: "14".to_owned(),
+            description: "节目介绍".to_owned(),
+            privacy: true,
+            publish_time_ms: 1_784_194_692_000,
+            auto_publish: true,
+            auto_publish_text: "新节目".to_owned(),
+            order_no: 2,
+            composed_track_refs: vec![
+                ResourceRef::new(Platform::Netease, "1859245776")
+                    .expect("composed track reference"),
+            ],
+            account: Some("studio-user".to_owned()),
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("data_len: 21"));
+        assert!(!debug.contains("private-audio-content"));
+
+        let result = PodcastEpisodeUploadResult {
+            podcast_ref: ResourceRef::new(Platform::Netease, "336355127")
+                .expect("podcast reference"),
+            episode_refs: vec![
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+            ],
+            name: request.name.expect("upload name"),
+            uploaded: true,
+            publish_time_ms: request.publish_time_ms,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize podcast episode upload");
+        assert_eq!(value["podcast_ref"], "netease:336355127");
+        assert_eq!(value["episode_refs"][0], "netease:2058695201");
+        assert_eq!(value["uploaded"], true);
+        assert_eq!(value["publish_time_ms"], 1_784_194_692_000_u64);
     }
 
     #[test]

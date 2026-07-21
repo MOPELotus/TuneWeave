@@ -58,21 +58,21 @@ use tuneweave_core::{
     PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
     PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
     PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodeStream,
-    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderRegistry,
-    Quality, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
-    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -81,6 +81,7 @@ const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
+const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 struct AuthTransactions {
@@ -447,6 +448,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/library/podcasts", get(account_podcasts))
         .route("/account/podcasts/created", get(account_created_podcasts))
+        .route(
+            "/account/podcasts/{reference}/episodes",
+            post(podcast_episode_upload)
+                .layer(DefaultBodyLimit::max(MAX_PODCAST_EPISODE_UPLOAD_BYTES)),
+        )
         .route(
             "/account/podcasts/{reference}/episodes/order",
             put(podcast_episode_order),
@@ -3151,6 +3157,34 @@ struct PodcastEpisodeDeleteBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PodcastEpisodeUploadParams {
+    account: Option<String>,
+    #[serde(alias = "fileName")]
+    filename: Option<String>,
+    #[serde(alias = "songName")]
+    name: Option<String>,
+    #[serde(alias = "coverImgId")]
+    cover_image_id: Option<String>,
+    #[serde(alias = "categoryId")]
+    category_id: Option<String>,
+    #[serde(alias = "secondCategoryId")]
+    second_category_id: Option<String>,
+    description: Option<String>,
+    privacy: Option<String>,
+    #[serde(alias = "publishTime", alias = "publish_time")]
+    publish_time_ms: Option<String>,
+    #[serde(alias = "autoPublish")]
+    auto_publish: Option<String>,
+    #[serde(alias = "autoPublishText")]
+    auto_publish_text: Option<String>,
+    #[serde(alias = "orderNo")]
+    order_no: Option<String>,
+    #[serde(alias = "composedSongs")]
+    composed_songs: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlaylistAccountParams {
     account: Option<String>,
 }
@@ -3498,6 +3532,137 @@ async fn podcast_episode_order(
             .with_platform(platform)
             .with_account(account),
     ))
+}
+
+async fn podcast_episode_upload(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PodcastEpisodeUploadParams>, QueryRejection>,
+    headers: HeaderMap,
+    payload: Result<Bytes, BytesRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeUploadResult>>, ApiError> {
+    let podcast_ref = parse_reference(reference)?;
+    let params = query_params(params)?;
+    let data = payload.map_err(|_| {
+        TuneWeaveError::invalid_request("audio body is invalid or exceeds 500 MiB")
+            .with_details(json!({ "max_bytes": MAX_PODCAST_EPISODE_UPLOAD_BYTES }))
+    })?;
+    validate_podcast_episode_upload_size(data.len())?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map(str::to_owned)
+                .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let publish_time_ms =
+        parse_optional_u64_parameter("publish_time_ms", params.publish_time_ms.as_deref())?
+            .unwrap_or(0);
+    let order_no =
+        parse_optional_u64_parameter("order_no", params.order_no.as_deref())?.unwrap_or(1);
+    let order_no = u32::try_from(order_no).map_err(|_| {
+        TuneWeaveError::invalid_request("order_no exceeds the supported range")
+            .with_details(json!({ "order_no": order_no }))
+    })?;
+    if order_no == 0 {
+        return Err(TuneWeaveError::invalid_request("order_no must be at least 1").into());
+    }
+    let account = account_alias(params.account.as_deref())?;
+    let platform = podcast_ref.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .upload_podcast_episode(
+            podcast_ref.id(),
+            &PodcastEpisodeUploadRequest {
+                filename: required_trimmed("filename", params.filename)?,
+                content_type,
+                data: data.into(),
+                name: optional_trimmed(params.name),
+                cover_image_id: required_trimmed("cover_image_id", params.cover_image_id)?,
+                category_id: required_trimmed("category_id", params.category_id)?,
+                second_category_id: required_trimmed(
+                    "second_category_id",
+                    params.second_category_id,
+                )?,
+                description: required_trimmed("description", params.description)?,
+                privacy: parse_bool_parameter("privacy", params.privacy.as_deref(), false)?,
+                publish_time_ms,
+                auto_publish: parse_bool_parameter(
+                    "auto_publish",
+                    params.auto_publish.as_deref(),
+                    false,
+                )?,
+                auto_publish_text: optional_trimmed(params.auto_publish_text).unwrap_or_default(),
+                order_no,
+                composed_track_refs: parse_podcast_episode_composed_tracks(
+                    params.composed_songs.as_deref(),
+                    platform,
+                )?,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+fn validate_podcast_episode_upload_size(size: usize) -> Result<(), TuneWeaveError> {
+    if size == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast episode audio body must not be empty",
+        ));
+    }
+    if size > MAX_PODCAST_EPISODE_UPLOAD_BYTES {
+        return Err(
+            TuneWeaveError::invalid_request("podcast episode audio body exceeds 500 MiB")
+                .with_details(json!({ "max_bytes": MAX_PODCAST_EPISODE_UPLOAD_BYTES })),
+        );
+    }
+    Ok(())
+}
+
+fn parse_podcast_episode_composed_tracks(
+    value: Option<&str>,
+    platform: Platform,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut references = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "composed_songs must not contain empty items",
+            ));
+        }
+        let reference = if item.contains(':') {
+            parse_reference(item.to_owned())?
+        } else {
+            ResourceRef::new(platform, item).map_err(|error| {
+                TuneWeaveError::invalid_request(format!("invalid composed track id: {error}"))
+                    .with_details(json!({ "id": item, "platform": platform }))
+            })?
+        };
+        if reference.platform() != platform {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast and composed track references must use the same platform",
+            )
+            .with_details(json!({
+                "podcast_platform": platform,
+                "track_ref": reference
+            })));
+        }
+        references.push(reference);
+    }
+    Ok(references)
 }
 
 async fn podcast_episode_delete(
@@ -8744,6 +8909,7 @@ mod tests {
                 Capability::PodcastEpisodeCharts,
                 Capability::PodcastEpisodeOrderWrite,
                 Capability::PodcastEpisodeDeleteWrite,
+                Capability::PodcastEpisodeUploadWrite,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeWorkbenchDetail,
                 Capability::PodcastEpisodeStream,
@@ -9658,6 +9824,51 @@ mod tests {
                 episode_refs: request.episode_refs.clone(),
                 deleted: true,
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn upload_podcast_episode(
+            &self,
+            podcast_id: &str,
+            request: &PodcastEpisodeUploadRequest,
+        ) -> Result<PodcastEpisodeUploadResult> {
+            Ok(PodcastEpisodeUploadResult {
+                podcast_ref: ResourceRef::new(Platform::Netease, podcast_id)
+                    .expect("valid podcast upload reference"),
+                episode_refs: vec![
+                    ResourceRef::new(Platform::Netease, "2058695201")
+                        .expect("valid uploaded episode reference"),
+                ],
+                name: request
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| request.filename.clone()),
+                uploaded: true,
+                publish_time_ms: request.publish_time_ms,
+                extensions: Extensions::from([
+                    ("filename".to_owned(), json!(request.filename)),
+                    ("content_type".to_owned(), json!(request.content_type)),
+                    ("data_len".to_owned(), json!(request.data.len())),
+                    ("cover_image_id".to_owned(), json!(request.cover_image_id)),
+                    ("category_id".to_owned(), json!(request.category_id)),
+                    (
+                        "second_category_id".to_owned(),
+                        json!(request.second_category_id),
+                    ),
+                    ("description".to_owned(), json!(request.description)),
+                    ("privacy".to_owned(), json!(request.privacy)),
+                    ("auto_publish".to_owned(), json!(request.auto_publish)),
+                    (
+                        "auto_publish_text".to_owned(),
+                        json!(request.auto_publish_text),
+                    ),
+                    ("order_no".to_owned(), json!(request.order_no)),
+                    (
+                        "composed_track_refs".to_owned(),
+                        json!(request.composed_track_refs),
+                    ),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -13974,6 +14185,124 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(json["error"]["code"], "invalid_request");
         }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_upload_preserves_reference_metadata_and_binary_body() {
+        let (status, json) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/podcasts/netease:336355127/episodes?account=creator&fileName=episode.mp3&songName=First&coverImgId=109951168000000000&categoryId=3&secondCategoryId=14&description=Intro&privacy=1&publishTime=1784194692000&autoPublish=1&autoPublishText=New&orderNo=2&composedSongs=1859245776%2Cnetease%3A1859245777",
+            Some("audio/mpeg"),
+            b"audio".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["podcast_ref"], "netease:336355127");
+        assert_eq!(json["data"]["episode_refs"][0], "netease:2058695201");
+        assert_eq!(json["data"]["name"], "First");
+        assert_eq!(json["data"]["uploaded"], true);
+        assert_eq!(json["data"]["publish_time_ms"], 1_784_194_692_000_u64);
+        assert_eq!(json["data"]["extensions"]["filename"], "episode.mp3");
+        assert_eq!(json["data"]["extensions"]["content_type"], "audio/mpeg");
+        assert_eq!(json["data"]["extensions"]["data_len"], 5);
+        assert_eq!(
+            json["data"]["extensions"]["cover_image_id"],
+            "109951168000000000"
+        );
+        assert_eq!(json["data"]["extensions"]["category_id"], "3");
+        assert_eq!(json["data"]["extensions"]["second_category_id"], "14");
+        assert_eq!(json["data"]["extensions"]["description"], "Intro");
+        assert_eq!(json["data"]["extensions"]["privacy"], true);
+        assert_eq!(json["data"]["extensions"]["auto_publish"], true);
+        assert_eq!(json["data"]["extensions"]["auto_publish_text"], "New");
+        assert_eq!(json["data"]["extensions"]["order_no"], 2);
+        assert_eq!(
+            json["data"]["extensions"]["composed_track_refs"],
+            json!(["netease:1859245776", "netease:1859245777"])
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "creator");
+
+        let (status, defaults) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/podcasts/netease:336355127/episodes?filename=episode.mp3&cover_image_id=109951168000000000&category_id=3&second_category_id=14&description=Intro",
+            None,
+            b"audio".to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaults["data"]["extensions"]["privacy"], false);
+        assert_eq!(defaults["data"]["extensions"]["auto_publish"], false);
+        assert_eq!(defaults["data"]["extensions"]["order_no"], 1);
+        assert_eq!(defaults["data"]["publish_time_ms"], 0);
+        assert_eq!(defaults["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_upload_rejects_missing_malformed_and_cross_platform_inputs() {
+        let base = "/v1/account/podcasts/netease:336355127/episodes";
+        for path in [
+            format!("{base}?coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro"),
+            format!("{base}?filename=a.mp3&categoryId=3&secondCategoryId=14&description=Intro"),
+            format!("{base}?filename=a.mp3&coverImgId=1&secondCategoryId=14&description=Intro"),
+            format!("{base}?filename=a.mp3&coverImgId=1&categoryId=3&description=Intro"),
+            format!("{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14"),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&privacy=yes"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&autoPublish=yes"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&publishTime=invalid"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&orderNo=0"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&orderNo=4294967296"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&composedSongs=1%2C"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&composedSongs=qq%3A1"
+            ),
+            format!(
+                "{base}?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro&unknown=true"
+            ),
+        ] {
+            let (status, json) = binary_request_with_method(
+                test_app_with_provider(),
+                Method::POST,
+                &path,
+                Some("audio/mpeg"),
+                b"audio".to_vec(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{path}");
+        }
+
+        let (status, json) = binary_request_with_method(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/podcasts/netease:336355127/episodes?filename=a.mp3&coverImgId=1&categoryId=3&secondCategoryId=14&description=Intro",
+            Some("audio/mpeg"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+
+        let error = validate_podcast_episode_upload_size(
+            MAX_PODCAST_EPISODE_UPLOAD_BYTES.saturating_add(1),
+        )
+        .expect_err("oversized podcast episode upload");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.details["max_bytes"], MAX_PODCAST_EPISODE_UPLOAD_BYTES);
     }
 
     #[tokio::test]
