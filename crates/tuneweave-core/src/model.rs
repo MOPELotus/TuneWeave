@@ -2047,6 +2047,73 @@ pub struct Video {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MusicVideoCatalog {
+    #[default]
+    All,
+    Latest,
+    Exclusive,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MusicVideoArea {
+    #[default]
+    All,
+    MainlandChina,
+    HongKongTaiwan,
+    Western,
+    Japan,
+    Korea,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MusicVideoType {
+    #[default]
+    All,
+    Official,
+    Original,
+    Live,
+    Netease,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MusicVideoOrder {
+    #[default]
+    Rising,
+    Hot,
+    New,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicVideoListRequest {
+    pub catalog: MusicVideoCatalog,
+    pub limit: u32,
+    pub offset: u32,
+    pub area: Option<MusicVideoArea>,
+    pub video_type: Option<MusicVideoType>,
+    pub order: Option<MusicVideoOrder>,
+    pub account: Option<String>,
+}
+
+impl MusicVideoListRequest {
+    #[must_use]
+    pub fn new(catalog: MusicVideoCatalog, limit: u32, offset: u32) -> Self {
+        Self {
+            catalog,
+            limit,
+            offset,
+            area: None,
+            video_type: None,
+            order: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoResourceKind {
     #[default]
     Mv,
@@ -4700,5 +4767,23 @@ mod tests {
         assert_eq!(value["playlist_subscriber_count"], 10);
         assert_eq!(value["public_listening_history"], false);
         assert_eq!(value["extensions"]["backend"], "modern");
+    }
+
+    #[test]
+    fn music_video_catalog_keeps_filters_pagination_and_account_typed() {
+        let mut request = MusicVideoListRequest::new(MusicVideoCatalog::All, 30, 60);
+        request.area = Some(MusicVideoArea::MainlandChina);
+        request.video_type = Some(MusicVideoType::Official);
+        request.order = Some(MusicVideoOrder::Hot);
+        request.account = Some("viewer".to_owned());
+
+        let value = serde_json::to_value(request).expect("serialize music video request");
+        assert_eq!(value["catalog"], "all");
+        assert_eq!(value["limit"], 30);
+        assert_eq!(value["offset"], 60);
+        assert_eq!(value["area"], "mainland_china");
+        assert_eq!(value["video_type"], "official");
+        assert_eq!(value["order"], "hot");
+        assert_eq!(value["account"], "viewer");
     }
 }

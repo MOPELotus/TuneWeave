@@ -22,24 +22,24 @@ use crate::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream,
-    MembershipSummary, Page, PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast,
-    PodcastChartEntry, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest,
-    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartRequest,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, ProviderDescriptor,
-    ProviderQrPoll, ProviderQrStart, RadioStation, RadioStationListRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
+    MembershipSummary, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
+    PersonalFmRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, Podcast, PodcastChartEntry, PodcastChartRequest,
+    PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartRequest, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeStream, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioStation,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, ResolutionStatus, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoStats, VideoStream, VideoStreamRequest,
 };
 
@@ -580,6 +580,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistVideos,
+        ))
+    }
+
+    async fn music_videos(&self, _request: &MusicVideoListRequest) -> Result<Page<Video>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoCatalog,
         ))
     }
 

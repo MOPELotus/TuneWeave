@@ -78,6 +78,7 @@ pub enum Capability {
     AudioStream,
     AudioStreamBatch,
     AudioDownload,
+    VideoCatalog,
     VideoDetail,
     VideoStats,
     VideoStream,
@@ -413,6 +414,11 @@ mod tests {
             serde_json::to_value(Capability::UserProfileModern)
                 .expect("serialize modern user profile capability"),
             serde_json::json!("user_profile_modern")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoCatalog)
+                .expect("serialize music video catalog capability"),
+            serde_json::json!("video_catalog")
         );
     }
 }

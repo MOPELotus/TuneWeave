@@ -188,11 +188,11 @@
 | `musician_tasks` | `/musician/tasks` | `pending` | — |
 | `musician_tasks_new` | `/musician/tasks/new` | `pending` | — |
 | `musician_vip_tasks` | `/musician/vip/tasks` | `pending` | — |
-| `mv_all` | `/mv/all` | `pending` | — |
+| `mv_all` | `/mv/all` | `verified` | `GET /v1/videos?catalog=all`（独立 `VideoCatalog` 能力；完整支持地区、类型、排序及偏移分页，统一英文值与参考中文值均映射为 `tags` JSON 字符串，精确提交字符串 `total="true"`；`count/hasMore` 驱动真实总数和续页，完整条目/响应不丢失；请求、筛选、分页、异常结构、查询边界和统一 HTTP 均有测试；2026-07-22 真实筛选目录返回 200、3 项非空统一 MV、总数 397 和下一偏移 3） |
 | `mv_detail` | `/mv/detail` | `verified` | `GET /v1/videos/netease:22695250`：数值引用推断 MV，真实返回标题、创作者及 240/480/720/1080 四档资源信息 |
 | `mv_detail_info` | `/mv/detail/info` | `verified` | `GET /v1/videos/netease:22695250/stats`：真实返回点赞态及点赞、评论、分享计数 |
-| `mv_exclusive_rcmd` | `/mv/exclusive/rcmd` | `pending` | — |
-| `mv_first` | `/mv/first` | `pending` | — |
+| `mv_exclusive_rcmd` | `/mv/exclusive/rcmd` | `verified` | `GET /v1/videos?catalog=exclusive`（精确提交参考 `offset/limit`，不接受不存在的地区/类型/排序筛选；按真实 `more` 返回下一偏移并保留完整响应，空白描述/封面和零时长不遮蔽有效数据；2026-07-22 真实统一 HTTP 返回 200、3 项非空 MV、`has_more=true/next_offset=3`） |
+| `mv_first` | `/mv/first` | `verified` | `GET /v1/videos?catalog=latest`（只支持参考真实存在的地区和 limit，全部地区精确提交空字符串，`total` 保持布尔值；明确拒绝非零 offset、类型及排序，不伪造分页，稳定返回 `next_offset=null/has_more=false/continuation_supported=false`；2026-07-22 真实统一 HTTP 返回 200 和 3 项非空最新 MV） |
 | `mv_sub` | `/mv/sub` | `pending` | — |
 | `mv_sublist` | `/mv/sublist` | `pending` | — |
 | `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收；零首选清晰度/有效期会继续读取有效兼容字段 |

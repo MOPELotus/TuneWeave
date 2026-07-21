@@ -231,10 +231,14 @@ pub(crate) struct ArtistMvItem {
     #[serde(rename = "artistName")]
     pub artist_name: Option<String>,
     pub duration: Option<u64>,
-    #[serde(alias = "cover")]
     pub imgurl: Option<String>,
+    pub cover: Option<String>,
     #[serde(rename = "imgurl16v9")]
     pub image_16x9_url: Option<String>,
+    #[serde(rename = "briefDesc")]
+    pub brief_description: Option<String>,
+    #[serde(rename = "desc")]
+    pub description: Option<String>,
     #[serde(rename = "playCount")]
     pub play_count: Option<u64>,
     #[serde(rename = "publishTime")]

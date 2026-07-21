@@ -40,7 +40,8 @@ use tuneweave_core::{
     ImageUploadRequest, ImageUploadResult, ListeningRightsAd, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor,
-    Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, Page, PageMeta,
+    Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, MusicVideoArea,
+    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
     PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
     PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
@@ -636,6 +637,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AudioStream,
             Capability::AudioStreamBatch,
             Capability::AudioDownload,
+            Capability::VideoCatalog,
             Capability::VideoDetail,
             Capability::VideoStats,
             Capability::VideoStream,
@@ -1819,6 +1821,15 @@ impl MusicProvider for NeteaseProvider {
                 map_artist_videos_response(response, limit, request.offset)
             }
         }
+    }
+
+    async fn music_videos(&self, request: &MusicVideoListRequest) -> Result<Page<Video>> {
+        let limit = request.limit.clamp(1, 100);
+        let (path, payload) = netease_music_video_catalog_request(request, limit)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_music_video_catalog_response(response.body, request, limit)
     }
 
     async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
@@ -10360,6 +10371,162 @@ fn map_artist_fan(raw: Value) -> Result<User> {
     })
 }
 
+fn netease_music_video_catalog_request(
+    request: &MusicVideoListRequest,
+    limit: u32,
+) -> Result<(&'static str, Value)> {
+    match request.catalog {
+        MusicVideoCatalog::All => {
+            let tags = json!({
+                "地区": netease_music_video_area(request.area.unwrap_or_default()),
+                "类型": netease_music_video_type(request.video_type.unwrap_or_default()),
+                "排序": netease_music_video_order(request.order.unwrap_or_default()),
+            })
+            .to_string();
+            Ok((
+                "/api/mv/all",
+                json!({
+                    "tags": tags,
+                    "offset": request.offset,
+                    "total": "true",
+                    "limit": limit,
+                }),
+            ))
+        }
+        MusicVideoCatalog::Latest => {
+            if request.offset != 0 {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase latest MV catalog does not support offset",
+                )
+                .with_platform(Platform::Netease));
+            }
+            if request.video_type.is_some() || request.order.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase latest MV catalog only supports the area filter",
+                )
+                .with_platform(Platform::Netease));
+            }
+            let area = request.area.unwrap_or_default();
+            Ok((
+                "/api/mv/first",
+                json!({
+                    "area": if area == MusicVideoArea::All {
+                        ""
+                    } else {
+                        netease_music_video_area(area)
+                    },
+                    "limit": limit,
+                    "total": true,
+                }),
+            ))
+        }
+        MusicVideoCatalog::Exclusive => {
+            if request.area.is_some() || request.video_type.is_some() || request.order.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase exclusive MV catalog does not support area, type, or order filters",
+                )
+                .with_platform(Platform::Netease));
+            }
+            Ok((
+                "/api/mv/exclusive/rcmd",
+                json!({ "offset": request.offset, "limit": limit }),
+            ))
+        }
+    }
+}
+
+fn netease_music_video_area(area: MusicVideoArea) -> &'static str {
+    match area {
+        MusicVideoArea::All => "全部",
+        MusicVideoArea::MainlandChina => "内地",
+        MusicVideoArea::HongKongTaiwan => "港台",
+        MusicVideoArea::Western => "欧美",
+        MusicVideoArea::Japan => "日本",
+        MusicVideoArea::Korea => "韩国",
+    }
+}
+
+fn netease_music_video_type(video_type: MusicVideoType) -> &'static str {
+    match video_type {
+        MusicVideoType::All => "全部",
+        MusicVideoType::Official => "官方版",
+        MusicVideoType::Original => "原生",
+        MusicVideoType::Live => "现场版",
+        MusicVideoType::Netease => "网易出品",
+    }
+}
+
+fn netease_music_video_order(order: MusicVideoOrder) -> &'static str {
+    match order {
+        MusicVideoOrder::Rising => "上升最快",
+        MusicVideoOrder::Hot => "最热",
+        MusicVideoOrder::New => "最新",
+    }
+}
+
+fn map_music_video_catalog_response(
+    response: Value,
+    request: &MusicVideoListRequest,
+    limit: u32,
+) -> Result<Page<Video>> {
+    let items = response
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase MV catalog response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response.clone() }))
+        })?
+        .into_iter()
+        .map(map_artist_mv)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let total = response.get("count").and_then(json_u64);
+    let continuation_supported = request.catalog != MusicVideoCatalog::Latest;
+    let has_more = if continuation_supported {
+        [response.get("hasMore"), response.get("more")]
+            .into_iter()
+            .flatten()
+            .find_map(json_bool)
+            .or_else(|| total.map(|total| u64::from(next_offset) < total))
+            .unwrap_or(consumed == limit)
+    } else {
+        false
+    };
+    let mut extensions = Extensions::from([
+        ("catalog".to_owned(), json!(request.catalog)),
+        (
+            "continuation_supported".to_owned(),
+            json!(continuation_supported),
+        ),
+        (
+            "offset_submitted".to_owned(),
+            json!(request.catalog != MusicVideoCatalog::Latest),
+        ),
+        ("limit_applied".to_owned(), json!(true)),
+        ("response".to_owned(), response),
+    ]);
+    insert_extension(&mut extensions, "area", request.area);
+    insert_extension(&mut extensions, "video_type", request.video_type);
+    insert_extension(&mut extensions, "order", request.order);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: request.offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
 fn map_artist_mvs_response(
     response: ArtistMvsEnvelope,
     limit: u32,
@@ -10407,30 +10574,45 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    if creators.is_empty()
-        && let Some(creator) = item.artist
-        && let Some(creator) = map_artist_mv_creator(creator)?
+    if !creators
+        .iter()
+        .any(|creator| creator.resource_ref.is_some())
+        && let Some(creator) = item
+            .artist
+            .map(map_artist_mv_creator)
+            .transpose()?
+            .flatten()
+        && (creator.resource_ref.is_some() || creators.is_empty())
     {
-        creators.push(creator);
+        creators = vec![creator];
     }
-    if creators.is_empty()
+    if !creators
+        .iter()
+        .any(|creator| creator.resource_ref.is_some())
         && let Some((id, name)) = item.artist_id.zip(artist_name)
         && !name.trim().is_empty()
     {
-        creators.push(CreatorSummary {
-            resource_ref: Some(ResourceRef::new(Platform::Netease, id.to_string()).map_err(
-                |error| {
+        let creator = CreatorSummary {
+            resource_ref: (id > 0)
+                .then(|| ResourceRef::new(Platform::Netease, id.to_string()))
+                .transpose()
+                .map_err(|error| {
                     TuneWeaveError::new(
                         ErrorCode::UpstreamError,
                         format!("NetEase returned an invalid MV artist id: {error}"),
                     )
                     .with_platform(Platform::Netease)
-                },
-            )?),
+                })?,
             name,
             avatar_url: None,
-        });
+        };
+        if creator.resource_ref.is_some() || creators.is_empty() {
+            creators = vec![creator];
+        }
     }
+    let description = normalized_string(item.description)
+        .or_else(|| normalized_string(item.brief_description))
+        .unwrap_or_default();
     let mut extensions = Extensions::new();
     extensions.insert("mv".to_owned(), raw);
     Ok(Video {
@@ -10439,10 +10621,11 @@ fn map_artist_mv(raw: Value) -> Result<Video> {
         id: item.id.to_string(),
         title: item.name,
         creators,
-        description: String::new(),
+        description,
         cover_url: normalized_string(item.image_16x9_url)
+            .or_else(|| normalized_string(item.cover))
             .or_else(|| normalized_string(item.imgurl)),
-        duration_ms: item.duration,
+        duration_ms: item.duration.filter(|duration| *duration > 0),
         published_at: item.published_at,
         play_count: item.play_count,
         subscribed: item.subed,
@@ -10454,8 +10637,10 @@ fn map_artist_mv_creator(creator: crate::dto::ArtistMvCreator) -> Result<Option<
     if creator.name.trim().is_empty() {
         return Ok(None);
     }
-    let creator_ref =
-        ResourceRef::new(Platform::Netease, creator.id.to_string()).map_err(|error| {
+    let creator_ref = (creator.id > 0)
+        .then(|| ResourceRef::new(Platform::Netease, creator.id.to_string()))
+        .transpose()
+        .map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
                 format!("NetEase returned an invalid MV artist id: {error}"),
@@ -10463,7 +10648,7 @@ fn map_artist_mv_creator(creator: crate::dto::ArtistMvCreator) -> Result<Option<
             .with_platform(Platform::Netease)
         })?;
     Ok(Some(CreatorSummary {
-        resource_ref: Some(creator_ref),
+        resource_ref: creator_ref,
         name: creator.name,
         avatar_url: normalized_string(creator.avatar_url),
     }))
@@ -19679,6 +19864,184 @@ mod tests {
     }
 
     #[test]
+    fn music_video_catalog_requests_match_all_three_reference_modules() {
+        let mut all = MusicVideoListRequest::new(MusicVideoCatalog::All, 30, 60);
+        all.area = Some(MusicVideoArea::MainlandChina);
+        all.video_type = Some(MusicVideoType::Official);
+        all.order = Some(MusicVideoOrder::Hot);
+        let (path, payload) =
+            netease_music_video_catalog_request(&all, 30).expect("all MV request");
+        assert_eq!(path, "/api/mv/all");
+        assert_eq!(payload["offset"], 60);
+        assert_eq!(payload["limit"], 30);
+        assert_eq!(payload["total"], "true");
+        assert_eq!(
+            serde_json::from_str::<Value>(payload["tags"].as_str().expect("MV tags JSON"))
+                .expect("parse MV tags"),
+            json!({"地区": "内地", "类型": "官方版", "排序": "最热"})
+        );
+
+        let mut latest = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 10, 0);
+        latest.area = Some(MusicVideoArea::Japan);
+        assert_eq!(
+            netease_music_video_catalog_request(&latest, 10).expect("latest MV request"),
+            (
+                "/api/mv/first",
+                json!({"area": "日本", "limit": 10, "total": true})
+            )
+        );
+        latest.area = Some(MusicVideoArea::All);
+        assert_eq!(
+            netease_music_video_catalog_request(&latest, 10)
+                .expect("unfiltered latest MV request")
+                .1["area"],
+            ""
+        );
+
+        let exclusive = MusicVideoListRequest::new(MusicVideoCatalog::Exclusive, 5, 15);
+        assert_eq!(
+            netease_music_video_catalog_request(&exclusive, 5).expect("exclusive MV request"),
+            ("/api/mv/exclusive/rcmd", json!({"offset": 15, "limit": 5}))
+        );
+    }
+
+    #[test]
+    fn music_video_catalog_rejects_controls_the_reference_module_cannot_apply() {
+        let latest_offset = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 30, 30);
+        assert_eq!(
+            netease_music_video_catalog_request(&latest_offset, 30)
+                .expect_err("latest offset")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let mut latest_type = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 30, 0);
+        latest_type.video_type = Some(MusicVideoType::All);
+        assert_eq!(
+            netease_music_video_catalog_request(&latest_type, 30)
+                .expect_err("latest type")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let mut exclusive_area = MusicVideoListRequest::new(MusicVideoCatalog::Exclusive, 30, 0);
+        exclusive_area.area = Some(MusicVideoArea::All);
+        assert_eq!(
+            netease_music_video_catalog_request(&exclusive_area, 30)
+                .expect_err("exclusive area")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn maps_music_video_catalog_pagination_and_complete_items() {
+        let mut request = MusicVideoListRequest::new(MusicVideoCatalog::All, 1, 4);
+        request.area = Some(MusicVideoArea::Western);
+        request.video_type = Some(MusicVideoType::Live);
+        request.order = Some(MusicVideoOrder::New);
+        let page = map_music_video_catalog_response(
+            json!({
+                "code": 200,
+                "count": 5_000,
+                "hasMore": true,
+                "data": [{
+                    "id": 10928277,
+                    "name": "那年初夏",
+                    "artistId": 9255,
+                    "artistName": "任然",
+                    "artists": [{"id": 9255, "name": "任然"}],
+                    "briefDesc": "catalog summary",
+                    "desc": " ",
+                    "cover": "https://example.test/catalog.jpg",
+                    "imgurl16v9": " ",
+                    "duration": 309000,
+                    "playCount": 373006,
+                    "subed": false,
+                    "mark": 0
+                }]
+            }),
+            &request,
+            1,
+        )
+        .expect("map all MV catalog");
+
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:10928277");
+        assert_eq!(page.items[0].description, "catalog summary");
+        assert_eq!(
+            page.items[0].cover_url.as_deref(),
+            Some("https://example.test/catalog.jpg")
+        );
+        assert_eq!(page.items[0].duration_ms, Some(309_000));
+        assert_eq!(page.items[0].play_count, Some(373_006));
+        assert_eq!(page.pagination.total, Some(5_000));
+        assert_eq!(page.pagination.next_offset, Some(5));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["catalog"], "all");
+        assert_eq!(page.pagination.extensions["continuation_supported"], true);
+        assert_eq!(page.pagination.extensions["area"], "western");
+        assert_eq!(page.pagination.extensions["video_type"], "live");
+        assert_eq!(page.pagination.extensions["order"], "new");
+        assert_eq!(page.pagination.extensions["response"]["data"][0]["mark"], 0);
+
+        let latest = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 1, 0);
+        let latest = map_music_video_catalog_response(
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 14689667,
+                    "name": "早发白帝城",
+                    "artists": [{"id": 0, "name": "未知创作者"}],
+                    "cover": "https://example.test/latest.jpg",
+                    "duration": 0
+                }]
+            }),
+            &latest,
+            1,
+        )
+        .expect("map latest MV snapshot");
+        assert_eq!(latest.items[0].duration_ms, None);
+        assert_eq!(latest.items[0].creators[0].resource_ref, None);
+        assert!(!latest.pagination.has_more);
+        assert_eq!(latest.pagination.next_offset, None);
+        assert_eq!(latest.pagination.total, None);
+        assert_eq!(
+            latest.pagination.extensions["continuation_supported"],
+            false
+        );
+        assert_eq!(latest.pagination.extensions["offset_submitted"], false);
+
+        let exclusive_request = MusicVideoListRequest::new(MusicVideoCatalog::Exclusive, 1, 10);
+        let exclusive = map_music_video_catalog_response(
+            json!({
+                "code": 200,
+                "more": true,
+                "data": [{
+                    "id": 10989376,
+                    "name": "超级面对面",
+                    "artists": [{"id": 37639787, "name": "辣目洋子"}],
+                    "cover": "https://example.test/exclusive.jpg"
+                }]
+            }),
+            &exclusive_request,
+            1,
+        )
+        .expect("map exclusive MV page");
+        assert!(exclusive.pagination.has_more);
+        assert_eq!(exclusive.pagination.next_offset, Some(11));
+        assert_eq!(exclusive.pagination.extensions["catalog"], "exclusive");
+    }
+
+    #[test]
+    fn music_video_catalog_mapping_rejects_a_missing_data_array() {
+        let request = MusicVideoListRequest::new(MusicVideoCatalog::All, 30, 0);
+        assert_eq!(
+            map_music_video_catalog_response(json!({"code": 200}), &request, 30)
+                .expect_err("missing MV data")
+                .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[test]
     fn maps_netease_artist_mvs_to_the_unified_video_model() {
         let response: ArtistMvsEnvelope = serde_json::from_value(json!({
             "hasMore": true,
@@ -19753,7 +20116,7 @@ mod tests {
                 "name": "周杰伦",
                 "img1v1Url": "https://example.test/artist.jpg"
             },
-            "artists": [{"id": 0, "name": ""}],
+            "artists": [{"id": 0, "name": "包装作者"}],
             "imgurl16v9": "  ",
             "imgurl": "https://example.test/square.jpg"
         }))
@@ -23612,6 +23975,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::ListeningHistory));
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::VideoRecommendations));
+        assert!(capabilities.contains(&Capability::VideoCatalog));
         assert!(capabilities.contains(&Capability::PodcastEpisodeRecommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
         assert!(capabilities.contains(&Capability::AlbumList));

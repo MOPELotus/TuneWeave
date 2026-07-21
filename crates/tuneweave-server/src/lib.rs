@@ -43,7 +43,8 @@ use tuneweave_core::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, PageRequest, PasswordFormat, PasswordLoginRequest,
+    MediaStream, MembershipSummary, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
+    MusicVideoOrder, MusicVideoType, PageRequest, PasswordFormat, PasswordLoginRequest,
     PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
     PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
     PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
@@ -272,6 +273,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/videos", get(artist_videos))
         .route("/artists/{reference}/tracks", get(artist_tracks))
         .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
+        .route("/videos", get(music_videos))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
@@ -3841,6 +3843,61 @@ async fn artist_videos(
     request.kind = parse_video_kind(params.kind.as_deref())?;
     request.order = optional_trimmed(params.order);
     let page = provider.artist_videos(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MusicVideoListParams {
+    platform: Option<String>,
+    account: Option<String>,
+    catalog: Option<String>,
+    area: Option<String>,
+    #[serde(rename = "type", alias = "video_type", alias = "mv_type")]
+    video_type: Option<String>,
+    order: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn music_videos(
+    State(state): State<AppState>,
+    params: Result<Query<MusicVideoListParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let catalog = parse_music_video_catalog(params.catalog.as_deref())?;
+    let mut request = MusicVideoListRequest::new(catalog, limit, offset);
+    request.area = params
+        .area
+        .as_deref()
+        .map(parse_music_video_area)
+        .transpose()?;
+    request.video_type = params
+        .video_type
+        .as_deref()
+        .map(parse_music_video_type)
+        .transpose()?;
+    request.order = params
+        .order
+        .as_deref()
+        .map(parse_music_video_order)
+        .transpose()?;
+    request.account.clone_from(&account);
+    let provider = state.registry.require(platform)?;
+    let page = provider.music_videos(&request).await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -7689,6 +7746,86 @@ fn parse_video_kind(value: Option<&str>) -> Result<VideoKind, TuneWeaveError> {
     }
 }
 
+fn parse_music_video_catalog(value: Option<&str>) -> Result<MusicVideoCatalog, TuneWeaveError> {
+    match value
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "all" | "all_mvs" | "mv_all" => Ok(MusicVideoCatalog::All),
+        "latest" | "new" | "first" | "mv_first" => Ok(MusicVideoCatalog::Latest),
+        "exclusive" | "netease" | "exclusive_recommendations" | "mv_exclusive_rcmd" => {
+            Ok(MusicVideoCatalog::Exclusive)
+        }
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported music video catalog: {value}"
+        ))
+        .with_details(json!({ "allowed": ["all", "latest", "exclusive"] }))),
+    }
+}
+
+fn parse_music_video_area(value: &str) -> Result<MusicVideoArea, TuneWeaveError> {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "" | "all" | "全部" => Ok(MusicVideoArea::All),
+        "mainland" | "mainland_china" | "cn" | "内地" => Ok(MusicVideoArea::MainlandChina),
+        "hktw" | "hong_kong_taiwan" | "港台" => Ok(MusicVideoArea::HongKongTaiwan),
+        "western" | "eu_us" | "欧美" => Ok(MusicVideoArea::Western),
+        "japan" | "jp" | "日本" => Ok(MusicVideoArea::Japan),
+        "korea" | "kr" | "韩国" => Ok(MusicVideoArea::Korea),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported music video area: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["all", "mainland_china", "hong_kong_taiwan", "western", "japan", "korea"]
+        }))),
+    }
+}
+
+fn parse_music_video_type(value: &str) -> Result<MusicVideoType, TuneWeaveError> {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "all" | "全部" => Ok(MusicVideoType::All),
+        "official" | "official_version" | "官方版" => Ok(MusicVideoType::Official),
+        "original" | "原生" => Ok(MusicVideoType::Original),
+        "live" | "live_version" | "现场版" => Ok(MusicVideoType::Live),
+        "netease" | "netease_produced" | "网易出品" => Ok(MusicVideoType::Netease),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported music video type: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["all", "official", "original", "live", "netease"]
+        }))),
+    }
+}
+
+fn parse_music_video_order(value: &str) -> Result<MusicVideoOrder, TuneWeaveError> {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "rising" | "fastest_rising" | "上升最快" => Ok(MusicVideoOrder::Rising),
+        "hot" | "hottest" | "最热" => Ok(MusicVideoOrder::Hot),
+        "new" | "latest" | "newest" | "最新" => Ok(MusicVideoOrder::New),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported music video order: {value}"
+        ))
+        .with_details(json!({ "allowed": ["rising", "hot", "new"] }))),
+    }
+}
+
 fn parse_video_resource_kind(
     value: Option<&str>,
     id: &str,
@@ -8265,6 +8402,7 @@ mod tests {
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
                 Capability::AudioDownload,
+                Capability::VideoCatalog,
                 Capability::VideoDetail,
                 Capability::VideoStats,
                 Capability::VideoStream,
@@ -9606,6 +9744,29 @@ mod tests {
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
                     extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn music_videos(&self, request: &MusicVideoListRequest) -> Result<Page<Video>> {
+            let mut video = sample_video("10928277");
+            video
+                .extensions
+                .insert("catalog".to_owned(), json!(request.catalog));
+            Ok(Page {
+                items: vec![video],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(5_000),
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
+                    extensions: Extensions::from([
+                        ("area".to_owned(), json!(request.area)),
+                        ("video_type".to_owned(), json!(request.video_type)),
+                        ("order".to_owned(), json!(request.order)),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
                 },
             })
         }
@@ -13507,6 +13668,57 @@ mod tests {
         assert_eq!(videos["meta"]["pagination"]["offset"], 10);
         assert_eq!(videos["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(videos["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn music_video_catalog_unifies_reference_filters_and_pagination() {
+        let (status, videos) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos?platform=netease&catalog=mv_all&area=%E5%86%85%E5%9C%B0&type=official&order=hot&limit=3&offset=6&account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(videos["data"][0]["ref"], "netease:10928277");
+        assert_eq!(videos["data"][0]["extensions"]["catalog"], "all");
+        assert_eq!(
+            videos["meta"]["pagination"]["extensions"]["area"],
+            "mainland_china"
+        );
+        assert_eq!(
+            videos["meta"]["pagination"]["extensions"]["video_type"],
+            "official"
+        );
+        assert_eq!(videos["meta"]["pagination"]["extensions"]["order"], "hot");
+        assert_eq!(videos["meta"]["pagination"]["limit"], 3);
+        assert_eq!(videos["meta"]["pagination"]["offset"], 6);
+        assert_eq!(videos["meta"]["account"], "viewer");
+
+        let (status, latest) =
+            json_response_from(test_app_with_provider(), "/v1/videos?catalog=first&area=jp").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(latest["data"][0]["extensions"]["catalog"], "latest");
+        assert_eq!(latest["meta"]["pagination"]["extensions"]["area"], "japan");
+        assert!(latest["meta"]["pagination"]["extensions"]["video_type"].is_null());
+        assert!(latest["meta"]["pagination"]["extensions"]["order"].is_null());
+    }
+
+    #[tokio::test]
+    async fn music_video_catalog_rejects_unknown_filters_and_invalid_pagination() {
+        for path in [
+            "/v1/videos?catalog=unknown",
+            "/v1/videos?area=mars",
+            "/v1/videos?type=concert",
+            "/v1/videos?order=random",
+            "/v1/videos?limit=0",
+            "/v1/videos?limit=101",
+            "/v1/videos?offset=next",
+            "/v1/videos?platform=unknown",
+            "/v1/videos?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
