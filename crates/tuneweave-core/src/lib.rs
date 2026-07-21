@@ -10,6 +10,7 @@ mod platform;
 mod provider;
 mod registry;
 mod resolver;
+mod uni_playlist_store;
 
 pub use auth::{
     AccountProfile, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
@@ -77,12 +78,14 @@ pub use model::{
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, User, UserProfile, UserProfileBackend,
-    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, UniPlaylist, UniPlaylistCreateRequest,
+    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
 pub use registry::ProviderRegistry;
 pub use resolver::StreamResolver;
+pub use uni_playlist_store::{FileUniPlaylistStore, MemoryUniPlaylistStore, UniPlaylistStore};

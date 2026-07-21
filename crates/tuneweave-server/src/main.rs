@@ -11,7 +11,8 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tuneweave_core::{
-    AccountCredentialStore, FileAccountCredentialStore, Platform, ProviderRegistry,
+    AccountCredentialStore, FileAccountCredentialStore, FileUniPlaylistStore, Platform,
+    ProviderRegistry, UniPlaylistStore,
 };
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_server::{AppState, build_router};
@@ -32,6 +33,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or_else(|| PathBuf::from(".local").join("data"));
     let credential_store: Arc<dyn AccountCredentialStore> =
         Arc::new(FileAccountCredentialStore::new(data_dir.join("accounts")));
+    let uni_playlist_store: Arc<dyn UniPlaylistStore> = Arc::new(FileUniPlaylistStore::open(
+        data_dir.join("uni-playlists.json"),
+    )?);
     let mut registry = ProviderRegistry::new();
     let netease_config = NeteaseConfig {
         cookie: env::var("TUNEWEAVE_NETEASE_COOKIE")
@@ -50,7 +54,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         ..NeteaseConfig::default()
     };
     registry.register(NeteaseProvider::new(netease_config)?)?;
-    let state = AppState::new(registry, Platform::Netease);
+    let state =
+        AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);
     let app = build_router(state);
     let listener = TcpListener::bind(address).await?;
 

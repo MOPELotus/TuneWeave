@@ -7,6 +7,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
+    Uni,
     Netease,
     Qq,
     Bilibili,
@@ -16,7 +17,8 @@ pub enum Platform {
 }
 
 impl Platform {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Uni,
         Self::Netease,
         Self::Qq,
         Self::Bilibili,
@@ -28,6 +30,7 @@ impl Platform {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Uni => "uni",
             Self::Netease => "netease",
             Self::Qq => "qq",
             Self::Bilibili => "bilibili",
@@ -49,6 +52,7 @@ impl FromStr for Platform {
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "uni" => Ok(Self::Uni),
             "netease" => Ok(Self::Netease),
             "qq" => Ok(Self::Qq),
             "bilibili" => Ok(Self::Bilibili),
@@ -169,6 +173,15 @@ mod tests {
     fn resource_ref_keeps_colons_inside_provider_ids() {
         let resource: ResourceRef = "bilibili:ep:123".parse().expect("valid reference");
         assert_eq!(resource.id(), "ep:123");
+    }
+
+    #[test]
+    fn uni_references_are_first_class_and_keep_opaque_ids() {
+        let resource: ResourceRef = "uni:pl_01abcXYZ".parse().expect("valid Uni reference");
+        assert_eq!(resource.platform(), Platform::Uni);
+        assert_eq!(resource.id(), "pl_01abcXYZ");
+        assert_eq!(resource.to_string(), "uni:pl_01abcXYZ");
+        assert!(Platform::ALL.contains(&Platform::Uni));
     }
 
     #[test]

@@ -2952,6 +2952,60 @@ pub struct Playlist {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistCreateRequest {
+    pub name: String,
+    pub description: String,
+}
+
+impl UniPlaylistCreateRequest {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylist {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub item_count: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub extensions: Extensions,
+}
+
+impl UniPlaylist {
+    #[must_use]
+    pub fn new(
+        resource_ref: ResourceRef,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        created_at_ms: u64,
+    ) -> Self {
+        let platform = resource_ref.platform();
+        let id = resource_ref.id().to_owned();
+        Self {
+            resource_ref,
+            platform,
+            id,
+            name: name.into(),
+            description: description.into(),
+            item_count: 0,
+            created_at_ms,
+            updated_at_ms: created_at_ms,
+            extensions: Extensions::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaylistVisibility {
@@ -4762,6 +4816,27 @@ mod tests {
             value["playlist_refs"],
             serde_json::json!(["netease:987654", "netease:987654"])
         );
+    }
+
+    #[test]
+    fn uni_playlist_keeps_local_identity_counts_and_millisecond_timestamps_explicit() {
+        let reference =
+            ResourceRef::new(Platform::Uni, "pl_01abcdefghijklmnop").expect("valid Uni reference");
+        let playlist = UniPlaylist::new(
+            reference,
+            "Cross-platform favorites",
+            "Mixed sources in exact order",
+            1_753_137_600_000,
+        );
+        let value = serde_json::to_value(playlist).expect("serialize Uni Playlist");
+        assert_eq!(value["ref"], "uni:pl_01abcdefghijklmnop");
+        assert_eq!(value["platform"], "uni");
+        assert_eq!(value["item_count"], 0);
+        assert_eq!(value["created_at_ms"], 1_753_137_600_000_u64);
+        assert_eq!(value["updated_at_ms"], value["created_at_ms"]);
+
+        let request = UniPlaylistCreateRequest::new("Imported favorites");
+        assert!(request.description.is_empty());
     }
 
     #[test]

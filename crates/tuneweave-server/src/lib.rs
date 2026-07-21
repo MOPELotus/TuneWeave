@@ -43,15 +43,16 @@ use tuneweave_core::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
-    MusicVideoOrder, MusicVideoType, PageRequest, PasswordFormat, PasswordLoginRequest,
-    PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageRequest, PasswordFormat,
+    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
@@ -71,11 +72,11 @@ use tuneweave_core::{
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
+    UniPlaylistCreateRequest, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -175,6 +176,7 @@ pub struct AppState {
     registry: ProviderRegistry,
     resolver: StreamResolver,
     auth_transactions: AuthTransactions,
+    uni_playlists: Arc<dyn UniPlaylistStore>,
     default_platform: Platform,
     started_at: Instant,
 }
@@ -203,10 +205,17 @@ impl AppState {
         Self {
             resolver: StreamResolver::new(registry.clone(), fallback_platforms),
             auth_transactions: AuthTransactions::default(),
+            uni_playlists: Arc::new(MemoryUniPlaylistStore::default()),
             registry,
             default_platform,
             started_at: Instant::now(),
         }
+    }
+
+    #[must_use]
+    pub fn with_uni_playlist_store(mut self, store: Arc<dyn UniPlaylistStore>) -> Self {
+        self.uni_playlists = store;
+        self
     }
 }
 
@@ -317,6 +326,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
+        .route("/uni/playlists", post(uni_playlist_create))
+        .route("/uni/playlists/{reference}", get(uni_playlist))
         .route("/playlists", post(playlist_create).delete(playlists_delete))
         .route(
             "/playlists/{reference}",
@@ -565,6 +576,14 @@ struct PlatformStatus {
 }
 
 fn platform_status(state: &AppState, platform: Platform) -> PlatformStatus {
+    if platform == Platform::Uni {
+        return PlatformStatus {
+            platform,
+            registered: true,
+            default: false,
+            capabilities: vec![Capability::UniPlaylistRead, Capability::UniPlaylistWrite],
+        };
+    }
     let provider = state.registry.get(platform);
     PlatformStatus {
         platform,
@@ -3123,6 +3142,116 @@ const fn stream_error_status(code: ErrorCode) -> ResolutionStatus {
         | ErrorCode::UpstreamTimeout
         | ErrorCode::InternalError => ResolutionStatus::UpstreamError,
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoQueryParams {}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistCreateBody {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+async fn uni_playlist_create(
+    State(state): State<AppState>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+    payload: Result<Json<UniPlaylistCreateBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylist>>, ApiError> {
+    let _ = query_params(params)?;
+    let body = json_body(payload)?;
+    let request = UniPlaylistCreateRequest {
+        name: required_trimmed("name", body.name)?,
+        description: body
+            .description
+            .map(|description| description.trim().to_owned())
+            .unwrap_or_default(),
+    };
+    if request.name.len() > 200 {
+        return Err(
+            TuneWeaveError::invalid_request("Uni Playlist name cannot exceed 200 bytes").into(),
+        );
+    }
+    if request.description.len() > 4_000 {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist description cannot exceed 4000 bytes",
+        )
+        .into());
+    }
+    let created_at_ms = unix_time_millis()?;
+    for _ in 0..8 {
+        let id = allocate_uni_playlist_id();
+        let reference = ResourceRef::new(Platform::Uni, &id).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to allocate a valid Uni Playlist reference: {error}"),
+            )
+        })?;
+        let playlist = UniPlaylist::new(
+            reference,
+            request.name.clone(),
+            request.description.clone(),
+            created_at_ms,
+        );
+        let store = Arc::clone(&state.uni_playlists);
+        let candidate = playlist.clone();
+        let result = tokio::task::spawn_blocking(move || store.create(&candidate))
+            .await
+            .map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "Uni Playlist persistence task failed",
+                )
+            })?;
+        match result {
+            Ok(()) => {
+                return Ok(Json(
+                    ApiResponse::new(playlist).with_platform(Platform::Uni),
+                ));
+            }
+            Err(error) if error.code == ErrorCode::Conflict => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::InternalError,
+        "failed to allocate a unique Uni Playlist id",
+    )
+    .into())
+}
+
+async fn uni_playlist(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UniPlaylist>>, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    if reference.platform() != Platform::Uni {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist reference must use the uni platform",
+        )
+        .with_details(json!({ "ref": reference }))
+        .into());
+    }
+    let playlist = state.uni_playlists.get(reference.id())?.ok_or_else(|| {
+        TuneWeaveError::new(ErrorCode::ResourceNotFound, "Uni Playlist was not found")
+            .with_details(json!({ "ref": reference }))
+    })?;
+    Ok(Json(
+        ApiResponse::new(playlist).with_platform(Platform::Uni),
+    ))
+}
+
+fn allocate_uni_playlist_id() -> String {
+    let suffix = rand::rng()
+        .sample_iter(Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect::<String>();
+    format!("pl_{suffix}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -12629,13 +12758,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn platform_discovery_does_not_claim_unregistered_capabilities() {
+    async fn platform_discovery_exposes_uni_without_claiming_provider_capabilities() {
         let (status, json) = json_response("/v1/platforms").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"].as_array().map(Vec::len), Some(6));
-        assert_eq!(json["data"][0]["platform"], "netease");
-        assert_eq!(json["data"][0]["registered"], false);
-        assert_eq!(json["data"][0]["default"], true);
+        assert_eq!(json["data"].as_array().map(Vec::len), Some(7));
+        assert_eq!(json["data"][0]["platform"], "uni");
+        assert_eq!(json["data"][0]["registered"], true);
+        assert_eq!(json["data"][0]["default"], false);
+        assert_eq!(
+            json["data"][0]["capabilities"],
+            json!(["uni_playlist_read", "uni_playlist_write"])
+        );
+        assert_eq!(json["data"][1]["platform"], "netease");
+        assert_eq!(json["data"][1]["registered"], false);
+        assert_eq!(json["data"][1]["default"], true);
+
+        let (status, capabilities) = json_response("/v1/capabilities?platform=uni").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capabilities["data"][0]["registered"], true);
+        assert_eq!(
+            capabilities["data"][0]["capabilities"],
+            json!(["uni_playlist_read", "uni_playlist_write"])
+        );
     }
 
     #[tokio::test]
@@ -16039,6 +16183,93 @@ mod tests {
         assert_eq!(json["data"]["ref"], "netease:3778678");
         assert_eq!(json["data"]["name"], "云音乐热歌榜");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_create_and_read_share_persistent_store_identity() {
+        let app = test_app_with_provider();
+        let before = unix_time_millis().expect("time before Uni Playlist create");
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists",
+            Some(json!({
+                "name": "  跨平台收藏  ",
+                "description": "  保留原平台顺序与重复项  "
+            })),
+        )
+        .await;
+        let after = unix_time_millis().expect("time after Uni Playlist create");
+        assert_eq!(status, StatusCode::OK);
+        let reference = created["data"]["ref"]
+            .as_str()
+            .expect("created Uni Playlist reference");
+        assert!(reference.starts_with("uni:pl_"));
+        assert_eq!(created["data"]["platform"], "uni");
+        assert_eq!(created["data"]["name"], "跨平台收藏");
+        assert_eq!(created["data"]["description"], "保留原平台顺序与重复项");
+        assert_eq!(created["data"]["item_count"], 0);
+        let created_at_ms = created["data"]["created_at_ms"]
+            .as_u64()
+            .expect("millisecond creation time");
+        assert!((before..=after).contains(&created_at_ms));
+        assert_eq!(created["data"]["updated_at_ms"], created_at_ms);
+        assert_eq!(created["meta"]["platform"], "uni");
+
+        let (status, loaded) =
+            json_response_from(app, &format!("/v1/uni/playlists/{reference}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(loaded["data"], created["data"]);
+        assert_eq!(loaded["meta"]["platform"], "uni");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_routes_reject_invalid_or_unknown_inputs() {
+        for (path, body) in [
+            ("/v1/uni/playlists", json!({ "name": " " })),
+            ("/v1/uni/playlists", json!({ "name": "x".repeat(201) })),
+            (
+                "/v1/uni/playlists",
+                json!({ "name": "valid", "description": "x".repeat(4_001) }),
+            ),
+            (
+                "/v1/uni/playlists",
+                json!({ "name": "valid", "unknown": true }),
+            ),
+            ("/v1/uni/playlists?unknown=true", json!({ "name": "valid" })),
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::POST, path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "path: {path}");
+        }
+
+        for (path, expected_status, expected_code) in [
+            (
+                "/v1/uni/playlists/netease:3778678",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/uni/playlists/uni:short",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/uni/playlists/uni:pl_01abcdefghijklmnop",
+                StatusCode::NOT_FOUND,
+                "resource_not_found",
+            ),
+            (
+                "/v1/uni/playlists/uni:pl_01abcdefghijklmnop?unknown=true",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, expected_status, "path: {path}");
+            assert_eq!(response["error"]["code"], expected_code, "path: {path}");
+        }
     }
 
     #[tokio::test]

@@ -79,6 +79,8 @@ pub enum Capability {
     ArtistTracks,
     ArtistTopTracks,
     ArtistSubscriptionWrite,
+    UniPlaylistRead,
+    UniPlaylistWrite,
     PlaylistRead,
     Lyrics,
     AudioStream,
@@ -142,6 +144,20 @@ pub enum Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uni_playlist_capabilities_use_stable_discovery_names() {
+        assert_eq!(
+            serde_json::to_value(Capability::UniPlaylistRead)
+                .expect("serialize Uni Playlist read capability"),
+            serde_json::json!("uni_playlist_read")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::UniPlaylistWrite)
+                .expect("serialize Uni Playlist write capability"),
+            serde_json::json!("uni_playlist_write")
+        );
+    }
 
     #[test]
     fn radio_station_capabilities_use_stable_discovery_names() {
