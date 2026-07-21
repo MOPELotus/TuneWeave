@@ -56,21 +56,22 @@ use tuneweave_core::{
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
     PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodeStream, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -445,6 +446,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/library/podcasts", get(account_podcasts))
         .route("/account/podcasts/created", get(account_created_podcasts))
+        .route(
+            "/account/podcasts/{reference}/episodes/order",
+            put(podcast_episode_order),
+        )
         .route(
             "/account/podcast-episodes",
             get(account_podcast_episode_search),
@@ -3108,6 +3113,23 @@ struct PlaylistOrderBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PodcastEpisodeOrderBody {
+    #[serde(
+        alias = "episode_ref",
+        alias = "episodeRef",
+        alias = "program_id",
+        alias = "programId",
+        alias = "id"
+    )]
+    episode: Option<Value>,
+    position: Option<Value>,
+    limit: Option<Value>,
+    offset: Option<Value>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlaylistAccountParams {
     account: Option<String>,
 }
@@ -3376,6 +3398,76 @@ async fn playlist_tracks_order(
             reference.id(),
             &PlaylistTrackOrderRequest {
                 track_refs,
+                account: Some(account.clone()),
+            },
+        )
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn podcast_episode_order(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    payload: Result<Json<PodcastEpisodeOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PodcastEpisodeOrderResult>>, ApiError> {
+    let podcast_ref = parse_reference(reference)?;
+    let body = json_body(payload)?;
+    let episode = body
+        .episode
+        .as_ref()
+        .ok_or_else(|| TuneWeaveError::invalid_request("episode must be provided"))?;
+    let episode = required_string_or_number("episode", episode)?;
+    let episode_ref = if episode.contains(':') {
+        parse_reference(episode)?
+    } else {
+        ResourceRef::new(podcast_ref.platform(), &episode).map_err(|error| {
+            TuneWeaveError::invalid_request(format!("invalid podcast episode id: {error}"))
+                .with_details(json!({ "episode": episode }))
+        })?
+    };
+    if episode_ref.platform() != podcast_ref.platform() {
+        return Err(TuneWeaveError::invalid_request(
+            "podcast and episode references must use the same platform",
+        )
+        .with_details(json!({
+            "podcast_ref": podcast_ref,
+            "episode_ref": episode_ref
+        }))
+        .into());
+    }
+    let parse_control = |name: &str, value: Option<&Value>, default: u32| {
+        let value = value.map_or(Ok(u64::from(default)), |value| {
+            required_json_u64(name, value)
+        })?;
+        u32::try_from(value).map_err(|_| {
+            TuneWeaveError::invalid_request(format!("{name} exceeds the supported range"))
+                .with_details(json!({ "parameter": name, "value": value }))
+        })
+    };
+    let position = parse_control("position", body.position.as_ref(), 1)?;
+    let limit = parse_control("limit", body.limit.as_ref(), 200)?;
+    let offset = parse_control("offset", body.offset.as_ref(), 0)?;
+    if position == 0 {
+        return Err(TuneWeaveError::invalid_request("position must be at least 1").into());
+    }
+    if !(1..=200).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 200").into());
+    }
+    let account = account_alias(body.account.as_deref())?;
+    let platform = podcast_ref.platform();
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .reorder_podcast_episode(
+            podcast_ref.id(),
+            &PodcastEpisodeOrderRequest {
+                episode_ref,
+                position,
+                limit,
+                offset,
                 account: Some(account.clone()),
             },
         )
@@ -8578,6 +8670,7 @@ mod tests {
                 Capability::PodcastEpisodeWorkbenchList,
                 Capability::PodcastEpisodeWorkbenchSearch,
                 Capability::PodcastEpisodeCharts,
+                Capability::PodcastEpisodeOrderWrite,
                 Capability::PodcastEpisodeDetail,
                 Capability::PodcastEpisodeWorkbenchDetail,
                 Capability::PodcastEpisodeStream,
@@ -9462,6 +9555,25 @@ mod tests {
                     has_more: false,
                     extensions: Extensions::from([("request".to_owned(), json!(request))]),
                 },
+            })
+        }
+
+        async fn reorder_podcast_episode(
+            &self,
+            podcast_id: &str,
+            request: &PodcastEpisodeOrderRequest,
+        ) -> Result<PodcastEpisodeOrderResult> {
+            Ok(PodcastEpisodeOrderResult {
+                podcast_ref: ResourceRef::new(Platform::Netease, podcast_id)
+                    .expect("valid podcast order reference"),
+                episode_ref: request.episode_ref.clone(),
+                position: request.position,
+                extensions: Extensions::from([
+                    ("limit".to_owned(), json!(request.limit)),
+                    ("offset".to_owned(), json!(request.offset)),
+                    ("account".to_owned(), json!(request.account)),
+                    ("response".to_owned(), json!({"code": 200})),
+                ]),
             })
         }
 
@@ -13635,6 +13747,68 @@ mod tests {
             hours["meta"]["pagination"]["extensions"]["offset_submitted"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_order_uses_account_scope_and_reference_controls() {
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/podcasts/netease:336355127/episodes/order",
+            Some(json!({
+                "programId": 2058695201_u64,
+                "position": 4,
+                "limit": 20,
+                "offset": 40,
+                "account": "creator"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["podcast_ref"], "netease:336355127");
+        assert_eq!(json["data"]["episode_ref"], "netease:2058695201");
+        assert_eq!(json["data"]["position"], 4);
+        assert_eq!(json["data"]["extensions"]["limit"], 20);
+        assert_eq!(json["data"]["extensions"]["offset"], 40);
+        assert_eq!(json["data"]["extensions"]["account"], "creator");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "creator");
+
+        let (status, defaults) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/podcasts/netease:336355127/episodes/order",
+            Some(json!({"episode_ref": "netease:2058695201"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaults["data"]["position"], 1);
+        assert_eq!(defaults["data"]["extensions"]["limit"], 200);
+        assert_eq!(defaults["data"]["extensions"]["offset"], 0);
+        assert_eq!(defaults["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_order_rejects_invalid_or_cross_platform_inputs() {
+        for body in [
+            json!({}),
+            json!({"episode": "qq:2058695201"}),
+            json!({"episode": 2058695201_u64, "position": 0}),
+            json!({"episode": 2058695201_u64, "limit": 201}),
+            json!({"episode": 2058695201_u64, "offset": 4_294_967_296_u64}),
+            json!({"episode": []}),
+            json!({"episode": 2058695201_u64, "unknown": true}),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::PUT,
+                "/v1/account/podcasts/netease:336355127/episodes/order",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
+        }
     }
 
     #[tokio::test]

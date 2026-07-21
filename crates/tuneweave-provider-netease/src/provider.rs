@@ -54,23 +54,23 @@ use tuneweave_core::{
     PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
     PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
     PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
-    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
-    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeOrderRequest,
+    PodcastEpisodeOrderResult, PodcastEpisodeStream, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -607,6 +607,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeWorkbenchList,
             Capability::PodcastEpisodeWorkbenchSearch,
             Capability::PodcastEpisodeCharts,
+            Capability::PodcastEpisodeOrderWrite,
             Capability::PodcastEpisodeDetail,
             Capability::PodcastEpisodeWorkbenchDetail,
             Capability::PodcastEpisodeStream,
@@ -1273,6 +1274,42 @@ impl MusicProvider for NeteaseProvider {
         require_authenticated_client(&client, "podcast workbench episode search")?;
         let response = client.request_eapi(path, payload).await?;
         map_netease_podcast_episodes_workbench(response.body, request.limit, request.offset)
+    }
+
+    async fn reorder_podcast_episode(
+        &self,
+        podcast_id: &str,
+        request: &PodcastEpisodeOrderRequest,
+    ) -> Result<PodcastEpisodeOrderResult> {
+        let podcast_id = parse_numeric_id("podcast voice list", podcast_id)?;
+        if !(1..=200).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast episode order limit must be between 1 and 200",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "limit": request.limit })));
+        }
+        if request.position == 0 {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast episode order position must be at least 1",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if request.episode_ref.platform() != Platform::Netease {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast episode order requires a NetEase episode reference",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "episode_ref": request.episode_ref })));
+        }
+        let episode_id = parse_numeric_id("podcast voice", request.episode_ref.id())?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "podcast episode order update")?;
+        let (path, payload) =
+            netease_podcast_episode_order_request(podcast_id, episode_id, request);
+        let response = client.request_eapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "podcast episode order update")?;
+        map_netease_podcast_episode_order_result(podcast_id, episode_id, request, response.body)
     }
 
     async fn podcast_episode_chart(
@@ -5817,6 +5854,23 @@ fn netease_podcast_episodes_workbench_request(
     )
 }
 
+fn netease_podcast_episode_order_request(
+    podcast_id: u64,
+    episode_id: u64,
+    request: &PodcastEpisodeOrderRequest,
+) -> (&'static str, Value) {
+    (
+        "/api/voice/workbench/radio/program/trans",
+        json!({
+            "limit": request.limit,
+            "offset": request.offset,
+            "radioId": podcast_id,
+            "programId": episode_id,
+            "position": request.position
+        }),
+    )
+}
+
 fn netease_podcast_episode_workbench_search_request(
     request: &PodcastEpisodeWorkbenchSearchRequest,
 ) -> Result<(&'static str, Value)> {
@@ -7019,6 +7073,41 @@ fn map_netease_podcast_episodes_workbench(
             has_more,
             extensions: Extensions::from([("response".to_owned(), body)]),
         },
+    })
+}
+
+fn map_netease_podcast_episode_order_result(
+    podcast_id: u64,
+    episode_id: u64,
+    request: &PodcastEpisodeOrderRequest,
+    body: Value,
+) -> Result<PodcastEpisodeOrderResult> {
+    ensure_success(&body)?;
+    let podcast_ref =
+        ResourceRef::new(Platform::Netease, podcast_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid podcast id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    let episode_ref =
+        ResourceRef::new(Platform::Netease, episode_id.to_string()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid podcast episode id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    Ok(PodcastEpisodeOrderResult {
+        podcast_ref,
+        episode_ref,
+        position: request.position,
+        extensions: Extensions::from([
+            ("limit".to_owned(), json!(request.limit)),
+            ("offset".to_owned(), json!(request.offset)),
+            ("response".to_owned(), body),
+        ]),
     })
 }
 
@@ -18236,6 +18325,27 @@ mod tests {
                 })
             )
         );
+        let order = PodcastEpisodeOrderRequest {
+            episode_ref: ResourceRef::new(Platform::Netease, "2058695201")
+                .expect("podcast episode reference"),
+            position: 4,
+            limit: 20,
+            offset: 40,
+            account: Some("studio-user".to_owned()),
+        };
+        assert_eq!(
+            netease_podcast_episode_order_request(336_355_127, 2_058_695_201, &order),
+            (
+                "/api/voice/workbench/radio/program/trans",
+                json!({
+                    "limit": 20,
+                    "offset": 40,
+                    "radioId": 336_355_127,
+                    "programId": 2_058_695_201_u64,
+                    "position": 4
+                })
+            )
+        );
         let mut search = PodcastEpisodeWorkbenchSearchRequest::new(200, 40);
         search.query = Some(" 一期 ".to_owned());
         search.display_status = Some(PodcastEpisodeDisplayStatus::SchedulePublish);
@@ -19299,6 +19409,43 @@ mod tests {
                 ErrorCode::UpstreamError
             );
         }
+    }
+
+    #[test]
+    fn maps_podcast_episode_order_identity_position_and_complete_response() {
+        let request = PodcastEpisodeOrderRequest {
+            episode_ref: ResourceRef::new(Platform::Netease, "2058695201")
+                .expect("podcast episode reference"),
+            position: 4,
+            limit: 20,
+            offset: 40,
+            account: Some("studio-user".to_owned()),
+        };
+        let result = map_netease_podcast_episode_order_result(
+            336_355_127,
+            2_058_695_201,
+            &request,
+            json!({"code": 200, "futureField": {"kept": true}}),
+        )
+        .expect("map podcast episode order result");
+        assert_eq!(result.podcast_ref.to_string(), "netease:336355127");
+        assert_eq!(result.episode_ref.to_string(), "netease:2058695201");
+        assert_eq!(result.position, 4);
+        assert_eq!(result.extensions["limit"], 20);
+        assert_eq!(result.extensions["offset"], 40);
+        assert_eq!(result.extensions["response"]["futureField"]["kept"], true);
+
+        assert_eq!(
+            map_netease_podcast_episode_order_result(
+                336_355_127,
+                2_058_695_201,
+                &request,
+                json!({"code": 500, "message": "failed"}),
+            )
+            .expect_err("failed podcast episode order")
+            .code,
+            ErrorCode::UpstreamError
+        );
     }
 
     #[test]
@@ -25193,6 +25340,70 @@ mod tests {
             let error = MusicProvider::podcast_episodes_workbench(&provider, "336355127", &request)
                 .await
                 .expect_err("workbench voice list requires authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_order_requires_valid_controls_references_and_account() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = |episode_ref: ResourceRef, position, limit, account: Option<&str>| {
+            PodcastEpisodeOrderRequest {
+                episode_ref,
+                position,
+                limit,
+                offset: 0,
+                account: account.map(str::to_owned),
+            }
+        };
+        for invalid in [
+            request(
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+                1,
+                0,
+                None,
+            ),
+            request(
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+                1,
+                201,
+                None,
+            ),
+            request(
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+                0,
+                200,
+                None,
+            ),
+            request(
+                ResourceRef::new(Platform::Qq, "2058695201").expect("foreign episode reference"),
+                1,
+                200,
+                None,
+            ),
+            request(
+                ResourceRef::new(Platform::Netease, "not-a-number")
+                    .expect("opaque episode reference"),
+                1,
+                200,
+                None,
+            ),
+        ] {
+            let error = MusicProvider::reorder_podcast_episode(&provider, "336355127", &invalid)
+                .await
+                .expect_err("invalid podcast episode order");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        for account in [None, Some("missing")] {
+            let order = request(
+                ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference"),
+                1,
+                200,
+                account,
+            );
+            let error = MusicProvider::reorder_podcast_episode(&provider, "336355127", &order)
+                .await
+                .expect_err("podcast episode order requires authentication");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         }
     }

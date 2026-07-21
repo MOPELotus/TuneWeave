@@ -1099,6 +1099,23 @@ pub struct PodcastEpisodeListRequest {
     pub account: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeOrderRequest {
+    pub episode_ref: ResourceRef,
+    pub position: u32,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastEpisodeOrderResult {
+    pub podcast_ref: ResourceRef,
+    pub episode_ref: ResourceRef,
+    pub position: u32,
+    pub extensions: Extensions,
+}
+
 impl PodcastEpisodeListRequest {
     #[must_use]
     pub const fn new(limit: u32, offset: u32) -> Self {
@@ -3251,6 +3268,38 @@ mod tests {
         assert_eq!(request.offset, 60);
         assert!(!request.ascending);
         assert_eq!(request.account.as_deref(), Some("spoken-word"));
+    }
+
+    #[test]
+    fn podcast_episode_order_keeps_list_episode_and_position_identity_distinct() {
+        let podcast_ref =
+            ResourceRef::new(Platform::Netease, "336355127").expect("podcast reference");
+        let episode_ref =
+            ResourceRef::new(Platform::Netease, "2058695201").expect("episode reference");
+        let request = PodcastEpisodeOrderRequest {
+            episode_ref: episode_ref.clone(),
+            position: 4,
+            limit: 20,
+            offset: 40,
+            account: Some("studio-user".to_owned()),
+        };
+        let value = serde_json::to_value(&request).expect("serialize podcast episode order");
+        assert_eq!(value["episode_ref"], "netease:2058695201");
+        assert_eq!(value["position"], 4);
+        assert_eq!(value["limit"], 20);
+        assert_eq!(value["offset"], 40);
+        assert_eq!(value["account"], "studio-user");
+
+        let result = PodcastEpisodeOrderResult {
+            podcast_ref,
+            episode_ref,
+            position: request.position,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(result).expect("serialize podcast episode order result");
+        assert_eq!(value["podcast_ref"], "netease:336355127");
+        assert_eq!(value["episode_ref"], "netease:2058695201");
+        assert_eq!(value["position"], 4);
     }
 
     #[test]
