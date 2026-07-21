@@ -62,26 +62,26 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioPlaybackQueue,
-    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
+    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioPlaybackItem,
+    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
+    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
+    StreamResolver, StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
     UniPlaylistCreateRequest, UniPlaylistImportRequest, UniPlaylistImportResult,
     UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
     UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
     UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
-    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistStore, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore,
+    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -366,6 +366,14 @@ pub fn build_router(state: AppState) -> Router {
             get(playlist_playable_items)
                 .post(playlist_items_add)
                 .delete(playlist_items_remove),
+        )
+        .route(
+            "/playlists/{reference}/items/{item_id}/stream",
+            get(uni_playlist_item_stream),
+        )
+        .route(
+            "/playlists/{reference}/items/{item_id}/stream/redirect",
+            get(uni_playlist_item_stream_redirect),
         )
         .route(
             "/playlists/{reference}/tracks/order",
@@ -2324,6 +2332,25 @@ struct StreamParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistItemStreamParams {
+    #[serde(alias = "level")]
+    quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<String>,
+    playback_platform: Option<String>,
+    fallback: Option<String>,
+    fallback_platforms: Option<String>,
+    unblock: Option<String>,
+    source: Option<String>,
+    account: Option<String>,
+    accounts: Option<String>,
+    resolution: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct StreamControlInput<'a> {
     quality: Option<&'a str>,
@@ -2410,6 +2437,23 @@ impl StreamControls {
         request
     }
 
+    fn resolve_request_with_accounts(
+        &self,
+        origin_platform: Platform,
+        accounts: BTreeMap<Platform, String>,
+    ) -> Result<ResolveRequest, TuneWeaveError> {
+        let mut request = self.resolve_request(origin_platform);
+        for (platform, account) in accounts {
+            if request.accounts.insert(platform, account).is_some() {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "account and accounts both select an alias for {platform}"
+                ))
+                .with_details(json!({ "platform": platform })));
+            }
+        }
+        Ok(request)
+    }
+
     fn starts_with_origin(&self, origin_platform: Platform) -> bool {
         match &self.routing {
             StreamRouting::Standard {
@@ -2442,6 +2486,64 @@ impl StreamControls {
                 .flatten(),
         }
     }
+}
+
+fn parse_stream_accounts(
+    value: Option<&str>,
+) -> Result<BTreeMap<Platform, String>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(BTreeMap::new());
+    };
+    let pairs = if value.starts_with('{') {
+        serde_json::from_str::<BTreeMap<String, String>>(value).map_err(|_| {
+            TuneWeaveError::invalid_request(
+                "accounts must be a JSON object or comma-separated platform=alias pairs",
+            )
+        })?
+    } else {
+        let mut pairs = BTreeMap::new();
+        for entry in value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            let (platform, account) = entry.split_once('=').ok_or_else(|| {
+                TuneWeaveError::invalid_request(
+                    "accounts must use comma-separated platform=alias pairs",
+                )
+                .with_details(json!({ "entry": entry }))
+            })?;
+            let platform = platform.trim().to_owned();
+            if pairs.insert(platform.clone(), account.to_owned()).is_some() {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "accounts contains duplicate platform {platform}"
+                )));
+            }
+        }
+        pairs
+    };
+    let mut accounts = BTreeMap::new();
+    for (platform, account) in pairs {
+        let platform = parse_platform_parameter(&platform)?;
+        if platform == Platform::Uni {
+            return Err(TuneWeaveError::invalid_request(
+                "accounts cannot select the local uni platform",
+            ));
+        }
+        let account = account.trim();
+        if account.is_empty() || account.len() > 64 {
+            return Err(TuneWeaveError::invalid_request(
+                "stream account aliases must contain between 1 and 64 bytes",
+            )
+            .with_details(json!({ "platform": platform })));
+        }
+        if accounts.insert(platform, account.to_owned()).is_some() {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "accounts contains duplicate platform {platform}"
+            )));
+        }
+    }
+    Ok(accounts)
 }
 
 fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls, TuneWeaveError> {
@@ -2518,6 +2620,590 @@ async fn track_stream(
     }
 
     Ok(Json(response))
+}
+
+async fn uni_playlist_item_stream(
+    State(state): State<AppState>,
+    Path((reference, item_id)): Path<(String, String)>,
+    params: Result<Query<UniPlaylistItemStreamParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistItemStream>>, ApiError> {
+    let params = query_params(params)?;
+    let (result, legacy_account) =
+        resolve_uni_playlist_item_request(&state, reference, item_id, params).await?;
+    let resolved_platform = result.stream.resolved_platform;
+    let mut response = ApiResponse::new(result).with_platform(resolved_platform);
+    if let Some(account) = legacy_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn uni_playlist_item_stream_redirect(
+    State(state): State<AppState>,
+    Path((reference, item_id)): Path<(String, String)>,
+    params: Result<Query<UniPlaylistItemStreamParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let (result, _) = resolve_uni_playlist_item_request(&state, reference, item_id, params).await?;
+    Ok(download_redirect_response(&result.stream.url))
+}
+
+async fn resolve_uni_playlist_item_request(
+    state: &AppState,
+    reference: String,
+    item_id: String,
+    params: UniPlaylistItemStreamParams,
+) -> Result<(UniPlaylistItemStream, Option<String>), TuneWeaveError> {
+    let reference = parse_uni_playlist_reference(reference)?;
+    let item = state.uni_playlists.item(reference.id(), &item_id)?;
+    let controls = parse_stream_controls(StreamControlInput {
+        quality: params.quality.as_deref(),
+        variant: params.variant.as_deref(),
+        bitrate: params.bitrate.as_deref(),
+        playback_platform: params.playback_platform.as_deref(),
+        fallback: params.fallback.as_deref(),
+        fallback_platforms: params.fallback_platforms.as_deref(),
+        unblock: params.unblock.as_deref(),
+        source: params.source.as_deref(),
+        account: params.account.as_deref(),
+    })?;
+    let resolution = parse_u32_parameter(
+        "resolution",
+        params.resolution.as_deref(),
+        VideoStreamRequest::DEFAULT_RESOLUTION,
+    )?;
+    if !(1..=4_320).contains(&resolution) {
+        return Err(TuneWeaveError::invalid_request(
+            "resolution must be between 1 and 4320",
+        ));
+    }
+    if params.resolution.is_some()
+        && !matches!(
+            item.kind,
+            UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video
+        )
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "resolution is only available for MV or video playlist items",
+        ));
+    }
+    let request = controls.resolve_request_with_accounts(
+        item.source_ref.platform(),
+        parse_stream_accounts(params.accounts.as_deref())?,
+    )?;
+    let legacy_account = controls.account.clone();
+    let stream_extensions = match item.kind {
+        UniPlaylistItemKind::Track => {
+            let origin = track_from_uni_item(item.clone());
+            (
+                state.resolver.resolve(&origin, &request).await?,
+                Extensions::from([("transport".to_owned(), json!("audio"))]),
+            )
+        }
+        UniPlaylistItemKind::PodcastEpisode => {
+            resolve_uni_podcast_episode_stream(state, &item, &request).await?
+        }
+        UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video => {
+            resolve_uni_video_stream(state, &item, &request, resolution).await?
+        }
+        UniPlaylistItemKind::RadioStation => {
+            resolve_uni_radio_stream(state, &item, &request).await?
+        }
+    };
+    let (stream, mut extensions) = stream_extensions;
+    extensions.insert("strict_match".to_owned(), json!(request.strict_match));
+    extensions.insert(
+        "account_platforms".to_owned(),
+        json!(request.accounts.keys().copied().collect::<Vec<_>>()),
+    );
+    Ok((
+        UniPlaylistItemStream {
+            playlist_ref: reference,
+            item_id: item.id,
+            source_ref: item.source_ref,
+            kind: item.kind,
+            stream,
+            extensions,
+        },
+        legacy_account,
+    ))
+}
+
+async fn resolve_uni_podcast_episode_stream(
+    state: &AppState,
+    item: &UniPlaylistItem,
+    request: &ResolveRequest,
+) -> Result<(MediaStream, Extensions), TuneWeaveError> {
+    let origin_platform = item.source_ref.platform();
+    let account = request.accounts.get(&origin_platform).map(String::as_str);
+    let provider = state.registry.require(origin_platform)?;
+    let episode = provider
+        .podcast_episode(item.source_ref.id(), account)
+        .await?;
+    let audio = episode.audio.as_ref().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "podcast episode did not expose a playable audio resource",
+        )
+        .with_platform(origin_platform)
+        .with_details(json!({ "episode_ref": episode.resource_ref }))
+    })?;
+    let stream = state.resolver.resolve(audio, request).await?;
+    Ok((
+        stream,
+        Extensions::from([
+            ("transport".to_owned(), json!("podcast_audio")),
+            ("episode".to_owned(), json!(episode)),
+        ]),
+    ))
+}
+
+async fn resolve_uni_video_stream(
+    state: &AppState,
+    item: &UniPlaylistItem,
+    request: &ResolveRequest,
+    resolution: u32,
+) -> Result<(MediaStream, Extensions), TuneWeaveError> {
+    let origin_platform = item.source_ref.platform();
+    let origin = track_from_uni_item(item.clone());
+    let platforms = state.resolver.platform_sequence(origin_platform, request);
+    let mut attempts = Vec::new();
+    let mut last_error = None;
+    for platform in platforms {
+        if platform == origin_platform {
+            let account = request.accounts.get(&platform).cloned();
+            let provider = match state.registry.require(platform) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    attempts.push(stream_failed_attempt(
+                        platform,
+                        account,
+                        Some(item.source_ref.clone()),
+                        Some(1.0),
+                        &error,
+                    ));
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            let kind = match item.kind {
+                UniPlaylistItemKind::Mv => VideoResourceKind::Mv,
+                UniPlaylistItemKind::Video => VideoResourceKind::Video,
+                _ => unreachable!("video resolver only accepts MV or video items"),
+            };
+            let mut video_request = VideoStreamRequest::new(kind, resolution);
+            video_request.account.clone_from(&account);
+            match provider
+                .video_stream(item.source_ref.id(), &video_request)
+                .await
+            {
+                Ok(video) if video.available && video.url.is_some() => {
+                    let mut stream = media_stream_from_video(
+                        &item.source_ref,
+                        video.clone(),
+                        request.quality,
+                        account,
+                    )?;
+                    attempts.append(&mut stream.attempts);
+                    stream.attempts = attempts;
+                    return Ok((
+                        stream,
+                        Extensions::from([
+                            ("transport".to_owned(), json!("native_video")),
+                            ("native_video_stream".to_owned(), json!(video)),
+                        ]),
+                    ));
+                }
+                Ok(video) => {
+                    let error = TuneWeaveError::new(
+                        ErrorCode::ResourceNotFound,
+                        "video item did not expose a playable stream URL",
+                    )
+                    .with_platform(platform)
+                    .with_details(json!({ "video_stream": video }));
+                    attempts.push(stream_failed_attempt(
+                        platform,
+                        account,
+                        Some(item.source_ref.clone()),
+                        Some(1.0),
+                        &error,
+                    ));
+                    last_error = Some(error);
+                }
+                Err(error) => {
+                    attempts.push(stream_failed_attempt(
+                        platform,
+                        account,
+                        Some(item.source_ref.clone()),
+                        Some(1.0),
+                        &error,
+                    ));
+                    last_error = Some(error);
+                }
+            }
+        } else {
+            match state
+                .resolver
+                .resolve_on_platforms(&origin, request, &[platform])
+                .await
+            {
+                Ok(mut stream) => {
+                    attempts.append(&mut stream.attempts);
+                    stream.attempts = attempts;
+                    return Ok((
+                        stream,
+                        Extensions::from([
+                            ("transport".to_owned(), json!("matched_audio")),
+                            ("video_audio_fallback".to_owned(), json!(true)),
+                        ]),
+                    ));
+                }
+                Err(error) => {
+                    let mut failed = stream_error_attempts(&error).unwrap_or_else(|| {
+                        vec![stream_failed_attempt(
+                            platform,
+                            request.accounts.get(&platform).cloned(),
+                            None,
+                            None,
+                            &error,
+                        )]
+                    });
+                    attempts.append(&mut failed);
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    Err(stream_resolution_error(
+        item,
+        attempts,
+        last_error,
+        "video playlist item could not be played",
+    ))
+}
+
+async fn resolve_uni_radio_stream(
+    state: &AppState,
+    item: &UniPlaylistItem,
+    request: &ResolveRequest,
+) -> Result<(MediaStream, Extensions), TuneWeaveError> {
+    let origin_platform = item.source_ref.platform();
+    let platforms = state.resolver.platform_sequence(origin_platform, request);
+    let mut attempts = Vec::new();
+    let mut last_error = None;
+    for platform in platforms {
+        let account = request.accounts.get(&platform).cloned();
+        if platform != origin_platform {
+            let error = TuneWeaveError::new(
+                ErrorCode::MatchRejected,
+                "live radio stations are not matched to recordings on another platform",
+            )
+            .with_platform(platform);
+            attempts.push(stream_failed_attempt(platform, account, None, None, &error));
+            last_error = Some(error);
+            continue;
+        }
+        let provider = match state.registry.require(platform) {
+            Ok(provider) => provider,
+            Err(error) => {
+                attempts.push(stream_failed_attempt(
+                    platform,
+                    account,
+                    Some(item.source_ref.clone()),
+                    Some(1.0),
+                    &error,
+                ));
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let station = provider
+            .radio_station(item.source_ref.id(), account.as_deref())
+            .await;
+        match station {
+            Ok(station)
+                if station
+                    .stream_url
+                    .as_deref()
+                    .is_some_and(|url| !url.is_empty()) =>
+            {
+                let stream = media_stream_from_radio_station(
+                    &item.source_ref,
+                    &station,
+                    request.quality,
+                    account,
+                    attempts,
+                )?;
+                return Ok((
+                    stream,
+                    Extensions::from([
+                        ("transport".to_owned(), json!("live_radio")),
+                        ("radio_station".to_owned(), json!(station)),
+                    ]),
+                ));
+            }
+            Ok(_) | Err(_) => {}
+        }
+        let queue = provider
+            .radio_playback_queue(
+                item.source_ref.id(),
+                &RadioPlaybackQueueRequest {
+                    limit: 5,
+                    account: account.clone(),
+                },
+            )
+            .await;
+        match queue {
+            Ok(queue) => {
+                let playable = queue
+                    .items
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .stream_url
+                            .as_deref()
+                            .is_some_and(|url| !url.is_empty())
+                    })
+                    .cloned();
+                if let Some(playable) = playable {
+                    let stream = media_stream_from_radio(
+                        &item.source_ref,
+                        &playable,
+                        request.quality,
+                        account,
+                        attempts,
+                    )?;
+                    return Ok((
+                        stream,
+                        Extensions::from([
+                            ("transport".to_owned(), json!("live_radio")),
+                            ("playback_item".to_owned(), json!(playable)),
+                            ("playback_queue".to_owned(), json!(queue)),
+                        ]),
+                    ));
+                }
+                let error = TuneWeaveError::new(
+                    ErrorCode::ResourceNotFound,
+                    "radio station queue did not expose a playable stream URL",
+                )
+                .with_platform(platform)
+                .with_details(json!({ "queue": queue }));
+                attempts.push(stream_failed_attempt(
+                    platform,
+                    account,
+                    Some(item.source_ref.clone()),
+                    Some(1.0),
+                    &error,
+                ));
+                last_error = Some(error);
+            }
+            Err(error) => {
+                attempts.push(stream_failed_attempt(
+                    platform,
+                    account,
+                    Some(item.source_ref.clone()),
+                    Some(1.0),
+                    &error,
+                ));
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(stream_resolution_error(
+        item,
+        attempts,
+        last_error,
+        "radio playlist item could not be played",
+    ))
+}
+
+fn media_stream_from_radio_station(
+    source_ref: &ResourceRef,
+    station: &RadioStation,
+    requested_quality: Quality,
+    account: Option<String>,
+    mut attempts: Vec<ResolutionAttempt>,
+) -> Result<MediaStream, TuneWeaveError> {
+    let url = station
+        .stream_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "radio station did not expose a stream URL",
+            )
+            .with_platform(station.platform)
+        })?;
+    attempts.push(ResolutionAttempt {
+        platform: station.platform,
+        account,
+        candidate: Some(station.resource_ref.clone()),
+        match_score: Some(1.0),
+        status: ResolutionStatus::Success,
+        error: None,
+    });
+    Ok(MediaStream {
+        url,
+        backup_urls: Vec::new(),
+        headers: BTreeMap::new(),
+        expires_at: None,
+        format: None,
+        codec: None,
+        bitrate: None,
+        size: None,
+        duration_ms: None,
+        requested_quality,
+        actual_quality: Quality::Auto,
+        trial: None,
+        origin_track: Some(source_ref.clone()),
+        resolved_track: station.resource_ref.clone(),
+        resolved_platform: station.platform,
+        match_score: Some(1.0),
+        attempts,
+    })
+}
+
+fn media_stream_from_video(
+    source_ref: &ResourceRef,
+    video: VideoStream,
+    requested_quality: Quality,
+    account: Option<String>,
+) -> Result<MediaStream, TuneWeaveError> {
+    let url = video.url.clone().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "video item did not expose a playable stream URL",
+        )
+        .with_platform(video.platform)
+    })?;
+    Ok(MediaStream {
+        url,
+        backup_urls: video.backup_urls,
+        headers: video.headers,
+        expires_at: video.expires_at,
+        format: video.format,
+        codec: video.codec,
+        bitrate: None,
+        size: video.size,
+        duration_ms: video.duration_ms,
+        requested_quality,
+        actual_quality: Quality::Auto,
+        trial: None,
+        origin_track: Some(source_ref.clone()),
+        resolved_track: video.video_ref.clone(),
+        resolved_platform: video.platform,
+        match_score: Some(1.0),
+        attempts: vec![ResolutionAttempt {
+            platform: video.platform,
+            account,
+            candidate: Some(video.video_ref),
+            match_score: Some(1.0),
+            status: ResolutionStatus::Success,
+            error: None,
+        }],
+    })
+}
+
+fn media_stream_from_radio(
+    source_ref: &ResourceRef,
+    item: &RadioPlaybackItem,
+    requested_quality: Quality,
+    account: Option<String>,
+    mut attempts: Vec<ResolutionAttempt>,
+) -> Result<MediaStream, TuneWeaveError> {
+    let url = item
+        .stream_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "radio playback item did not expose a stream URL",
+            )
+            .with_platform(item.platform)
+        })?;
+    attempts.push(ResolutionAttempt {
+        platform: item.platform,
+        account,
+        candidate: Some(item.resource_ref.clone()),
+        match_score: Some(1.0),
+        status: ResolutionStatus::Success,
+        error: None,
+    });
+    Ok(MediaStream {
+        url,
+        backup_urls: Vec::new(),
+        headers: BTreeMap::new(),
+        expires_at: None,
+        format: None,
+        codec: None,
+        bitrate: None,
+        size: None,
+        duration_ms: item.duration_ms,
+        requested_quality,
+        actual_quality: Quality::Auto,
+        trial: None,
+        origin_track: Some(source_ref.clone()),
+        resolved_track: item.resource_ref.clone(),
+        resolved_platform: item.platform,
+        match_score: Some(1.0),
+        attempts,
+    })
+}
+
+fn stream_error_attempts(error: &TuneWeaveError) -> Option<Vec<ResolutionAttempt>> {
+    error
+        .details
+        .get("attempts")
+        .cloned()
+        .and_then(|attempts| serde_json::from_value(attempts).ok())
+}
+
+fn stream_failed_attempt(
+    platform: Platform,
+    account: Option<String>,
+    candidate: Option<ResourceRef>,
+    match_score: Option<f64>,
+    error: &TuneWeaveError,
+) -> ResolutionAttempt {
+    let status = match error.code {
+        ErrorCode::AuthenticationRequired => ResolutionStatus::AuthenticationRequired,
+        ErrorCode::PermissionDenied => ResolutionStatus::PermissionDenied,
+        ErrorCode::MatchRejected => ResolutionStatus::NoMatch,
+        ErrorCode::CapabilityNotSupported
+        | ErrorCode::PlatformUnavailable
+        | ErrorCode::ResourceNotFound => ResolutionStatus::Unavailable,
+        _ => ResolutionStatus::UpstreamError,
+    };
+    ResolutionAttempt {
+        platform,
+        account,
+        candidate,
+        match_score,
+        status,
+        error: Some(error.message.clone()),
+    }
+}
+
+fn stream_resolution_error(
+    item: &UniPlaylistItem,
+    attempts: Vec<ResolutionAttempt>,
+    last_error: Option<TuneWeaveError>,
+    message: &str,
+) -> TuneWeaveError {
+    let code = last_error
+        .as_ref()
+        .map_or(ErrorCode::PlatformUnavailable, |error| error.code);
+    let cause = last_error.map(|error| error.details).unwrap_or(Value::Null);
+    TuneWeaveError::new(code, message)
+        .with_platform(item.source_ref.platform())
+        .with_details(json!({
+            "source_ref": item.source_ref,
+            "item_id": item.id,
+            "attempts": attempts,
+            "cause": cause
+        }))
 }
 
 async fn resolve_podcast_episode_stream(
@@ -13456,7 +14142,66 @@ mod tests {
         }
 
         fn capabilities(&self) -> BTreeSet<Capability> {
-            BTreeSet::from([Capability::PlaylistRead])
+            BTreeSet::from([
+                Capability::PlaylistRead,
+                Capability::SearchTracks,
+                Capability::AudioStream,
+            ])
+        }
+
+        async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
+            let (id, name, duration_ms) = if query.query.contains("任性") {
+                ("qq-video-audio", "任性 (5525 Live版)", 266_000)
+            } else if query.query.contains("一期节目音频") {
+                ("qq-podcast-audio", "一期节目音频", 258_000)
+            } else {
+                ("qq-clock", "反方向的钟", 258_000)
+            };
+            let mut track = Track::new(
+                ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
+                name,
+            );
+            track.artists.push(ArtistSummary {
+                resource_ref: None,
+                name: "周杰伦".to_owned(),
+            });
+            track.duration_ms = Some(duration_ms);
+            Ok(Page {
+                items: vec![track],
+                pagination: PageMeta {
+                    limit: query.limit,
+                    offset: query.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([("account".to_owned(), json!(query.account))]),
+                },
+            })
+        }
+
+        async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+            Ok(MediaStream {
+                url: format!("https://example.test/qq/{}.m4a", track.id),
+                backup_urls: Vec::new(),
+                headers: BTreeMap::from([(
+                    "x-test-stream-account".to_owned(),
+                    request.account.clone().unwrap_or_else(|| "none".to_owned()),
+                )]),
+                expires_at: None,
+                format: Some("m4a".to_owned()),
+                codec: Some("aac".to_owned()),
+                bitrate: request.bitrate.or(Some(320_000)),
+                size: Some(2048),
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: Quality::High,
+                trial: None,
+                origin_track: None,
+                resolved_track: track.resource_ref.clone(),
+                resolved_platform: Platform::Qq,
+                match_score: None,
+                attempts: Vec::new(),
+            })
         }
 
         async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
@@ -17585,7 +18330,7 @@ mod tests {
 
     #[tokio::test]
     async fn uni_playlist_items_preserve_types_order_duplicates_and_platform_accounts() {
-        let app = test_app_with_provider();
+        let app = test_app_with_import_providers();
         let (status, created) = json_request_from(
             app.clone(),
             Method::POST,
@@ -17701,6 +18446,199 @@ mod tests {
         assert_eq!(items["data"][4]["kind"], "radio_station");
         assert_eq!(items["data"][4]["extensions"]["stable_item_id"], true);
         assert_eq!(items["meta"]["pagination"]["total"], 5);
+
+        let item_ids = added["data"]["items"]
+            .as_array()
+            .expect("added Uni items")
+            .iter()
+            .map(|item| item["id"].as_str().expect("stable item id").to_owned())
+            .collect::<Vec<_>>();
+        let item_stream_path = |index: usize| {
+            format!(
+                "{unified_path}/items/{}/stream",
+                item_ids.get(index).expect("stream item id")
+            )
+        };
+
+        let (status, origin_track) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?quality=high&fallback=false&accounts=netease=origin",
+                item_stream_path(0)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(origin_track["data"]["item_id"], item_ids[0]);
+        assert_eq!(origin_track["data"]["source_ref"], "netease:185809");
+        assert_eq!(origin_track["data"]["kind"], "track");
+        assert_eq!(
+            origin_track["data"]["stream"]["resolved_platform"],
+            "netease"
+        );
+        assert_eq!(
+            origin_track["data"]["stream"]["attempts"][0]["account"],
+            "origin"
+        );
+        assert_eq!(origin_track["data"]["extensions"]["transport"], "audio");
+
+        let (status, qq_track) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?quality=lossless&playback_platform=qq&fallback=false&accounts=qq=green",
+                item_stream_path(1)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(qq_track["data"]["stream"]["resolved_platform"], "qq");
+        assert_eq!(qq_track["data"]["stream"]["resolved_track"], "qq:qq-clock");
+        assert_eq!(qq_track["data"]["stream"]["match_score"], 1.0);
+        assert_eq!(
+            qq_track["data"]["stream"]["attempts"][0]["account"],
+            "green"
+        );
+        assert_eq!(
+            qq_track["data"]["stream"]["headers"]["x-test-stream-account"],
+            "green"
+        );
+
+        let (status, video) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?fallback=false&resolution=720&accounts=netease=video",
+                item_stream_path(2)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            video["data"]["stream"]["url"],
+            "https://example.test/video/5436712.mp4"
+        );
+        assert_eq!(video["data"]["extensions"]["transport"], "native_video");
+        assert_eq!(
+            video["data"]["extensions"]["native_video_stream"]["height"],
+            720
+        );
+        assert_eq!(
+            video["data"]["extensions"]["native_video_stream"]["extensions"]["account"],
+            "video"
+        );
+
+        let (status, video_audio_fallback) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?playback_platform=qq&fallback=false&accounts=qq=video-green",
+                item_stream_path(2)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            video_audio_fallback["data"]["stream"]["resolved_track"],
+            "qq:qq-video-audio"
+        );
+        assert_eq!(
+            video_audio_fallback["data"]["extensions"]["transport"],
+            "matched_audio"
+        );
+        assert_eq!(
+            video_audio_fallback["data"]["extensions"]["video_audio_fallback"],
+            true
+        );
+        assert_eq!(
+            video_audio_fallback["data"]["stream"]["attempts"][0]["account"],
+            "video-green"
+        );
+
+        let (status, episode) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?fallback=false&accounts=netease=voice",
+                item_stream_path(3)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(episode["data"]["extensions"]["transport"], "podcast_audio");
+        assert_eq!(
+            episode["data"]["stream"]["origin_track"],
+            "netease:2603965162"
+        );
+        assert_eq!(episode["data"]["stream"]["attempts"][0]["account"], "voice");
+
+        let (status, episode_fallback) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?playback_platform=qq&fallback=false&accounts=netease=voice,qq=podcast-green",
+                item_stream_path(3)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            episode_fallback["data"]["stream"]["resolved_platform"],
+            "qq"
+        );
+        assert_eq!(
+            episode_fallback["data"]["stream"]["attempts"][0]["account"],
+            "podcast-green"
+        );
+        assert_eq!(
+            episode_fallback["data"]["extensions"]["episode"]["extensions"]["account"],
+            "voice"
+        );
+
+        let (status, radio) = json_response_from(
+            app.clone(),
+            &format!(
+                "{}?fallback=false&accounts=netease=radio",
+                item_stream_path(4)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(radio["data"]["extensions"]["transport"], "live_radio");
+        assert_eq!(
+            radio["data"]["stream"]["url"],
+            "https://example.test/radio-live.mp3"
+        );
+        assert_eq!(radio["data"]["stream"]["attempts"][0]["account"], "radio");
+
+        let redirect = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{}/redirect?fallback=false", item_stream_path(0)))
+                    .body(Body::empty())
+                    .expect("playlist item stream redirect request"),
+            )
+            .await
+            .expect("playlist item stream redirect response");
+        assert_eq!(redirect.status(), StatusCode::FOUND);
+        assert_eq!(
+            redirect.headers()[header::LOCATION],
+            "https://example.test/audio.mp3"
+        );
+
+        for path in [
+            format!("{}?resolution=1080", item_stream_path(0)),
+            format!("{}?accounts=netease", item_stream_path(0)),
+            format!("{}?accounts=uni=local", item_stream_path(0)),
+            format!(
+                "{}?account=legacy&accounts=netease=origin",
+                item_stream_path(0)
+            ),
+            format!("{}?unknown=true", item_stream_path(0)),
+            format!("{unified_path}/items/item-does-not-exist/stream"),
+        ] {
+            let (status, response) = json_response_from(app.clone(), &path).await;
+            assert!(
+                matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND),
+                "path: {path}, response: {response}"
+            );
+        }
 
         for path in [
             format!("{unified_path}?account=default"),
@@ -18422,6 +19360,32 @@ mod tests {
                 parse_stream_variant(Some(value)).expect(value),
                 expected,
                 "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn uni_stream_accounts_accept_list_and_json_forms_without_platform_collisions() {
+        let listed = parse_stream_accounts(Some("netease=origin,qq=green-diamond"))
+            .expect("list account map");
+        assert_eq!(listed[&Platform::Netease], "origin");
+        assert_eq!(listed[&Platform::Qq], "green-diamond");
+
+        let json = parse_stream_accounts(Some(r#"{"netease":" personal ","qq":"vip"}"#))
+            .expect("JSON account map");
+        assert_eq!(json[&Platform::Netease], "personal");
+        assert_eq!(json[&Platform::Qq], "vip");
+
+        for invalid in [
+            "netease",
+            "qq=one,QQ=two",
+            "uni=local",
+            "qq=",
+            r#"{"unknown":"alias"}"#,
+        ] {
+            assert!(
+                parse_stream_accounts(Some(invalid)).is_err(),
+                "invalid accounts: {invalid}"
             );
         }
     }

@@ -3116,6 +3116,16 @@ pub struct UniPlaylistItem {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemStream {
+    pub playlist_ref: ResourceRef,
+    pub item_id: String,
+    pub source_ref: ResourceRef,
+    pub kind: UniPlaylistItemKind,
+    pub stream: MediaStream,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistItemInput {
     #[serde(rename = "ref")]

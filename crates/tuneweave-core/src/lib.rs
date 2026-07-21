@@ -84,8 +84,8 @@ pub use model::{
     UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
     UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
     UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
-    UniPlaylistItemSnapshot, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    UniPlaylistItemSnapshot, UniPlaylistItemStream, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
     VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
     VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };

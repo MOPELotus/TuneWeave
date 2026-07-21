@@ -31,6 +31,7 @@ pub trait UniPlaylistStore: Send + Sync {
         playlist_id: &str,
         items: &[UniPlaylistItem],
     ) -> Result<UniPlaylistItemAddResult>;
+    fn item(&self, playlist_id: &str, item_id: &str) -> Result<UniPlaylistItem>;
     fn items(&self, playlist_id: &str, limit: u32, offset: u32) -> Result<Page<UniPlaylistItem>>;
     fn remove_item(
         &self,
@@ -105,6 +106,14 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .write()
             .map_err(|_| uni_playlist_lock_error())?;
         append_items_to_database(&mut database, playlist_id, items)
+    }
+
+    fn item(&self, playlist_id: &str, item_id: &str) -> Result<UniPlaylistItem> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_item(&database, playlist_id, item_id)
     }
 
     fn items(&self, playlist_id: &str, limit: u32, offset: u32) -> Result<Page<UniPlaylistItem>> {
@@ -225,6 +234,14 @@ impl UniPlaylistStore for FileUniPlaylistStore {
         persist_database(&self.path, &next)?;
         *database = next;
         Ok(result)
+    }
+
+    fn item(&self, playlist_id: &str, item_id: &str) -> Result<UniPlaylistItem> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_item(&database, playlist_id, item_id)
     }
 
     fn items(&self, playlist_id: &str, limit: u32, offset: u32) -> Result<Page<UniPlaylistItem>> {
@@ -383,6 +400,24 @@ fn playlist_items_page(
             extensions: Extensions::from([("duplicates_preserved".to_owned(), json!(true))]),
         },
     })
+}
+
+fn playlist_item(
+    database: &UniPlaylistDatabase,
+    playlist_id: &str,
+    item_id: &str,
+) -> Result<UniPlaylistItem> {
+    validate_uni_playlist_id(playlist_id)?;
+    validate_uni_playlist_item_id(item_id)?;
+    if !database.playlists.contains_key(playlist_id) {
+        return Err(uni_playlist_not_found(playlist_id));
+    }
+    database
+        .items
+        .get(playlist_id)
+        .and_then(|items| items.iter().find(|item| item.id == item_id))
+        .cloned()
+        .ok_or_else(|| uni_playlist_item_not_found(playlist_id, item_id))
 }
 
 fn remove_item_from_database(
@@ -975,6 +1010,17 @@ mod tests {
         assert_eq!(result.items[1].position, 1);
         assert_eq!(result.items[0].source_ref, result.items[1].source_ref);
         assert_eq!(result.extensions["duplicates_preserved"], true);
+
+        assert_eq!(
+            store
+                .item(&playlist.id, &second.id)
+                .expect("read stable item directly"),
+            result.items[1]
+        );
+        let missing = store
+            .item(&playlist.id, "item_missing_0123456789")
+            .expect_err("missing stable item");
+        assert_eq!(missing.code, ErrorCode::ResourceNotFound);
 
         let page = store.items(&playlist.id, 1, 1).expect("read item page");
         assert_eq!(page.items.len(), 1);

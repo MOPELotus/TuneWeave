@@ -6,7 +6,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 - `implemented`：代码及局部测试已完成，仍缺完整 HTTP、持久化或播放链验收。
 - `verified`：核心契约、存储/路由和异常边界均已自动化验证；涉及外部 provider 时还需真实网络验证。
 
-当前统计：`pending=1`、`implemented=0`、`verified=10`。
+当前统计：`pending=0`、`implemented=0`、`verified=11`。
 
 | 能力 | 状态 | 当前实现/缺口 |
 | --- | --- | --- |
@@ -20,4 +20,4 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 | `DELETE /v1/uni/playlists/{ref}/items/{item_id}` | `verified` | 按某一次出现的稳定项目 ID 原子删除并重编号后续位置；同一来源的其他重复项保持独立，未知/畸形项目 ID、缺失歌单和未知查询均有测试，文件存储重启后保持删除结果。2026-07-22 真实 release 二进制从两次重复的网易云歌曲中只删除第一项，另一项仍保留。 |
 | `PATCH /v1/uni/playlists/{ref}/items/order` | `verified` | 原子提交当前全部项目 ID 的显式顺序并重编号零基位置；缺项、未知项、重复 ID 和畸形 ID 会整批拒绝且不改数据，重复来源项不折叠，无变化顺序明确返回 `changed=false`，文件存储重启后保持新顺序。2026-07-22 真实 release 二进制将剩余 MV 与歌曲重排为 `0,1`，重启后顺序一致，数据库为 1332 字节。 |
 | `/v1/playlists` 统一读取适配 | `verified` | `GET /v1/playlists/{ref}` 已把本地元数据映射为现有 `Playlist`，`GET .../items` 以同一 `PlaylistPlayableEntry` 分页返回外部或 Uni 的歌曲、MV/视频音频、播客节目和广播电台，Uni 项保留稳定 `item_id`；`GET .../tracks` 对混合 Uni 内容仅筛选歌曲并返回筛选后的真实分页总数。外部 provider 的既有账户选择和分页不变，本地 `uni:` 明确拒绝无意义的 `account`。详情、混合项目、重复歌曲、歌曲兼容视图、外部来源与错误边界均有 HTTP 测试。2026-07-22 真实 release 二进制匿名解析并混合写入两次网易云歌曲、MV、播客节目和广播电台共 5 项；统一项目视图依次返回 `track,track,mv,podcast_episode,radio_station` 及全部稳定 ID，歌曲兼容视图返回真实 `total=2`，重启后 5 项完整恢复，数据库为 2963 字节。 |
-| Uni Playlist 播放与跨平台回退 | `pending` | 需先尝试原始平台，再按 `playback_platform`、分平台账户和严格元数据匹配执行有序回退。 |
+| Uni Playlist 播放与跨平台回退 | `verified` | `GET /v1/playlists/{ref}/items/{item_id}/stream` 以稳定项目 ID 播放，所有类型统一返回 `UniPlaylistItemStream` 内的 `MediaStream`，并提供 `/redirect`。歌曲使用持久化快照作为严格来源身份；播客先解析承载音频；MV/视频在原生视频流与其他平台严格匹配音频之间按 `playback_platform/fallback_platforms/fallback/unblock` 的精确顺序切换；广播刷新原平台直播 URL，`difm:` 等动态频道再取实时队列，不把直播电台错误匹配成录音。`accounts` 接受 `platform=alias` 列表或 JSON 对象并与兼容 `account` 的首目标语义隔离，全部尝试、账户、候选、分数及失败状态均保留。自动化测试覆盖网易原始歌曲、QQ 严格命中、节目跨平台命中、MV 原生/匹配音频、广播、302、重复项目、精确平台解析及输入冲突。2026-07-22 真实 release 二进制使用隔离的只读账户副本播放网易歌曲、MV、播客节目和河北音乐广播：歌曲与 MV 均记录“QQ 未注册→网易成功”，MV 请求 720 而上游实际 480 被如实保留，节目走承载音频，广播走实时频道 URL，302 为成功，重启后同一稳定项目仍可播放；数据库为 2370 字节，隔离凭据及数据随后安全清理。 |

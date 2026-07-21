@@ -43,6 +43,39 @@ impl StreamResolver {
     pub async fn resolve(&self, origin: &Track, request: &ResolveRequest) -> Result<MediaStream> {
         validate_origin(origin)?;
         let platforms = self.platform_sequence(origin.platform, request);
+        self.resolve_platforms(origin, request, platforms).await
+    }
+
+    /// Resolve against exactly the supplied platform order. This is used by typed playlist
+    /// resources that have their own native origin transport (for example video or live radio)
+    /// and therefore must not retry the origin as if its resource id were a song id.
+    pub async fn resolve_on_platforms(
+        &self,
+        origin: &Track,
+        request: &ResolveRequest,
+        platforms: &[Platform],
+    ) -> Result<MediaStream> {
+        validate_origin(origin)?;
+        let mut seen = BTreeSet::new();
+        let platforms = platforms
+            .iter()
+            .copied()
+            .filter(|platform| seen.insert(*platform))
+            .collect::<Vec<_>>();
+        if platforms.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "at least one playback platform is required",
+            ));
+        }
+        self.resolve_platforms(origin, request, platforms).await
+    }
+
+    async fn resolve_platforms(
+        &self,
+        origin: &Track,
+        request: &ResolveRequest,
+        platforms: Vec<Platform>,
+    ) -> Result<MediaStream> {
         let threshold = if request.strict_match {
             self.strict_threshold
         } else {
@@ -211,7 +244,8 @@ impl StreamResolver {
         Err(error)
     }
 
-    fn platform_sequence(&self, origin: Platform, request: &ResolveRequest) -> Vec<Platform> {
+    #[must_use]
+    pub fn platform_sequence(&self, origin: Platform, request: &ResolveRequest) -> Vec<Platform> {
         let explicit = &request.playback_platforms;
         let first = explicit.first().copied().unwrap_or(origin);
         let mut candidates = vec![first];
@@ -501,6 +535,43 @@ mod tests {
             .expect_err("must stop");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["attempts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn exact_platform_resolution_never_injects_origin_or_default_fallbacks() {
+        let origin = track(Platform::Netease, "mv-185809", "反方向的钟", "周杰伦");
+        let qq_track = track(Platform::Qq, "0039mid", "反方向的钟", "周杰伦");
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(FakeProvider {
+                platform: Platform::Netease,
+                search_results: Vec::new(),
+                stream_behavior: StreamBehavior::Success,
+            })
+            .expect("register NetEase");
+        registry
+            .register(FakeProvider {
+                platform: Platform::Qq,
+                search_results: vec![qq_track],
+                stream_behavior: StreamBehavior::AuthenticationRequired,
+            })
+            .expect("register QQ");
+        let resolver = StreamResolver::new(registry, vec![Platform::Netease]);
+        let request = ResolveRequest::default();
+
+        let error = resolver
+            .resolve_on_platforms(&origin, &request, &[Platform::Qq, Platform::Qq])
+            .await
+            .expect_err("exact QQ failure must not retry NetEase");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["attempts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(error.details["attempts"][0]["platform"], "qq");
+
+        let empty = resolver
+            .resolve_on_platforms(&origin, &request, &[])
+            .await
+            .expect_err("empty exact sequence");
+        assert_eq!(empty.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
