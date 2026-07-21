@@ -64,10 +64,10 @@ use tuneweave_core::{
     SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -351,6 +351,7 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/tracks",
             get(user_favorite_tracks),
         )
+        .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
         .route("/recommendations/tracks", get(recommended_tracks))
@@ -387,6 +388,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/auth/session/refresh", post(auth_session_refresh))
         .route("/account", get(account_profile))
+        .route("/account/profile", get(account_user_profile))
         .route("/account/membership", get(account_membership))
         .route(
             "/account/avatar",
@@ -4050,6 +4052,104 @@ async fn user_favorite_tracks(
             .with_platform(platform)
             .with_account(account)
             .with_pagination(page.pagination),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserProfileParams {
+    account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountUserProfileParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "variant", alias = "source")]
+    backend: Option<String>,
+}
+
+fn parse_user_profile_backend(value: Option<&str>) -> Result<UserProfileBackend, TuneWeaveError> {
+    match value
+        .unwrap_or("modern")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "legacy" | "old" | "weapi" | "v1" => Ok(UserProfileBackend::Legacy),
+        "default" | "modern" | "new" | "eapi" | "v2" => Ok(UserProfileBackend::Modern),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported user profile backend: {value}"
+        ))
+        .with_details(json!({ "allowed": ["legacy", "modern"] }))),
+    }
+}
+
+async fn user_profile(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UserProfileParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = optional_trimmed(params.account);
+    let backend = parse_user_profile_backend(params.backend.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let profile = provider
+        .user_profile(reference.id(), backend, account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(profile).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn account_user_profile(
+    State(state): State<AppState>,
+    params: Result<Query<AccountUserProfileParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let backend = parse_user_profile_backend(params.backend.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let session = provider.session_profile(&account).await?;
+    if !session.authenticated {
+        return Err(TuneWeaveError::new(
+            tuneweave_core::ErrorCode::AuthenticationRequired,
+            format!("{platform} account alias {account} is not logged in"),
+        )
+        .with_platform(platform)
+        .with_details(json!({ "account": account }))
+        .into());
+    }
+    let user_id = session
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "0")
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("{platform} account profile did not contain a usable user id"),
+            )
+            .with_platform(platform)
+            .with_details(json!({ "account": account.clone() }))
+        })?;
+    let profile = provider
+        .user_profile(&user_id, backend, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(profile)
+            .with_platform(platform)
+            .with_account(account),
     ))
 }
 
@@ -8112,6 +8212,8 @@ mod tests {
                 Capability::SearchSuggestions,
                 Capability::SearchMultiMatch,
                 Capability::SearchLocalTrackMatch,
+                Capability::UserProfileLegacy,
+                Capability::UserProfileModern,
                 Capability::UserMembership,
                 Capability::AudioRecognition,
                 Capability::Banners,
@@ -8377,6 +8479,22 @@ mod tests {
                     ("account".to_owned(), json!(request.account)),
                 ]),
             })
+        }
+
+        async fn user_profile(
+            &self,
+            id: &str,
+            backend: UserProfileBackend,
+            account: Option<&str>,
+        ) -> Result<UserProfile> {
+            let mut profile = sample_user_profile(id);
+            profile
+                .extensions
+                .insert("backend".to_owned(), json!(backend));
+            profile
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(profile)
         }
 
         async fn user_membership(
@@ -10386,7 +10504,11 @@ mod tests {
         }
 
         async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
-            Ok(AccountProfile::authenticated(Platform::Netease, account))
+            let mut profile = AccountProfile::authenticated(Platform::Netease, account);
+            profile.user_id = Some("32953014".to_owned());
+            profile.nickname = Some("binaryify".to_owned());
+            profile.avatar_url = Some("https://example.test/avatar.jpg".to_owned());
+            Ok(profile)
         }
 
         async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
@@ -11016,6 +11138,25 @@ mod tests {
             followed: Some(false),
             mutual: Some(false),
             extensions: Default::default(),
+        }
+    }
+
+    fn sample_user_profile(id: &str) -> UserProfile {
+        UserProfile {
+            user: sample_user(id),
+            level: Some(10),
+            listened_track_count: Some(35_545),
+            playlist_count: Some(21),
+            playlist_subscriber_count: Some(10),
+            following_count: Some(22),
+            follower_count: Some(93),
+            event_count: Some(21),
+            birthday: Some("1994-05-15T23:31:38Z".to_owned()),
+            created_at: Some("2014-08-11T06:25:00Z".to_owned()),
+            background_url: Some("https://example.test/background.jpg".to_owned()),
+            description: Some("profile details".to_owned()),
+            public_listening_history: Some(false),
+            extensions: Extensions::new(),
         }
     }
 
@@ -15112,6 +15253,59 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn user_profile_exposes_both_upstream_backends_through_one_unified_endpoint() {
+        let (status, modern) =
+            json_response_from(test_app_with_provider(), "/v1/users/netease:32953014").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(modern["data"]["user"]["ref"], "netease:32953014");
+        assert_eq!(modern["data"]["level"], 10);
+        assert_eq!(modern["data"]["listened_track_count"], 35_545);
+        assert_eq!(modern["data"]["extensions"]["backend"], "modern");
+        assert_eq!(modern["meta"]["platform"], "netease");
+
+        let (status, legacy) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:32953014?source=v1&account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(legacy["data"]["extensions"]["backend"], "legacy");
+        assert_eq!(legacy["data"]["extensions"]["account"], "viewer");
+        assert_eq!(legacy["meta"]["account"], "viewer");
+    }
+
+    #[tokio::test]
+    async fn account_user_profile_resolves_the_selected_sessions_user_id() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/profile?platform=netease&account=personal&backend=eapi",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["user"]["ref"], "netease:32953014");
+        assert_eq!(json["data"]["extensions"]["backend"], "modern");
+        assert_eq!(json["data"]["extensions"]["account"], "personal");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn user_profile_endpoints_reject_invalid_references_backends_and_query_fields() {
+        for path in [
+            "/v1/users/invalid",
+            "/v1/users/netease:32953014?backend=future",
+            "/v1/users/netease:32953014?platform=netease",
+            "/v1/account/profile?platform=unknown",
+            "/v1/account/profile?backend=future",
+            "/v1/account/profile?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

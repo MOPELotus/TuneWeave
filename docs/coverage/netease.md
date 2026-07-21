@@ -354,7 +354,7 @@
 | `ugc_mv_get` | `/ugc/mv/get` | `pending` | — |
 | `ugc_song_get` | `/ugc/song/get` | `pending` | — |
 | `ugc_user_devote` | `/ugc/user/devote` | `pending` | — |
-| `user_account` | `/user/account` | `partial` | `GET /v1/account`（空白或零 `profile.userId` 不会遮蔽有效账户 ID；2026-07-17 持久化真实账户及服务重启后均返回已认证统一资料；缺少的完整用户资料由 `user_detail/user_detail_new` 条目继续追踪） |
+| `user_account` | `/user/account` | `verified` | `GET /v1/account` 与 `GET /v1/account/profile`（空白或零 `profile.userId` 不会遮蔽有效账户 ID；2026-07-17 持久化真实账户及服务重启后均返回已认证账户摘要，2026-07-22 同一隔离账户成功解析用户 ID 并取得完整统一资料） |
 | `user_audio` | `/user/audio` | `pending` | — |
 | `user_binding` | `/user/binding` | `pending` | — |
 | `user_bindingcellphone` | `/user/bindingcellphone` | `pending` | — |
@@ -362,8 +362,8 @@
 | `user_cloud_del` | `/user/cloud/del` | `verified` | `DELETE /v1/account/cloud/tracks`（JSON `refs` 或 `ids`，支持 `platform/account`、完整引用推断、保序与重复项；WeAPI `/api/cloud/del` 严格保留参考实现的单元素数组载荷 `songIds: [ids.join(",")]`，拒绝跨平台混合和引用冲突；协议、选择器、认证前置及结果映射均有离线测试；2026-07-17 持久化真实账户仅对唯一生成的测试音频执行删除，统一 HTTP 返回 200，随后完整列表恢复 209 项且无测试标记残留） |
 | `user_cloud_detail` | `/user/cloud/detail` | `verified` | `GET/POST /v1/account/cloud/tracks/details`（`refs` 或 `ids`，完整引用可推断平台，原始 ID 使用显式或默认平台；WeAPI `/api/v1/cloud/get/byids` 按 `songIds` 数组请求，统一结果保持输入顺序和重复项，并复用完整 `CloudTrack` 映射；2026-07-17 持久化真实账户以列表返回的统一引用实测详情成功） |
 | `user_comment_history` | `/user/comment/history` | `pending` | — |
-| `user_detail` | `/user/detail` | `pending` | — |
-| `user_detail_new` | `/user/detail/new` | `pending` | — |
+| `user_detail` | `/user/detail` | `verified` | `GET /v1/users/{ref}?backend=legacy` 及 `GET /v1/account/profile?backend=legacy`（独立 `UserProfileLegacy` 能力，精确以空载荷 WeAPI 调用 `/api/v1/user/detail/{uid}`；统一 `UserProfile` 映射身份、等级、听歌数、社交/歌单计数、生日、注册时间、背景与公开态，完整平台资料和原始响应不丢失；请求构造、映射、空包装/文本/零时间戳回退、ID 一致性、无效等级、账户选择、查询边界及统一 HTTP 均有测试；2026-07-22 公开用户真实 HTTP 返回 200 和完整非空资料） |
+| `user_detail_new` | `/user/detail/new` | `verified` | `GET /v1/users/{ref}`（缺省 `backend=modern`，也接受 `new/eapi/v2`）及 `GET /v1/account/profile`（独立 `UserProfileModern` 能力，精确以 EAPI 调用 `/api/w/v1/user/detail/{uid}` 并提交字符串 `all=true/userId`；与 legacy 共用稳定模型但以 `extensions.backend/response` 明确保留后端和完整未来字段；2026-07-22 公开用户及持久化 `manual-sms` 账户的统一 HTTP 均真实返回 200，账户路径正确解析所选账户自己的用户 ID） |
 | `user_dj` | `/user/dj` | `pending` | — |
 | `user_event` | `/user/event` | `pending` | — |
 | `user_follow_mixed` | `/user/follow/mixed` | `pending` | — |

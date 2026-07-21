@@ -38,9 +38,9 @@ use crate::{
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
     SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoRecommendationRequest, VideoStats, VideoStream,
-    VideoStreamRequest,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
+    VideoRecommendationRequest, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -133,6 +133,19 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::SearchLocalTrackMatch,
         ))
+    }
+
+    async fn user_profile(
+        &self,
+        _id: &str,
+        backend: UserProfileBackend,
+        _account: Option<&str>,
+    ) -> Result<UserProfile> {
+        let capability = match backend {
+            UserProfileBackend::Legacy => Capability::UserProfileLegacy,
+            UserProfileBackend::Modern => Capability::UserProfileModern,
+        };
+        Err(TuneWeaveError::unsupported(self.platform(), capability))
     }
 
     async fn user_membership(

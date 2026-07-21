@@ -21,6 +21,8 @@ pub enum Capability {
     SearchSuggestions,
     SearchMultiMatch,
     SearchLocalTrackMatch,
+    UserProfileLegacy,
+    UserProfileModern,
     UserMembership,
     UserMembershipClientInfo,
     AnonymousSession,
@@ -397,6 +399,20 @@ mod tests {
             serde_json::to_value(Capability::AccountCloudDownload)
                 .expect("serialize cloud download capability"),
             serde_json::json!("account_cloud_download")
+        );
+    }
+
+    #[test]
+    fn user_profile_backends_keep_distinct_discovery_names() {
+        assert_eq!(
+            serde_json::to_value(Capability::UserProfileLegacy)
+                .expect("serialize legacy user profile capability"),
+            serde_json::json!("user_profile_legacy")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::UserProfileModern)
+                .expect("serialize modern user profile capability"),
+            serde_json::json!("user_profile_modern")
         );
     }
 }

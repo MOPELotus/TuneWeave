@@ -1990,6 +1990,36 @@ pub struct User {
     pub extensions: Extensions,
 }
 
+/// A platform-neutral public user profile.
+///
+/// Platform-specific identity, privacy, binding, badge, and social fields remain available in
+/// `extensions`; the stable fields below cover the profile data shared by music platforms.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub user: User,
+    pub level: Option<u32>,
+    pub listened_track_count: Option<u64>,
+    pub playlist_count: Option<u64>,
+    pub playlist_subscriber_count: Option<u64>,
+    pub following_count: Option<u64>,
+    pub follower_count: Option<u64>,
+    pub event_count: Option<u64>,
+    pub birthday: Option<String>,
+    pub created_at: Option<String>,
+    pub background_url: Option<String>,
+    pub description: Option<String>,
+    pub public_listening_history: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserProfileBackend {
+    Legacy,
+    #[default]
+    Modern,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CreatorSummary {
     #[serde(rename = "ref")]
@@ -4629,5 +4659,46 @@ mod tests {
         assert_eq!(value[0]["entries"][0]["region_code"], "CN");
         assert_eq!(value[0]["entries"][0]["name"], "中国");
         assert_eq!(value[0]["entries"][0]["english_name"], "China");
+    }
+
+    #[test]
+    fn user_profile_keeps_identity_counts_and_backend_serialization_stable() {
+        let profile = UserProfile {
+            user: User {
+                resource_ref: ResourceRef::new(Platform::Netease, "32953014")
+                    .expect("valid user reference"),
+                platform: Platform::Netease,
+                id: "32953014".to_owned(),
+                name: "binaryify".to_owned(),
+                avatar_url: None,
+                signature: None,
+                followed: Some(false),
+                mutual: Some(false),
+                extensions: Extensions::new(),
+            },
+            level: Some(10),
+            listened_track_count: Some(35_545),
+            playlist_count: Some(21),
+            playlist_subscriber_count: Some(10),
+            following_count: Some(22),
+            follower_count: Some(93),
+            event_count: Some(21),
+            birthday: None,
+            created_at: None,
+            background_url: None,
+            description: None,
+            public_listening_history: Some(false),
+            extensions: Extensions::from([(
+                "backend".to_owned(),
+                serde_json::to_value(UserProfileBackend::Modern)
+                    .expect("serialize profile backend"),
+            )]),
+        };
+        let value = serde_json::to_value(profile).expect("serialize user profile");
+        assert_eq!(value["user"]["ref"], "netease:32953014");
+        assert_eq!(value["listened_track_count"], 35_545);
+        assert_eq!(value["playlist_subscriber_count"], 10);
+        assert_eq!(value["public_listening_history"], false);
+        assert_eq!(value["extensions"]["backend"], "modern");
     }
 }

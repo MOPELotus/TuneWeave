@@ -1,18 +1,18 @@
 # 网易云 Basic 阶段验收账本
 
-最后更新：2026-07-18。上游基线与逐模块状态仍以 [`netease.md`](netease.md) 的 416 项全量账本为准；本表只把 Basic 范围聚合成可独立验收的能力单元，不替代或合并掉任何上游 API。
+最后更新：2026-07-22。上游基线与逐模块状态仍以 [`netease.md`](netease.md) 的 416 项全量账本为准；本表只把 Basic 范围聚合成可独立验收的能力单元，不替代或合并掉任何上游 API。
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=0`、`partial=6`、`implemented=21`、`verified=37`。
+当前共 64 个验收单元：`pending=0`、`partial=4`、`implemented=21`、`verified=39`。
 
-- 完整实现率：`(implemented + verified) / 64 = 58 / 64 = 90.63%`。
+- 完整实现率：`(implemented + verified) / 64 = 60 / 64 = 93.75%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
-- 完整联网验收率：`verified / 64 = 37 / 64 = 57.81%`。
+- 完整联网验收率：`verified / 64 = 39 / 64 = 60.94%`。
 
 这些百分比是 Basic 能力验收口径，不是 416 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：全部 64 个 Basic 单元现已触达，S08 六个首页个性化模块也已通过同一次匿名真实联网验收。下一步依重要度把 C07、C10、C11、C12、P10、A10 六个 `partial` 单元补齐，优先完成常用内容目录、公开/账户资料和声音播放链；账户写入、完整权益及工作台成功态在 Basic 末尾使用现有持久化账户集中验收。只有这六项全部清零后才进入 Uni Playlist。
+当前剩余功能排序以完整播放体验为准：全部 64 个 Basic 单元现已触达，公开/账户完整资料的 legacy 与 modern 链路也已真实验收。下一步依重要度把 C07、C10、C11、P10 四个 `partial` 单元补齐，优先完成常用内容目录、声音歌单和声音播放链；账户写入、完整权益及工作台成功态在 Basic 末尾使用现有持久化账户集中验收。只有这四项全部清零后才进入 Uni Playlist。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -37,7 +37,7 @@
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收；收藏兼容结构的空包装及空分页别名不会遮蔽后续有效值 |
 | C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_catelist/dj_hot/dj_detail/dj_program/dj_program_detail/voicelist_search` 已通过 provider 与真实统一 HTTP/联网验收；精选、个性化、分类、今日、付费目录、播客横幅、新晋/热门/付费播客榜、新人/热门/24 小时主播榜、节目榜以及 `dj_sub/dj_sublist` 已完成稳定统一映射和离线 HTTP 验证；搜索解包排名包装为完整 `Podcast` 并保留算法/理由，1009 不再伪装直播广播；横幅目标明确使用 `podcast_episode` 而不伪装歌曲，榜单显式分离排名包装与完整资源，主播榜额外保留粉丝数和完整用户身份，节目榜可直接进入播放链，真实不生效的 offset 不会伪装成分页，不存在的翻页控制会被拒绝，账户列表语义优先于条目陈旧收藏态；登录成功分支留待 Basic 末尾集中验收，声音详情、声音歌单及其他常规目录仍待接入 |
 | C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `partial` | `voice_lyric` 已通过 provider 与真实统一 HTTP 验收，覆盖 675 段非空转写和 `data=null`；`voice_detail`、`voicelist_detail`、`voicelist_list`、`voicelist_list_search` 与 `voicelist_my_created` 分别以详情/目录的 `backend=workbench`、`/v1/account/podcast-episodes` 或 `/v1/account/podcasts/created` 接入独立能力和类型化输出，完整保留名称、七种审核状态、公开性、付费性、所属播客、包装字段合并、空/畸形首选列表回退、最大 200 条分页及不可续页快照语义，并实测匿名 301 认证边界，成功态留待 Basic 末尾集中验收；声音歌单与声音写入链路仍待接入 |
-| C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `partial` | 会员摘要已验证，`user_detail/user_detail_new` 未接入，账户资料待登录验收 |
+| C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `verified` | `user_detail/user_detail_new` 已以同一 `UserProfile` 的显式 legacy/modern 后端完整接入，平台原始资料不丢失；2026-07-22 公开两后端及持久账户 modern 路径均真实 HTTP 验收成功 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |
 | P02 | 播放与权益 | 旧版歌曲播放 URL 与精确 `br` | `verified` | `song_url` 单/批量和任意码率已真实验收；空白编码与零时长不遮蔽有效格式/歌曲时长 |
 | P03 | 播放与权益 | 新版九档音质歌曲播放 URL | `implemented` | 九档真实 HTTP 均成功；跨平台成功源待后续 provider |
@@ -58,7 +58,7 @@
 | A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；空顶层 key/业务码不遮蔽嵌套有效值，真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
 | A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收；空白/零账户身份不会误报已登录 |
 | A09 | 账户与身份 | 会话刷新及退出 | `implemented` | 2026-07-17 真实账户刷新、凭据代际替换和重启恢复均已验收；退出会删除登录态，留待需要重新扫码时受控验证 |
-| A10 | 账户与身份 | 当前账户资料 | `partial` | 2026-07-17 持久化真实账户的当前资料成功态已验收；空 `userId` 不遮蔽有效账户 ID，`user_detail/user_detail_new` 仍未接入 |
+| A10 | 账户与身份 | 当前账户资料 | `verified` | 账户摘要、持久化恢复及完整资料均已验收；空/零 `userId` 不遮蔽有效账户 ID，`GET /v1/account/profile` 会按所选账户解析身份并调用显式 legacy/modern 资料后端，2026-07-22 `manual-sms` modern 路径真实成功 |
 | L01 | 个人音乐库 | 喜欢歌曲 ID 及统一歌曲列表 | `verified` | 2026-07-17 持久化真实账户实测返回 5 项，ID 获取、详情映射和分页链路成功 |
 | L02 | 个人音乐库 | 收藏/取消收藏专辑及专辑收藏列表 | `implemented` | 2026-07-17 真实账户收藏列表返回 5 项；收藏/取消收藏写入回滚仍待验收 |
 | L03 | 个人音乐库 | 收藏/取消收藏广播电台及收藏列表 | `implemented` | 2026-07-17 真实账户收藏列表成功返回空列表；兼容结构中空旧列表不再遮蔽嵌套非空列表；收藏/取消收藏写入回滚仍待验收 |

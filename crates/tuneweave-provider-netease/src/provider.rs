@@ -64,9 +64,10 @@ use tuneweave_core::{
     SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
     StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest,
 };
 use url::Url;
 
@@ -577,6 +578,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::SearchSuggestions,
             Capability::SearchMultiMatch,
             Capability::SearchLocalTrackMatch,
+            Capability::UserProfileLegacy,
+            Capability::UserProfileModern,
             Capability::UserMembership,
             Capability::UserMembershipClientInfo,
             Capability::AnonymousSession,
@@ -842,6 +845,23 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_api(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_local_track_match(&md5, response.body)
+    }
+
+    async fn user_profile(
+        &self,
+        id: &str,
+        backend: UserProfileBackend,
+        account: Option<&str>,
+    ) -> Result<UserProfile> {
+        let id = parse_numeric_id("user", id.trim())?;
+        let client = self.client_for(account)?;
+        let (path, payload) = netease_user_profile_request(id, backend);
+        let response = match backend {
+            UserProfileBackend::Legacy => client.request_weapi(&path, payload).await?,
+            UserProfileBackend::Modern => client.request_eapi(&path, payload).await?,
+        };
+        ensure_success(&response.body)?;
+        map_netease_user_profile(id, backend, response.body)
     }
 
     async fn user_membership(
@@ -9330,7 +9350,7 @@ fn map_netease_download(
             "NetEase download response is missing data",
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({ "response": response }))
+        .with_details(json!({ "response": response.clone() }))
     })?;
     let item = if let Some(items) = data.as_array() {
         items
@@ -12901,6 +12921,127 @@ fn netease_user_membership_request(id: Option<u64>) -> (&'static str, Value) {
     )
 }
 
+fn netease_user_profile_request(id: u64, backend: UserProfileBackend) -> (String, Value) {
+    match backend {
+        UserProfileBackend::Legacy => (format!("/api/v1/user/detail/{id}"), json!({})),
+        UserProfileBackend::Modern => (
+            format!("/api/w/v1/user/detail/{id}"),
+            json!({ "all": "true", "userId": id.to_string() }),
+        ),
+    }
+}
+
+fn map_netease_user_profile(
+    requested_id: u64,
+    backend: UserProfileBackend,
+    response: Value,
+) -> Result<UserProfile> {
+    let profile = [
+        response.get("profile"),
+        response.pointer("/data/profile"),
+        response.pointer("/result/profile"),
+        response.get("data"),
+        response.get("result"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|candidate| candidate.is_object())
+    .find(|candidate| {
+        ["userId", "id", "uid"]
+            .into_iter()
+            .any(|field| candidate.get(field).and_then(usable_resource_id).is_some())
+    })
+    .cloned()
+    .ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase user profile response is missing an identified profile object",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "response": response }))
+    })?;
+    let id = ["userId", "id", "uid"]
+        .into_iter()
+        .find_map(|field| profile.get(field).and_then(usable_resource_id))
+        .expect("identified profile contains a usable user id");
+    if id != requested_id.to_string() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase returned a different user profile than requested",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "requested_user_id": requested_id, "returned_user_id": id })));
+    }
+    let name = radio_text_field(&profile, &["nickname", "name", "userName"]).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase user profile is missing its display name",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "profile": profile.clone() }))
+    })?;
+    let resource_ref = ResourceRef::new(Platform::Netease, id.clone()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid user profile id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let level = response
+        .get("level")
+        .and_then(json_u64)
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase user profile level exceeds the supported range",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "level": value }))
+            })
+        })
+        .transpose()?;
+    let timestamp = |values: &[Option<&Value>]| {
+        values
+            .iter()
+            .flatten()
+            .find_map(|value| json_timestamp_millis(value).filter(|value| *value > 0))
+            .and_then(|milliseconds| unix_rfc3339(milliseconds / 1_000))
+    };
+    let birthday = timestamp(&[profile.get("birthday")]);
+    let created_at = timestamp(&[response.get("createTime"), profile.get("createTime")]);
+    let user = User {
+        resource_ref,
+        platform: Platform::Netease,
+        id,
+        name,
+        avatar_url: radio_text_field(&profile, &["avatarUrl", "avatar"]),
+        signature: radio_text_field(&profile, &["signature"]),
+        followed: radio_bool_field(&profile, &["followed"]),
+        mutual: radio_bool_field(&profile, &["mutual"]),
+        extensions: Extensions::from([("profile".to_owned(), profile.clone())]),
+    };
+    Ok(UserProfile {
+        user,
+        level,
+        listened_track_count: response.get("listenSongs").and_then(json_u64),
+        playlist_count: profile.get("playlistCount").and_then(json_u64),
+        playlist_subscriber_count: profile.get("playlistBeSubscribedCount").and_then(json_u64),
+        following_count: profile.get("follows").and_then(json_u64),
+        follower_count: profile.get("followeds").and_then(json_u64),
+        event_count: profile.get("eventCount").and_then(json_u64),
+        birthday,
+        created_at,
+        background_url: radio_text_field(&profile, &["backgroundUrl"]),
+        description: radio_text_field(&profile, &["detailDescription", "description"]),
+        public_listening_history: response.get("peopleCanSeeMyPlayRecord").and_then(json_bool),
+        extensions: Extensions::from([
+            ("backend".to_owned(), json!(backend)),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
 fn netease_user_membership_client_request(id: Option<u64>) -> (&'static str, Value) {
     (
         "/api/music-vip-membership/client/vip/info",
@@ -14600,6 +14741,144 @@ mod tests {
                 ErrorCode::UpstreamError
             );
         }
+    }
+
+    #[test]
+    fn user_profile_matches_legacy_and_modern_upstream_requests() {
+        assert_eq!(
+            netease_user_profile_request(32_953_014, UserProfileBackend::Legacy),
+            ("/api/v1/user/detail/32953014".to_owned(), json!({}))
+        );
+        assert_eq!(
+            netease_user_profile_request(32_953_014, UserProfileBackend::Modern),
+            (
+                "/api/w/v1/user/detail/32953014".to_owned(),
+                json!({"all": "true", "userId": "32953014"})
+            )
+        );
+    }
+
+    #[test]
+    fn maps_complete_user_profile_without_losing_platform_fields() {
+        let profile = map_netease_user_profile(
+            32_953_014,
+            UserProfileBackend::Modern,
+            json!({
+                "code": 200,
+                "bindings": [{"type": 1, "url": "https://example.test/binding"}],
+                "createTime": 0,
+                "level": "10",
+                "listenSongs": "35545",
+                "peopleCanSeeMyPlayRecord": 0,
+                "profile": {
+                    "userId": "32953014",
+                    "nickname": "binaryify",
+                    "avatarUrl": " ",
+                    "avatar": "https://example.test/avatar.jpg",
+                    "backgroundUrl": "https://example.test/background.jpg",
+                    "birthday": 768967898000_u64,
+                    "createTime": 1407747900967_u64,
+                    "detailDescription": "",
+                    "description": "profile details",
+                    "eventCount": "21",
+                    "followed": 0,
+                    "followeds": 93,
+                    "follows": 22,
+                    "mutual": false,
+                    "playlistBeSubscribedCount": 10,
+                    "playlistCount": 21,
+                    "signature": "emmm",
+                    "vipType": 11
+                }
+            }),
+        )
+        .expect("map user profile");
+
+        assert_eq!(profile.user.resource_ref.to_string(), "netease:32953014");
+        assert_eq!(profile.user.name, "binaryify");
+        assert_eq!(
+            profile.user.avatar_url.as_deref(),
+            Some("https://example.test/avatar.jpg")
+        );
+        assert_eq!(profile.user.signature.as_deref(), Some("emmm"));
+        assert_eq!(profile.user.followed, Some(false));
+        assert_eq!(profile.user.mutual, Some(false));
+        assert_eq!(profile.level, Some(10));
+        assert_eq!(profile.listened_track_count, Some(35_545));
+        assert_eq!(profile.playlist_count, Some(21));
+        assert_eq!(profile.playlist_subscriber_count, Some(10));
+        assert_eq!(profile.following_count, Some(22));
+        assert_eq!(profile.follower_count, Some(93));
+        assert_eq!(profile.event_count, Some(21));
+        assert_eq!(profile.birthday, unix_rfc3339(768_967_898));
+        assert_eq!(profile.created_at, unix_rfc3339(1_407_747_900));
+        assert_eq!(
+            profile.background_url.as_deref(),
+            Some("https://example.test/background.jpg")
+        );
+        assert_eq!(profile.description.as_deref(), Some("profile details"));
+        assert_eq!(profile.public_listening_history, Some(false));
+        assert_eq!(profile.extensions["backend"], "modern");
+        assert_eq!(profile.extensions["response"]["bindings"][0]["type"], 1);
+        assert_eq!(profile.user.extensions["profile"]["vipType"], 11);
+    }
+
+    #[test]
+    fn user_profile_skips_empty_wrappers_and_rejects_invalid_identity_data() {
+        let recovered = map_netease_user_profile(
+            1,
+            UserProfileBackend::Legacy,
+            json!({
+                "code": 200,
+                "profile": {},
+                "data": {"profile": {"userId": 1, "nickname": "Recovered"}}
+            }),
+        )
+        .expect("recover nested profile");
+        assert_eq!(recovered.user.name, "Recovered");
+
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "profile": {"userId": 0, "nickname": "Nobody"}}),
+            json!({"code": 200, "profile": {"userId": 2, "nickname": "Other"}}),
+            json!({"code": 200, "profile": {"userId": 1, "nickname": " "}}),
+            json!({
+                "code": 200,
+                "level": 4294967296_u64,
+                "profile": {"userId": 1, "nickname": "Too High"}
+            }),
+        ] {
+            assert_eq!(
+                map_netease_user_profile(1, UserProfileBackend::Modern, response)
+                    .expect_err("invalid profile response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn user_profile_validates_the_user_and_selected_account_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let invalid_user = MusicProvider::user_profile(
+            &provider,
+            "not-a-number",
+            UserProfileBackend::Modern,
+            None,
+        )
+        .await
+        .expect_err("invalid user id");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
+
+        let missing_account = MusicProvider::user_profile(
+            &provider,
+            "32953014",
+            UserProfileBackend::Legacy,
+            Some("missing"),
+        )
+        .await
+        .expect_err("missing account alias");
+        assert_eq!(missing_account.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
@@ -23310,6 +23589,8 @@ mod tests {
         assert!(capabilities.contains(&Capability::PrincipalStatus));
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));
+        assert!(capabilities.contains(&Capability::UserProfileLegacy));
+        assert!(capabilities.contains(&Capability::UserProfileModern));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::AccountAlbums));
         assert!(capabilities.contains(&Capability::AccountRadioStations));
