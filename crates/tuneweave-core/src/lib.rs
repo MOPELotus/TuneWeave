@@ -79,11 +79,13 @@ pub use model::{
     SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TrialWindow, UniPlaylist, UniPlaylistCreateRequest,
-    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemInput,
-    UniPlaylistItemKind, UniPlaylistItemSnapshot, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResolution, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

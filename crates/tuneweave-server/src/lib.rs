@@ -15,7 +15,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -74,11 +74,12 @@ use tuneweave_core::{
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
     UniPlaylistCreateRequest, UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
-    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemSnapshot, UniPlaylistStore, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
+    UniPlaylistStore, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -332,6 +333,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/uni/playlists/{reference}/items",
             get(uni_playlist_items).post(uni_playlist_items_add),
+        )
+        .route(
+            "/uni/playlists/{reference}/items/order",
+            patch(uni_playlist_items_reorder),
+        )
+        .route(
+            "/uni/playlists/{reference}/items/{item_id}",
+            delete(uni_playlist_item_delete),
         )
         .route("/uni/playlists/{reference}", get(uni_playlist))
         .route("/playlists", post(playlist_create).delete(playlists_delete))
@@ -3183,6 +3192,12 @@ struct UniPlaylistItemsQuery {
     offset: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistItemOrderBody {
+    item_ids: Option<Vec<String>>,
+}
+
 async fn uni_playlist_create(
     State(state): State<AppState>,
     params: Result<Query<NoQueryParams>, QueryRejection>,
@@ -3390,6 +3405,59 @@ async fn uni_playlist_items(
             .with_platform(Platform::Uni)
             .with_pagination(page.pagination),
     ))
+}
+
+async fn uni_playlist_item_delete(
+    State(state): State<AppState>,
+    Path((reference, item_id)): Path<(String, String)>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistItemDeleteResult>>, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_uni_playlist_reference(reference)?;
+    let updated_at_ms = unix_time_millis()?;
+    let store = Arc::clone(&state.uni_playlists);
+    let playlist_id = reference.id().to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        store.remove_item(&playlist_id, &item_id, updated_at_ms)
+    })
+    .await
+    .map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Uni Playlist persistence task failed",
+        )
+    })??;
+    Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
+}
+
+async fn uni_playlist_items_reorder(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+    payload: Result<Json<UniPlaylistItemOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistItemOrderResult>>, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_uni_playlist_reference(reference)?;
+    let body = json_body(payload)?;
+    let request = UniPlaylistItemOrderRequest {
+        item_ids: body
+            .item_ids
+            .ok_or_else(|| TuneWeaveError::invalid_request("item_ids must be provided"))?,
+    };
+    let updated_at_ms = unix_time_millis()?;
+    let store = Arc::clone(&state.uni_playlists);
+    let playlist_id = reference.id().to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        store.reorder_items(&playlist_id, &request.item_ids, updated_at_ms)
+    })
+    .await
+    .map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Uni Playlist persistence task failed",
+        )
+    })??;
+    Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
 }
 
 async fn resolve_uni_playlist_item_snapshot(
@@ -16627,6 +16695,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uni_playlist_items_delete_one_duplicate_and_reorder_by_complete_stable_ids() {
+        let app = test_app_with_provider();
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists",
+            Some(json!({ "name": "精确编辑" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let reference = created["data"]["ref"]
+            .as_str()
+            .expect("created Uni Playlist reference");
+        let item_path = format!("/v1/uni/playlists/{reference}/items");
+        let (status, added) = json_request_from(
+            app.clone(),
+            Method::POST,
+            &item_path,
+            Some(json!({
+                "items": [
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:5436712", "kind": "mv" }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first_id = added["data"]["items"][0]["id"]
+            .as_str()
+            .expect("first item id")
+            .to_owned();
+        let second_id = added["data"]["items"][1]["id"]
+            .as_str()
+            .expect("second item id")
+            .to_owned();
+        let third_id = added["data"]["items"][2]["id"]
+            .as_str()
+            .expect("third item id")
+            .to_owned();
+
+        let (status, deleted) = json_request_from(
+            app.clone(),
+            Method::DELETE,
+            &format!("{item_path}/{first_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["data"]["item"]["id"], first_id);
+        assert_eq!(deleted["data"]["item"]["position"], 0);
+        assert_eq!(deleted["data"]["playlist"]["item_count"], 2);
+        assert_eq!(deleted["data"]["extensions"]["previous_item_count"], 3);
+
+        let order_path = format!("{item_path}/order");
+        let (status, reordered) = json_request_from(
+            app.clone(),
+            Method::PATCH,
+            &order_path,
+            Some(json!({ "item_ids": [third_id, second_id] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reordered["data"]["changed"], true);
+        assert_eq!(reordered["data"]["items"][0]["id"], third_id);
+        assert_eq!(reordered["data"]["items"][0]["position"], 0);
+        assert_eq!(reordered["data"]["items"][1]["id"], second_id);
+        assert_eq!(reordered["data"]["items"][1]["position"], 1);
+        assert_eq!(
+            reordered["data"]["items"][1]["source_ref"],
+            "netease:185809"
+        );
+        assert_eq!(
+            reordered["data"]["extensions"]["complete_order_required"],
+            true
+        );
+        assert_eq!(reordered["meta"]["platform"], "uni");
+
+        let (status, page) = json_response_from(app.clone(), &item_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["data"], reordered["data"]["items"]);
+        let (status, unchanged) = json_request_from(
+            app,
+            Method::PATCH,
+            &order_path,
+            Some(json!({ "item_ids": [third_id, second_id] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unchanged["data"]["changed"], false);
+    }
+
+    #[tokio::test]
     async fn uni_playlist_routes_reject_invalid_or_unknown_inputs() {
         for (path, body) in [
             ("/v1/uni/playlists", json!({ "name": " " })),
@@ -16755,6 +16916,79 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {request_path}");
             assert_eq!(response["error"]["code"], "invalid_request");
         }
+
+        let (status, added) = json_request_from(
+            app.clone(),
+            Method::POST,
+            &path,
+            Some(json!({
+                "items": [
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:5436712", "kind": "mv" }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let first_id = added["data"]["items"][0]["id"]
+            .as_str()
+            .expect("first item id")
+            .to_owned();
+        let second_id = added["data"]["items"][1]["id"]
+            .as_str()
+            .expect("second item id")
+            .to_owned();
+        let order_path = format!("{path}/order");
+        for (request_path, body) in [
+            (order_path.clone(), json!({})),
+            (
+                order_path.clone(),
+                json!({ "item_ids": [first_id], "unknown": true }),
+            ),
+            (order_path.clone(), json!({ "item_ids": [first_id] })),
+            (
+                order_path.clone(),
+                json!({ "item_ids": [first_id, first_id] }),
+            ),
+            (
+                order_path.clone(),
+                json!({ "item_ids": ["short", second_id] }),
+            ),
+            (
+                format!("{order_path}?unknown=true"),
+                json!({ "item_ids": [first_id, second_id] }),
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(app.clone(), Method::PATCH, &request_path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {request_path}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+        for (request_path, expected_status, expected_code) in [
+            (
+                format!("{path}/short"),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                format!("{path}/item_99abcdefghijklmnop"),
+                StatusCode::NOT_FOUND,
+                "resource_not_found",
+            ),
+            (
+                format!("{path}/{second_id}?unknown=true"),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(app.clone(), Method::DELETE, &request_path, None).await;
+            assert_eq!(status, expected_status, "path: {request_path}");
+            assert_eq!(response["error"]["code"], expected_code);
+        }
+        let (status, unchanged) = json_response_from(app.clone(), &path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unchanged["meta"]["pagination"]["total"], 2);
 
         let (status, missing) = json_request_from(
             app,

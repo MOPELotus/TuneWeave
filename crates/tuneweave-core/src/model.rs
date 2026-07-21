@@ -3074,6 +3074,26 @@ pub struct UniPlaylistItemAddResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemDeleteResult {
+    pub playlist: UniPlaylist,
+    pub item: UniPlaylistItem,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemOrderRequest {
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistItemOrderResult {
+    pub playlist: UniPlaylist,
+    pub items: Vec<UniPlaylistItem>,
+    pub changed: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaylistVisibility {

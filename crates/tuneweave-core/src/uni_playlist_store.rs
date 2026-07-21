@@ -15,7 +15,8 @@ use serde_json::json;
 
 use crate::{
     ErrorCode, Extensions, Page, PageMeta, Platform, Result, TuneWeaveError, UniPlaylist,
-    UniPlaylistItem, UniPlaylistItemAddResult,
+    UniPlaylistItem, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
+    UniPlaylistItemOrderResult,
 };
 
 const UNI_PLAYLIST_FILE_VERSION: u32 = 1;
@@ -30,6 +31,18 @@ pub trait UniPlaylistStore: Send + Sync {
         items: &[UniPlaylistItem],
     ) -> Result<UniPlaylistItemAddResult>;
     fn items(&self, playlist_id: &str, limit: u32, offset: u32) -> Result<Page<UniPlaylistItem>>;
+    fn remove_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemDeleteResult>;
+    fn reorder_items(
+        &self,
+        playlist_id: &str,
+        item_ids: &[String],
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemOrderResult>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -83,6 +96,32 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .read()
             .map_err(|_| uni_playlist_lock_error())?;
         playlist_items_page(&database, playlist_id, limit, offset)
+    }
+
+    fn remove_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        remove_item_from_database(&mut database, playlist_id, item_id, updated_at_ms)
+    }
+
+    fn reorder_items(
+        &self,
+        playlist_id: &str,
+        item_ids: &[String],
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemOrderResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        reorder_items_in_database(&mut database, playlist_id, item_ids, updated_at_ms)
     }
 }
 
@@ -160,6 +199,42 @@ impl UniPlaylistStore for FileUniPlaylistStore {
             .read()
             .map_err(|_| uni_playlist_lock_error())?;
         playlist_items_page(&database, playlist_id, limit, offset)
+    }
+
+    fn remove_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut next = database.clone();
+        let result = remove_item_from_database(&mut next, playlist_id, item_id, updated_at_ms)?;
+        persist_database(&self.path, &next)?;
+        *database = next;
+        Ok(result)
+    }
+
+    fn reorder_items(
+        &self,
+        playlist_id: &str,
+        item_ids: &[String],
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemOrderResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut next = database.clone();
+        let result = reorder_items_in_database(&mut next, playlist_id, item_ids, updated_at_ms)?;
+        if result.changed {
+            persist_database(&self.path, &next)?;
+            *database = next;
+        }
+        Ok(result)
     }
 }
 
@@ -273,6 +348,132 @@ fn playlist_items_page(
             has_more,
             extensions: Extensions::from([("duplicates_preserved".to_owned(), json!(true))]),
         },
+    })
+}
+
+fn remove_item_from_database(
+    database: &mut UniPlaylistDatabase,
+    playlist_id: &str,
+    item_id: &str,
+    updated_at_ms: u64,
+) -> Result<UniPlaylistItemDeleteResult> {
+    validate_uni_playlist_id(playlist_id)?;
+    validate_uni_playlist_item_id(item_id)?;
+    if !database.playlists.contains_key(playlist_id) {
+        return Err(uni_playlist_not_found(playlist_id));
+    }
+    let stored_items = database.items.entry(playlist_id.to_owned()).or_default();
+    let position = stored_items
+        .iter()
+        .position(|item| item.id == item_id)
+        .ok_or_else(|| uni_playlist_item_not_found(playlist_id, item_id))?;
+    let previous_item_count = u64::try_from(stored_items.len()).unwrap_or(u64::MAX);
+    let removed = stored_items.remove(position);
+    for (position, item) in stored_items.iter_mut().enumerate() {
+        item.position = u64::try_from(position).unwrap_or(u64::MAX);
+    }
+    let playlist = database
+        .playlists
+        .get_mut(playlist_id)
+        .expect("playlist existence checked before item removal");
+    playlist.item_count = u64::try_from(stored_items.len()).unwrap_or(u64::MAX);
+    playlist.updated_at_ms = playlist.updated_at_ms.max(updated_at_ms);
+    Ok(UniPlaylistItemDeleteResult {
+        playlist: playlist.clone(),
+        item: removed,
+        extensions: Extensions::from([
+            ("previous_item_count".to_owned(), json!(previous_item_count)),
+            ("duplicates_preserved".to_owned(), json!(true)),
+        ]),
+    })
+}
+
+fn reorder_items_in_database(
+    database: &mut UniPlaylistDatabase,
+    playlist_id: &str,
+    item_ids: &[String],
+    updated_at_ms: u64,
+) -> Result<UniPlaylistItemOrderResult> {
+    validate_uni_playlist_id(playlist_id)?;
+    if !database.playlists.contains_key(playlist_id) {
+        return Err(uni_playlist_not_found(playlist_id));
+    }
+    let stored_items = database
+        .items
+        .get(playlist_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut submitted = BTreeSet::new();
+    for item_id in item_ids {
+        validate_uni_playlist_item_id(item_id)?;
+        if !submitted.insert(item_id.as_str()) {
+            return Err(TuneWeaveError::invalid_request(
+                "Uni Playlist item order cannot contain duplicate item ids",
+            )
+            .with_details(json!({ "item_id": item_id })));
+        }
+    }
+    let stored_ids = stored_items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if submitted != stored_ids {
+        let missing = stored_ids
+            .difference(&submitted)
+            .copied()
+            .collect::<Vec<_>>();
+        let unknown = submitted
+            .difference(&stored_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(TuneWeaveError::invalid_request(
+            "item_ids must contain every current Uni Playlist item id exactly once",
+        )
+        .with_details(json!({ "missing_item_ids": missing, "unknown_item_ids": unknown })));
+    }
+    let changed = stored_items
+        .iter()
+        .map(|item| item.id.as_str())
+        .ne(item_ids.iter().map(String::as_str));
+    if changed {
+        let by_id = stored_items
+            .iter()
+            .cloned()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
+        let reordered = item_ids
+            .iter()
+            .enumerate()
+            .map(|(position, item_id)| {
+                let mut item = by_id
+                    .get(item_id)
+                    .expect("submitted item ids validated against stored ids")
+                    .clone();
+                item.position = u64::try_from(position).unwrap_or(u64::MAX);
+                item
+            })
+            .collect::<Vec<_>>();
+        database.items.insert(playlist_id.to_owned(), reordered);
+        let playlist = database
+            .playlists
+            .get_mut(playlist_id)
+            .expect("playlist existence checked before item reordering");
+        playlist.updated_at_ms = playlist.updated_at_ms.max(updated_at_ms);
+    }
+    let playlist = database
+        .playlists
+        .get(playlist_id)
+        .expect("playlist existence checked before item reordering")
+        .clone();
+    let items = database.items.get(playlist_id).cloned().unwrap_or_default();
+    Ok(UniPlaylistItemOrderResult {
+        playlist,
+        items,
+        changed,
+        extensions: Extensions::from([
+            ("complete_order_required".to_owned(), json!(true)),
+            ("duplicates_preserved".to_owned(), json!(true)),
+        ]),
     })
 }
 
@@ -471,16 +672,7 @@ fn validate_uni_playlist(playlist: &UniPlaylist) -> Result<()> {
 }
 
 fn validate_uni_playlist_item(item: &UniPlaylistItem) -> Result<()> {
-    if !(16..=64).contains(&item.id.len())
-        || !item
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(TuneWeaveError::invalid_request(
-            "Uni Playlist item id must be 16 to 64 URL-safe ASCII characters",
-        ));
-    }
+    validate_uni_playlist_item_id(&item.id)?;
     if item.source_ref.platform() == Platform::Uni {
         return Err(TuneWeaveError::invalid_request(
             "Uni Playlist items must reference an external platform resource",
@@ -531,6 +723,20 @@ fn validate_uni_playlist_item(item: &UniPlaylistItem) -> Result<()> {
     Ok(())
 }
 
+fn validate_uni_playlist_item_id(id: &str) -> Result<()> {
+    if !(16..=64).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist item id must be 16 to 64 URL-safe ASCII characters",
+        )
+        .with_details(json!({ "item_id": id })));
+    }
+    Ok(())
+}
+
 fn validate_uni_playlist_id(id: &str) -> Result<()> {
     if !(16..=64).contains(&id.len())
         || !id
@@ -556,6 +762,17 @@ fn uni_playlist_conflict(id: &str) -> TuneWeaveError {
 fn uni_playlist_not_found(id: &str) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::ResourceNotFound, "Uni Playlist was not found")
         .with_details(json!({ "ref": format!("uni:{id}") }))
+}
+
+fn uni_playlist_item_not_found(playlist_id: &str, item_id: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::ResourceNotFound,
+        "Uni Playlist item was not found",
+    )
+    .with_details(json!({
+        "playlist_ref": format!("uni:{playlist_id}"),
+        "item_id": item_id,
+    }))
 }
 
 fn uni_playlist_lock_error() -> TuneWeaveError {
@@ -666,6 +883,112 @@ mod tests {
     }
 
     #[test]
+    fn item_delete_targets_one_stable_id_and_reindexes_remaining_duplicates() {
+        let store = MemoryUniPlaylistStore::default();
+        let playlist = sample_playlist("pl_01abcdefghijklmnop");
+        store.create(&playlist).expect("create playlist");
+        let first = sample_item("item_01abcdefghijklmnop", "185809", 1_753_137_600_100);
+        let second = sample_item("item_02abcdefghijklmnop", "185809", 1_753_137_600_200);
+        let third = sample_item("item_03abcdefghijklmnop", "200001", 1_753_137_600_300);
+        store
+            .append_items(
+                &playlist.id,
+                &[first.clone(), second.clone(), third.clone()],
+            )
+            .expect("append items");
+
+        let deleted = store
+            .remove_item(&playlist.id, &first.id, 1_753_137_600_400)
+            .expect("remove one duplicate occurrence");
+        assert_eq!(deleted.item.id, first.id);
+        assert_eq!(deleted.item.position, 0);
+        assert_eq!(deleted.playlist.item_count, 2);
+        assert_eq!(deleted.playlist.updated_at_ms, 1_753_137_600_400);
+        assert_eq!(deleted.extensions["previous_item_count"], 3);
+
+        let remaining = store.items(&playlist.id, 100, 0).expect("remaining items");
+        assert_eq!(remaining.items[0].id, second.id);
+        assert_eq!(remaining.items[0].source_ref, first.source_ref);
+        assert_eq!(remaining.items[0].position, 0);
+        assert_eq!(remaining.items[1].id, third.id);
+        assert_eq!(remaining.items[1].position, 1);
+
+        let error = store
+            .remove_item(&playlist.id, "item_04abcdefghijklmnop", 1_753_137_600_500)
+            .expect_err("reject missing item id");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+        assert_eq!(
+            store.items(&playlist.id, 100, 0).expect("unchanged items"),
+            remaining
+        );
+    }
+
+    #[test]
+    fn item_reorder_requires_the_exact_complete_id_set_and_is_atomic() {
+        let store = MemoryUniPlaylistStore::default();
+        let playlist = sample_playlist("pl_01abcdefghijklmnop");
+        store.create(&playlist).expect("create playlist");
+        let first = sample_item("item_01abcdefghijklmnop", "185809", 1_753_137_600_100);
+        let second = sample_item("item_02abcdefghijklmnop", "185809", 1_753_137_600_200);
+        let third = sample_item("item_03abcdefghijklmnop", "200001", 1_753_137_600_300);
+        store
+            .append_items(
+                &playlist.id,
+                &[first.clone(), second.clone(), third.clone()],
+            )
+            .expect("append items");
+        let original = store.items(&playlist.id, 100, 0).expect("original order");
+
+        for invalid_order in [
+            vec![first.id.clone(), second.id.clone()],
+            vec![first.id.clone(), first.id.clone(), third.id.clone()],
+            vec![
+                first.id.clone(),
+                second.id.clone(),
+                "item_04abcdefghijklmnop".to_owned(),
+            ],
+        ] {
+            let error = store
+                .reorder_items(&playlist.id, &invalid_order, 1_753_137_600_400)
+                .expect_err("reject non-exact item order");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(
+                store.items(&playlist.id, 100, 0).expect("unchanged order"),
+                original
+            );
+        }
+
+        let order = vec![third.id.clone(), first.id.clone(), second.id.clone()];
+        let reordered = store
+            .reorder_items(&playlist.id, &order, 1_753_137_600_400)
+            .expect("reorder all items");
+        assert!(reordered.changed);
+        assert_eq!(reordered.playlist.updated_at_ms, 1_753_137_600_400);
+        assert_eq!(
+            reordered
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            order.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reordered
+                .items
+                .iter()
+                .map(|item| item.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        let unchanged = store
+            .reorder_items(&playlist.id, &order, 1_753_137_600_500)
+            .expect("accept explicit no-op order");
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.playlist.updated_at_ms, 1_753_137_600_400);
+    }
+
+    #[test]
     fn file_store_uses_one_reloadable_database_file() {
         let directory = TempDirectory::new();
         let path = directory.0.join("uni-playlists.json");
@@ -676,6 +999,21 @@ mod tests {
         store
             .append_items(&playlist.id, std::slice::from_ref(&item))
             .expect("persist item");
+        let second = sample_item("item_02abcdefghijklmnop", "200001", 1_753_137_600_200);
+        let third = sample_item("item_03abcdefghijklmnop", "300001", 1_753_137_600_300);
+        store
+            .append_items(&playlist.id, &[second.clone(), third.clone()])
+            .expect("persist more items");
+        store
+            .reorder_items(
+                &playlist.id,
+                &[third.id.clone(), item.id.clone(), second.id.clone()],
+                1_753_137_600_400,
+            )
+            .expect("persist order");
+        store
+            .remove_item(&playlist.id, &item.id, 1_753_137_600_500)
+            .expect("persist deletion");
         assert!(path.is_file());
         assert_eq!(
             fs::read_dir(&directory.0)
@@ -693,17 +1031,23 @@ mod tests {
                 .expect("reload playlist")
                 .expect("stored playlist")
                 .item_count,
-            1
+            2
         );
         assert_eq!(
             reopened
                 .items(&playlist.id, 25, 0)
                 .expect("reload item page")
                 .items,
-            vec![UniPlaylistItem {
-                position: 0,
-                ..item
-            }]
+            vec![
+                UniPlaylistItem {
+                    position: 0,
+                    ..third
+                },
+                UniPlaylistItem {
+                    position: 1,
+                    ..second
+                },
+            ]
         );
     }
 
