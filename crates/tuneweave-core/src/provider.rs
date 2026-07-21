@@ -27,22 +27,23 @@ use crate::{
     PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
     PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
-    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, Podcast, PodcastCategoryRecommendations, PodcastChartEntry,
-    PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest,
-    PodcastEpisodeDeleteResult, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
-    PodcastEpisodeRecommendationRequest, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
-    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
-    StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast, PodcastCategoryRecommendations,
+    PodcastChartEntry, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest,
+    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartRequest,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor,
+    ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
+    RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
     UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
@@ -748,6 +749,62 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::PlaylistRead,
         ))
+    }
+
+    async fn playlist_playable_items(
+        &self,
+        id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        let page = self.playlist_tracks(id, request).await?;
+        Ok(Page {
+            items: page
+                .items
+                .into_iter()
+                .map(PlaylistPlayableItem::Track)
+                .collect(),
+            pagination: page.pagination,
+        })
+    }
+
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        if source_type == "playlist" {
+            return self.playlist(id, account).await;
+        }
+        Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            format!(
+                "{} does not support playlist source type {source_type}",
+                self.platform()
+            ),
+        )
+        .with_platform(self.platform())
+        .with_details(serde_json::json!({ "source_type": source_type })))
+    }
+
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        if source_type == "playlist" {
+            return self.playlist_playable_items(id, request).await;
+        }
+        Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            format!(
+                "{} does not support playlist source type {source_type}",
+                self.platform()
+            ),
+        )
+        .with_platform(self.platform())
+        .with_details(serde_json::json!({ "source_type": source_type })))
     }
 
     async fn create_playlist(

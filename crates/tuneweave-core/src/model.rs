@@ -2952,10 +2952,60 @@ pub struct Playlist {
     pub extensions: Extensions,
 }
 
+/// A typed playable entry exposed by a platform playlist implementation.
+///
+/// Providers may override the default track-only bridge when their playlists contain videos,
+/// podcast episodes, radio stations, or another supported playable resource category.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "resource", rename_all = "snake_case")]
+pub enum PlaylistPlayableItem {
+    Track(Track),
+    Video(VideoDetail),
+    PodcastEpisode(Box<PodcastEpisode>),
+    RadioStation(RadioStation),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistCreateRequest {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistImportSourceRequest {
+    #[serde(rename = "ref")]
+    pub playlist_ref: ResourceRef,
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistImportRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub sources: Vec<UniPlaylistImportSourceRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistImportSourceResult {
+    #[serde(rename = "ref")]
+    pub playlist_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub name: String,
+    pub item_count: u64,
+    pub account: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistImportResult {
+    pub playlist: UniPlaylist,
+    pub sources: Vec<UniPlaylistImportSourceResult>,
+    pub extensions: Extensions,
 }
 
 impl UniPlaylistCreateRequest {
@@ -3013,6 +3063,7 @@ pub enum UniPlaylistItemKind {
     Mv,
     Video,
     PodcastEpisode,
+    RadioStation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -4939,6 +4990,25 @@ mod tests {
         assert_eq!(value["items"][0]["ref"], "netease:185809");
         assert_eq!(value["items"][0]["kind"], "track");
         assert_eq!(value["accounts"]["netease"], "vip");
+
+        let import = UniPlaylistImportRequest {
+            name: None,
+            description: None,
+            sources: vec![UniPlaylistImportSourceRequest {
+                playlist_ref: ResourceRef::new(Platform::Bilibili, "3629748")
+                    .expect("valid collection reference"),
+                source_type: "season".to_owned(),
+                account: None,
+            }],
+        };
+        let value = serde_json::to_value(import).expect("serialize Uni Playlist import request");
+        assert_eq!(value["sources"][0]["ref"], "bilibili:3629748");
+        assert_eq!(value["sources"][0]["type"], "season");
+        assert_eq!(
+            serde_json::to_value(UniPlaylistItemKind::RadioStation)
+                .expect("serialize radio station item kind"),
+            "radio_station"
+        );
     }
 
     #[test]

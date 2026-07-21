@@ -38,7 +38,7 @@ cargo run -p tuneweave-server --bin tuneweave
 
 默认数据目录已由 Git 忽略。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
 
-Uni Playlist 使用同一私有数据目录下的 `uni-playlists.json` 单文件数据库，与平台账户凭据分离；创建接口先同步临时文件再发布，进程重启后会恢复已有歌单元数据。
+Uni Playlist 使用同一私有数据目录下的 `uni-playlists.json` 单文件数据库，与平台账户凭据分离；创建、批量导入和编辑都先同步临时文件再发布，进程重启后会恢复歌单元数据及类型化项目。导入可用 `ref+type` 或 `platform+type+id` 合并多个公开/账户可见平台集合，账户别名按来源可选且彼此隔离。
 
 当前可直接调用 `/healthz`、`/v1/platforms`、`/v1/capabilities`、
 `/v1/search`、`/v1/tracks/{ref}`、`/v1/albums/{ref}`、

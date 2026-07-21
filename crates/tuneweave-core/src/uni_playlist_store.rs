@@ -24,6 +24,7 @@ static UNI_PLAYLIST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub trait UniPlaylistStore: Send + Sync {
     fn create(&self, playlist: &UniPlaylist) -> Result<()>;
+    fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<UniPlaylist>>;
     fn append_items(
         &self,
@@ -52,7 +53,7 @@ pub struct MemoryUniPlaylistStore {
 
 impl UniPlaylistStore for MemoryUniPlaylistStore {
     fn create(&self, playlist: &UniPlaylist) -> Result<()> {
-        validate_uni_playlist(playlist)?;
+        validate_new_playlist(playlist, &[])?;
         let mut database = self
             .database
             .write()
@@ -64,6 +65,22 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .playlists
             .insert(playlist.id.clone(), playlist.clone());
         database.items.insert(playlist.id.clone(), Vec::new());
+        Ok(())
+    }
+
+    fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()> {
+        validate_new_playlist(playlist, items)?;
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        if database.playlists.contains_key(&playlist.id) {
+            return Err(uni_playlist_conflict(&playlist.id));
+        }
+        database
+            .playlists
+            .insert(playlist.id.clone(), playlist.clone());
+        database.items.insert(playlist.id.clone(), items.to_vec());
         Ok(())
     }
 
@@ -150,7 +167,7 @@ impl FileUniPlaylistStore {
 
 impl UniPlaylistStore for FileUniPlaylistStore {
     fn create(&self, playlist: &UniPlaylist) -> Result<()> {
-        validate_uni_playlist(playlist)?;
+        validate_new_playlist(playlist, &[])?;
         let mut database = self
             .database
             .write()
@@ -161,6 +178,23 @@ impl UniPlaylistStore for FileUniPlaylistStore {
         let mut next = database.clone();
         next.playlists.insert(playlist.id.clone(), playlist.clone());
         next.items.insert(playlist.id.clone(), Vec::new());
+        persist_database(&self.path, &next)?;
+        *database = next;
+        Ok(())
+    }
+
+    fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()> {
+        validate_new_playlist(playlist, items)?;
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        if database.playlists.contains_key(&playlist.id) {
+            return Err(uni_playlist_conflict(&playlist.id));
+        }
+        let mut next = database.clone();
+        next.playlists.insert(playlist.id.clone(), playlist.clone());
+        next.items.insert(playlist.id.clone(), items.to_vec());
         persist_database(&self.path, &next)?;
         *database = next;
         Ok(())
@@ -643,6 +677,38 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.backup"))
 }
 
+fn validate_new_playlist(playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()> {
+    validate_uni_playlist(playlist)?;
+    let item_count = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    if playlist.item_count != item_count {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist item_count must match the initial item sequence",
+        ));
+    }
+    let mut item_ids = BTreeSet::new();
+    for (position, item) in items.iter().enumerate() {
+        validate_uni_playlist_item(item)?;
+        if item.position != u64::try_from(position).unwrap_or(u64::MAX) {
+            return Err(TuneWeaveError::invalid_request(
+                "initial Uni Playlist item positions must be zero-based and contiguous",
+            ));
+        }
+        if item.added_at_ms > playlist.updated_at_ms {
+            return Err(TuneWeaveError::invalid_request(
+                "initial Uni Playlist items cannot be newer than the playlist",
+            ));
+        }
+        if !item_ids.insert(item.id.as_str()) {
+            return Err(TuneWeaveError::new(
+                ErrorCode::Conflict,
+                "initial Uni Playlist item ids must be unique",
+            )
+            .with_details(json!({ "item_id": item.id })));
+        }
+    }
+    Ok(())
+}
+
 fn validate_uni_playlist(playlist: &UniPlaylist) -> Result<()> {
     validate_uni_playlist_id(&playlist.id)?;
     if playlist.platform != Platform::Uni
@@ -856,6 +922,41 @@ mod tests {
             store.create(&playlist).expect_err("reject duplicate").code,
             ErrorCode::Conflict
         );
+    }
+
+    #[test]
+    fn imported_playlist_and_items_are_created_as_one_validated_unit() {
+        let store = MemoryUniPlaylistStore::default();
+        let mut playlist = sample_playlist("pl_01abcdefghijklmnop");
+        playlist.item_count = 2;
+        playlist.updated_at_ms = 1_753_137_600_200;
+        let first = UniPlaylistItem {
+            position: 0,
+            ..sample_item("item_01abcdefghijklmnop", "185809", 1_753_137_600_100)
+        };
+        let second = UniPlaylistItem {
+            position: 1,
+            ..sample_item("item_02abcdefghijklmnop", "185809", 1_753_137_600_200)
+        };
+        store
+            .create_with_items(&playlist, &[first.clone(), second.clone()])
+            .expect("create imported playlist atomically");
+        assert_eq!(
+            store
+                .items(&playlist.id, 100, 0)
+                .expect("imported items")
+                .items,
+            vec![first, second]
+        );
+
+        let mut invalid = sample_playlist("pl_02abcdefghijklmnop");
+        invalid.item_count = 1;
+        let bad_item = sample_item("item_03abcdefghijklmnop", "200001", 1_753_137_600_100);
+        let error = store
+            .create_with_items(&invalid, &[bad_item])
+            .expect_err("reject non-contiguous initial position");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(store.get(&invalid.id).expect("no partial playlist"), None);
     }
 
     #[test]
