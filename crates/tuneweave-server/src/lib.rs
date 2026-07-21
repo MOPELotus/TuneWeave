@@ -278,6 +278,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
         .route(
+            "/account/library/videos/{reference}",
+            put(video_subscribe).delete(video_unsubscribe),
+        )
+        .route(
             "/videos/{reference}/stream/redirect",
             get(video_stream_redirect),
         )
@@ -427,6 +431,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/playlists", get(account_playlists))
         .route("/account/playlists/order", put(account_playlists_order))
         .route("/account/library/albums", get(account_albums))
+        .route("/account/library/videos", get(account_videos))
         .route(
             "/account/library/radio-stations",
             get(account_radio_stations),
@@ -1904,6 +1909,51 @@ async fn set_album_subscription(
     let provider = state.registry.require(platform)?;
     let result = provider
         .set_album_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoSubscriptionParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+}
+
+async fn video_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_video_subscription(state, reference, query_params(params)?, true).await
+}
+
+async fn video_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_video_subscription(state, reference, query_params(params)?, false).await
+}
+
+async fn set_video_subscription(
+    state: AppState,
+    reference: String,
+    params: VideoSubscriptionParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_video_subscription(reference.id(), kind, subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -6596,6 +6646,43 @@ async fn account_albums(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountVideoQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn account_videos(
+    State(state): State<AppState>,
+    params: Result<Query<AccountVideoQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .account_videos(&PageRequest {
+            limit,
+            offset,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(platform)
+            .with_account(account)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_radio_stations(
     State(state): State<AppState>,
     Query(params): Query<AccountQuery>,
@@ -8406,6 +8493,7 @@ mod tests {
                 Capability::VideoDetail,
                 Capability::VideoStats,
                 Capability::VideoStream,
+                Capability::VideoSubscriptionWrite,
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
@@ -8416,6 +8504,7 @@ mod tests {
                 Capability::AccountProfile,
                 Capability::AccountPlaylists,
                 Capability::AccountAlbums,
+                Capability::AccountVideos,
                 Capability::AccountRadioStations,
                 Capability::AccountPodcasts,
                 Capability::AccountCreatedPodcasts,
@@ -9834,6 +9923,24 @@ mod tests {
             })
         }
 
+        async fn set_video_subscription(
+            &self,
+            id: &str,
+            kind: VideoResourceKind,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Netease, id)
+                    .expect("valid test video reference"),
+                subscribed,
+                extensions: Extensions::from([
+                    ("kind".to_owned(), json!(kind)),
+                    ("account".to_owned(), json!(account)),
+                ]),
+            })
+        }
+
         async fn artist_tracks(
             &self,
             id: &str,
@@ -10091,6 +10198,29 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions,
+                },
+            })
+        }
+
+        async fn account_videos(&self, request: &PageRequest) -> Result<Page<Video>> {
+            let mut video = sample_video("22695250");
+            video.subscribed = Some(true);
+            video.extensions.insert(
+                "subscription_item".to_owned(),
+                json!({ "type": 1, "markTypes": [101] }),
+            );
+            Ok(Page {
+                items: vec![video],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "response".to_owned(),
+                        json!({ "code": 200, "hasMore": false }),
+                    )]),
                 },
             })
         }
@@ -14035,6 +14165,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_library_put_and_delete_preserve_kind_account_and_result() {
+        let (status, subscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/library/videos/netease:22695250?type=mv&account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscribed["data"]["resource_ref"], "netease:22695250");
+        assert_eq!(subscribed["data"]["subscribed"], true);
+        assert_eq!(subscribed["data"]["extensions"]["kind"], "mv");
+        assert_eq!(subscribed["data"]["extensions"]["account"], "collector");
+        assert_eq!(subscribed["meta"]["platform"], "netease");
+        assert_eq!(subscribed["meta"]["account"], "collector");
+
+        let (status, unsubscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/library/videos/netease:22695250?account=collector",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unsubscribed["data"]["subscribed"], false);
+        assert_eq!(unsubscribed["data"]["extensions"]["kind"], "mv");
+
+        let (status, invalid) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            "/v1/account/library/videos/netease:22695250?unknown=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
     async fn radio_station_library_put_and_delete_share_the_subscription_result() {
         let (status, subscribed) = json_request_from(
             test_app_with_provider(),
@@ -16139,6 +16308,41 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["paidCount"],
             1
         );
+    }
+
+    #[tokio::test]
+    async fn account_videos_preserve_subscription_and_page_metadata() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/library/videos?platform=netease&account=personal&limit=25&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["ref"], "netease:22695250");
+        assert_eq!(json["data"][0]["subscribed"], true);
+        assert_eq!(
+            json["data"][0]["extensions"]["subscription_item"]["markTypes"][0],
+            101
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert_eq!(json["meta"]["pagination"]["limit"], 25);
+        assert_eq!(json["meta"]["pagination"]["total"], 1);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["response"]["hasMore"],
+            false
+        );
+
+        for path in [
+            "/v1/account/library/videos?limit=0",
+            "/v1/account/library/videos?limit=101",
+            "/v1/account/library/videos?offset=next",
+            "/v1/account/library/videos?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

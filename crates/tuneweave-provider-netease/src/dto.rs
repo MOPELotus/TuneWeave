@@ -638,6 +638,16 @@ pub(crate) struct SubscribedAlbumsEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct SubscribedVideosEnvelope {
+    #[serde(default)]
+    pub data: Vec<Value>,
+    #[serde(default, alias = "total")]
+    pub count: Option<u64>,
+    #[serde(rename = "hasMore", alias = "more")]
+    pub has_more: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AlbumEntitlementsEnvelope {
     #[serde(default)]
     pub data: Vec<Value>,

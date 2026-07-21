@@ -95,8 +95,8 @@ use crate::{
         PersonalFmEnvelope, PersonalizedEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
         PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
         RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, TrackEntitlementData, TrackEnvelope,
-        UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
+        StreamEnvelope, SubscribedAlbumsEnvelope, SubscribedVideosEnvelope, TrackEntitlementData,
+        TrackEnvelope, UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -641,6 +641,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::VideoDetail,
             Capability::VideoStats,
             Capability::VideoStream,
+            Capability::VideoSubscriptionWrite,
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
@@ -651,6 +652,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountProfile,
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
+            Capability::AccountVideos,
             Capability::AccountRadioStations,
             Capability::AccountPodcasts,
             Capability::AccountCreatedPodcasts,
@@ -1929,6 +1931,30 @@ impl MusicProvider for NeteaseProvider {
         }
     }
 
+    async fn set_video_subscription(
+        &self,
+        id: &str,
+        kind: VideoResourceKind,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        if kind != VideoResourceKind::Mv {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase only supports subscription changes for MV resources",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "kind": kind })));
+        }
+        let id = parse_numeric_id("MV", id)?;
+        let account = account.unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        require_authenticated_client(&client, "MV subscription writing")?;
+        let (path, payload) = netease_mv_subscription_request(id, subscribed);
+        let response = client.request_weapi(path, payload).await?;
+        ensure_account_access(&client, &response.body, "MV subscription writing")?;
+        map_video_subscription_result(id, kind, subscribed, response.body)
+    }
+
     async fn artist_tracks(
         &self,
         id: &str,
@@ -2246,6 +2272,24 @@ impl MusicProvider for NeteaseProvider {
             .await?;
         ensure_success(&response.body)?;
         map_subscribed_albums_response(response.body, request, limit)
+    }
+
+    async fn account_videos(&self, request: &PageRequest) -> Result<Page<Video>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let limit = request.limit.clamp(1, 100);
+        let response = client
+            .request_weapi(
+                "/api/cloudvideo/allvideo/sublist",
+                json!({
+                    "limit": limit,
+                    "offset": request.offset,
+                    "total": true
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "subscribed MV catalog")?;
+        map_subscribed_videos_response(response.body, request, limit)
     }
 
     async fn account_radio_stations(&self, request: &PageRequest) -> Result<Page<RadioStation>> {
@@ -8574,6 +8618,49 @@ fn map_subscribed_albums_response(
     })
 }
 
+fn map_subscribed_videos_response(
+    raw: Value,
+    request: &PageRequest,
+    limit: u32,
+) -> Result<Page<Video>> {
+    let response: SubscribedVideosEnvelope = parse_body(raw.clone())?;
+    let items = response
+        .data
+        .into_iter()
+        .map(|raw| {
+            let source_type = raw.get("type").and_then(json_u64);
+            let mut video = map_cloud_search_video(raw.clone())?;
+            video.subscribed = Some(true);
+            video.extensions.remove("search_item");
+            video.extensions.insert("subscription_item".to_owned(), raw);
+            insert_extension(&mut video.extensions, "source_type", source_type);
+            Ok(video)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let has_more = response.has_more.unwrap_or_else(|| {
+        response
+            .count
+            .map_or(consumed == limit, |total| u64::from(next_offset) < total)
+    });
+    let mut metadata = raw;
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("data");
+    }
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: request.offset,
+            total: response.count,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([("response".to_owned(), metadata)]),
+        },
+    })
+}
+
 fn map_session_profile(account: &str, status: NeteaseSessionStatus) -> AccountProfile {
     let mut profile = map_account_profile(account, status.account);
     profile.authenticated = status.authenticated;
@@ -8701,6 +8788,18 @@ fn netease_artist_subscription_request(id: u64, subscribed: bool) -> (&'static s
             "artistId": id,
             "artistIds": format!("[{id}]")
         }),
+    )
+}
+
+fn netease_mv_subscription_request(id: u64, subscribed: bool) -> (&'static str, Value) {
+    let path = if subscribed {
+        "/api/mv/sub"
+    } else {
+        "/api/mv/unsub"
+    };
+    (
+        path,
+        json!({ "mvId": id, "mvIds": json!([id.to_string()]).to_string() }),
     )
 }
 
@@ -12245,6 +12344,29 @@ fn map_artist_subscription_result(
         resource_ref,
         subscribed,
         extensions,
+    })
+}
+
+fn map_video_subscription_result(
+    id: u64,
+    kind: VideoResourceKind,
+    subscribed: bool,
+    response: Value,
+) -> Result<SubscriptionResult> {
+    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid MV id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    Ok(SubscriptionResult {
+        resource_ref,
+        subscribed,
+        extensions: Extensions::from([
+            ("kind".to_owned(), json!(kind)),
+            ("response".to_owned(), response),
+        ]),
     })
 }
 
@@ -19906,6 +20028,72 @@ mod tests {
     }
 
     #[test]
+    fn mv_subscription_protocol_and_catalog_match_reference_modules() {
+        assert_eq!(
+            netease_mv_subscription_request(22_695_250, true),
+            (
+                "/api/mv/sub",
+                json!({ "mvId": 22_695_250, "mvIds": "[\"22695250\"]" })
+            )
+        );
+        assert_eq!(
+            netease_mv_subscription_request(22_695_250, false),
+            (
+                "/api/mv/unsub",
+                json!({ "mvId": 22_695_250, "mvIds": "[\"22695250\"]" })
+            )
+        );
+
+        let request = PageRequest {
+            limit: 1,
+            offset: 4,
+            account: Some("collector".to_owned()),
+        };
+        let page = map_subscribed_videos_response(
+            json!({
+                "code": 200,
+                "count": 8,
+                "hasMore": true,
+                "data": [{
+                    "vid": "22695250",
+                    "type": 1,
+                    "title": "任性 (5525 Live版)",
+                    "creator": [{"userId": 6452, "userName": "任贤齐"}],
+                    "coverUrl": "https://example.test/subscribed.jpg",
+                    "durationms": 266000,
+                    "playTime": 100726,
+                    "markTypes": [101]
+                }]
+            }),
+            &request,
+            1,
+        )
+        .expect("map subscribed MV catalog");
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:22695250");
+        assert_eq!(page.items[0].subscribed, Some(true));
+        assert_eq!(page.items[0].extensions["source_type"], 1);
+        assert_eq!(
+            page.items[0].extensions["subscription_item"]["markTypes"][0],
+            101
+        );
+        assert!(!page.items[0].extensions.contains_key("search_item"));
+        assert_eq!(page.pagination.total, Some(8));
+        assert_eq!(page.pagination.next_offset, Some(5));
+        assert!(page.pagination.has_more);
+        assert!(page.pagination.extensions["response"].get("data").is_none());
+
+        let empty = map_subscribed_videos_response(
+            json!({"code": 200, "data": [], "hasMore": false}),
+            &PageRequest::new(25, 0),
+            25,
+        )
+        .expect("map empty subscribed MV catalog");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.next_offset, None);
+        assert!(!empty.pagination.has_more);
+    }
+
+    #[test]
     fn music_video_catalog_rejects_controls_the_reference_module_cannot_apply() {
         let latest_offset = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 30, 30);
         assert_eq!(
@@ -23956,6 +24144,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::UserProfileModern));
         assert!(capabilities.contains(&Capability::AccountPlaylists));
         assert!(capabilities.contains(&Capability::AccountAlbums));
+        assert!(capabilities.contains(&Capability::AccountVideos));
         assert!(capabilities.contains(&Capability::AccountRadioStations));
         assert!(capabilities.contains(&Capability::AccountArtistNewVideos));
         assert!(capabilities.contains(&Capability::AccountArtistNewTracks));
@@ -23976,6 +24165,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::VideoRecommendations));
         assert!(capabilities.contains(&Capability::VideoCatalog));
+        assert!(capabilities.contains(&Capability::VideoSubscriptionWrite));
         assert!(capabilities.contains(&Capability::PodcastEpisodeRecommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
         assert!(capabilities.contains(&Capability::AlbumList));
@@ -24241,6 +24431,45 @@ mod tests {
         )
         .await
         .expect_err("missing account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn mv_subscriptions_and_catalog_require_the_selected_logged_in_alias() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for subscribed in [true, false] {
+            let error = MusicProvider::set_video_subscription(
+                &provider,
+                "22695250",
+                VideoResourceKind::Mv,
+                subscribed,
+                Some("missing"),
+            )
+            .await
+            .expect_err("missing MV account alias");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+        let unsupported = MusicProvider::set_video_subscription(
+            &provider,
+            "D1C2B3A4",
+            VideoResourceKind::Video,
+            true,
+            Some("missing"),
+        )
+        .await
+        .expect_err("ordinary video subscription is unsupported by the MV module");
+        assert_eq!(unsupported.code, ErrorCode::InvalidRequest);
+
+        let error = MusicProvider::account_videos(
+            &provider,
+            &PageRequest {
+                limit: 25,
+                offset: 0,
+                account: Some("missing".to_owned()),
+            },
+        )
+        .await
+        .expect_err("missing subscribed MV account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 

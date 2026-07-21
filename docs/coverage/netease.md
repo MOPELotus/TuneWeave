@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=243`、`partial=3`、`implemented=64`、`verified=106`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=241`、`partial=3`、`implemented=64`、`verified=108`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -193,8 +193,8 @@
 | `mv_detail_info` | `/mv/detail/info` | `verified` | `GET /v1/videos/netease:22695250/stats`：真实返回点赞态及点赞、评论、分享计数 |
 | `mv_exclusive_rcmd` | `/mv/exclusive/rcmd` | `verified` | `GET /v1/videos?catalog=exclusive`（精确提交参考 `offset/limit`，不接受不存在的地区/类型/排序筛选；按真实 `more` 返回下一偏移并保留完整响应，空白描述/封面和零时长不遮蔽有效数据；2026-07-22 真实统一 HTTP 返回 200、3 项非空 MV、`has_more=true/next_offset=3`） |
 | `mv_first` | `/mv/first` | `verified` | `GET /v1/videos?catalog=latest`（只支持参考真实存在的地区和 limit，全部地区精确提交空字符串，`total` 保持布尔值；明确拒绝非零 offset、类型及排序，不伪造分页，稳定返回 `next_offset=null/has_more=false/continuation_supported=false`；2026-07-22 真实统一 HTTP 返回 200 和 3 项非空最新 MV） |
-| `mv_sub` | `/mv/sub` | `pending` | — |
-| `mv_sublist` | `/mv/sublist` | `pending` | — |
+| `mv_sub` | `/mv/sub` | `verified` | `PUT/DELETE /v1/account/library/videos/{ref}?kind=mv`（统一方法表达收藏与取消收藏，登录态严格由引用平台和 `account` 别名选择；精确调用 WeAPI `/api/mv/sub|unsub`，同时提交数值 `mvId` 和字符串化 `mvIds=["..."]`，完整响应保留在 `SubscriptionResult.extensions`；普通视频类型、非法 ID、缺失账户、查询字段和能力发现均有离线回归；2026-07-22 持久化真实账户以公开 MV 完成原始未收藏→PUT 收藏→DELETE 取消收藏闭环，最终详情确认恢复未收藏） |
+| `mv_sublist` | `/mv/sublist` | `verified` | `GET /v1/account/library/videos`（固定 WeAPI `/api/cloudvideo/allvideo/sublist` 及参考 `limit/offset/total=true`，映射混合 MV/普通视频的字符串 `vid`、创作者、封面、正时长、播放量和收藏态，来源 `type` 与完整条目保留在扩展；`count/hasMore/more` 生成真实分页，空页不伪造续页，顶层扩展移除已映射大数组；协议、字段、分页、空响应、账户隔离与统一 HTTP 均有测试；2026-07-22 持久化真实账户 HTTP 返回 200、1 项普通视频且 `has_more=false`） |
 | `mv_url` | `/mv/url` | `verified` | `GET /v1/videos/netease:22695250/stream` 与 `/redirect`：四档真实 URL、大小及 302 均已验收；零首选清晰度/有效期会继续读取有效兼容字段 |
 | `nickname_check` | `/nickname/check` | `pending` | — |
 | `personal_fm` | `/personal_fm` | `verified` | `GET /v1/recommendations/personal-fm`（缺省 `backend=classic`，也接受 `default/personal_fm`；固定 WeAPI `/api/v1/radio/get` 和空载荷，不伪造参考实现不存在的分页参数；统一返回当前 `Track[]` 队列快照，`total` 为本次数量，`has_more=false/next_offset=null/continuation_supported=false`，完整响应保留在分页扩展；请求协议、能力发现、歌曲映射、截取语义、账户隔离、冲突和未知字段均有测试；2026-07-18 匿名真实 provider 联网返回非空统一曲目队列） |

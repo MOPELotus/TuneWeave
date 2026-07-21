@@ -82,6 +82,7 @@ pub enum Capability {
     VideoDetail,
     VideoStats,
     VideoStream,
+    VideoSubscriptionWrite,
     QrLogin,
     PasswordLogin,
     PhoneLogin,
@@ -92,6 +93,7 @@ pub enum Capability {
     AccountProfile,
     AccountPlaylists,
     AccountAlbums,
+    AccountVideos,
     AccountRadioStations,
     AccountPodcasts,
     AccountCreatedPodcasts,
@@ -241,6 +243,16 @@ mod tests {
             serde_json::to_value(Capability::VideoStream)
                 .expect("serialize video stream capability"),
             serde_json::json!("video_stream")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoSubscriptionWrite)
+                .expect("serialize video subscription capability"),
+            serde_json::json!("video_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountVideos)
+                .expect("serialize account videos capability"),
+            serde_json::json!("account_videos")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),

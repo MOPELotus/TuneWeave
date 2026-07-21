@@ -40,7 +40,7 @@ use crate::{
     SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
     TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
-    VideoRecommendationRequest, VideoStats, VideoStream, VideoStreamRequest,
+    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -611,6 +611,19 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn set_video_subscription(
+        &self,
+        _id: &str,
+        _kind: VideoResourceKind,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoSubscriptionWrite,
+        ))
+    }
+
     async fn artist_tracks(
         &self,
         _id: &str,
@@ -741,6 +754,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountAlbums,
+        ))
+    }
+
+    async fn account_videos(&self, _request: &PageRequest) -> Result<Page<Video>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountVideos,
         ))
     }
 
