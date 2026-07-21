@@ -79,6 +79,7 @@ pub enum Capability {
     AudioStreamBatch,
     AudioDownload,
     VideoCatalog,
+    VideoTaxonomy,
     VideoDetail,
     VideoStats,
     VideoStream,
@@ -248,6 +249,11 @@ mod tests {
             serde_json::to_value(Capability::VideoSubscriptionWrite)
                 .expect("serialize video subscription capability"),
             serde_json::json!("video_subscription_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoTaxonomy)
+                .expect("serialize video taxonomy capability"),
+            serde_json::json!("video_taxonomy")
         );
         assert_eq!(
             serde_json::to_value(Capability::AccountVideos)

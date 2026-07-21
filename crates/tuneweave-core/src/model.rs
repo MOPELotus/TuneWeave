@@ -2052,6 +2052,9 @@ pub enum MusicVideoCatalog {
     All,
     Latest,
     Exclusive,
+    TimelineAll,
+    TimelineRecommended,
+    Group,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -2094,6 +2097,7 @@ pub struct MusicVideoListRequest {
     pub area: Option<MusicVideoArea>,
     pub video_type: Option<MusicVideoType>,
     pub order: Option<MusicVideoOrder>,
+    pub group_id: Option<String>,
     pub account: Option<String>,
 }
 
@@ -2107,9 +2111,48 @@ impl MusicVideoListRequest {
             area: None,
             video_type: None,
             order: None,
+            group_id: None,
             account: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoTaxonomyKind {
+    #[default]
+    Categories,
+    Groups,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoTaxonomyRequest {
+    pub kind: VideoTaxonomyKind,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl VideoTaxonomyRequest {
+    #[must_use]
+    pub fn new(kind: VideoTaxonomyKind, limit: u32, offset: u32) -> Self {
+        Self {
+            kind,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoCatalogOption {
+    pub id: String,
+    pub name: String,
+    pub url: Option<String>,
+    pub selected: Option<bool>,
+    pub related_video_type: Option<String>,
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -4784,6 +4827,18 @@ mod tests {
         assert_eq!(value["area"], "mainland_china");
         assert_eq!(value["video_type"], "official");
         assert_eq!(value["order"], "hot");
+        assert!(value["group_id"].is_null());
         assert_eq!(value["account"], "viewer");
+
+        let mut grouped = MusicVideoListRequest::new(MusicVideoCatalog::Group, 8, 16);
+        grouped.group_id = Some("58100".to_owned());
+        let value = serde_json::to_value(grouped).expect("serialize video group request");
+        assert_eq!(value["catalog"], "group");
+        assert_eq!(value["group_id"], "58100");
+
+        let taxonomy = VideoTaxonomyRequest::new(VideoTaxonomyKind::Groups, 99, 0);
+        let value = serde_json::to_value(taxonomy).expect("serialize video taxonomy request");
+        assert_eq!(value["kind"], "groups");
+        assert_eq!(value["limit"], 99);
     }
 }

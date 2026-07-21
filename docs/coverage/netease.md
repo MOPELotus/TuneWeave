@@ -9,7 +9,7 @@
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=241`、`partial=3`、`implemented=64`、`verified=108`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=235`、`partial=3`、`implemented=62`、`verified=116`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
@@ -385,15 +385,15 @@
 | `user_update` | `/user/update` | `pending` | — |
 | `verify_getQr` | `/verify/getQr` | `pending` | — |
 | `verify_qrcodestatus` | `/verify/qrcodestatus` | `pending` | — |
-| `video_category_list` | `/video/category/list` | `pending` | — |
-| `video_detail` | `/video/detail` | `implemented` | `GET /v1/videos/{ref}?kind=video` 与离线成功夹具已覆盖；上游文档旧样本真实返回 404，待补当前有效视频 ID 成功态 |
+| `video_category_list` | `/video/category/list` | `verified` | `GET /v1/videos/taxonomy?kind=categories`（独立 `VideoTaxonomy` 能力；固定 WeAPI `/api/cloudvideo/category/list`，精确提交参考 `offset/total="true"/limit`，统一映射字符串 ID、名称、跳转 URL、选中态、关联视频类型及完整条目；上游返回数超过请求 limit 时明确 `limit_applied=false`，不截断伪装；协议、分页、畸形条目、能力发现与统一 HTTP 均有测试；2026-07-22 匿名真实 HTTP 返回 9 项分类） |
+| `video_detail` | `/video/detail` | `verified` | `GET /v1/videos/{ref}?kind=video`（不透明视频 ID、标题、创作者、描述、封面、时长、发布时间、播放量、收藏态与资源档位完整映射；2026-07-22 从真实账户收藏列表取得当前有效视频并验证详情返回 200、4 档分辨率及正时长） |
 | `video_detail_info` | `/video/detail/info` | `verified` | `GET /v1/videos/{ref}/stats?kind=video`：旧样本仍真实返回点赞、评论和分享统计，映射已验收 |
-| `video_group` | `/video/group` | `pending` | — |
-| `video_group_list` | `/video/group/list` | `pending` | — |
-| `video_sub` | `/video/sub` | `pending` | — |
-| `video_timeline_all` | `/video/timeline/all` | `pending` | — |
-| `video_timeline_recommend` | `/video/timeline/recommend` | `pending` | — |
-| `video_url` | `/video/url` | `implemented` | `GET /v1/videos/{ref}/stream?kind=video&resolution=1080`：离线成功夹具及真实空 URL 业务态已覆盖，待有效视频 ID 可播放成功态 |
+| `video_group` | `/video/group` | `verified` | `GET /v1/videos?catalog=group&group_id=...`（固定 WeAPI `/api/videotimeline/videogroup/otherclient/get`，精确提交数值 `groupId`、参考字符串 `need_preview_url="true"`、布尔 `total=true` 与 offset，不提交虚构 limit；复用完整站内 `Video` 映射并保留时间线包装；`datas=null` 合法规范化为空页，缺失/错误容器仍拒绝；非空/空/畸形、筛选冲突和统一 HTTP 均有测试；2026-07-22 从真实时间线及分类/标签累计发起 63 次 group 请求，均返回 `code=200,datas=null,hasmore=false`） |
+| `video_group_list` | `/video/group/list` | `verified` | `GET /v1/videos/taxonomy?kind=groups`（固定 WeAPI `/api/cloudvideo/group/list` 与空载荷；返回完整标签目录且不接受不存在的非零 offset，统一 `total` 为实际项数、`continuation_supported=false/limit_applied=false`；条目、协议、分页边界和 HTTP 均有测试；2026-07-22 匿名真实 HTTP 返回 107 项标签） |
+| `video_sub` | `/video/sub` | `verified` | `PUT/DELETE /v1/account/library/videos/{ref}?kind=video`（与 MV 分支共用统一 `SubscriptionResult`，但严格分派至 WeAPI `/api/cloudvideo/video/sub|unsub` 并只提交不透明字符串 `id`；账户别名、资源类型、完整响应与查询边界均保留/验证；2026-07-22 对真实账户已有普通视频完成原始已收藏→DELETE 取消→PUT 恢复闭环，最终列表确认原条目仍存在） |
+| `video_timeline_all` | `/video/timeline/all` | `verified` | `GET /v1/videos?catalog=timeline_all`（固定 WeAPI `/api/videotimeline/otherclient/get`，精确提交 `groupId=0/offset/need_preview_url="true"/total=true`；不提交参考模块不存在的 limit，按 `hasmore` 与真实返回数生成下一 offset，外层算法包装、内层视频、创作者、收藏态和完整响应均保留；2026-07-22 持久化真实账户统一 HTTP 返回 8 项、`has_more=true/next_offset=8`） |
+| `video_timeline_recommend` | `/video/timeline/recommend` | `verified` | `GET /v1/videos?catalog=timeline_recommended`（固定 WeAPI `/api/videotimeline/get`，精确提交参考 `offset/filterLives="[]"/withProgramInfo="true"/needUrl="1"/resolution="480"`；不伪造 limit，完整映射 `datas[].data` 并保留外层算法；2026-07-22 持久化真实账户统一 HTTP 返回 8 项、`has_more=true/next_offset=8`） |
+| `video_url` | `/video/url` | `verified` | `GET /v1/videos/{ref}/stream?kind=video&resolution=...` 与 `/redirect`（离线覆盖成功、空 URL 与多兼容字段；2026-07-22 使用账户收藏中的当前有效普通视频真实返回 480p 非空播放 URL、`available=true/actual_resolution=480`，统一重定向返回 302） |
 | `vip_growthpoint` | `/vip/growthpoint` | `pending` | — |
 | `vip_growthpoint_details` | `/vip/growthpoint/details` | `pending` | — |
 | `vip_growthpoint_get` | `/vip/growthpoint/get` | `pending` | — |

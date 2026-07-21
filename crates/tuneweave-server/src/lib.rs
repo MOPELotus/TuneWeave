@@ -66,9 +66,10 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -274,6 +275,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/tracks", get(artist_tracks))
         .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
         .route("/videos", get(music_videos))
+        .route("/videos/taxonomy", get(video_taxonomy))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
@@ -3912,6 +3914,8 @@ struct MusicVideoListParams {
     #[serde(rename = "type", alias = "video_type", alias = "mv_type")]
     video_type: Option<String>,
     order: Option<String>,
+    #[serde(alias = "id", alias = "groupId")]
+    group_id: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
 }
@@ -3945,9 +3949,47 @@ async fn music_videos(
         .as_deref()
         .map(parse_music_video_order)
         .transpose()?;
+    request.group_id = optional_trimmed(params.group_id);
     request.account.clone_from(&account);
     let provider = state.registry.require(platform)?;
     let page = provider.music_videos(&request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoTaxonomyParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn video_taxonomy(
+    State(state): State<AppState>,
+    params: Result<Query<VideoTaxonomyParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<VideoCatalogOption>>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let kind = parse_video_taxonomy_kind(params.kind.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 99)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let mut request = VideoTaxonomyRequest::new(kind, limit, offset);
+    request.account.clone_from(&account);
+    let provider = state.registry.require(platform)?;
+    let page = provider.video_taxonomy(&request).await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
@@ -7846,10 +7888,36 @@ fn parse_music_video_catalog(value: Option<&str>) -> Result<MusicVideoCatalog, T
         "exclusive" | "netease" | "exclusive_recommendations" | "mv_exclusive_rcmd" => {
             Ok(MusicVideoCatalog::Exclusive)
         }
+        "timeline" | "timeline_all" | "all_videos" | "video_timeline_all" => {
+            Ok(MusicVideoCatalog::TimelineAll)
+        }
+        "recommended" | "recommend" | "timeline_recommended" | "video_timeline_recommend" => {
+            Ok(MusicVideoCatalog::TimelineRecommended)
+        }
+        "group" | "video_group" => Ok(MusicVideoCatalog::Group),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported music video catalog: {value}"
         ))
-        .with_details(json!({ "allowed": ["all", "latest", "exclusive"] }))),
+        .with_details(json!({
+            "allowed": ["all", "latest", "exclusive", "timeline_all", "timeline_recommended", "group"]
+        }))),
+    }
+}
+
+fn parse_video_taxonomy_kind(value: Option<&str>) -> Result<VideoTaxonomyKind, TuneWeaveError> {
+    match value
+        .unwrap_or("categories")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "categories" | "category" | "video_category_list" => Ok(VideoTaxonomyKind::Categories),
+        "groups" | "group" | "tags" | "video_group_list" => Ok(VideoTaxonomyKind::Groups),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported video taxonomy kind: {value}"
+        ))
+        .with_details(json!({ "allowed": ["categories", "groups"] }))),
     }
 }
 
@@ -8490,6 +8558,7 @@ mod tests {
                 Capability::AudioStreamBatch,
                 Capability::AudioDownload,
                 Capability::VideoCatalog,
+                Capability::VideoTaxonomy,
                 Capability::VideoDetail,
                 Capability::VideoStats,
                 Capability::VideoStream,
@@ -9854,8 +9923,33 @@ mod tests {
                         ("area".to_owned(), json!(request.area)),
                         ("video_type".to_owned(), json!(request.video_type)),
                         ("order".to_owned(), json!(request.order)),
+                        ("group_id".to_owned(), json!(request.group_id)),
                         ("account".to_owned(), json!(request.account)),
                     ]),
+                },
+            })
+        }
+
+        async fn video_taxonomy(
+            &self,
+            request: &VideoTaxonomyRequest,
+        ) -> Result<Page<VideoCatalogOption>> {
+            Ok(Page {
+                items: vec![VideoCatalogOption {
+                    id: "58100".to_owned(),
+                    name: "现场".to_owned(),
+                    url: Some("orpheus://video-group/58100".to_owned()),
+                    selected: Some(true),
+                    related_video_type: Some("LIVE".to_owned()),
+                    extensions: Extensions::from([("kind".to_owned(), json!(request.kind))]),
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
                 },
             })
         }
@@ -13830,6 +13924,63 @@ mod tests {
         assert_eq!(latest["meta"]["pagination"]["extensions"]["area"], "japan");
         assert!(latest["meta"]["pagination"]["extensions"]["video_type"].is_null());
         assert!(latest["meta"]["pagination"]["extensions"]["order"].is_null());
+
+        let (status, timeline) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos?catalog=video_timeline_all&limit=8&offset=16&account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(timeline["data"][0]["extensions"]["catalog"], "timeline_all");
+        assert_eq!(timeline["meta"]["pagination"]["offset"], 16);
+
+        let (status, group) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos?catalog=group&groupId=58100&limit=8&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(group["data"][0]["extensions"]["catalog"], "group");
+        assert_eq!(
+            group["meta"]["pagination"]["extensions"]["group_id"],
+            "58100"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_taxonomy_unifies_categories_groups_and_pagination() {
+        let (status, categories) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/taxonomy?platform=netease&type=category&limit=9&offset=0&account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(categories["data"][0]["id"], "58100");
+        assert_eq!(categories["data"][0]["name"], "现场");
+        assert_eq!(categories["data"][0]["extensions"]["kind"], "categories");
+        assert_eq!(categories["meta"]["platform"], "netease");
+        assert_eq!(categories["meta"]["account"], "viewer");
+        assert_eq!(categories["meta"]["pagination"]["limit"], 9);
+
+        let (status, groups) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/taxonomy?kind=video_group_list",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(groups["data"][0]["extensions"]["kind"], "groups");
+
+        for path in [
+            "/v1/videos/taxonomy?kind=unknown",
+            "/v1/videos/taxonomy?limit=0",
+            "/v1/videos/taxonomy?limit=101",
+            "/v1/videos/taxonomy?offset=next",
+            "/v1/videos/taxonomy?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
@@ -14191,6 +14342,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(unsubscribed["data"]["subscribed"], false);
         assert_eq!(unsubscribed["data"]["extensions"]["kind"], "mv");
+
+        let video_id = "D1C2B3A40987654321ABCDEF12345678";
+        let (status, video_subscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::PUT,
+            &format!("/v1/account/library/videos/netease:{video_id}?kind=video&account=collector"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            video_subscribed["data"]["resource_ref"],
+            format!("netease:{video_id}")
+        );
+        assert_eq!(video_subscribed["data"]["extensions"]["kind"], "video");
+
+        let (status, video_unsubscribed) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            &format!("/v1/account/library/videos/netease:{video_id}?kind=video&account=collector"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(video_unsubscribed["data"]["subscribed"], false);
 
         let (status, invalid) = json_request_from(
             test_app_with_provider(),

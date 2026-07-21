@@ -65,10 +65,10 @@ use tuneweave_core::{
     SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
     StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -638,6 +638,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AudioStreamBatch,
             Capability::AudioDownload,
             Capability::VideoCatalog,
+            Capability::VideoTaxonomy,
             Capability::VideoDetail,
             Capability::VideoStats,
             Capability::VideoStream,
@@ -1831,7 +1832,46 @@ impl MusicProvider for NeteaseProvider {
         let client = self.client_for(request.account.as_deref())?;
         let response = client.request_weapi(path, payload).await?;
         ensure_success(&response.body)?;
-        map_music_video_catalog_response(response.body, request, limit)
+        match request.catalog {
+            MusicVideoCatalog::TimelineAll
+            | MusicVideoCatalog::TimelineRecommended
+            | MusicVideoCatalog::Group => {
+                map_video_timeline_response(response.body, request, limit)
+            }
+            MusicVideoCatalog::All | MusicVideoCatalog::Latest | MusicVideoCatalog::Exclusive => {
+                map_music_video_catalog_response(response.body, request, limit)
+            }
+        }
+    }
+
+    async fn video_taxonomy(
+        &self,
+        request: &VideoTaxonomyRequest,
+    ) -> Result<Page<VideoCatalogOption>> {
+        let limit = request.limit.clamp(1, 100);
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = match request.kind {
+            VideoTaxonomyKind::Categories => (
+                "/api/cloudvideo/category/list",
+                json!({
+                    "offset": request.offset,
+                    "total": "true",
+                    "limit": limit,
+                }),
+            ),
+            VideoTaxonomyKind::Groups => {
+                if request.offset != 0 {
+                    return Err(TuneWeaveError::invalid_request(
+                        "the NetEase video group taxonomy does not support offset",
+                    )
+                    .with_platform(Platform::Netease));
+                }
+                ("/api/cloudvideo/group/list", json!({}))
+            }
+        };
+        let response = client.request_weapi(path, payload).await?;
+        ensure_success(&response.body)?;
+        map_video_taxonomy_response(response.body, request, limit)
     }
 
     async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
@@ -1938,21 +1978,24 @@ impl MusicProvider for NeteaseProvider {
         subscribed: bool,
         account: Option<&str>,
     ) -> Result<SubscriptionResult> {
-        if kind != VideoResourceKind::Mv {
-            return Err(TuneWeaveError::invalid_request(
-                "NetEase only supports subscription changes for MV resources",
-            )
-            .with_platform(Platform::Netease)
-            .with_details(json!({ "kind": kind })));
-        }
-        let id = parse_numeric_id("MV", id)?;
         let account = account.unwrap_or("default");
         let client = self.client_for(Some(account))?;
-        require_authenticated_client(&client, "MV subscription writing")?;
-        let (path, payload) = netease_mv_subscription_request(id, subscribed);
+        require_authenticated_client(&client, "video subscription writing")?;
+        let (id, path, payload) = match kind {
+            VideoResourceKind::Mv => {
+                let numeric_id = parse_numeric_id("MV", id)?;
+                let (path, payload) = netease_mv_subscription_request(numeric_id, subscribed);
+                (numeric_id.to_string(), path, payload)
+            }
+            VideoResourceKind::Video => {
+                let id = validated_video_id(id, kind)?;
+                let (path, payload) = netease_video_subscription_request(&id, subscribed);
+                (id, path, payload)
+            }
+        };
         let response = client.request_weapi(path, payload).await?;
-        ensure_account_access(&client, &response.body, "MV subscription writing")?;
-        map_video_subscription_result(id, kind, subscribed, response.body)
+        ensure_account_access(&client, &response.body, "video subscription writing")?;
+        map_video_subscription_result(&id, kind, subscribed, response.body)
     }
 
     async fn artist_tracks(
@@ -8803,6 +8846,15 @@ fn netease_mv_subscription_request(id: u64, subscribed: bool) -> (&'static str, 
     )
 }
 
+fn netease_video_subscription_request(id: &str, subscribed: bool) -> (&'static str, Value) {
+    let path = if subscribed {
+        "/api/cloudvideo/video/sub"
+    } else {
+        "/api/cloudvideo/video/unsub"
+    };
+    (path, json!({ "id": id }))
+}
+
 fn netease_playlist_create_payload(request: &PlaylistCreateRequest) -> Result<Value> {
     let name = validate_playlist_name(&request.name)?;
     let privacy = match request.visibility {
@@ -10476,6 +10528,12 @@ fn netease_music_video_catalog_request(
 ) -> Result<(&'static str, Value)> {
     match request.catalog {
         MusicVideoCatalog::All => {
+            if request.group_id.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "the NetEase all MV catalog does not support a video group id",
+                )
+                .with_platform(Platform::Netease));
+            }
             let tags = json!({
                 "地区": netease_music_video_area(request.area.unwrap_or_default()),
                 "类型": netease_music_video_type(request.video_type.unwrap_or_default()),
@@ -10499,7 +10557,8 @@ fn netease_music_video_catalog_request(
                 )
                 .with_platform(Platform::Netease));
             }
-            if request.video_type.is_some() || request.order.is_some() {
+            if request.video_type.is_some() || request.order.is_some() || request.group_id.is_some()
+            {
                 return Err(TuneWeaveError::invalid_request(
                     "the NetEase latest MV catalog only supports the area filter",
                 )
@@ -10520,7 +10579,11 @@ fn netease_music_video_catalog_request(
             ))
         }
         MusicVideoCatalog::Exclusive => {
-            if request.area.is_some() || request.video_type.is_some() || request.order.is_some() {
+            if request.area.is_some()
+                || request.video_type.is_some()
+                || request.order.is_some()
+                || request.group_id.is_some()
+            {
                 return Err(TuneWeaveError::invalid_request(
                     "the NetEase exclusive MV catalog does not support area, type, or order filters",
                 )
@@ -10531,7 +10594,73 @@ fn netease_music_video_catalog_request(
                 json!({ "offset": request.offset, "limit": limit }),
             ))
         }
+        MusicVideoCatalog::TimelineAll => {
+            reject_video_timeline_filters(request, false)?;
+            Ok((
+                "/api/videotimeline/otherclient/get",
+                json!({
+                    "groupId": 0,
+                    "offset": request.offset,
+                    "need_preview_url": "true",
+                    "total": true,
+                }),
+            ))
+        }
+        MusicVideoCatalog::TimelineRecommended => {
+            reject_video_timeline_filters(request, false)?;
+            Ok((
+                "/api/videotimeline/get",
+                json!({
+                    "offset": request.offset,
+                    "filterLives": "[]",
+                    "withProgramInfo": "true",
+                    "needUrl": "1",
+                    "resolution": "480",
+                }),
+            ))
+        }
+        MusicVideoCatalog::Group => {
+            reject_video_timeline_filters(request, true)?;
+            let group_id = request
+                .group_id
+                .as_deref()
+                .ok_or_else(|| {
+                    TuneWeaveError::invalid_request(
+                        "the NetEase video group catalog requires group_id",
+                    )
+                    .with_platform(Platform::Netease)
+                })
+                .and_then(|id| parse_numeric_id("video group", id))?;
+            Ok((
+                "/api/videotimeline/videogroup/otherclient/get",
+                json!({
+                    "groupId": group_id,
+                    "offset": request.offset,
+                    "need_preview_url": "true",
+                    "total": true,
+                }),
+            ))
+        }
     }
+}
+
+fn reject_video_timeline_filters(
+    request: &MusicVideoListRequest,
+    group_allowed: bool,
+) -> Result<()> {
+    if request.area.is_some() || request.video_type.is_some() || request.order.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase video timelines do not support MV area, type, or order filters",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if !group_allowed && request.group_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "this NetEase video timeline does not support group_id",
+        )
+        .with_platform(Platform::Netease));
+    }
+    Ok(())
 }
 
 fn netease_music_video_area(area: MusicVideoArea) -> &'static str {
@@ -10561,6 +10690,155 @@ fn netease_music_video_order(order: MusicVideoOrder) -> &'static str {
         MusicVideoOrder::Hot => "最热",
         MusicVideoOrder::New => "最新",
     }
+}
+
+fn map_video_taxonomy_response(
+    response: Value,
+    request: &VideoTaxonomyRequest,
+    limit: u32,
+) -> Result<Page<VideoCatalogOption>> {
+    let raw_items = response
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase video taxonomy response is missing its data array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response.clone() }))
+        })?;
+    let items = raw_items
+        .into_iter()
+        .map(|raw| {
+            let id = raw.get("id").and_then(usable_resource_id).ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase video taxonomy item is missing a usable id",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "item": raw.clone() }))
+            })?;
+            let name = radio_text_field(&raw, &["name"]).ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase video taxonomy item is missing a name",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "item": raw.clone() }))
+            })?;
+            Ok(VideoCatalogOption {
+                id,
+                name,
+                url: radio_text_field(&raw, &["url"]),
+                selected: raw.get("selectTab").and_then(json_bool),
+                related_video_type: raw.get("relatedVideoType").and_then(json_scalar_string),
+                extensions: Extensions::from([("taxonomy_item".to_owned(), raw)]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let total = [response.get("count"), response.get("total")]
+        .into_iter()
+        .flatten()
+        .find_map(json_u64)
+        .or_else(|| (request.kind == VideoTaxonomyKind::Groups).then_some(u64::from(consumed)));
+    let has_more = [
+        response.get("hasMore"),
+        response.get("hasmore"),
+        response.get("more"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(json_bool)
+    .or_else(|| total.map(|total| u64::from(next_offset) < total))
+    .unwrap_or(false);
+    let limit_applied = request.kind == VideoTaxonomyKind::Categories && consumed <= limit;
+    let mut metadata = response;
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("data");
+    }
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: request.offset,
+            total,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("kind".to_owned(), json!(request.kind)),
+                ("limit_applied".to_owned(), json!(limit_applied)),
+                (
+                    "continuation_supported".to_owned(),
+                    json!(request.kind == VideoTaxonomyKind::Categories),
+                ),
+                ("response".to_owned(), metadata),
+            ]),
+        },
+    })
+}
+
+fn map_video_timeline_response(
+    response: Value,
+    request: &MusicVideoListRequest,
+    limit: u32,
+) -> Result<Page<Video>> {
+    let raw_items = match response.get("datas") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::Null) => Vec::new(),
+        _ => {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase video timeline response is missing its datas array",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "response": response.clone() })));
+        }
+    };
+    let items = raw_items
+        .into_iter()
+        .map(|raw| {
+            let mut video = map_cloud_search_video(raw.clone())?;
+            video.extensions.remove("search_item");
+            video.extensions.insert("timeline_item".to_owned(), raw);
+            Ok(video)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = request.offset.saturating_add(consumed);
+    let has_more = [
+        response.get("hasMore"),
+        response.get("hasmore"),
+        response.get("more"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(json_bool)
+    .unwrap_or(false);
+    let mut metadata = response;
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("datas");
+    }
+    let mut extensions = Extensions::from([
+        ("catalog".to_owned(), json!(request.catalog)),
+        ("limit_applied".to_owned(), json!(false)),
+        ("response".to_owned(), metadata),
+    ]);
+    insert_extension(&mut extensions, "group_id", request.group_id.clone());
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset: request.offset,
+            total: None,
+            next_offset: (has_more && consumed > 0).then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
 }
 
 fn map_music_video_catalog_response(
@@ -12348,12 +12626,12 @@ fn map_artist_subscription_result(
 }
 
 fn map_video_subscription_result(
-    id: u64,
+    id: &str,
     kind: VideoResourceKind,
     subscribed: bool,
     response: Value,
 ) -> Result<SubscriptionResult> {
-    let resource_ref = ResourceRef::new(Platform::Netease, id.to_string()).map_err(|error| {
+    let resource_ref = ResourceRef::new(Platform::Netease, id).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::UpstreamError,
             format!("NetEase returned an invalid MV id: {error}"),
@@ -20094,6 +20372,190 @@ mod tests {
     }
 
     #[test]
+    fn video_timeline_taxonomy_and_subscription_match_reference_modules() {
+        let categories = VideoTaxonomyRequest::new(VideoTaxonomyKind::Categories, 3, 6);
+        let category_page = map_video_taxonomy_response(
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 58100,
+                    "name": "现场",
+                    "url": "orpheus://video-group/58100",
+                    "selectTab": true,
+                    "relatedVideoType": "LIVE",
+                    "future": {"enabled": true}
+                }],
+                "hasMore": true
+            }),
+            &categories,
+            3,
+        )
+        .expect("map video categories");
+        assert_eq!(category_page.items[0].id, "58100");
+        assert_eq!(category_page.items[0].name, "现场");
+        assert_eq!(category_page.items[0].selected, Some(true));
+        assert_eq!(
+            category_page.items[0].related_video_type.as_deref(),
+            Some("LIVE")
+        );
+        assert_eq!(
+            category_page.items[0].extensions["taxonomy_item"]["future"]["enabled"],
+            true
+        );
+        assert_eq!(category_page.pagination.next_offset, Some(7));
+
+        let groups = VideoTaxonomyRequest::new(VideoTaxonomyKind::Groups, 99, 0);
+        let group_page = map_video_taxonomy_response(
+            json!({"code": 200, "data": [{"id": "1101", "name": "舞蹈"}]}),
+            &groups,
+            99,
+        )
+        .expect("map video groups");
+        assert_eq!(group_page.pagination.total, Some(1));
+        assert_eq!(group_page.pagination.next_offset, None);
+        assert_eq!(
+            group_page.pagination.extensions["continuation_supported"],
+            false
+        );
+        assert_eq!(group_page.pagination.extensions["limit_applied"], false);
+
+        let timeline = MusicVideoListRequest::new(MusicVideoCatalog::TimelineAll, 30, 8);
+        assert_eq!(
+            netease_music_video_catalog_request(&timeline, 30).expect("all video timeline"),
+            (
+                "/api/videotimeline/otherclient/get",
+                json!({
+                    "groupId": 0,
+                    "offset": 8,
+                    "need_preview_url": "true",
+                    "total": true
+                })
+            )
+        );
+        let recommended =
+            MusicVideoListRequest::new(MusicVideoCatalog::TimelineRecommended, 30, 16);
+        assert_eq!(
+            netease_music_video_catalog_request(&recommended, 30)
+                .expect("recommended video timeline"),
+            (
+                "/api/videotimeline/get",
+                json!({
+                    "offset": 16,
+                    "filterLives": "[]",
+                    "withProgramInfo": "true",
+                    "needUrl": "1",
+                    "resolution": "480"
+                })
+            )
+        );
+        let mut group = MusicVideoListRequest::new(MusicVideoCatalog::Group, 30, 24);
+        group.group_id = Some("58100".to_owned());
+        assert_eq!(
+            netease_music_video_catalog_request(&group, 30).expect("video group timeline"),
+            (
+                "/api/videotimeline/videogroup/otherclient/get",
+                json!({
+                    "groupId": 58100,
+                    "offset": 24,
+                    "need_preview_url": "true",
+                    "total": true
+                })
+            )
+        );
+
+        let page = map_video_timeline_response(
+            json!({
+                "code": 200,
+                "hasmore": true,
+                "rcmdLimit": 8,
+                "datas": [{
+                    "type": 1,
+                    "alg": "video_hot",
+                    "data": {
+                        "vid": "D1C2B3A4",
+                        "title": "现场视频",
+                        "description": "完整描述",
+                        "coverUrl": "https://example.test/video.jpg",
+                        "durationms": 223061,
+                        "playTime": 1234,
+                        "subscribed": true,
+                        "creator": [{"userId": 32953014, "nickname": "创作者"}]
+                    }
+                }]
+            }),
+            &timeline,
+            30,
+        )
+        .expect("map video timeline");
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:D1C2B3A4");
+        assert_eq!(page.items[0].subscribed, Some(true));
+        assert_eq!(
+            page.items[0].extensions["timeline_item"]["alg"],
+            "video_hot"
+        );
+        assert_eq!(page.pagination.next_offset, Some(9));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["limit_applied"], false);
+        assert!(
+            !page.pagination.extensions["response"]
+                .as_object()
+                .expect("timeline response metadata")
+                .contains_key("datas")
+        );
+
+        let empty_group = map_video_timeline_response(
+            json!({"code": 200, "datas": null, "hasmore": false, "rcmdLimit": 48}),
+            &group,
+            30,
+        )
+        .expect("map empty video group");
+        assert!(empty_group.items.is_empty());
+        assert_eq!(empty_group.pagination.next_offset, None);
+        assert!(!empty_group.pagination.has_more);
+        assert_eq!(
+            map_video_timeline_response(json!({"code": 200}), &group, 30)
+                .expect_err("missing timeline items")
+                .code,
+            ErrorCode::UpstreamError
+        );
+
+        assert_eq!(
+            netease_video_subscription_request("D1C2B3A4", true),
+            ("/api/cloudvideo/video/sub", json!({"id": "D1C2B3A4"}))
+        );
+        assert_eq!(
+            netease_video_subscription_request("D1C2B3A4", false),
+            ("/api/cloudvideo/video/unsub", json!({"id": "D1C2B3A4"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn video_timeline_rejects_unsupported_filter_combinations() {
+        let missing_group = MusicVideoListRequest::new(MusicVideoCatalog::Group, 30, 0);
+        assert_eq!(
+            netease_music_video_catalog_request(&missing_group, 30)
+                .expect_err("missing video group")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let mut filtered =
+            MusicVideoListRequest::new(MusicVideoCatalog::TimelineRecommended, 30, 0);
+        filtered.area = Some(MusicVideoArea::All);
+        assert_eq!(
+            netease_music_video_catalog_request(&filtered, 30)
+                .expect_err("timeline MV filter")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        let invalid_group_offset = VideoTaxonomyRequest::new(VideoTaxonomyKind::Groups, 99, 1);
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let error = MusicProvider::video_taxonomy(&provider, &invalid_group_offset)
+            .await
+            .expect_err("group taxonomy offset");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn music_video_catalog_rejects_controls_the_reference_module_cannot_apply() {
         let latest_offset = MusicVideoListRequest::new(MusicVideoCatalog::Latest, 30, 30);
         assert_eq!(
@@ -24165,6 +24627,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::Recommendations));
         assert!(capabilities.contains(&Capability::VideoRecommendations));
         assert!(capabilities.contains(&Capability::VideoCatalog));
+        assert!(capabilities.contains(&Capability::VideoTaxonomy));
         assert!(capabilities.contains(&Capability::VideoSubscriptionWrite));
         assert!(capabilities.contains(&Capability::PodcastEpisodeRecommendations));
         assert!(capabilities.contains(&Capability::AlbumDetail));
@@ -24449,7 +24912,7 @@ mod tests {
             .expect_err("missing MV account alias");
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         }
-        let unsupported = MusicProvider::set_video_subscription(
+        let ordinary_video = MusicProvider::set_video_subscription(
             &provider,
             "D1C2B3A4",
             VideoResourceKind::Video,
@@ -24457,8 +24920,8 @@ mod tests {
             Some("missing"),
         )
         .await
-        .expect_err("ordinary video subscription is unsupported by the MV module");
-        assert_eq!(unsupported.code, ErrorCode::InvalidRequest);
+        .expect_err("ordinary video subscription requires its selected account");
+        assert_eq!(ordinary_video.code, ErrorCode::AuthenticationRequired);
 
         let error = MusicProvider::account_videos(
             &provider,
