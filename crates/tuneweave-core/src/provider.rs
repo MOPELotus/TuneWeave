@@ -36,16 +36,16 @@ use crate::{
     PodcastEpisodeRecommendationRequest, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
     PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
-    RadioStation, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, StreamBatch, StreamOutcome, StreamRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyRequest,
+    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
+    StreamRequest, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackEntitlement, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -244,6 +244,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::RadioStyleCatalog,
+        ))
+    }
+
+    async fn radio_playback_queue(
+        &self,
+        _id: &str,
+        _request: &RadioPlaybackQueueRequest,
+    ) -> Result<RadioPlaybackQueue> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RadioPlaybackQueue,
         ))
     }
 

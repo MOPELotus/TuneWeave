@@ -61,18 +61,19 @@ use tuneweave_core::{
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
     PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle,
-    RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
     VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
     VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
@@ -601,6 +602,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
             Capability::RadioStyleCatalog,
+            Capability::RadioPlaybackQueue,
             Capability::PodcastCategories,
             Capability::PodcastCategoryRecommendations,
             Capability::PodcastList,
@@ -1113,6 +1115,17 @@ impl MusicProvider for NeteaseProvider {
         let client = self.client_for(request.account.as_deref())?;
         let response = client.request_api(path, payload).await?;
         map_netease_radio_style_catalog(response.body, request)
+    }
+
+    async fn radio_playback_queue(
+        &self,
+        id: &str,
+        request: &RadioPlaybackQueueRequest,
+    ) -> Result<RadioPlaybackQueue> {
+        let (path, payload, source, channel_id) = netease_difm_playback_queue_request(id, request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_api(path, payload).await?;
+        map_netease_difm_playback_queue(response.body, source, channel_id, request)
     }
 
     async fn radio_station(&self, id: &str, account: Option<&str>) -> Result<RadioStation> {
@@ -6552,6 +6565,191 @@ fn difm_item_error(scope: &str, field: &str, raw: &Value) -> TuneWeaveError {
     )
     .with_platform(Platform::Netease)
     .with_details(json!({ "item": raw }))
+}
+
+fn netease_difm_playback_queue_request(
+    id: &str,
+    request: &RadioPlaybackQueueRequest,
+) -> Result<(&'static str, Value, u32, u32)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "DiFM playback queue limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "limit": request.limit })));
+    }
+    let (source, channel_id) = parse_netease_difm_channel_id(id)?;
+    Ok((
+        "/api/dj/difm/playing/tracks/list",
+        json!({
+            "limit": request.limit,
+            "source": source,
+            "channelId": channel_id
+        }),
+        source,
+        channel_id,
+    ))
+}
+
+fn parse_netease_difm_channel_id(id: &str) -> Result<(u32, u32)> {
+    let parts = id.split(':').collect::<Vec<_>>();
+    let ["difm", source, channel_id] = parts.as_slice() else {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase DiFM channel references must use difm:{source}:{channel_id}",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": id })));
+    };
+    let source = source.parse::<u32>().map_err(|_| {
+        TuneWeaveError::invalid_request("NetEase DiFM channel source must be an integer")
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "id": id, "source": source }))
+    })?;
+    if source > 2 {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase DiFM channel source must be 0, 1, or 2",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": id, "source": source })));
+    }
+    let channel_id = channel_id.parse::<u32>().map_err(|_| {
+        TuneWeaveError::invalid_request("NetEase DiFM channel id must be a positive integer")
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "id": id, "channel_id": channel_id }))
+    })?;
+    if channel_id == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase DiFM channel id must be a positive integer",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "id": id, "channel_id": channel_id })));
+    }
+    Ok((source, channel_id))
+}
+
+fn map_netease_difm_playback_queue(
+    body: Value,
+    source: u32,
+    channel_id: u32,
+    request: &RadioPlaybackQueueRequest,
+) -> Result<RadioPlaybackQueue> {
+    ensure_success(&body)?;
+    let data = body
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| difm_playback_error("response did not contain its data object", &body))?;
+    let raw_items = data
+        .get("list")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| difm_playback_error("response did not contain its list array", &body))?;
+    let station_ref = netease_difm_station_ref(source, channel_id)?;
+    let items = raw_items
+        .into_iter()
+        .map(|raw| map_netease_difm_playback_item(raw, source, channel_id, &station_ref))
+        .collect::<Result<Vec<_>>>()?;
+    let total = data.get("total").and_then(json_u64);
+    let mut extensions = Extensions::new();
+    extensions.insert("requested_limit".to_owned(), json!(request.limit));
+    extensions.insert("response".to_owned(), body);
+    Ok(RadioPlaybackQueue {
+        station_ref,
+        items,
+        total,
+        extensions,
+    })
+}
+
+fn map_netease_difm_playback_item(
+    raw: Value,
+    source: u32,
+    channel_id: u32,
+    station_ref: &ResourceRef,
+) -> Result<RadioPlaybackItem> {
+    validate_difm_source(&raw, source, "playback item")?;
+    let item_channel_id = difm_u32_field(&raw, "channelId", "playback item")?;
+    if item_channel_id != channel_id {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase DiFM playback item channel conflicted with its queue",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "expected_channel_id": channel_id,
+            "actual_channel_id": item_channel_id,
+            "item": raw
+        })));
+    }
+    let track_id = raw
+        .get("id")
+        .and_then(json_scalar_string)
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty() && id != "0")
+        .ok_or_else(|| difm_item_error("playback item", "id", &raw))?;
+    let title = difm_required_text(&raw, "name", "playback item")?;
+    let item_ref = ResourceRef::new(
+        Platform::Netease,
+        format!("difm-track:{source}:{channel_id}:{track_id}"),
+    )
+    .map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid DiFM playback item id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "item": raw.clone() }))
+    })?;
+    let duration_ms = raw
+        .get("duration")
+        .and_then(json_u64)
+        .map(|seconds| {
+            seconds.checked_mul(1_000).ok_or_else(|| {
+                difm_item_error("playback item", "duration within milliseconds range", &raw)
+            })
+        })
+        .transpose()?;
+    let waveform = match raw.get("wave") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .ok_or_else(|| difm_item_error("playback item", "numeric waveform", &raw))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(difm_item_error("playback item", "waveform array", &raw));
+        }
+    };
+    let mut item = RadioPlaybackItem::new(item_ref, station_ref.clone(), title);
+    item.artist = difm_optional_text(&raw, "artist");
+    item.cover_url = difm_optional_text(&raw, "cover");
+    item.blur_cover_url = difm_optional_text(&raw, "blurCover");
+    item.stream_url = difm_optional_text(&raw, "audio");
+    item.duration_ms = duration_ms;
+    item.waveform = waveform;
+    item.extensions.insert("difm_track".to_owned(), raw);
+    Ok(item)
+}
+
+fn netease_difm_station_ref(source: u32, channel_id: u32) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Netease, format!("difm:{source}:{channel_id}")).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid DiFM channel id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })
+}
+
+fn difm_playback_error(message: &str, response: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase DiFM playback queue {message}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": response }))
 }
 
 fn map_radio_station_list_response(
@@ -19103,6 +19301,156 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_maps_difm_playback_queue_with_direct_audio_and_waveform() {
+        let request = RadioPlaybackQueueRequest {
+            limit: 5,
+            account: Some("radio-user".to_owned()),
+        };
+        assert_eq!(
+            netease_difm_playback_queue_request("difm:0:10505", &request)
+                .expect("build DiFM playback request"),
+            (
+                "/api/dj/difm/playing/tracks/list",
+                json!({ "limit": 5, "source": 0, "channelId": 10505 }),
+                0,
+                10505
+            )
+        );
+
+        let queue = map_netease_difm_playback_queue(
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "artist": "Max Freegrant & Slow Fish",
+                        "audio": "https://example.test/green-forest.mp3",
+                        "blurCover": "https://example.test/green-forest-blur.jpg",
+                        "channelId": 10505,
+                        "cover": "https://example.test/green-forest.jpg",
+                        "duration": 351,
+                        "id": 199222851,
+                        "name": "Green Forest (Dezza & Rylan Taggart Remix)",
+                        "offset": 0,
+                        "source": 0,
+                        "wave": [0.0003, 0.2434, 0.0457],
+                        "futureField": { "kept": true }
+                    }],
+                    "total": "1"
+                },
+                "message": ""
+            }),
+            0,
+            10505,
+            &request,
+        )
+        .expect("map DiFM playback queue");
+
+        assert_eq!(queue.station_ref.to_string(), "netease:difm:0:10505");
+        assert_eq!(queue.total, Some(1));
+        assert_eq!(queue.items.len(), 1);
+        let item = &queue.items[0];
+        assert_eq!(
+            item.resource_ref.to_string(),
+            "netease:difm-track:0:10505:199222851"
+        );
+        assert_eq!(item.station_ref, queue.station_ref);
+        assert_eq!(item.artist.as_deref(), Some("Max Freegrant & Slow Fish"));
+        assert_eq!(item.duration_ms, Some(351_000));
+        assert_eq!(item.waveform, vec![0.0003, 0.2434, 0.0457]);
+        assert_eq!(
+            item.stream_url.as_deref(),
+            Some("https://example.test/green-forest.mp3")
+        );
+        assert_eq!(item.extensions["difm_track"]["offset"], 0);
+        assert_eq!(item.extensions["difm_track"]["futureField"]["kept"], true);
+        assert_eq!(queue.extensions["requested_limit"], 5);
+        assert_eq!(queue.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn difm_playback_queue_rejects_invalid_refs_limits_and_conflicting_items() {
+        for (id, limit) in [
+            ("10505", 5),
+            ("difm:3:10505", 5),
+            ("difm:0:0", 5),
+            ("difm:0:10505:extra", 5),
+            ("difm:0:10505", 0),
+            ("difm:0:10505", 101),
+        ] {
+            assert_eq!(
+                netease_difm_playback_queue_request(
+                    id,
+                    &RadioPlaybackQueueRequest {
+                        limit,
+                        account: None,
+                    },
+                )
+                .expect_err("invalid DiFM playback request")
+                .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+
+        let request = RadioPlaybackQueueRequest::default();
+        for response in [
+            json!({ "code": 200, "data": [] }),
+            json!({ "code": 200, "data": {} }),
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": " ",
+                        "name": "Missing id",
+                        "source": 0,
+                        "channelId": 10505
+                    }]
+                }
+            }),
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": 1,
+                        "name": "Wrong source",
+                        "source": 1,
+                        "channelId": 10505
+                    }]
+                }
+            }),
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": 1,
+                        "name": "Wrong channel",
+                        "source": 0,
+                        "channelId": 1
+                    }]
+                }
+            }),
+            json!({
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": 1,
+                        "name": "Bad wave",
+                        "source": 0,
+                        "channelId": 10505,
+                        "wave": [0.1, "bad"]
+                    }]
+                }
+            }),
+        ] {
+            assert_eq!(
+                map_netease_difm_playback_queue(response, 0, 10505, &request)
+                    .expect_err("invalid DiFM playback response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn podcast_requests_match_reference_modules() {
         assert_eq!(
             netease_podcast_categories_request(PodcastTaxonomyKind::All),
@@ -26112,6 +26460,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioStationList));
         assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
         assert!(capabilities.contains(&Capability::RadioStyleCatalog));
+        assert!(capabilities.contains(&Capability::RadioPlaybackQueue));
         assert!(capabilities.contains(&Capability::PodcastCategories));
         assert!(capabilities.contains(&Capability::PodcastList));
         assert!(capabilities.contains(&Capability::PodcastDetail));
@@ -27857,6 +28206,30 @@ mod tests {
                 })
         }));
         assert_eq!(catalog.extensions["response"]["code"], 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_difm_playback_queue_returns_direct_playable_items() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = RadioPlaybackQueueRequest::new(5);
+        let queue = MusicProvider::radio_playback_queue(&provider, "difm:0:10505", &request)
+            .await
+            .expect("live DiFM playback queue");
+        assert_eq!(queue.station_ref.to_string(), "netease:difm:0:10505");
+        assert_eq!(queue.items.len(), 5);
+        assert_eq!(queue.total, Some(5));
+        assert!(queue.items.iter().all(|item| {
+            item.resource_ref
+                .to_string()
+                .starts_with("netease:difm-track:0:10505:")
+                && item.station_ref == queue.station_ref
+                && !item.title.is_empty()
+                && item.stream_url.is_some()
+                && item.duration_ms.is_some_and(|duration| duration > 0)
+                && !item.waveform.is_empty()
+        }));
+        assert_eq!(queue.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]

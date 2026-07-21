@@ -61,20 +61,20 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
-    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -226,6 +226,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/taxonomy", get(radio_taxonomy))
         .route("/radio/styles", get(radio_styles))
         .route("/radio/stations", get(radio_stations))
+        .route(
+            "/radio/stations/{reference}/tracks",
+            get(radio_playback_queue),
+        )
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/podcasts/categories", get(podcast_categories))
         .route(
@@ -1034,6 +1038,43 @@ async fn radio_styles(
         })
         .await?;
     let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RadioPlaybackQueueParams {
+    account: Option<String>,
+    limit: Option<String>,
+}
+
+async fn radio_playback_queue(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<RadioPlaybackQueueParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RadioPlaybackQueue>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = optional_trimmed(params.account);
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 5)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let provider = state.registry.require(platform)?;
+    let queue = provider
+        .radio_playback_queue(
+            reference.id(),
+            &RadioPlaybackQueueRequest {
+                limit,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(queue).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -9011,8 +9052,8 @@ mod tests {
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
         MusicProvider, Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation,
-        ProviderQrStart, RadioCatalogOption, RadioStyle, RadioStyleSource, Result, SearchQuery,
-        StreamRequest, VideoResolution,
+        ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
+        Result, SearchQuery, StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -9062,6 +9103,7 @@ mod tests {
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
                 Capability::RadioStyleCatalog,
+                Capability::RadioPlaybackQueue,
                 Capability::PodcastCategories,
                 Capability::PodcastCategoryRecommendations,
                 Capability::PodcastList,
@@ -9576,6 +9618,33 @@ mod tests {
                     }],
                     extensions: Default::default(),
                 }],
+                extensions,
+            })
+        }
+
+        async fn radio_playback_queue(
+            &self,
+            id: &str,
+            request: &RadioPlaybackQueueRequest,
+        ) -> Result<RadioPlaybackQueue> {
+            let station_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid mock DiFM station reference");
+            let mut item = RadioPlaybackItem::new(
+                ResourceRef::new(Platform::Netease, "difm-track:0:10505:199222851")
+                    .expect("valid mock DiFM item reference"),
+                station_ref.clone(),
+                "Green Forest (Dezza & Rylan Taggart Remix)",
+            );
+            item.artist = Some("Max Freegrant & Slow Fish".to_owned());
+            item.stream_url = Some("https://example.test/green-forest.mp3".to_owned());
+            item.duration_ms = Some(351_000);
+            item.waveform = vec![0.0003, 0.2434];
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("request".to_owned(), json!(request));
+            Ok(RadioPlaybackQueue {
+                station_ref,
+                items: vec![item],
+                total: Some(1),
                 extensions,
             })
         }
@@ -13612,6 +13681,82 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
             assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn radio_playback_queue_uses_station_reference_account_and_limit() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/radio/stations/netease:difm:0:10505/tracks?account=radio-user&limit=7",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["station_ref"], "netease:difm:0:10505");
+        assert_eq!(
+            json["data"]["items"][0]["ref"],
+            "netease:difm-track:0:10505:199222851"
+        );
+        assert_eq!(
+            json["data"]["items"][0]["station_ref"],
+            "netease:difm:0:10505"
+        );
+        assert_eq!(json["data"]["items"][0]["duration_ms"], 351_000);
+        assert_eq!(json["data"]["items"][0]["waveform"][1], 0.2434);
+        assert_eq!(json["data"]["extensions"]["request"]["limit"], 7);
+        assert_eq!(
+            json["data"]["extensions"]["request"]["account"],
+            "radio-user"
+        );
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "radio-user");
+    }
+
+    #[tokio::test]
+    async fn radio_playback_queue_rejects_bad_references_limits_and_queries() {
+        for (path, expected_status, expected_code) in [
+            (
+                "/v1/radio/stations/missing-platform/tracks",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/radio/stations/qq:difm:0:10505/tracks",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "platform_unavailable",
+            ),
+            (
+                "/v1/radio/stations/netease:difm:0:10505/tracks?limit=0",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/radio/stations/netease:difm:0:10505/tracks?limit=101",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/radio/stations/netease:difm:0:10505/tracks?limit=bad",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "/v1/radio/stations/netease:difm:0:10505/tracks?unknown=true",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, expected_status, "path: {path}, body: {json}");
+            assert_eq!(json["error"]["code"], expected_code, "path: {path}");
+        }
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/radio/stations/netease:difm:0:10505/tracks",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["request"]["limit"], 5);
     }
 
     #[tokio::test]

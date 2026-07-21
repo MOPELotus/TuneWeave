@@ -792,6 +792,77 @@ pub struct RadioStyleCatalog {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RadioPlaybackQueueRequest {
+    pub limit: u32,
+    pub account: Option<String>,
+}
+
+impl RadioPlaybackQueueRequest {
+    #[must_use]
+    pub const fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            account: None,
+        }
+    }
+}
+
+impl Default for RadioPlaybackQueueRequest {
+    fn default() -> Self {
+        Self::new(5)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioPlaybackItem {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub station_ref: ResourceRef,
+    pub title: String,
+    pub artist: Option<String>,
+    pub cover_url: Option<String>,
+    pub blur_cover_url: Option<String>,
+    pub stream_url: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub waveform: Vec<f64>,
+    pub extensions: Extensions,
+}
+
+impl RadioPlaybackItem {
+    #[must_use]
+    pub fn new(
+        resource_ref: ResourceRef,
+        station_ref: ResourceRef,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            platform: resource_ref.platform(),
+            id: resource_ref.id().to_owned(),
+            resource_ref,
+            station_ref,
+            title: title.into(),
+            artist: None,
+            cover_url: None,
+            blur_cover_url: None,
+            stream_url: None,
+            duration_ms: None,
+            waveform: Vec::new(),
+            extensions: Extensions::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioPlaybackQueue {
+    pub station_ref: ResourceRef,
+    pub items: Vec<RadioPlaybackItem>,
+    pub total: Option<u64>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RadioStation {
     #[serde(rename = "ref")]
@@ -3321,6 +3392,40 @@ mod tests {
             "difm:0:10505"
         );
         assert_eq!(RadioStyleCatalogRequest::default().sources, vec![0]);
+    }
+
+    #[test]
+    fn radio_playback_queue_keeps_station_item_and_direct_stream_distinct() {
+        let station_ref =
+            ResourceRef::new(Platform::Netease, "difm:0:10505").expect("valid station reference");
+        let item_ref = ResourceRef::new(Platform::Netease, "difm-track:0:10505:199222851")
+            .expect("valid playback item reference");
+        let mut item = RadioPlaybackItem::new(
+            item_ref,
+            station_ref.clone(),
+            "Green Forest (Dezza & Rylan Taggart Remix)",
+        );
+        item.artist = Some("Max Freegrant & Slow Fish".to_owned());
+        item.stream_url = Some("https://example.test/difm.mp3".to_owned());
+        item.duration_ms = Some(351_000);
+        item.waveform = vec![0.0003, 0.2434];
+        let queue = RadioPlaybackQueue {
+            station_ref,
+            items: vec![item],
+            total: Some(1),
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(queue).expect("serialize radio playback queue");
+        assert_eq!(value["station_ref"], "netease:difm:0:10505");
+        assert_eq!(
+            value["items"][0]["ref"],
+            "netease:difm-track:0:10505:199222851"
+        );
+        assert_eq!(value["items"][0]["station_ref"], "netease:difm:0:10505");
+        assert_eq!(value["items"][0]["duration_ms"], 351_000);
+        assert_eq!(value["items"][0]["waveform"][1], 0.2434);
+        assert_eq!(RadioPlaybackQueueRequest::default().limit, 5);
     }
 
     #[test]
