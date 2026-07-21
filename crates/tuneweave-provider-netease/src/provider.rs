@@ -61,7 +61,8 @@ use tuneweave_core::{
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
     PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy,
+    RadioCatalogOption, RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
     SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
@@ -599,6 +600,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationDetail,
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
+            Capability::RadioStyleCatalog,
             Capability::PodcastCategories,
             Capability::PodcastCategoryRecommendations,
             Capability::PodcastList,
@@ -1101,6 +1103,16 @@ impl MusicProvider for NeteaseProvider {
             regions,
             extensions,
         })
+    }
+
+    async fn radio_style_catalog(
+        &self,
+        request: &RadioStyleCatalogRequest,
+    ) -> Result<RadioStyleCatalog> {
+        let (path, payload) = netease_radio_style_catalog_request(request)?;
+        let client = self.client_for(request.account.as_deref())?;
+        let response = client.request_api(path, payload).await?;
+        map_netease_radio_style_catalog(response.body, request)
     }
 
     async fn radio_station(&self, id: &str, account: Option<&str>) -> Result<RadioStation> {
@@ -6345,6 +6357,201 @@ fn netease_radio_station_list_payload(request: &RadioStationListRequest) -> Resu
         "lastId": last_id,
         "score": score
     }))
+}
+
+fn netease_radio_style_catalog_request(
+    request: &RadioStyleCatalogRequest,
+) -> Result<(&'static str, Value)> {
+    if request.sources.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "DiFM sources must contain at least one value",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if let Some(source) = request.sources.iter().copied().find(|source| *source > 2) {
+        return Err(
+            TuneWeaveError::invalid_request("DiFM sources must only contain 0, 1, or 2")
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "source": source, "allowed": [0, 1, 2] })),
+        );
+    }
+    Ok((
+        "/api/dj/difm/all/style/channel/v2",
+        json!({ "sources": serde_json::to_string(&request.sources).expect("u32 list serializes") }),
+    ))
+}
+
+fn map_netease_radio_style_catalog(
+    body: Value,
+    request: &RadioStyleCatalogRequest,
+) -> Result<RadioStyleCatalog> {
+    ensure_success(&body)?;
+    let raw_sources = body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| difm_catalog_error("response did not contain its data array", &body))?;
+    let sources = raw_sources
+        .into_iter()
+        .map(map_netease_radio_style_source)
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("requested_sources".to_owned(), json!(request.sources));
+    extensions.insert("response".to_owned(), body);
+    Ok(RadioStyleCatalog {
+        sources,
+        extensions,
+    })
+}
+
+fn map_netease_radio_style_source(raw: Value) -> Result<RadioStyleSource> {
+    let source = difm_u32_field(&raw, "source", "source")?;
+    let raw_styles = raw
+        .get("styles")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| difm_item_error("source", "styles array", &raw))?;
+    let styles = raw_styles
+        .into_iter()
+        .map(|style| map_netease_radio_style(style, source))
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("difm_source".to_owned(), raw);
+    Ok(RadioStyleSource {
+        id: source,
+        styles,
+        extensions,
+    })
+}
+
+fn map_netease_radio_style(raw: Value, source: u32) -> Result<RadioStyle> {
+    let style_id = difm_u32_field(&raw, "id", "style")?;
+    validate_difm_source(&raw, source, "style")?;
+    let name = difm_required_text(&raw, "name", "style")?;
+    let raw_channels = raw
+        .get("channels")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| difm_item_error("style", "channels array", &raw))?;
+    let channels = raw_channels
+        .into_iter()
+        .map(|channel| map_netease_difm_channel(channel, source, style_id, &name))
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert("difm_style".to_owned(), raw.clone());
+    extensions.insert("source".to_owned(), json!(source));
+    extensions.insert("style_id".to_owned(), json!(style_id));
+    Ok(RadioStyle {
+        id: format!("difm:{source}:{style_id}"),
+        name,
+        localized_name: difm_optional_text(&raw, "chineseName"),
+        description: difm_optional_text(&raw, "description").unwrap_or_default(),
+        channels,
+        extensions,
+    })
+}
+
+fn map_netease_difm_channel(
+    raw: Value,
+    source: u32,
+    style_id: u32,
+    style_name: &str,
+) -> Result<RadioStation> {
+    let channel_id = difm_u32_field(&raw, "id", "channel")?;
+    validate_difm_source(&raw, source, "channel")?;
+    let name = difm_required_text(&raw, "name", "channel")?;
+    let provider_id = format!("difm:{source}:{channel_id}");
+    let reference = ResourceRef::new(Platform::Netease, &provider_id).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase returned an invalid DiFM channel id: {error}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "channel": raw.clone() }))
+    })?;
+    let mut station = RadioStation::new(reference, name);
+    station.description = difm_optional_text(&raw, "description").unwrap_or_default();
+    station.cover_url = difm_optional_text(&raw, "cover");
+    station.category = Some(style_name.to_owned());
+    station.subscribed = raw
+        .get("subed")
+        .and_then(json_bool)
+        .or_else(|| raw.get("subscribed").and_then(json_bool));
+    station
+        .extensions
+        .insert("difm_channel".to_owned(), raw.clone());
+    station
+        .extensions
+        .insert("source".to_owned(), json!(source));
+    station
+        .extensions
+        .insert("style_id".to_owned(), json!(style_id));
+    station
+        .extensions
+        .insert("channel_id".to_owned(), json!(channel_id));
+    if let Some(localized_name) = difm_optional_text(&raw, "chineseName") {
+        station
+            .extensions
+            .insert("localized_name".to_owned(), json!(localized_name));
+    }
+    Ok(station)
+}
+
+fn validate_difm_source(raw: &Value, expected: u32, scope: &str) -> Result<()> {
+    let Some(value) = raw.get("source").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let actual = json_u64(value)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| difm_item_error(scope, "valid source", raw))?;
+    if actual != expected {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase DiFM {scope} source conflicted with its parent"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(
+            json!({ "expected_source": expected, "actual_source": actual, "item": raw }),
+        ));
+    }
+    Ok(())
+}
+
+fn difm_u32_field(raw: &Value, field: &str, scope: &str) -> Result<u32> {
+    raw.get(field)
+        .and_then(json_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| difm_item_error(scope, field, raw))
+}
+
+fn difm_required_text(raw: &Value, field: &str, scope: &str) -> Result<String> {
+    difm_optional_text(raw, field).ok_or_else(|| difm_item_error(scope, field, raw))
+}
+
+fn difm_optional_text(raw: &Value, field: &str) -> Option<String> {
+    raw.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn difm_catalog_error(message: &str, response: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase DiFM style catalog {message}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "response": response }))
+}
+
+fn difm_item_error(scope: &str, field: &str, raw: &Value) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase DiFM {scope} did not contain a usable {field}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "item": raw }))
 }
 
 fn map_radio_station_list_response(
@@ -18763,6 +18970,139 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_maps_difm_style_catalog_without_flattening_sources() {
+        let request = RadioStyleCatalogRequest {
+            sources: vec![0, 1, 2],
+            account: Some("radio-user".to_owned()),
+        };
+        assert_eq!(
+            netease_radio_style_catalog_request(&request).expect("build DiFM catalog request"),
+            (
+                "/api/dj/difm/all/style/channel/v2",
+                json!({ "sources": "[0,1,2]" })
+            )
+        );
+
+        let catalog = map_netease_radio_style_catalog(
+            json!({
+                "code": 200,
+                "data": [{
+                    "source": 0,
+                    "styles": [{
+                        "id": 1020,
+                        "name": "New",
+                        "chineseName": "新晋",
+                        "description": "New electronic channels",
+                        "source": 0,
+                        "channels": [{
+                            "id": 10505,
+                            "name": "Deep Progressive House",
+                            "chineseName": "深度前卫浩室",
+                            "description": "A continuous progressive mix",
+                            "cover": "https://example.test/10505.jpg",
+                            "blurCover": "https://example.test/10505-blur.jpg",
+                            "source": 0,
+                            "futureField": { "kept": true }
+                        }],
+                        "futureStyle": true
+                    }]
+                }, {
+                    "source": "1",
+                    "styles": [{
+                        "id": "1192",
+                        "name": "Composers",
+                        "source": 1,
+                        "channels": [{
+                            "id": "11380",
+                            "name": "Mozart",
+                            "source": 1
+                        }]
+                    }]
+                }]
+            }),
+            &request,
+        )
+        .expect("map DiFM catalog");
+
+        assert_eq!(catalog.sources.len(), 2);
+        assert_eq!(catalog.sources[0].id, 0);
+        assert_eq!(catalog.sources[0].styles[0].id, "difm:0:1020");
+        assert_eq!(
+            catalog.sources[0].styles[0].localized_name.as_deref(),
+            Some("新晋")
+        );
+        let electronic = &catalog.sources[0].styles[0].channels[0];
+        assert_eq!(electronic.resource_ref.to_string(), "netease:difm:0:10505");
+        assert_eq!(electronic.id, "difm:0:10505");
+        assert_eq!(electronic.category.as_deref(), Some("New"));
+        assert_eq!(electronic.extensions["localized_name"], "深度前卫浩室");
+        assert_eq!(
+            electronic.extensions["difm_channel"]["futureField"]["kept"],
+            true
+        );
+        assert_eq!(catalog.sources[1].styles[0].id, "difm:1:1192");
+        assert_eq!(
+            catalog.sources[1].styles[0].channels[0]
+                .resource_ref
+                .to_string(),
+            "netease:difm:1:11380"
+        );
+        assert_eq!(catalog.extensions["requested_sources"], json!([0, 1, 2]));
+        assert_eq!(catalog.extensions["response"]["code"], 200);
+    }
+
+    #[test]
+    fn difm_style_catalog_rejects_invalid_requests_and_conflicting_hierarchy() {
+        for sources in [vec![], vec![3]] {
+            let request = RadioStyleCatalogRequest {
+                sources,
+                account: None,
+            };
+            assert_eq!(
+                netease_radio_style_catalog_request(&request)
+                    .expect_err("invalid DiFM source request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+
+        for response in [
+            json!({ "code": 200, "data": {} }),
+            json!({ "code": 200, "data": [{ "source": 0 }] }),
+            json!({
+                "code": 200,
+                "data": [{
+                    "source": 0,
+                    "styles": [{
+                        "id": 1020,
+                        "name": "New",
+                        "source": 1,
+                        "channels": []
+                    }]
+                }]
+            }),
+            json!({
+                "code": 200,
+                "data": [{
+                    "source": 0,
+                    "styles": [{
+                        "id": 1020,
+                        "name": "New",
+                        "channels": [{ "id": 10505, "name": "Channel", "source": 2 }]
+                    }]
+                }]
+            }),
+        ] {
+            assert_eq!(
+                map_netease_radio_style_catalog(response, &RadioStyleCatalogRequest::default())
+                    .expect_err("invalid DiFM catalog response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn podcast_requests_match_reference_modules() {
         assert_eq!(
             netease_podcast_categories_request(PodcastTaxonomyKind::All),
@@ -25771,6 +26111,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::RadioStationDetail));
         assert!(capabilities.contains(&Capability::RadioStationList));
         assert!(capabilities.contains(&Capability::RadioStationSubscriptionWrite));
+        assert!(capabilities.contains(&Capability::RadioStyleCatalog));
         assert!(capabilities.contains(&Capability::PodcastCategories));
         assert!(capabilities.contains(&Capability::PodcastList));
         assert!(capabilities.contains(&Capability::PodcastDetail));
@@ -27480,6 +27821,42 @@ mod tests {
                 .iter()
                 .any(|region| region.id == "407" && region.name == "网络台")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_difm_style_catalog_preserves_all_requested_sources() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let request = RadioStyleCatalogRequest {
+            sources: vec![0, 1, 2],
+            account: None,
+        };
+        let catalog = MusicProvider::radio_style_catalog(&provider, &request)
+            .await
+            .expect("live DiFM style catalog");
+        assert_eq!(
+            catalog
+                .sources
+                .iter()
+                .map(|source| source.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(catalog.sources.iter().all(|source| {
+            !source.styles.is_empty()
+                && source.styles.iter().all(|style| {
+                    !style.id.is_empty()
+                        && !style.name.is_empty()
+                        && !style.channels.is_empty()
+                        && style.channels.iter().all(|channel| {
+                            channel
+                                .resource_ref
+                                .to_string()
+                                .starts_with(&format!("netease:difm:{}:", source.id))
+                        })
+                })
+        }));
+        assert_eq!(catalog.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]

@@ -35,6 +35,7 @@ pub enum Capability {
     RadioStationDetail,
     RadioStationList,
     RadioStationSubscriptionWrite,
+    RadioStyleCatalog,
     PodcastCategories,
     PodcastCategoryRecommendations,
     PodcastList,

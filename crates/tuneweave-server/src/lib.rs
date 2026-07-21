@@ -62,18 +62,19 @@ use tuneweave_core::{
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
     PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
+    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
+    StreamResolver, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -223,6 +224,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/banners", get(banners))
         .route("/radio/taxonomy", get(radio_taxonomy))
+        .route("/radio/styles", get(radio_styles))
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/podcasts/categories", get(podcast_categories))
@@ -960,6 +962,78 @@ async fn radio_taxonomy(
         })
         .await?;
     let mut response = ApiResponse::new(taxonomy).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RadioStyleCatalogParams {
+    platform: Option<String>,
+    account: Option<String>,
+    sources: Option<String>,
+}
+
+fn parse_radio_style_sources(value: Option<&str>) -> Result<Vec<u32>, TuneWeaveError> {
+    let Some(value) = value else {
+        return Ok(vec![0]);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "sources must not be empty when provided",
+        ));
+    }
+    let sources = if value.starts_with('[') {
+        serde_json::from_str::<Vec<u32>>(value).map_err(|error| {
+            TuneWeaveError::invalid_request(format!(
+                "sources must be a JSON integer array: {error}"
+            ))
+        })?
+    } else {
+        value
+            .split(',')
+            .map(|source| {
+                let source = source.trim();
+                source.parse::<u32>().map_err(|_| {
+                    TuneWeaveError::invalid_request(format!(
+                        "sources must contain only integer values: {source}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if sources.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "sources must contain at least one value",
+        ));
+    }
+    if let Some(source) = sources.iter().copied().find(|source| *source > 2) {
+        return Err(
+            TuneWeaveError::invalid_request("sources must only contain 0, 1, or 2")
+                .with_details(json!({ "source": source, "allowed": [0, 1, 2] })),
+        );
+    }
+    Ok(sources)
+}
+
+async fn radio_styles(
+    State(state): State<AppState>,
+    params: Result<Query<RadioStyleCatalogParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RadioStyleCatalog>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let catalog = provider
+        .radio_style_catalog(&RadioStyleCatalogRequest {
+            sources: parse_radio_style_sources(params.sources.as_deref())?,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(catalog).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -8937,7 +9011,8 @@ mod tests {
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
         MusicProvider, Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation,
-        ProviderQrStart, RadioCatalogOption, Result, SearchQuery, StreamRequest, VideoResolution,
+        ProviderQrStart, RadioCatalogOption, RadioStyle, RadioStyleSource, Result, SearchQuery,
+        StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -8986,6 +9061,7 @@ mod tests {
                 Capability::RadioStationDetail,
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
+                Capability::RadioStyleCatalog,
                 Capability::PodcastCategories,
                 Capability::PodcastCategoryRecommendations,
                 Capability::PodcastList,
@@ -9468,6 +9544,36 @@ mod tests {
                 regions: vec![RadioCatalogOption {
                     id: "407".to_owned(),
                     name: "网络台".to_owned(),
+                    extensions: Default::default(),
+                }],
+                extensions,
+            })
+        }
+
+        async fn radio_style_catalog(
+            &self,
+            request: &RadioStyleCatalogRequest,
+        ) -> Result<RadioStyleCatalog> {
+            let source = request.sources[0];
+            let mut channel = sample_radio_station(&format!("difm:{source}:10505"));
+            channel.name = "Deep Progressive House".to_owned();
+            channel.category = Some("New".to_owned());
+            channel
+                .extensions
+                .insert("source".to_owned(), json!(source));
+            let mut extensions = tuneweave_core::Extensions::new();
+            extensions.insert("request".to_owned(), json!(request));
+            Ok(RadioStyleCatalog {
+                sources: vec![RadioStyleSource {
+                    id: source,
+                    styles: vec![RadioStyle {
+                        id: format!("difm:{source}:1020"),
+                        name: "New".to_owned(),
+                        localized_name: Some("新晋".to_owned()),
+                        description: "New channels".to_owned(),
+                        channels: vec![channel],
+                        extensions: Default::default(),
+                    }],
                     extensions: Default::default(),
                 }],
                 extensions,
@@ -13459,6 +13565,53 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "radio-user");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-user");
+    }
+
+    #[tokio::test]
+    async fn radio_style_catalog_accepts_reference_and_unified_source_lists() {
+        for (sources, expected_source) in [
+            ("sources=0,1,2", 0),
+            ("sources=%5B1%2C2%5D", 1),
+            ("sources=2", 2),
+        ] {
+            let path = format!("/v1/radio/styles?platform=netease&account=radio-user&{sources}");
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "path: {path}");
+            assert_eq!(json["data"]["sources"][0]["id"], expected_source);
+            assert_eq!(
+                json["data"]["sources"][0]["styles"][0]["id"],
+                format!("difm:{expected_source}:1020")
+            );
+            assert_eq!(
+                json["data"]["sources"][0]["styles"][0]["channels"][0]["ref"],
+                format!("netease:difm:{expected_source}:10505")
+            );
+            assert_eq!(
+                json["data"]["extensions"]["request"]["sources"][0],
+                expected_source
+            );
+            assert_eq!(json["meta"]["platform"], "netease");
+            assert_eq!(json["meta"]["account"], "radio-user");
+        }
+
+        let (status, json) = json_response_from(test_app_with_provider(), "/v1/radio/styles").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["sources"][0]["id"], 0);
+    }
+
+    #[tokio::test]
+    async fn radio_style_catalog_rejects_invalid_sources_and_unknown_queries() {
+        for path in [
+            "/v1/radio/styles?sources=",
+            "/v1/radio/styles?sources=0,,1",
+            "/v1/radio/styles?sources=3",
+            "/v1/radio/styles?sources=%5B0%2C%22one%22%5D",
+            "/v1/radio/styles?unknown=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]

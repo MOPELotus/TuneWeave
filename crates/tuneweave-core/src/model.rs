@@ -754,6 +754,44 @@ pub struct RadioTaxonomyRequest {
     pub account: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RadioStyleCatalogRequest {
+    pub sources: Vec<u32>,
+    pub account: Option<String>,
+}
+
+impl Default for RadioStyleCatalogRequest {
+    fn default() -> Self {
+        Self {
+            sources: vec![0],
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioStyle {
+    pub id: String,
+    pub name: String,
+    pub localized_name: Option<String>,
+    pub description: String,
+    pub channels: Vec<RadioStation>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioStyleSource {
+    pub id: u32,
+    pub styles: Vec<RadioStyle>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioStyleCatalog {
+    pub sources: Vec<RadioStyleSource>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RadioStation {
     #[serde(rename = "ref")]
@@ -3248,6 +3286,41 @@ mod tests {
         let value = serde_json::to_value(taxonomy).expect("serialize radio taxonomy");
         assert_eq!(value["categories"][0]["id"], "1");
         assert_eq!(value["regions"][0]["id"], "407");
+    }
+
+    #[test]
+    fn radio_style_catalog_preserves_hierarchy_and_source_qualified_channels() {
+        let channel_ref =
+            ResourceRef::new(Platform::Netease, "difm:0:10505").expect("valid channel reference");
+        let channel = RadioStation::new(channel_ref, "Deep Progressive House");
+        let catalog = RadioStyleCatalog {
+            sources: vec![RadioStyleSource {
+                id: 0,
+                styles: vec![RadioStyle {
+                    id: "difm:0:1020".to_owned(),
+                    name: "New".to_owned(),
+                    localized_name: Some("新晋".to_owned()),
+                    description: "New electronic channels".to_owned(),
+                    channels: vec![channel],
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(catalog).expect("serialize radio style catalog");
+        assert_eq!(value["sources"][0]["id"], 0);
+        assert_eq!(value["sources"][0]["styles"][0]["id"], "difm:0:1020");
+        assert_eq!(
+            value["sources"][0]["styles"][0]["channels"][0]["ref"],
+            "netease:difm:0:10505"
+        );
+        assert_eq!(
+            value["sources"][0]["styles"][0]["channels"][0]["id"],
+            "difm:0:10505"
+        );
+        assert_eq!(RadioStyleCatalogRequest::default().sources, vec![0]);
     }
 
     #[test]
