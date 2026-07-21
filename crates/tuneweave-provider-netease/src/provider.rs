@@ -50,25 +50,27 @@ use tuneweave_core::{
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
     PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
     PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
-    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
+    PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
+    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
+    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
+    PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
     PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
-    VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
+    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -594,6 +596,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStationList,
             Capability::RadioStationSubscriptionWrite,
             Capability::PodcastCategories,
+            Capability::PodcastCategoryRecommendations,
             Capability::PodcastList,
             Capability::PodcastCharts,
             Capability::PodcastCreatorCharts,
@@ -1136,11 +1139,25 @@ impl MusicProvider for NeteaseProvider {
         map_radio_station_subscription_result(id, subscribed, response.body)
     }
 
-    async fn podcast_categories(&self, account: Option<&str>) -> Result<PodcastTaxonomy> {
-        let client = self.client_for(account)?;
-        let (path, payload) = netease_podcast_categories_request();
+    async fn podcast_categories(
+        &self,
+        request: &PodcastTaxonomyRequest,
+    ) -> Result<PodcastTaxonomy> {
+        let client = self.client_for(request.account.as_deref())?;
+        let (path, payload) = netease_podcast_categories_request(request.kind);
         let response = client.request_weapi(path, payload).await?;
-        map_netease_podcast_categories(response.body)
+        map_netease_podcast_categories(response.body, request.kind)
+    }
+
+    async fn podcast_category_recommendations(
+        &self,
+        account: Option<&str>,
+    ) -> Result<PodcastCategoryRecommendations> {
+        let client = self.client_for(account)?;
+        let response = client
+            .request_weapi("/api/djradio/home/category/recommend", json!({}))
+            .await?;
+        map_netease_podcast_category_recommendations(response.body)
     }
 
     async fn podcasts(&self, request: &PodcastListRequest) -> Result<Page<Podcast>> {
@@ -5496,8 +5513,12 @@ fn netease_radio_station_subscription_payload(id: u64, subscribed: bool) -> Valu
     })
 }
 
-fn netease_podcast_categories_request() -> (&'static str, Value) {
-    ("/api/djradio/category/get", json!({}))
+fn netease_podcast_categories_request(kind: PodcastTaxonomyKind) -> (&'static str, Value) {
+    let path = match kind {
+        PodcastTaxonomyKind::All => "/api/djradio/category/get",
+        PodcastTaxonomyKind::NonHot => "/api/djradio/category/excludehot",
+    };
+    (path, json!({}))
 }
 
 fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'static str, Value)> {
@@ -6253,20 +6274,79 @@ fn radio_station_item_error(field: &str, raw: &Value) -> TuneWeaveError {
     .with_details(json!({ "item": raw }))
 }
 
-fn map_netease_podcast_categories(body: Value) -> Result<PodcastTaxonomy> {
+fn map_netease_podcast_categories(
+    body: Value,
+    kind: PodcastTaxonomyKind,
+) -> Result<PodcastTaxonomy> {
     ensure_success(&body)?;
+    let container = match kind {
+        PodcastTaxonomyKind::All => "categories",
+        PodcastTaxonomyKind::NonHot => "data",
+    };
     let raw_categories = body
-        .get("categories")
+        .get(container)
         .and_then(Value::as_array)
         .cloned()
-        .ok_or_else(|| podcast_item_error("categories array", &body))?;
+        .ok_or_else(|| podcast_item_error(&format!("{container} array"), &body))?;
     let categories = raw_categories
         .into_iter()
         .map(map_netease_podcast_category)
         .collect::<Result<Vec<_>>>()?;
     Ok(PodcastTaxonomy {
         categories,
+        extensions: Extensions::from([
+            ("kind".to_owned(), json!(kind)),
+            ("response".to_owned(), body),
+        ]),
+    })
+}
+
+fn map_netease_podcast_category_recommendations(
+    body: Value,
+) -> Result<PodcastCategoryRecommendations> {
+    ensure_success(&body)?;
+    let raw_sections = body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("data array", &body))?;
+    let sections = raw_sections
+        .into_iter()
+        .map(map_netease_podcast_category_recommendation)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PodcastCategoryRecommendations {
+        sections,
         extensions: Extensions::from([("response".to_owned(), body)]),
+    })
+}
+
+fn map_netease_podcast_category_recommendation(
+    raw: Value,
+) -> Result<PodcastCategoryRecommendation> {
+    let id = raw
+        .get("categoryId")
+        .and_then(json_scalar_string)
+        .ok_or_else(|| podcast_item_error("category recommendation id", &raw))?;
+    let name = radio_text_field(&raw, &["categoryName"])
+        .ok_or_else(|| podcast_item_error("category recommendation name", &raw))?;
+    let raw_podcasts = raw
+        .get("radios")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| podcast_item_error("category recommendation radios array", &raw))?;
+    let podcasts = raw_podcasts
+        .into_iter()
+        .map(map_netease_podcast)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PodcastCategoryRecommendation {
+        category: PodcastCategory {
+            id,
+            name,
+            icon_url: None,
+            extensions: Extensions::new(),
+        },
+        podcasts,
+        extensions: Extensions::from([("section".to_owned(), raw)]),
     })
 }
 
@@ -17962,7 +18042,7 @@ mod tests {
     #[test]
     fn podcast_requests_match_reference_modules() {
         assert_eq!(
-            netease_podcast_categories_request(),
+            netease_podcast_categories_request(PodcastTaxonomyKind::All),
             ("/api/djradio/category/get", json!({}))
         );
         let mut hot_request = PodcastListRequest::new(PodcastCatalog::Hot, 20, 40);
@@ -18378,26 +18458,37 @@ mod tests {
 
     #[test]
     fn maps_podcast_categories_with_stable_ids_icons_and_complete_extensions() {
-        let taxonomy = map_netease_podcast_categories(json!({
-            "code": 200,
-            "categories": [
-                {
-                    "id": 2,
-                    "name": " 音乐播客 ",
-                    "picWebUrl": "https://example.test/web.png",
-                    "pic96x96Url": "https://example.test/96.png",
-                    "picPCBlackUrl": "https://example.test/black.png",
-                    "futureField": {"kept": true}
-                },
-                {
-                    "id": "10001",
-                    "name": "有声书",
-                    "picWebUrl": "",
-                    "pic56x56Url": "https://example.test/56.png"
-                }
-            ],
-            "futureTopLevel": "preserved"
-        }))
+        assert_eq!(
+            netease_podcast_categories_request(PodcastTaxonomyKind::All),
+            ("/api/djradio/category/get", json!({}))
+        );
+        assert_eq!(
+            netease_podcast_categories_request(PodcastTaxonomyKind::NonHot),
+            ("/api/djradio/category/excludehot", json!({}))
+        );
+        let taxonomy = map_netease_podcast_categories(
+            json!({
+                "code": 200,
+                "categories": [
+                    {
+                        "id": 2,
+                        "name": " 音乐播客 ",
+                        "picWebUrl": "https://example.test/web.png",
+                        "pic96x96Url": "https://example.test/96.png",
+                        "picPCBlackUrl": "https://example.test/black.png",
+                        "futureField": {"kept": true}
+                    },
+                    {
+                        "id": "10001",
+                        "name": "有声书",
+                        "picWebUrl": "",
+                        "pic56x56Url": "https://example.test/56.png"
+                    }
+                ],
+                "futureTopLevel": "preserved"
+            }),
+            PodcastTaxonomyKind::All,
+        )
         .expect("map podcast taxonomy");
 
         assert_eq!(taxonomy.categories.len(), 2);
@@ -18420,6 +18511,15 @@ mod tests {
             taxonomy.extensions["response"]["futureTopLevel"],
             "preserved"
         );
+        assert_eq!(taxonomy.extensions["kind"], "all");
+
+        let non_hot = map_netease_podcast_categories(
+            json!({"code": 200, "data": [{"id": 11, "name": "知识"}]}),
+            PodcastTaxonomyKind::NonHot,
+        )
+        .expect("map non-hot podcast taxonomy");
+        assert_eq!(non_hot.categories[0].id, "11");
+        assert_eq!(non_hot.extensions["kind"], "non_hot");
 
         for invalid in [
             json!({"code": 200}),
@@ -18427,8 +18527,50 @@ mod tests {
             json!({"code": 200, "categories": [{"id": 1, "name": "  "}]}),
         ] {
             assert_eq!(
-                map_netease_podcast_categories(invalid)
+                map_netease_podcast_categories(invalid, PodcastTaxonomyKind::All)
                     .expect_err("invalid podcast taxonomy")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn maps_grouped_podcast_category_recommendations_without_dropping_radios() {
+        let recommendations = map_netease_podcast_category_recommendations(json!({
+            "code": 200,
+            "data": [{
+                "categoryId": 3,
+                "categoryName": "情感",
+                "radios": [fixture_podcast_radio(526_564_706, "伴听FM")],
+                "futureSectionField": true
+            }],
+            "futureTopLevel": "preserved"
+        }))
+        .expect("map podcast category recommendations");
+
+        assert_eq!(recommendations.sections.len(), 1);
+        let section = &recommendations.sections[0];
+        assert_eq!(section.category.id, "3");
+        assert_eq!(section.category.name, "情感");
+        assert_eq!(section.category.icon_url, None);
+        assert_eq!(section.podcasts.len(), 1);
+        assert_eq!(section.podcasts[0].name, "伴听FM");
+        assert_eq!(section.extensions["section"]["futureSectionField"], true);
+        assert_eq!(
+            recommendations.extensions["response"]["futureTopLevel"],
+            "preserved"
+        );
+
+        for invalid in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": [{"categoryName": "情感", "radios": []}]}),
+            json!({"code": 200, "data": [{"categoryId": 3, "categoryName": " ", "radios": []}]}),
+            json!({"code": 200, "data": [{"categoryId": 3, "categoryName": "情感"}]}),
+        ] {
+            assert_eq!(
+                map_netease_podcast_category_recommendations(invalid)
+                    .expect_err("invalid category recommendations")
                     .code,
                 ErrorCode::UpstreamError
             );
@@ -25932,14 +26074,38 @@ mod tests {
     #[ignore = "requires live NetEase access"]
     async fn live_public_podcast_categories() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
-        let taxonomy = MusicProvider::podcast_categories(&provider, None)
+        for kind in [PodcastTaxonomyKind::All, PodcastTaxonomyKind::NonHot] {
+            let taxonomy =
+                MusicProvider::podcast_categories(&provider, &PodcastTaxonomyRequest::new(kind))
+                    .await
+                    .expect("live public podcast categories");
+            assert!(!taxonomy.categories.is_empty());
+            assert!(taxonomy.categories.iter().all(|category| {
+                !category.id.is_empty() && !category.name.is_empty() && category.icon_url.is_some()
+            }));
+            assert_eq!(taxonomy.extensions["kind"], json!(kind));
+            assert_eq!(taxonomy.extensions["response"]["code"], 200);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_public_podcast_category_recommendations() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let recommendations = MusicProvider::podcast_category_recommendations(&provider, None)
             .await
-            .expect("live public podcast categories");
-        assert!(!taxonomy.categories.is_empty());
-        assert!(taxonomy.categories.iter().all(|category| {
-            !category.id.is_empty() && !category.name.is_empty() && category.icon_url.is_some()
+            .expect("live public podcast category recommendations");
+        assert!(!recommendations.sections.is_empty());
+        assert!(recommendations.sections.iter().all(|section| {
+            !section.category.id.is_empty()
+                && !section.category.name.is_empty()
+                && !section.podcasts.is_empty()
+                && section
+                    .podcasts
+                    .iter()
+                    .all(|podcast| !podcast.id.is_empty() && !podcast.name.is_empty())
         }));
-        assert_eq!(taxonomy.extensions["response"]["code"], 200);
+        assert_eq!(recommendations.extensions["response"]["code"], 200);
     }
 
     #[tokio::test]

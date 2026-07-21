@@ -837,6 +837,43 @@ pub struct PodcastTaxonomy {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PodcastTaxonomyKind {
+    #[default]
+    All,
+    NonHot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastTaxonomyRequest {
+    pub kind: PodcastTaxonomyKind,
+    pub account: Option<String>,
+}
+
+impl PodcastTaxonomyRequest {
+    #[must_use]
+    pub const fn new(kind: PodcastTaxonomyKind) -> Self {
+        Self {
+            kind,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCategoryRecommendation {
+    pub category: PodcastCategory,
+    pub podcasts: Vec<Podcast>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCategoryRecommendations {
+    pub sections: Vec<PodcastCategoryRecommendation>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PodcastCatalog {
     #[default]
     Featured,
@@ -3159,6 +3196,38 @@ mod tests {
             extensions: Extensions::new(),
         };
         assert_eq!(taxonomy.categories.len(), 1);
+
+        let mut taxonomy_request = PodcastTaxonomyRequest::new(PodcastTaxonomyKind::NonHot);
+        taxonomy_request.account = Some("spoken-word".to_owned());
+        let value =
+            serde_json::to_value(taxonomy_request).expect("serialize podcast taxonomy request");
+        assert_eq!(value["kind"], "non_hot");
+        assert_eq!(value["account"], "spoken-word");
+
+        let recommendations = PodcastCategoryRecommendations {
+            sections: vec![PodcastCategoryRecommendation {
+                category: PodcastCategory {
+                    id: "3".to_owned(),
+                    name: "情感".to_owned(),
+                    icon_url: None,
+                    extensions: Extensions::new(),
+                },
+                podcasts: vec![Podcast::new(
+                    ResourceRef::new(Platform::Netease, "526564706")
+                        .expect("valid podcast reference"),
+                    "伴听FM",
+                )],
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(recommendations)
+            .expect("serialize podcast category recommendations");
+        assert_eq!(value["sections"][0]["category"]["id"], "3");
+        assert_eq!(
+            value["sections"][0]["podcasts"][0]["ref"],
+            "netease:526564706"
+        );
 
         let mut request = PodcastListRequest::new(PodcastCatalog::CategoryHot, 30, 60);
         request.category_id = Some("2001".to_owned());

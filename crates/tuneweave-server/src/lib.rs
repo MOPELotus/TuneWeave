@@ -52,24 +52,25 @@ use tuneweave_core::{
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
-    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeStream,
-    PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PrincipalType, ProviderRegistry, Quality, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
+    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeStream, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackEntitlement,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -221,6 +222,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/radio/stations", get(radio_stations))
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/podcasts/categories", get(podcast_categories))
+        .route(
+            "/podcasts/category-recommendations",
+            get(podcast_category_recommendations),
+        )
         .route("/podcasts", get(podcasts))
         .route("/podcasts/{reference}", get(podcast))
         .route("/podcasts/{reference}/episodes", get(podcast_episodes))
@@ -1024,6 +1029,7 @@ async fn radio_station(
 struct PodcastCategoriesParams {
     platform: Option<String>,
     account: Option<String>,
+    kind: Option<String>,
 }
 
 async fn podcast_categories(
@@ -1031,11 +1037,42 @@ async fn podcast_categories(
     params: Result<Query<PodcastCategoriesParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<PodcastTaxonomy>>, ApiError> {
     let params = query_params(params)?;
+    let kind = parse_podcast_taxonomy_kind(params.kind.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
     let provider = state.registry.require(platform)?;
-    let taxonomy = provider.podcast_categories(account.as_deref()).await?;
+    let taxonomy = provider
+        .podcast_categories(&PodcastTaxonomyRequest {
+            kind,
+            account: account.clone(),
+        })
+        .await?;
     let mut response = ApiResponse::new(taxonomy).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PodcastCategoryRecommendationParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn podcast_category_recommendations(
+    State(state): State<AppState>,
+    params: Result<Query<PodcastCategoryRecommendationParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<PodcastCategoryRecommendations>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let recommendations = provider
+        .podcast_category_recommendations(account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(recommendations).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -8298,6 +8335,22 @@ fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeav
     }
 }
 
+fn parse_podcast_taxonomy_kind(value: Option<&str>) -> Result<PodcastTaxonomyKind, TuneWeaveError> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("all")
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "all" | "complete" => Ok(PodcastTaxonomyKind::All),
+        "non_hot" | "non-hot" | "exclude_hot" | "exclude-hot" => Ok(PodcastTaxonomyKind::NonHot),
+        _ => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported podcast taxonomy kind: {value}"
+        ))
+        .with_details(json!({ "allowed": ["all", "non_hot"] }))),
+    }
+}
+
 fn parse_podcast_chart_kind(value: Option<&str>) -> Result<PodcastChartKind, TuneWeaveError> {
     match value
         .unwrap_or("new")
@@ -8463,8 +8516,8 @@ mod tests {
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
-        MusicProvider, Page, PageMeta, PodcastCategory, ProviderQrStart, RadioCatalogOption,
-        Result, SearchQuery, StreamRequest, VideoResolution,
+        MusicProvider, Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation,
+        ProviderQrStart, RadioCatalogOption, Result, SearchQuery, StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -8514,6 +8567,7 @@ mod tests {
                 Capability::RadioStationList,
                 Capability::RadioStationSubscriptionWrite,
                 Capability::PodcastCategories,
+                Capability::PodcastCategoryRecommendations,
                 Capability::PodcastList,
                 Capability::PodcastCharts,
                 Capability::PodcastCreatorCharts,
@@ -9093,7 +9147,10 @@ mod tests {
             })
         }
 
-        async fn podcast_categories(&self, account: Option<&str>) -> Result<PodcastTaxonomy> {
+        async fn podcast_categories(
+            &self,
+            request: &PodcastTaxonomyRequest,
+        ) -> Result<PodcastTaxonomy> {
             Ok(PodcastTaxonomy {
                 categories: vec![PodcastCategory {
                     id: "2".to_owned(),
@@ -9102,6 +9159,32 @@ mod tests {
                     extensions: Extensions::from([(
                         "category".to_owned(),
                         json!({"id": 2, "futureField": true}),
+                    )]),
+                }],
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("kind".to_owned(), json!(request.kind)),
+                    ("response".to_owned(), json!({"code": 200})),
+                ]),
+            })
+        }
+
+        async fn podcast_category_recommendations(
+            &self,
+            account: Option<&str>,
+        ) -> Result<PodcastCategoryRecommendations> {
+            Ok(PodcastCategoryRecommendations {
+                sections: vec![PodcastCategoryRecommendation {
+                    category: PodcastCategory {
+                        id: "3".to_owned(),
+                        name: "情感".to_owned(),
+                        icon_url: None,
+                        extensions: Extensions::new(),
+                    },
+                    podcasts: vec![sample_podcast("526564706")],
+                    extensions: Extensions::from([(
+                        "section".to_owned(),
+                        json!({"categoryId": 3, "futureField": true}),
                     )]),
                 }],
                 extensions: Extensions::from([
@@ -12961,7 +13044,39 @@ mod tests {
         );
         assert_eq!(json["data"]["extensions"]["response"]["code"], 200);
         assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
+        assert_eq!(json["data"]["extensions"]["kind"], "all");
         assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "podcast-user");
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/categories?kind=exclude-hot",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["kind"], "non_hot");
+    }
+
+    #[tokio::test]
+    async fn podcast_category_recommendations_keep_sections_and_complete_podcasts() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts/category-recommendations?platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["sections"][0]["category"]["id"], "3");
+        assert_eq!(json["data"]["sections"][0]["category"]["name"], "情感");
+        assert_eq!(
+            json["data"]["sections"][0]["podcasts"][0]["ref"],
+            "netease:526564706"
+        );
+        assert_eq!(
+            json["data"]["sections"][0]["extensions"]["section"]["futureField"],
+            true
+        );
+        assert_eq!(json["data"]["extensions"]["response"]["code"], 200);
+        assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
         assert_eq!(json["meta"]["account"], "podcast-user");
     }
 
@@ -12970,6 +13085,8 @@ mod tests {
         for path in [
             "/v1/podcasts/categories?platform=unknown",
             "/v1/podcasts/categories?unknown=true",
+            "/v1/podcasts/categories?kind=unknown",
+            "/v1/podcasts/category-recommendations?unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
