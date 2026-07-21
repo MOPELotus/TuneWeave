@@ -2965,6 +2965,17 @@ pub enum PlaylistPlayableItem {
     RadioStation(RadioStation),
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistPlayableEntry {
+    pub item_id: Option<String>,
+    pub position: u64,
+    pub kind: UniPlaylistItemKind,
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub snapshot: UniPlaylistItemSnapshot,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistCreateRequest {
     pub name: String,

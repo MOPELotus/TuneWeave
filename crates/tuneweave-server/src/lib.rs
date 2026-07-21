@@ -21,22 +21,22 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AnonymousSession, AntiCheatToken,
-    AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea,
-    ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
-    ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
-    ArtistWorksRequest, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
-    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
-    BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
-    ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, AnonymousSession,
+    AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart,
+    ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
+    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
+    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -44,15 +44,15 @@ use tuneweave_core::{
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
     MediaStream, MembershipSummary, MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageRequest, PasswordFormat,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
     PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
     PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
     Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
     PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
     PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
-    PlaylistOrderResult, PlaylistPlayableItem, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
@@ -363,7 +363,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/playlists/{reference}/items",
-            post(playlist_items_add).delete(playlist_items_remove),
+            get(playlist_playable_items)
+                .post(playlist_items_add)
+                .delete(playlist_items_remove),
         )
         .route(
             "/playlists/{reference}/tracks/order",
@@ -5124,6 +5126,21 @@ async fn playlist(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
+    if platform == Platform::Uni {
+        if account.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "local Uni Playlists do not use platform accounts",
+            )
+            .into());
+        }
+        let playlist = state.uni_playlists.get(reference.id())?.ok_or_else(|| {
+            TuneWeaveError::new(ErrorCode::ResourceNotFound, "Uni Playlist was not found")
+                .with_details(json!({ "ref": reference }))
+        })?;
+        return Ok(Json(
+            ApiResponse::new(playlist_from_uni(playlist)).with_platform(Platform::Uni),
+        ));
+    }
     let provider = state.registry.require(platform)?;
     let playlist = provider.playlist(reference.id(), account).await?;
     let mut response = ApiResponse::new(playlist).with_platform(platform);
@@ -5159,6 +5176,43 @@ async fn playlist_tracks(
         .filter(|account| !account.is_empty())
         .map(str::to_owned);
     let platform = reference.platform();
+    if platform == Platform::Uni {
+        if account.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "local Uni Playlists do not use platform accounts",
+            )
+            .into());
+        }
+        let tracks = all_uni_playlist_items(&state, reference.id())?
+            .into_iter()
+            .filter(|item| item.kind == UniPlaylistItemKind::Track)
+            .map(track_from_uni_item)
+            .collect::<Vec<_>>();
+        let total = u64::try_from(tracks.len()).unwrap_or(u64::MAX);
+        let items = tracks
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+        let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let next = offset.saturating_add(consumed);
+        let has_more = u64::from(next) < total;
+        return Ok(Json(
+            ApiResponse::new(items)
+                .with_platform(Platform::Uni)
+                .with_pagination(PageMeta {
+                    limit,
+                    offset,
+                    total: Some(total),
+                    next_offset: has_more.then_some(next),
+                    has_more,
+                    extensions: Extensions::from([
+                        ("mixed_items_filtered".to_owned(), json!(true)),
+                        ("item_kind".to_owned(), json!("track")),
+                    ]),
+                }),
+        ));
+    }
     let provider = state.registry.require(platform)?;
     let page = provider
         .playlist_tracks(
@@ -5178,6 +5232,183 @@ async fn playlist_tracks(
     }
 
     Ok(Json(response))
+}
+
+async fn playlist_playable_items(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<PlaylistPlayableEntry>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    if platform == Platform::Uni {
+        if account.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "local Uni Playlists do not use platform accounts",
+            )
+            .into());
+        }
+        let page = state.uni_playlists.items(reference.id(), limit, offset)?;
+        let items = page
+            .items
+            .into_iter()
+            .map(playlist_playable_entry_from_uni)
+            .collect();
+        return Ok(Json(
+            ApiResponse::new(items)
+                .with_platform(Platform::Uni)
+                .with_pagination(page.pagination),
+        ));
+    }
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .playlist_source_items(
+            reference.id(),
+            "playlist",
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let items = page
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            playlist_playable_entry_from_provider(
+                item,
+                u64::from(offset).saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+            )
+        })
+        .collect();
+    let mut response = ApiResponse::new(items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn playlist_from_uni(playlist: UniPlaylist) -> Playlist {
+    let mut extensions = playlist.extensions;
+    extensions.insert("uni_item_count".to_owned(), json!(playlist.item_count));
+    extensions.insert("created_at_ms".to_owned(), json!(playlist.created_at_ms));
+    extensions.insert("updated_at_ms".to_owned(), json!(playlist.updated_at_ms));
+    extensions.insert("mixed_playable_items".to_owned(), json!(true));
+    Playlist {
+        resource_ref: playlist.resource_ref,
+        platform: Platform::Uni,
+        id: playlist.id,
+        name: playlist.name,
+        description: playlist.description,
+        cover_url: None,
+        creator: None,
+        track_count: None,
+        tags: Vec::new(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    }
+}
+
+fn all_uni_playlist_items(
+    state: &AppState,
+    playlist_id: &str,
+) -> Result<Vec<UniPlaylistItem>, TuneWeaveError> {
+    let mut offset = 0;
+    let mut items = Vec::new();
+    loop {
+        let page = state.uni_playlists.items(playlist_id, 100, offset)?;
+        items.extend(page.items);
+        if !page.pagination.has_more {
+            return Ok(items);
+        }
+        offset = page.pagination.next_offset.ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "local Uni Playlist pagination did not provide next_offset",
+            )
+        })?;
+    }
+}
+
+fn playlist_playable_entry_from_uni(item: UniPlaylistItem) -> PlaylistPlayableEntry {
+    let mut extensions = item.extensions;
+    extensions.insert("stable_item_id".to_owned(), json!(true));
+    PlaylistPlayableEntry {
+        item_id: Some(item.id),
+        position: item.position,
+        kind: item.kind,
+        resource_ref: item.source_ref,
+        snapshot: item.snapshot,
+        extensions,
+    }
+}
+
+fn playlist_playable_entry_from_provider(
+    item: PlaylistPlayableItem,
+    position: u64,
+) -> PlaylistPlayableEntry {
+    let imported = playlist_playable_to_uni_imported_item(item);
+    let mut extensions = imported.extensions;
+    extensions.insert("stable_item_id".to_owned(), json!(false));
+    PlaylistPlayableEntry {
+        item_id: None,
+        position,
+        kind: imported.kind,
+        resource_ref: imported.source_ref,
+        snapshot: imported.snapshot,
+        extensions,
+    }
+}
+
+fn track_from_uni_item(item: UniPlaylistItem) -> Track {
+    let snapshot = item.snapshot;
+    let mut extensions = snapshot.extensions;
+    let playable = extensions.get("playable").and_then(Value::as_bool);
+    let available_qualities = extensions
+        .get("available_qualities")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let mv_ref = extensions
+        .get("mv_ref")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    extensions.insert("uni_item_id".to_owned(), json!(item.id));
+    extensions.insert("uni_position".to_owned(), json!(item.position));
+    let mut track = Track::new(item.source_ref, snapshot.title);
+    track.aliases = snapshot.version_tags;
+    track.artists = snapshot
+        .artists
+        .into_iter()
+        .map(|name| ArtistSummary {
+            resource_ref: None,
+            name,
+        })
+        .collect();
+    track.album = snapshot.album.map(|name| AlbumSummary {
+        resource_ref: None,
+        name,
+        cover_url: snapshot.cover_url,
+    });
+    track.duration_ms = snapshot.duration_ms;
+    track.isrc = snapshot.isrc;
+    track.mv_ref = mv_ref;
+    track.playable = playable;
+    track.available_qualities = available_qualities;
+    track.extensions = extensions;
+    track
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -17441,12 +17672,57 @@ mod tests {
         );
 
         let (status, playlist) =
-            json_response_from(app, &format!("/v1/uni/playlists/{reference}")).await;
+            json_response_from(app.clone(), &format!("/v1/uni/playlists/{reference}")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(playlist["data"]["item_count"], 5);
         assert!(
             playlist["data"]["updated_at_ms"].as_u64()
                 >= playlist["data"]["created_at_ms"].as_u64()
+        );
+
+        let unified_path = format!("/v1/playlists/{reference}");
+        let (status, unified) = json_response_from(app.clone(), &unified_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unified["data"]["ref"], reference);
+        assert_eq!(unified["data"]["platform"], "uni");
+        assert_eq!(unified["data"]["name"], "混合播放队列");
+        assert_eq!(unified["data"]["track_count"], Value::Null);
+        assert_eq!(unified["data"]["extensions"]["uni_item_count"], 5);
+        assert_eq!(unified["data"]["extensions"]["mixed_playable_items"], true);
+
+        let (status, items) =
+            json_response_from(app.clone(), &format!("{unified_path}/items?limit=5")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(items["data"].as_array().map(Vec::len), Some(5));
+        assert_eq!(items["data"][0]["item_id"], added["data"]["items"][0]["id"]);
+        assert_eq!(items["data"][0]["ref"], "netease:185809");
+        assert_eq!(items["data"][2]["kind"], "mv");
+        assert_eq!(items["data"][3]["kind"], "podcast_episode");
+        assert_eq!(items["data"][4]["kind"], "radio_station");
+        assert_eq!(items["data"][4]["extensions"]["stable_item_id"], true);
+        assert_eq!(items["meta"]["pagination"]["total"], 5);
+
+        for path in [
+            format!("{unified_path}?account=default"),
+            format!("{unified_path}/items?account=default"),
+            format!("{unified_path}/tracks?account=default"),
+        ] {
+            let (status, response) = json_response_from(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+
+        let (status, tracks) =
+            json_response_from(app, &format!("{unified_path}/tracks?limit=1&offset=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(tracks["data"][0]["ref"], "netease:185809");
+        assert_eq!(tracks["data"][0]["name"], "反方向的钟");
+        assert_eq!(tracks["data"][0]["extensions"]["uni_position"], 1);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 2);
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["mixed_items_filtered"],
+            true
         );
     }
 
@@ -17761,8 +18037,9 @@ mod tests {
 
     #[tokio::test]
     async fn playlist_tracks_use_unified_pagination() {
+        let app = test_app_with_provider();
         let (status, json) = json_response_from(
-            test_app_with_provider(),
+            app.clone(),
             "/v1/playlists/netease:3778678/tracks?limit=10&offset=0",
         )
         .await;
@@ -17770,6 +18047,20 @@ mod tests {
         assert_eq!(json["data"][0]["ref"], "netease:123");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+
+        let (status, items) = json_response_from(
+            app,
+            "/v1/playlists/netease:3778678/items?limit=10&offset=0&account=public",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(items["data"][0]["item_id"], Value::Null);
+        assert_eq!(items["data"][0]["position"], 0);
+        assert_eq!(items["data"][0]["kind"], "track");
+        assert_eq!(items["data"][0]["ref"], "netease:123");
+        assert_eq!(items["data"][0]["extensions"]["stable_item_id"], false);
+        assert_eq!(items["meta"]["account"], "public");
+        assert_eq!(items["meta"]["pagination"]["total"], 1);
     }
 
     #[tokio::test]
