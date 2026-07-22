@@ -4,9 +4,9 @@
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=0`、`partial=4`、`implemented=18`、`verified=42`。
+当前共 64 个验收单元：`pending=0`、`partial=3`、`implemented=18`、`verified=43`。
 
-- 完整实现率：`(implemented + verified) / 64 = 60 / 64 = 93.75%`。
+- 完整实现率：`(implemented + verified) / 64 = 61 / 64 = 95.31%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
 - 完整联网验收率：`verified / 64 = 42 / 64 = 65.63%`。
 
@@ -40,7 +40,7 @@
 | C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `verified` | `user_detail/user_detail_new` 已以同一 `UserProfile` 的显式 legacy/modern 后端完整接入，平台原始资料不丢失；2026-07-22 公开两后端及持久账户 modern 路径均真实 HTTP 验收成功 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |
 | P02 | 播放与权益 | 旧版歌曲播放 URL 与精确 `br` | `verified` | `song_url` 单/批量和任意码率已真实验收；空白编码与零时长不遮蔽有效格式/歌曲时长 |
-| P03 | 播放与权益 | 新版九档音质歌曲播放 URL | `partial` | 九档真实 HTTP 均成功；2026-07-22 上游新增 `sky` 的 `immerseType=c51|ste|aac` 选择，当前只固定 `c51`，需补输入与协议测试；跨平台成功源待后续 provider |
+| P03 | 播放与权益 | 新版九档音质歌曲播放 URL | `verified` | 九档真实 HTTP 均成功；统一 `immersive_type` 及 `immerse_type/immerseType` 兼容输入完整覆盖 `c51/ste/aac`，仅现代 `spatial/sky` 写入协议并在单曲、批量、解灰/跨平台解析链透传；2026-07-22 同一公开歌曲的三个显式类型均真实取流成功；跨平台成功源由 P05 随后续 provider 跟踪 |
 | P04 | 播放与权益 | 原生批量取流、保序、重复项和逐项失败 | `verified` | GET/POST 批量及旧/新版真实 HTTP 已验收 |
 | P05 | 播放与权益 | 严格跨平台匹配、账户选择和失败回退 | `implemented` | 解析器、尝试轨迹和未注册来源回落已验收，待真实 QQ/酷狗等成功取流 |
 | P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收；192/320 kbps 分别映射 `higher/high`，可用档位固定按能力升序去重，零新版最高码率回退有效兼容值 |

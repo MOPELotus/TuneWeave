@@ -37,46 +37,46 @@ use tuneweave_core::{
     DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
     DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    ImageUploadRequest, ImageUploadResult, ListeningRightsAd, ListeningRightsAdCatalog,
-    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
-    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor,
-    Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicProvider, MusicVideoArea,
-    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
-    PageRequest, ParseResourceRefError, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
-    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackDevice,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
-    PlaylistMutationAction, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility,
-    Podcast, PodcastCatalog, PodcastCategory, PodcastCategoryRecommendation,
-    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
-    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
-    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAd,
+    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
+    ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
+    LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary,
+    Money, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
+    MusicVideoOrder, MusicVideoType, Page, PageMeta, PageRequest, ParseResourceRefError,
+    PasswordFormat, PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackDevice, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
+    PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
+    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
+    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
+    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
+    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
+    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
+    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem,
+    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationCursor,
+    RadioStationListRequest, RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest,
+    RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
+    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
+    StreamRequest, StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
+    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -10768,6 +10768,12 @@ fn map_netease_stream_batch(
     ]);
     if let Some(level) = level {
         extensions.insert("level".to_owned(), json!(level));
+        if level == "sky" {
+            extensions.insert(
+                "immersive_type".to_owned(),
+                json!(netease_immersive_type(request.immersive_type)),
+            );
+        }
     }
     Ok(StreamBatch {
         outcomes,
@@ -10815,7 +10821,7 @@ fn netease_stream_request(
                 "encodeType": "flac"
             });
             if level == "sky" {
-                payload["immerseType"] = json!("c51");
+                payload["immerseType"] = json!(netease_immersive_type(request.immersive_type));
             }
             (
                 StreamVariant::Modern,
@@ -10824,6 +10830,14 @@ fn netease_stream_request(
                 Some(level),
             )
         }
+    }
+}
+
+fn netease_immersive_type(value: Option<ImmersiveAudioType>) -> &'static str {
+    match value.unwrap_or(ImmersiveAudioType::C51) {
+        ImmersiveAudioType::C51 => "c51",
+        ImmersiveAudioType::Ste => "ste",
+        ImmersiveAudioType::Aac => "aac",
     }
 }
 
@@ -26042,6 +26056,7 @@ mod tests {
             quality: Quality::High,
             variant: StreamVariant::Modern,
             bitrate: None,
+            immersive_type: None,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -26092,6 +26107,7 @@ mod tests {
                 quality,
                 variant: StreamVariant::Modern,
                 bitrate: None,
+                immersive_type: None,
                 account: None,
             };
             let (variant, path, payload, mapped_level) =
@@ -26109,10 +26125,39 @@ mod tests {
             }
         }
 
+        for (immersive_type, expected) in [
+            (ImmersiveAudioType::C51, "c51"),
+            (ImmersiveAudioType::Ste, "ste"),
+            (ImmersiveAudioType::Aac, "aac"),
+        ] {
+            let request = StreamRequest {
+                quality: Quality::Spatial,
+                variant: StreamVariant::Modern,
+                bitrate: None,
+                immersive_type: Some(immersive_type),
+                account: None,
+            };
+            let (_, _, payload, level) = netease_stream_request(&[123], &request);
+            assert_eq!(level, Some("sky"));
+            assert_eq!(payload["immerseType"], expected);
+        }
+
+        let non_spatial = StreamRequest {
+            quality: Quality::Hires,
+            variant: StreamVariant::Modern,
+            bitrate: None,
+            immersive_type: Some(ImmersiveAudioType::Aac),
+            account: None,
+        };
+        let (_, _, payload, level) = netease_stream_request(&[123], &non_spatial);
+        assert_eq!(level, Some("hires"));
+        assert!(payload.get("immerseType").is_none());
+
         let request = StreamRequest {
             quality: Quality::Auto,
             variant: StreamVariant::Default,
             bitrate: Some(192_123),
+            immersive_type: None,
             account: None,
         };
         let (variant, _, payload, level) = netease_stream_request(&[123], &request);
@@ -26128,6 +26173,7 @@ mod tests {
             quality: Quality::High,
             variant: StreamVariant::Legacy,
             bitrate: Some(192_123),
+            immersive_type: Some(ImmersiveAudioType::Ste),
             account: Some("legacy-user".to_owned()),
         };
         let (variant, path, payload, level) =
@@ -26136,6 +26182,7 @@ mod tests {
         assert_eq!(path, "/api/song/enhance/player/url");
         assert_eq!(payload["ids"], r#"["1969519579","33894312"]"#);
         assert_eq!(payload["br"], 192_123);
+        assert!(payload.get("immerseType").is_none());
         assert_eq!(level, None);
 
         let (_, _, payload, _) = netease_stream_request(
@@ -26144,6 +26191,7 @@ mod tests {
                 quality: Quality::High,
                 variant: StreamVariant::Legacy,
                 bitrate: None,
+                immersive_type: None,
                 account: None,
             },
         );
@@ -26156,6 +26204,7 @@ mod tests {
             quality: Quality::High,
             variant: StreamVariant::Legacy,
             bitrate: Some(192_123),
+            immersive_type: None,
             account: None,
         };
         let (variant, path, payload, level) = netease_download_request(2_709_812_973, &legacy);
@@ -26180,6 +26229,7 @@ mod tests {
                 quality,
                 variant: StreamVariant::Modern,
                 bitrate: Some(1),
+                immersive_type: None,
                 account: None,
             };
             let (variant, path, payload, mapped_level) =
@@ -26205,6 +26255,7 @@ mod tests {
             quality: Quality::Higher,
             variant: StreamVariant::Legacy,
             bitrate: Some(192_123),
+            immersive_type: None,
             account: None,
         };
         let download = map_netease_download(
@@ -26254,6 +26305,7 @@ mod tests {
                 quality: Quality::Spatial,
                 variant: StreamVariant::Modern,
                 bitrate: None,
+                immersive_type: None,
                 account: None,
             },
             StreamVariant::Modern,
@@ -26339,6 +26391,7 @@ mod tests {
             quality: Quality::High,
             variant: StreamVariant::Modern,
             bitrate: None,
+            immersive_type: None,
             account: None,
         };
         let response = json!({
@@ -26423,6 +26476,7 @@ mod tests {
             quality: Quality::High,
             variant: StreamVariant::Modern,
             bitrate: None,
+            immersive_type: None,
             account: None,
         };
         let batch = map_netease_stream_batch(
@@ -26540,6 +26594,7 @@ mod tests {
             quality: Quality::Lossless,
             variant: StreamVariant::Modern,
             bitrate: None,
+            immersive_type: None,
             account: None,
         };
         let stream: StreamData = serde_json::from_value(json!({
@@ -30363,6 +30418,7 @@ mod tests {
                     quality: Quality::High,
                     variant: StreamVariant::Modern,
                     bitrate: None,
+                    immersive_type: None,
                     account: None,
                 },
             )
@@ -30399,6 +30455,7 @@ mod tests {
                     quality,
                     variant: StreamVariant::Modern,
                     bitrate: None,
+                    immersive_type: None,
                     account: None,
                 },
             )
@@ -30409,6 +30466,49 @@ mod tests {
             assert_eq!(batch.extensions["variant"], "modern", "{level}");
             assert_eq!(batch.extensions["level"], level, "{level}");
             assert_eq!(batch.extensions["response"]["code"], 200, "{level}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase access"]
+    async fn live_spatial_stream_covers_every_immersive_type() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "2709812973").expect("track reference"),
+            "live immersive stream fixture",
+        );
+        for (immersive_type, expected) in [
+            (ImmersiveAudioType::C51, "c51"),
+            (ImmersiveAudioType::Ste, "ste"),
+            (ImmersiveAudioType::Aac, "aac"),
+        ] {
+            let batch = MusicProvider::streams(
+                &provider,
+                std::slice::from_ref(&track),
+                &StreamRequest {
+                    quality: Quality::Spatial,
+                    variant: StreamVariant::Modern,
+                    bitrate: None,
+                    immersive_type: Some(immersive_type),
+                    account: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("live {expected} stream request failed: {error}"));
+            assert_eq!(batch.extensions["immersive_type"], expected);
+            assert_eq!(batch.outcomes.len(), 1, "{expected}");
+            assert_eq!(
+                batch.outcomes[0].status,
+                ResolutionStatus::Success,
+                "{expected}"
+            );
+            assert!(
+                batch.outcomes[0]
+                    .stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.url.starts_with("http")),
+                "{expected}"
+            );
         }
     }
 
@@ -30431,6 +30531,7 @@ mod tests {
                 quality: Quality::High,
                 variant: StreamVariant::Modern,
                 bitrate: None,
+                immersive_type: None,
                 account: None,
             },
         )
@@ -30468,6 +30569,7 @@ mod tests {
                 quality: Quality::High,
                 variant: StreamVariant::Legacy,
                 bitrate: None,
+                immersive_type: None,
                 account: None,
             },
         )
@@ -30500,6 +30602,7 @@ mod tests {
                 quality: Quality::Higher,
                 variant: StreamVariant::Legacy,
                 bitrate: Some(192_123),
+                immersive_type: None,
                 account: None,
             },
         )
@@ -30537,6 +30640,7 @@ mod tests {
                     quality,
                     variant: StreamVariant::Modern,
                     bitrate: None,
+                    immersive_type: None,
                     account: None,
                 },
             )

@@ -3373,6 +3373,14 @@ pub enum StreamVariant {
     Modern,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImmersiveAudioType {
+    C51,
+    Ste,
+    Aac,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StreamRequest {
     pub quality: Quality,
@@ -3380,6 +3388,8 @@ pub struct StreamRequest {
     pub variant: StreamVariant,
     #[serde(default)]
     pub bitrate: Option<u64>,
+    #[serde(default)]
+    pub immersive_type: Option<ImmersiveAudioType>,
     pub account: Option<String>,
 }
 
@@ -3389,6 +3399,7 @@ impl Default for StreamRequest {
             quality: Quality::Auto,
             variant: StreamVariant::Default,
             bitrate: None,
+            immersive_type: None,
             account: None,
         }
     }
@@ -3401,6 +3412,8 @@ pub struct ResolveRequest {
     pub variant: StreamVariant,
     #[serde(default)]
     pub bitrate: Option<u64>,
+    #[serde(default)]
+    pub immersive_type: Option<ImmersiveAudioType>,
     pub playback_platforms: Vec<Platform>,
     pub fallback: bool,
     pub accounts: BTreeMap<Platform, String>,
@@ -3413,6 +3426,7 @@ impl Default for ResolveRequest {
             quality: Quality::Auto,
             variant: StreamVariant::Default,
             bitrate: None,
+            immersive_type: None,
             playback_platforms: Vec::new(),
             fallback: true,
             accounts: BTreeMap::new(),
@@ -4345,12 +4359,14 @@ mod tests {
             quality: Quality::Spatial,
             variant: StreamVariant::Modern,
             bitrate: Some(999_000),
+            immersive_type: Some(ImmersiveAudioType::Ste),
             account: Some("vip".to_owned()),
         };
         let value = serde_json::to_value(request).expect("serialize stream request");
         assert_eq!(value["quality"], "spatial");
         assert_eq!(value["variant"], "modern");
         assert_eq!(value["bitrate"], 999_000);
+        assert_eq!(value["immersive_type"], "ste");
 
         let resolve = ResolveRequest {
             variant: StreamVariant::Legacy,

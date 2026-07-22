@@ -40,19 +40,20 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
-    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
-    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload,
-    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
-    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
-    PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType,
+    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
+    ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary,
+    MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
+    MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest,
+    PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableEntry,
+    PlaylistPlayableItem, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
@@ -2324,6 +2325,8 @@ struct StreamParams {
     variant: Option<String>,
     #[serde(alias = "br")]
     bitrate: Option<String>,
+    #[serde(alias = "immerseType", alias = "immerse_type")]
+    immersive_type: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
@@ -2341,6 +2344,8 @@ struct UniPlaylistItemStreamParams {
     variant: Option<String>,
     #[serde(alias = "br")]
     bitrate: Option<String>,
+    #[serde(alias = "immerseType", alias = "immerse_type")]
+    immersive_type: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
@@ -2356,6 +2361,7 @@ struct StreamControlInput<'a> {
     quality: Option<&'a str>,
     variant: Option<&'a str>,
     bitrate: Option<&'a str>,
+    immersive_type: Option<&'a str>,
     playback_platform: Option<&'a str>,
     fallback: Option<&'a str>,
     fallback_platforms: Option<&'a str>,
@@ -2369,6 +2375,7 @@ struct StreamControls {
     quality: Quality,
     variant: StreamVariant,
     bitrate: Option<u64>,
+    immersive_type: Option<ImmersiveAudioType>,
     routing: StreamRouting,
     account: Option<String>,
 }
@@ -2427,6 +2434,7 @@ impl StreamControls {
             quality: self.quality,
             variant: self.variant,
             bitrate: self.bitrate,
+            immersive_type: self.immersive_type,
             playback_platforms,
             fallback,
             ..ResolveRequest::default()
@@ -2481,6 +2489,7 @@ impl StreamControls {
             quality: self.quality,
             variant: self.variant,
             bitrate: self.bitrate,
+            immersive_type: self.immersive_type,
             account: (account_platform == platform)
                 .then(|| self.account.clone())
                 .flatten(),
@@ -2550,6 +2559,7 @@ fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls
     let quality = parse_quality(input.quality)?;
     let variant = parse_stream_variant(input.variant)?;
     let bitrate = parse_optional_u64_parameter("bitrate", input.bitrate)?;
+    let immersive_type = parse_immersive_audio_type(input.immersive_type)?;
     let unblock = parse_bool_parameter("unblock", input.unblock, false)?;
     let fallback = parse_bool_parameter("fallback", input.fallback, true)?;
     let routing = if unblock {
@@ -2578,6 +2588,7 @@ fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls
         quality,
         variant,
         bitrate,
+        immersive_type,
         routing,
         account: input
             .account
@@ -2598,6 +2609,7 @@ async fn track_stream(
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
         bitrate: params.bitrate.as_deref(),
+        immersive_type: params.immersive_type.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -2660,6 +2672,7 @@ async fn resolve_uni_playlist_item_request(
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
         bitrate: params.bitrate.as_deref(),
+        immersive_type: params.immersive_type.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -3250,6 +3263,7 @@ async fn podcast_episode_stream(
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
         bitrate: params.bitrate.as_deref(),
+        immersive_type: params.immersive_type.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -3277,6 +3291,7 @@ async fn podcast_episode_stream_redirect(
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
         bitrate: params.bitrate.as_deref(),
+        immersive_type: params.immersive_type.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -3305,6 +3320,7 @@ fn download_request(params: &DownloadParams) -> Result<StreamRequest, TuneWeaveE
         quality: parse_quality(params.quality.as_deref())?,
         variant: parse_stream_variant(params.variant.as_deref())?,
         bitrate: parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?,
+        immersive_type: None,
         account: params
             .account
             .as_deref()
@@ -3380,6 +3396,8 @@ struct StreamBatchParams {
     variant: Option<String>,
     #[serde(alias = "br")]
     bitrate: Option<String>,
+    #[serde(alias = "immerseType", alias = "immerse_type")]
+    immersive_type: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<String>,
     fallback_platforms: Option<String>,
@@ -3451,6 +3469,8 @@ struct StreamBatchBody {
     variant: Option<String>,
     #[serde(alias = "br")]
     bitrate: Option<StreamUnsignedInput>,
+    #[serde(alias = "immerseType", alias = "immerse_type")]
+    immersive_type: Option<String>,
     playback_platform: Option<String>,
     fallback: Option<StreamBooleanInput>,
     fallback_platforms: Option<String>,
@@ -3474,6 +3494,7 @@ async fn track_streams_get(
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
         bitrate: params.bitrate.as_deref(),
+        immersive_type: params.immersive_type.as_deref(),
         playback_platform: params.playback_platform.as_deref(),
         fallback: params.fallback.as_deref(),
         fallback_platforms: params.fallback_platforms.as_deref(),
@@ -3504,6 +3525,7 @@ async fn track_streams_post(
         quality: body.quality.as_deref(),
         variant: body.variant.as_deref(),
         bitrate: bitrate.as_deref(),
+        immersive_type: body.immersive_type.as_deref(),
         playback_platform: body.playback_platform.as_deref(),
         fallback: fallback.as_deref(),
         fallback_platforms: body.fallback_platforms.as_deref(),
@@ -3708,6 +3730,7 @@ async fn resolve_stream_batch(
             ("quality".to_owned(), json!(controls.quality)),
             ("variant".to_owned(), json!(controls.variant)),
             ("bitrate".to_owned(), json!(controls.bitrate)),
+            ("immersive_type".to_owned(), json!(controls.immersive_type)),
             ("fallback".to_owned(), json!(controls.fallback_enabled())),
         ]),
     }
@@ -8217,6 +8240,7 @@ async fn cloud_track_download_redirect(
         quality: Quality::Auto,
         variant: StreamVariant::Default,
         bitrate: None,
+        immersive_type: None,
         account: Some(account),
     };
     match provider.stream(&track, &stream_request).await {
@@ -10366,6 +10390,23 @@ fn parse_stream_variant(value: Option<&str>) -> Result<StreamVariant, TuneWeaveE
             "unsupported stream variant: {value}"
         ))
         .with_details(json!({ "allowed": ["default", "legacy", "modern"] }))),
+    }
+}
+
+fn parse_immersive_audio_type(
+    value: Option<&str>,
+) -> Result<Option<ImmersiveAudioType>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "c51" => Ok(Some(ImmersiveAudioType::C51)),
+        "ste" => Ok(Some(ImmersiveAudioType::Ste)),
+        "aac" => Ok(Some(ImmersiveAudioType::Aac)),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported immersive audio type: {value}"
+        ))
+        .with_details(json!({ "allowed": ["c51", "ste", "aac"] }))),
     }
 }
 
@@ -13502,6 +13543,16 @@ mod tests {
                             .and_then(Value::as_str)
                             .unwrap_or("none")
                             .to_owned(),
+                    ),
+                    (
+                        "x-test-immersive-type".to_owned(),
+                        match request.immersive_type {
+                            Some(ImmersiveAudioType::C51) => "c51",
+                            Some(ImmersiveAudioType::Ste) => "ste",
+                            Some(ImmersiveAudioType::Aac) => "aac",
+                            None => "none",
+                        }
+                        .to_owned(),
                     ),
                 ]),
                 expires_at: None,
@@ -16981,7 +17032,7 @@ mod tests {
 
         let (status, fallback) = json_response_from(
             test_app_with_provider(),
-            "/v1/episodes/netease:1367665101/stream?unblock=true&source=qq&account=green-vip&level=sky&backend=modern",
+            "/v1/episodes/netease:1367665101/stream?unblock=true&source=qq&account=green-vip&level=sky&backend=modern&immerseType=aac",
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -17004,6 +17055,10 @@ mod tests {
         assert_eq!(
             fallback["data"]["stream"]["attempts"][1]["status"],
             "success"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["headers"]["x-test-immersive-type"],
+            "aac"
         );
         assert_eq!(fallback["meta"]["account"], "green-vip");
     }
@@ -17034,6 +17089,7 @@ mod tests {
             "/v1/episodes/1367665101/stream",
             "/v1/episodes/netease:1367665101/stream?quality=future",
             "/v1/episodes/netease:1367665101/stream?br=invalid",
+            "/v1/episodes/netease:1367665101/stream?immerseType=atmos",
             "/v1/episodes/netease:1367665101/stream?unblock=true&playback_platform=qq",
             "/v1/episodes/netease:1367665101/stream?unknown=true",
             "/v1/episodes/netease:1367665101/stream/redirect?unknown=true",
@@ -18463,7 +18519,7 @@ mod tests {
         let (status, origin_track) = json_response_from(
             app.clone(),
             &format!(
-                "{}?quality=high&fallback=false&accounts=netease=origin",
+                "{}?quality=spatial&immersive_type=ste&fallback=false&accounts=netease=origin",
                 item_stream_path(0)
             ),
         )
@@ -18479,6 +18535,10 @@ mod tests {
         assert_eq!(
             origin_track["data"]["stream"]["attempts"][0]["account"],
             "origin"
+        );
+        assert_eq!(
+            origin_track["data"]["stream"]["headers"]["x-test-immersive-type"],
+            "ste"
         );
         assert_eq!(origin_track["data"]["extensions"]["transport"], "audio");
 
@@ -18626,6 +18686,7 @@ mod tests {
             format!("{}?resolution=1080", item_stream_path(0)),
             format!("{}?accounts=netease", item_stream_path(0)),
             format!("{}?accounts=uni=local", item_stream_path(0)),
+            format!("{}?immersive_type=atmos", item_stream_path(0)),
             format!(
                 "{}?account=legacy&accounts=netease=origin",
                 item_stream_path(0)
@@ -19365,6 +19426,24 @@ mod tests {
     }
 
     #[test]
+    fn immersive_audio_type_parser_accepts_every_upstream_value() {
+        for (value, expected) in [
+            ("c51", ImmersiveAudioType::C51),
+            ("STE", ImmersiveAudioType::Ste),
+            ("aac", ImmersiveAudioType::Aac),
+        ] {
+            assert_eq!(
+                parse_immersive_audio_type(Some(value)).expect(value),
+                Some(expected),
+                "{value}"
+            );
+        }
+        assert_eq!(parse_immersive_audio_type(None).expect("default"), None);
+        assert_eq!(parse_immersive_audio_type(Some(" ")).expect("blank"), None);
+        assert!(parse_immersive_audio_type(Some("atmos")).is_err());
+    }
+
+    #[test]
     fn uni_stream_accounts_accept_list_and_json_forms_without_platform_collisions() {
         let listed = parse_stream_accounts(Some("netease=origin,qq=green-diamond"))
             .expect("list account map");
@@ -19423,6 +19502,59 @@ mod tests {
         assert_eq!(json["data"]["bitrate"], 192_123);
         assert_eq!(json["data"]["headers"]["x-test-stream-variant"], "modern");
         assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn track_stream_forwards_all_immersive_type_aliases() {
+        for (parameter, value) in [
+            ("immersive_type", "c51"),
+            ("immerse_type", "ste"),
+            ("immerseType", "aac"),
+        ] {
+            let path = format!(
+                "/v1/tracks/netease:2709812973/stream?level=sky&backend=v1&fallback=false&{parameter}={value}"
+            );
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{parameter}");
+            assert_eq!(json["data"]["requested_quality"], "spatial", "{parameter}");
+            assert_eq!(
+                json["data"]["headers"]["x-test-immersive-type"], value,
+                "{parameter}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn track_stream_batches_forward_immersive_type_for_get_and_post() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/streams?ids=1,2&platform=netease&quality=spatial&immersive_type=ste&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["extensions"]["immersive_type"], "ste");
+        for outcome in json["data"]["outcomes"].as_array().expect("GET outcomes") {
+            assert_eq!(outcome["stream"]["headers"]["x-test-immersive-type"], "ste");
+        }
+
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/tracks/streams",
+            Some(json!({
+                "ids": ["1", "2"],
+                "platform": "netease",
+                "level": "sky",
+                "immerseType": "aac",
+                "fallback": false
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["extensions"]["immersive_type"], "aac");
+        for outcome in json["data"]["outcomes"].as_array().expect("POST outcomes") {
+            assert_eq!(outcome["stream"]["headers"]["x-test-immersive-type"], "aac");
+        }
     }
 
     #[tokio::test]
@@ -19547,6 +19679,7 @@ mod tests {
             "/v1/tracks/streams?refs=invalid",
             "/v1/tracks/streams?ids=1&platform=unknown",
             "/v1/tracks/streams?ids=1&br=invalid",
+            "/v1/tracks/streams?ids=1&immersive_type=atmos",
             "/v1/tracks/streams?ids=1&unblock=true&playback_platform=qq",
             "/v1/tracks/streams?ids=1&unknown=true",
         ] {
@@ -19564,6 +19697,7 @@ mod tests {
             json!({ "refs": [] }),
             json!({ "ids": ["1"], "platform": "unknown" }),
             json!({ "ids": ["1"], "bitrate": -1 }),
+            json!({ "ids": ["1"], "immersive_type": "atmos" }),
             json!({ "ids": ["1"], "unknown": true }),
         ] {
             let (status, json) = json_request_from(
@@ -19665,6 +19799,7 @@ mod tests {
             "/v1/tracks/netease:2709812973/stream?unblock=true&source=unknown",
             "/v1/tracks/netease:2709812973/stream?unblock=true&playback_platform=qq",
             "/v1/tracks/netease:2709812973/stream?unblock=true&fallback_platforms=qq",
+            "/v1/tracks/netease:2709812973/stream?immersive_type=atmos",
             "/v1/tracks/netease:2709812973/stream?unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;

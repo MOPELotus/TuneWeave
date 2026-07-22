@@ -198,6 +198,7 @@ impl StreamResolver {
                 quality: request.quality,
                 variant: request.variant,
                 bitrate: request.bitrate,
+                immersive_type: request.immersive_type,
                 account: account.clone(),
             };
             match provider.stream(&candidate, &stream_request).await {
@@ -344,7 +345,10 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::{ArtistSummary, Page, PageMeta, Quality, ResourceRef, StreamRequest, TrialWindow};
+    use crate::{
+        ArtistSummary, ImmersiveAudioType, Page, PageMeta, Quality, ResourceRef, StreamRequest,
+        TrialWindow,
+    };
 
     use super::*;
 
@@ -417,7 +421,16 @@ mod tests {
         MediaStream {
             url: format!("https://{}.example.test/{}.flac", track.platform, track.id),
             backup_urls: Vec::new(),
-            headers: BTreeMap::new(),
+            headers: BTreeMap::from([(
+                "x-test-immersive-type".to_owned(),
+                match request.immersive_type {
+                    Some(ImmersiveAudioType::C51) => "c51",
+                    Some(ImmersiveAudioType::Ste) => "ste",
+                    Some(ImmersiveAudioType::Aac) => "aac",
+                    None => "none",
+                }
+                .to_owned(),
+            )]),
             expires_at: None,
             format: Some("flac".to_owned()),
             codec: Some("flac".to_owned()),
@@ -458,6 +471,7 @@ mod tests {
         let mut request = ResolveRequest {
             quality: Quality::Lossless,
             bitrate: Some(192_123),
+            immersive_type: Some(ImmersiveAudioType::Ste),
             ..ResolveRequest::default()
         };
         request
@@ -469,6 +483,7 @@ mod tests {
         assert_eq!(stream.resolved_track.to_string(), "qq:0039mid");
         assert_eq!(stream.resolved_platform, Platform::Qq);
         assert_eq!(stream.bitrate, Some(192_123));
+        assert_eq!(stream.headers["x-test-immersive-type"], "ste");
         assert_eq!(stream.attempts.len(), 2);
         assert_eq!(
             stream.attempts[0].status,
