@@ -21,8 +21,8 @@ use crate::{
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
-    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream,
-    MembershipSummary, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
+    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
+    MediaStream, MembershipSummary, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
     PersonalFmRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
     PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
@@ -1097,6 +1097,10 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::Lyrics,
         ))
+    }
+
+    async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        self.lyrics(id, request.account.as_deref()).await
     }
 
     async fn stream(&self, _track: &Track, _request: &StreamRequest) -> Result<MediaStream> {

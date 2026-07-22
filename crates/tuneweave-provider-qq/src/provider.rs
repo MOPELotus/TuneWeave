@@ -4,14 +4,15 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
     Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
-    MusicProvider, Page, PageMeta, Platform, Playlist, Podcast, PodcastEpisode, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, Track,
-    TuneWeaveError, User, Video,
+    Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
+    PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
+use crate::qrc::decrypt_qrc;
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
@@ -23,6 +24,8 @@ const QUERY_SONG_MODULE: &str = "music.trackInfo.UniformRuleCtrl";
 const QUERY_SONG_METHOD: &str = "CgiGetTrackInfo";
 const SONG_DETAIL_MODULE: &str = "music.pf_song_detail_svr";
 const SONG_DETAIL_METHOD: &str = "get_song_detail_yqq";
+const LYRIC_MODULE: &str = "music.musichallSong.PlayLyricInfo";
+const LYRIC_METHOD: &str = "GetPlayLyricInfo";
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -154,6 +157,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::TrackDetail,
+            Capability::Lyrics,
         ])
     }
 
@@ -283,9 +287,37 @@ impl MusicProvider for QqProvider {
             .ok_or_else(|| qq_data_error("QQ track query returned no response"))?;
         map_query_song_response(&identifiers, response)
     }
+
+    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+        self.qq_lyrics(
+            id,
+            &LyricsRequest {
+                account: account.map(str::to_owned),
+                ..LyricsRequest::default()
+            },
+        )
+        .await
+    }
+
+    async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        self.qq_lyrics(id, request).await
+    }
 }
 
 impl QqProvider {
+    async fn qq_lyrics(&self, id: &str, options: &LyricsRequest) -> Result<Lyrics> {
+        validate_qq_public_account(options.account.as_deref(), "QQ lyrics")?;
+        let (request, identifier) = lyric_request(id, options)?;
+        let response = self
+            .client
+            .request_android(&[request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ lyric service returned no response"))?;
+        map_lyric_response(&identifier, options, response)
+    }
+
     async fn typed_search(
         &self,
         query: &SearchQuery,
@@ -863,6 +895,31 @@ fn song_detail_request(id: &str) -> Result<(QqApiRequest, QqTrackIdentifier)> {
     ))
 }
 
+fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqTrackIdentifier)> {
+    let identifier = parse_qq_track_identifier(id)?;
+    let mut param = json!({
+        "crypt": 1,
+        "lrc_t": 0,
+        "qrc": options.word_synced,
+        "qrc_t": 0,
+        "roma": options.romanized,
+        "roma_t": 0,
+        "trans": options.translated,
+        "trans_t": 0,
+        "type": options.song_type.unwrap_or(1),
+        "ct": 11,
+        "cv": 14090008
+    });
+    match &identifier {
+        QqTrackIdentifier::Numeric(id) => param["songId"] = json!(id),
+        QqTrackIdentifier::Mid(mid) => param["songMid"] = json!(mid),
+    }
+    Ok((
+        QqApiRequest::new(LYRIC_MODULE, LYRIC_METHOD, param),
+        identifier,
+    ))
+}
+
 fn parse_qq_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
     let value = value.trim();
     if value.is_empty() {
@@ -974,6 +1031,136 @@ fn map_song_detail_response(
         .extensions
         .insert("detail_response".to_owned(), response.raw);
     Ok(track)
+}
+
+fn map_lyric_response(
+    requested: &QqTrackIdentifier,
+    options: &LyricsRequest,
+    response: QqApiResponse,
+) -> Result<Lyrics> {
+    let song_id = response
+        .data
+        .get("songID")
+        .and_then(json_u64)
+        .filter(|song_id| *song_id > 0)
+        .ok_or_else(|| qq_track_not_found(&qq_track_identifier_value(requested)))?;
+    if matches!(requested, QqTrackIdentifier::Numeric(requested_id) if *requested_id != song_id) {
+        return Err(qq_data_error(
+            "QQ lyric service returned a different track than requested",
+        ));
+    }
+    let crypt = match response.data.get("crypt") {
+        None | Some(Value::Null) => 0,
+        Some(value) => json_i64(value)
+            .filter(|value| matches!(value, 0 | 1))
+            .ok_or_else(|| qq_data_error("QQ lyric response has an invalid crypt flag"))?,
+    };
+    let actual_qrc = match response.data.get("qrc") {
+        None | Some(Value::Null) => options.word_synced,
+        Some(value) => json_bool(value)
+            .ok_or_else(|| qq_data_error("QQ lyric response has an invalid qrc flag"))?,
+    };
+    let lyric = decode_lyric_field(response.data.get("lyric"), crypt, "lyric", true)?;
+    let translated = decode_lyric_field(response.data.get("trans"), crypt, "trans", false)?;
+    let romanized = decode_lyric_field(response.data.get("roma"), crypt, "roma", false)?;
+    let (plain, word_synced, format) = if actual_qrc && lyric.is_some() {
+        (None, lyric, "qrc")
+    } else if lyric.is_some() {
+        (lyric, None, "lrc")
+    } else {
+        (None, None, "plain")
+    };
+    let track_id = match requested {
+        QqTrackIdentifier::Numeric(_) => song_id.to_string(),
+        QqTrackIdentifier::Mid(mid) => mid.clone(),
+    };
+    let track_ref = ResourceRef::new(Platform::Qq, track_id).map_err(|error| {
+        qq_data_error(format!(
+            "QQ returned an invalid lyric track identity: {error}"
+        ))
+    })?;
+    let mut extensions = Extensions::from([
+        ("numeric_id".to_owned(), json!(song_id.to_string())),
+        (
+            "identifier_kind".to_owned(),
+            json!(match requested {
+                QqTrackIdentifier::Numeric(_) => "numeric_id",
+                QqTrackIdentifier::Mid(_) => "mid",
+            }),
+        ),
+        ("actual_qrc".to_owned(), json!(actual_qrc)),
+        ("crypt".to_owned(), json!(crypt)),
+        (
+            "requested_options".to_owned(),
+            json!({
+                "qrc": options.word_synced,
+                "trans": options.translated,
+                "roma": options.romanized,
+                "song_type": options.song_type.unwrap_or(1)
+            }),
+        ),
+    ]);
+    for (extension, upstream) in [
+        ("song_name", "songName"),
+        ("song_type", "songType"),
+        ("singer_name", "singerName"),
+        ("lrc_time", "lrc_t"),
+        ("qrc_time", "qrc_t"),
+        ("translated_time", "trans_t"),
+        ("romanized_time", "roma_t"),
+        ("lyric_style", "lyric_style"),
+        ("classical", "classical"),
+        ("introduction_title", "introduceTitle"),
+        ("introduction_text", "introduceText"),
+        ("track", "track"),
+        ("start_timestamp", "startTs"),
+        ("translation_source", "transSource"),
+        ("has_contributor", "hasContributor"),
+        ("has_translation_contributor", "hasTransContributor"),
+        ("has_multiple_translations", "hasMultiTrans"),
+    ] {
+        insert_value(&mut extensions, extension, response.data.get(upstream));
+    }
+    extensions.insert("response".to_owned(), response.raw);
+    Ok(Lyrics {
+        track_ref,
+        plain,
+        translated,
+        romanized,
+        word_synced,
+        format: format.to_owned(),
+        contributors: Vec::new(),
+        extensions,
+    })
+}
+
+fn decode_lyric_field(
+    value: Option<&Value>,
+    crypt: i64,
+    name: &str,
+    required: bool,
+) -> Result<Option<String>> {
+    let Some(value) = value else {
+        if required {
+            return Err(qq_data_error(format!(
+                "QQ lyric response is missing its {name} field"
+            )));
+        }
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| qq_data_error(format!("QQ lyric {name} field is not a string")))?;
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let decoded = if crypt == 1 {
+        decrypt_qrc(value.trim())
+            .map_err(|error| qq_data_error(format!("QQ lyric {name} decryption failed: {error}")))?
+    } else {
+        value.to_owned()
+    };
+    Ok((!decoded.trim().is_empty()).then_some(decoded))
 }
 
 fn validate_song_detail_info(info: Option<&Value>) -> Result<()> {
@@ -2394,6 +2581,120 @@ mod tests {
     }
 
     #[test]
+    fn lyric_request_preserves_every_option_and_both_identifier_branches() {
+        let options = LyricsRequest {
+            word_synced: true,
+            translated: true,
+            romanized: true,
+            song_type: Some(7),
+            account: None,
+        };
+        let (numeric, identifier) = lyric_request("100", &options).expect("numeric lyric request");
+        assert_eq!(numeric.module, LYRIC_MODULE);
+        assert_eq!(numeric.method, LYRIC_METHOD);
+        assert_eq!(
+            numeric.param,
+            json!({
+                "crypt": 1,
+                "lrc_t": 0,
+                "qrc": true,
+                "qrc_t": 0,
+                "roma": true,
+                "roma_t": 0,
+                "trans": true,
+                "trans_t": 0,
+                "type": 7,
+                "ct": 11,
+                "cv": 14090008,
+                "songId": 100
+            })
+        );
+        assert_eq!(identifier, QqTrackIdentifier::Numeric(100));
+
+        let (mid, identifier) =
+            lyric_request("000akynZ2Rbro5", &LyricsRequest::default()).expect("MID lyric request");
+        assert_eq!(mid.param["songMid"], "000akynZ2Rbro5");
+        assert_eq!(mid.param["qrc"], false);
+        assert_eq!(mid.param["trans"], false);
+        assert_eq!(mid.param["roma"], false);
+        assert_eq!(mid.param["type"], 1);
+        assert!(mid.param.get("songId").is_none());
+        assert_eq!(
+            identifier,
+            QqTrackIdentifier::Mid("000akynZ2Rbro5".to_owned())
+        );
+    }
+
+    #[test]
+    fn lyric_mapping_never_lets_line_sync_override_word_sync() {
+        let requested = QqTrackIdentifier::Numeric(100);
+        let options = LyricsRequest::default();
+        let lyrics = map_lyric_response(
+            &requested,
+            &options,
+            response(json!({
+                "songID": 100,
+                "songName": "测试歌",
+                "songType": 1,
+                "singerName": "测试歌手",
+                "crypt": 0,
+                "qrc": 1,
+                "lyric": "<QrcInfos><LyricInfo LyricContent=\"[0,1000](0,500)逐字\"/></QrcInfos>",
+                "trans": "[00:00.00]translation",
+                "roma": "[00:00.00]romanization",
+                "hasContributor": 1
+            })),
+        )
+        .expect("map word-synced lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "qq:100");
+        assert_eq!(lyrics.format, "qrc");
+        assert!(lyrics.word_synced.is_some());
+        assert!(lyrics.plain.is_none());
+        assert_eq!(lyrics.translated.as_deref(), Some("[00:00.00]translation"));
+        assert_eq!(lyrics.romanized.as_deref(), Some("[00:00.00]romanization"));
+        assert_eq!(lyrics.extensions["actual_qrc"], true);
+        assert_eq!(lyrics.extensions["song_type"], 1);
+        assert_eq!(lyrics.extensions["has_contributor"], 1);
+        assert_eq!(lyrics.extensions["response"]["code"], 0);
+
+        let line_synced = map_lyric_response(
+            &requested,
+            &options,
+            response(json!({
+                "songID": 100,
+                "crypt": 0,
+                "qrc": 0,
+                "lyric": "[00:00.00]逐行歌词"
+            })),
+        )
+        .expect("map line-synced lyrics");
+        assert_eq!(line_synced.format, "lrc");
+        assert!(line_synced.plain.is_some());
+        assert!(line_synced.word_synced.is_none());
+    }
+
+    #[test]
+    fn lyric_mapping_rejects_wrong_identity_flags_fields_and_ciphertext() {
+        let requested = QqTrackIdentifier::Numeric(100);
+        let options = LyricsRequest::default();
+        for malformed in [
+            json!({"songID": 101, "crypt": 0, "qrc": 0, "lyric": "text"}),
+            json!({"songID": 100, "crypt": 2, "qrc": 0, "lyric": "text"}),
+            json!({"songID": 100, "crypt": 0, "qrc": 2, "lyric": "text"}),
+            json!({"songID": 100, "crypt": 0, "qrc": 0}),
+            json!({"songID": 100, "crypt": 0, "qrc": 0, "lyric": []}),
+            json!({"songID": 100, "crypt": 1, "qrc": 1, "lyric": "00"}),
+        ] {
+            let error = map_lyric_response(&requested, &options, response(malformed))
+                .expect_err("malformed lyric response");
+            assert!(matches!(
+                error.code,
+                ErrorCode::UpstreamError | ErrorCode::ResourceNotFound
+            ));
+        }
+    }
+
+    #[test]
     fn artist_mapping_preserves_counts_identity_and_raw_search_fields() {
         let item = map_artist_search_item(json!({
             "singerID": 4558,
@@ -3301,6 +3602,44 @@ mod tests {
         assert_eq!(mid.resource_ref.to_string(), "qq:003w2xz20QlUZt");
         assert_eq!(mid.extensions["detail_identifier_kind"], "mid");
         assert_eq!(mid.extensions["detail_response"]["code"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_lyrics_cover_lrc_qrc_translation_romanization_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let line_synced = provider.lyrics("100", None).await.expect("numeric LRC");
+        assert_eq!(line_synced.track_ref.to_string(), "qq:100");
+        assert_eq!(line_synced.format, "lrc");
+        assert!(line_synced.plain.is_some());
+        assert!(line_synced.word_synced.is_none());
+
+        let rich = provider
+            .lyrics_with_options(
+                "000akynZ2Rbro5",
+                &LyricsRequest {
+                    word_synced: true,
+                    translated: true,
+                    romanized: true,
+                    song_type: Some(1),
+                    account: None,
+                },
+            )
+            .await
+            .expect("MID rich lyrics");
+        assert_eq!(rich.track_ref.to_string(), "qq:000akynZ2Rbro5");
+        assert_eq!(rich.format, "qrc");
+        assert!(rich.word_synced.is_some());
+        assert!(rich.plain.is_none());
+        assert!(rich.translated.is_some());
+        assert!(rich.romanized.is_some());
+        assert_eq!(rich.extensions["numeric_id"], "213086592");
+        assert_eq!(rich.extensions["requested_options"]["qrc"], true);
+        assert_eq!(rich.extensions["response"]["code"], 0);
     }
 
     #[tokio::test]

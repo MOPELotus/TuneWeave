@@ -3359,6 +3359,18 @@ pub struct LyricContributor {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LyricsRequest {
+    #[serde(default)]
+    pub word_synced: bool,
+    #[serde(default)]
+    pub translated: bool,
+    #[serde(default)]
+    pub romanized: bool,
+    pub song_type: Option<i64>,
+    pub account: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lyrics {
     pub track_ref: ResourceRef,

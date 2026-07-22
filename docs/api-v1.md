@@ -1178,7 +1178,7 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
 | POST | `/v1/audio/recognize` | `{platform?, account?, fingerprint, duration_seconds}`；指纹最大 131072 字节，时长 1–300 秒 | `AudioRecognition`；命中起点跳过不可解析的首选字段并读取有效兼容值 |
-| GET | `/v1/tracks/{ref}/lyrics` | `platform?` 不覆盖引用平台 | `Lyrics` |
+| GET | `/v1/tracks/{ref}/lyrics` | `account?`、`word_synced/qrc?`、`translated/trans?`、`romanized/roma?`、`song_type/type?`；引用决定平台 | `Lyrics`；QQ 省略歌词选项时保持上游 `false/false/false/type=1` 默认 |
 | GET | `/v1/episodes/{ref}/lyrics` | `account?` | `PodcastEpisodeLyrics`；真实无歌词分支也返回可检查的成功数据 |
 | GET | `/v1/episodes/{ref}/stream` | 与歌曲流相同的音质、后端、播放平台、回退、解灰和账户参数 | `PodcastEpisodeStream`；节目、原音频和最终解析资源身份分离 |
 | GET | `/v1/episodes/{ref}/stream/redirect` | 同上 | 成功解析节目音频后返回 302，不向客户端暴露账户凭据 |
@@ -1200,7 +1200,7 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 
 `immersive_type=c51|ste|aac` 选择沉浸声音频类型，并兼容网易云字段名 `immerse_type`/`immerseType`。省略时网易云 `spatial/sky` 使用上游默认 `c51`；显式选择仅在现代 `song_url_v1` 且音质为 `spatial/sky` 时写入 `immerseType`，其他音质和旧版协议不会误发该字段。该控制与音质、账户和跨平台路由一同贯穿单曲、批量、播客、Uni Playlist 项播放及 `POST /v1/resolve`；不支持的值返回 `invalid_request`，不会静默降级为另一种沉浸声类型。
 
-`available_qualities` 始终按上述能力层级从低到高返回，不依赖平台响应数组的偶然顺序。网易云歌曲元数据中的 192 kbps `m` 档映射为 `higher`，320 kbps `h` 档才映射为 `high`；最高码率字段为零时不会遮住有效的兼容码率。当逐字 YRC 与逐行 LRC 同时存在时，`Lyrics.format` 标记能力更高的 `yrc`，但 `plain` 与 `word_synced` 两份内容都会保留；歌词贡献者的无效旧 ID 也不会遮住有效 `userId`。
+`available_qualities` 始终按上述能力层级从低到高返回，不依赖平台响应数组的偶然顺序。网易云歌曲元数据中的 192 kbps `m` 档映射为 `higher`，320 kbps `h` 档才映射为 `high`；最高码率字段为零时不会遮住有效的兼容码率。当逐字 YRC 与逐行 LRC 同时存在时，`Lyrics.format` 标记能力更高的 `yrc`，但 `plain` 与 `word_synced` 两份内容都会保留；歌词贡献者的无效旧 ID 也不会遮住有效 `userId`。QQ 的 `qrc/trans/roma` 是相互独立的上游开关，返回内容使用平台自定义 3DES+zlib 编码；TuneWeave 解密后按实际 `qrc` 响应标志选择 `qrc` 或 `lrc`，逐字歌词存在时不会被逐行格式覆盖。歌曲 ID/MID、`song_type` 和完整上游响应仍保存在扩展。
 
 批量 GET 的 `refs` 是逗号分隔完整资源引用；`ids/id` 是平台内 ID，`platform` 省略时使用服务默认平台，且只能与 `ids` 一起使用。POST 的 `refs/ids` 既可为单个字符串或逗号字符串，也可为字符串数组。两种输入都不折叠重复项；混合平台引用按来源 provider 分组调用原生批量能力，再严格还原原顺序。`StreamBatch.outcomes` 为每个输入返回独立 `status/stream/error_code/error/extensions`，单项不可用不会把整个 HTTP 请求变成失败；各 provider 的完整批量响应位于 `extensions.provider_batches`。
 

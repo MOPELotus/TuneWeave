@@ -48,7 +48,7 @@ pub use model::{
     ImageUploadResult, ImmersiveAudioType, ListeningRightsAd, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor,
-    Lyrics, MediaDownload, MediaStream, MembershipSummary, Money, MusicVideoArea,
+    Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary, Money, MusicVideoArea,
     MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
     PageRequest, PersonalFmRequest, PersonalFmVariant, PlatformApiRequest, PlatformBatchRequest,
     PlaybackDevice, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,

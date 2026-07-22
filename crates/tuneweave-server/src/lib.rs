@@ -43,7 +43,7 @@ use tuneweave_core::{
     ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType,
     ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
     ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, MediaDownload, MediaStream, MembershipSummary,
+    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
     MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
     MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest,
     PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
@@ -1697,6 +1697,20 @@ struct AccountParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LyricsParams {
+    account: Option<String>,
+    #[serde(alias = "qrc")]
+    word_synced: Option<String>,
+    #[serde(alias = "trans")]
+    translated: Option<String>,
+    #[serde(alias = "roma")]
+    romanized: Option<String>,
+    #[serde(alias = "type")]
+    song_type: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrackBatchParams {
     refs: Option<String>,
     ids: Option<String>,
@@ -2441,8 +2455,9 @@ async fn set_artist_subscription(
 async fn track_lyrics(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<AccountParams>,
+    params: Result<Query<LyricsParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
+    let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = params
         .account
@@ -2451,7 +2466,22 @@ async fn track_lyrics(
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
-    let lyrics = provider.lyrics(reference.id(), account).await?;
+    let word_synced =
+        parse_bool_parameter("word_synced/qrc", params.word_synced.as_deref(), false)?;
+    let translated = parse_bool_parameter("translated/trans", params.translated.as_deref(), false)?;
+    let romanized = parse_bool_parameter("romanized/roma", params.romanized.as_deref(), false)?;
+    let lyrics = provider
+        .lyrics_with_options(
+            reference.id(),
+            &LyricsRequest {
+                word_synced,
+                translated,
+                romanized,
+                song_type: params.song_type,
+                account: account.map(str::to_owned),
+            },
+        )
+        .await?;
     let mut response = ApiResponse::new(lyrics).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
@@ -13667,6 +13697,21 @@ mod tests {
             })
         }
 
+        async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+            let mut lyrics = self.lyrics(id, request.account.as_deref()).await?;
+            lyrics.extensions.insert(
+                "requested_options".to_owned(),
+                json!({
+                    "word_synced": request.word_synced,
+                    "translated": request.translated,
+                    "romanized": request.romanized,
+                    "song_type": request.song_type,
+                    "account": request.account
+                }),
+            );
+            Ok(lyrics)
+        }
+
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             Ok(MediaStream {
                 url: "https://example.test/audio.mp3".to_owned(),
@@ -19621,6 +19666,48 @@ mod tests {
         assert_eq!(json["data"]["track_ref"], "netease:185809");
         assert_eq!(json["data"]["format"], "lrc");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn track_lyrics_forward_unified_and_qq_reference_options() {
+        for (query, song_type) in [
+            (
+                "qrc=true&trans=true&roma=true&song_type=7&account=collector",
+                7,
+            ),
+            (
+                "word_synced=true&translated=true&romanized=true&type=9&account=collector",
+                9,
+            ),
+            ("qrc=1&trans=1&roma=1&type=11&account=collector", 11),
+        ] {
+            let (status, json) = json_response_from(
+                test_app_with_provider(),
+                &format!("/v1/tracks/netease:185809/lyrics?{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            let options = &json["data"]["extensions"]["requested_options"];
+            assert_eq!(options["word_synced"], true);
+            assert_eq!(options["translated"], true);
+            assert_eq!(options["romanized"], true);
+            assert_eq!(options["song_type"], song_type);
+            assert_eq!(options["account"], "collector");
+            assert_eq!(json["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn track_lyrics_reject_invalid_options_and_unknown_fields() {
+        for query in ["qrc=maybe", "song_type=not-a-number", "unexpected=true"] {
+            let (status, json) = json_response_from(
+                test_app_with_provider(),
+                &format!("/v1/tracks/netease:185809/lyrics?{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{query}");
+        }
     }
 
     #[tokio::test]

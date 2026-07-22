@@ -1809,6 +1809,8 @@ dependencies = [
  "async-trait",
  "base64",
  "cbc",
+ "flate2",
+ "hex",
  "md-5",
  "num-bigint",
  "rand",

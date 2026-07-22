@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=94`、`partial=0`、`implemented=1`、`verified=5`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=93`、`partial=0`、`implemented=1`、`verified=6`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -38,7 +38,7 @@
 | Q021 | 内容展示 | `SongApi.get_sheet` | 是 | `pending` | 曲谱详情；排在高频链路之后 |
 | Q022 | 内容展示 | `SongApi.has_sheet` | 是 | `pending` | 曲谱存在性；排在高频链路之后 |
 | Q023 | 内容展示 | `SongApi.get_fav_num` | 是 | `pending` | 歌曲收藏人数 |
-| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `pending` | 普通/逐字、翻译、罗马音及 `song_type`，高精度格式优先 |
+| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/lyrics` 精确调用 Android `music.musichallSong.PlayLyricInfo/GetPlayLyricInfo`，数字 ID 使用 `songId`、MID 使用 `songMid`，完整提交 `crypt=1/lrc_t=0/qrc_t=0/trans_t=0/roma_t=0/ct=11/cv=14090008`；统一 `word_synced/translated/romanized/song_type` 与参考 `qrc/trans/roma/type` 查询名成对兼容，省略时保持上游 `false/false/false/type=1` 默认。响应的 `lyric/trans/roma` 分别执行 QQ 历史字节序、自定义 PC-2 的 3DES EDE 与 zlib 解压，畸形十六进制、块长度、压缩流、UTF-8、字段、标志或数字 ID 错配全部拒绝为假成功；未引入整套歌词工具依赖。实际 `qrc=1` 时主歌词只进入 `word_synced` 且 `format=qrc`，绝不被低精度 LRC 覆盖；`qrc=0` 才映射 `plain/format=lrc`，翻译和罗马音独立保留，歌曲名、歌手、类型、贡献状态等常用元数据及完整子响应保存在扩展。2026-07-22 独立加密向量、provider 与 release HTTP 均已验证：数字 ID `100` 返回 LRC；MID `000akynZ2Rbro5`（`Lemon`）同时返回非空 QRC、翻译、罗马音并解析到数字 ID `213086592`。同日完成本轮第三接口后的上游复查，快照仍为 `1b0aae0db3ee6876b3a77b8d1ce3057b4b3c9cd5` |
 | Q025 | 内容展示 | `AlbumApi.get_detail` | 是 | `pending` | 专辑详情 |
 | Q026 | 内容展示 | `AlbumApi.get_song` | 是 | `pending` | 专辑歌曲分页 |
 | Q027 | 内容展示 | `AlbumApi.get_new_album` | 是 | `pending` | 新专辑目录 |
