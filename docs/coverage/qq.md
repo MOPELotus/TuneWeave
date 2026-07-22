@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=95`、`partial=0`、`implemented=1`、`verified=4`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=94`、`partial=0`、`implemented=1`、`verified=5`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -27,8 +27,8 @@
 | Q010 | 搜索与发现 | `RecommendApi.get_radar_recommend` | 是 | `pending` | 雷达推荐 |
 | Q011 | 搜索与发现 | `TopApi.get_category` | 是 | `pending` | 榜单目录 |
 | Q012 | 搜索与发现 | `TopApi.get_detail` | 是 | `pending` | 榜单歌曲及分页 |
-| Q013 | 内容展示 | `SongApi.query_song` | 是 | `verified` | `GET/POST /v1/tracks` 完整保留参考批量能力：GET 接受逗号分隔 `refs` 或 `platform+ids`，POST 接受单值/数组；完整引用批次必须属于同一平台，输入顺序与重复项原样保留，账户参数统一透传。QQ 精确调用 Android `music.trackInfo.UniformRuleCtrl/CgiGetTrackInfo`，每项提交 `types=0/modify_stamp=0` 及固定 `ctx=0/client=1`；纯十进制字符串按数字 ID 批次提交，其他值按 MID 批次提交，严格拒绝两种标识混用。响应按请求标识重新对齐，不因上游排序或去重丢失重复项；缺失 `tracks` 拒绝为假空结果，请求项缺失明确返回资源不存在。统一 `Track` 分别保留数字 ID、MID、媒体 MID、`songType`、文件规格、付费信息、状态和完整原始歌曲项，公开引用优先使用 MID。单条 `/v1/tracks/{ref}` 在 Q014 富详情接入前复用同一查询协议。2026-07-22 provider 与 release 统一 GET/POST 已真实验证数字 ID `100` 的重复批次和 MID `003w2xz20QlUZt`；前者稳定返回两项同引用 `qq:003a7WZv0CYKYn`，后者返回请求 MID，数字 ID/MID/媒体 MID/`songType=1` 均存在 |
-| Q014 | 内容展示 | `SongApi.get_detail` | 是 | `pending` | 单曲详情 |
+| Q013 | 内容展示 | `SongApi.query_song` | 是 | `verified` | `GET/POST /v1/tracks` 完整保留参考批量能力：GET 接受逗号分隔 `refs` 或 `platform+ids`，POST 接受单值/数组；完整引用批次必须属于同一平台，输入顺序与重复项原样保留，账户参数统一透传。QQ 精确调用 Android `music.trackInfo.UniformRuleCtrl/CgiGetTrackInfo`，每项提交 `types=0/modify_stamp=0` 及固定 `ctx=0/client=1`；纯十进制字符串按数字 ID 批次提交，其他值按 MID 批次提交，严格拒绝两种标识混用。响应按请求标识重新对齐，不因上游排序或去重丢失重复项；缺失 `tracks` 拒绝为假空结果，请求项缺失明确返回资源不存在。统一 `Track` 分别保留数字 ID、MID、媒体 MID、`songType`、文件规格、付费信息、状态和完整原始歌曲项，公开引用优先使用 MID。2026-07-22 provider 与 release 统一 GET/POST 已真实验证数字 ID `100` 的重复批次和 MID `003w2xz20QlUZt`；前者稳定返回两项同引用 `qq:003a7WZv0CYKYn`，后者返回请求 MID，数字 ID/MID/媒体 MID/`songType=1` 均存在 |
+| Q014 | 内容展示 | `SongApi.get_detail` | 是 | `verified` | `GET /v1/tracks/{qq-ref}` 精确调用固定 Web `music.pf_song_detail_svr/get_song_detail_yqq`，QQ 数字 ID 使用 `song_id`，MID 使用 `song_mid`，两种输入均不改写为另一分支。新增 Web JSON CGI 档案逐字段匹配参考：独立 Chrome 120 UA，`ct=24/cv=4747474/platform=yqq.json/chid=0/uin=0/g_tk=5381/g_tk_new_20200303=5381` 及字符集、通知、新码字段，不借用 Android UA 或设备身份。`track_info` 复用完整统一 `Track` 映射；`info.company/genre/intro/lan/pub_time.content`、`extras` 和含业务码的完整子响应分别保存在详情扩展，发行公司、流派、简介、语言、发布时间及未来平台字段不会丢失。缺失曲目明确返回资源不存在；请求/返回身份不一致，或已出现但类型、内容项结构畸形的富字段均拒绝为假成功。2026-07-22 provider 与 release 统一 HTTP 已真实验证数字 ID `100` 和 MID `003w2xz20QlUZt` 两条分支：数字 ID 返回 `qq:003a7WZv0CYKYn`，五类富内容各有 1 项，扩展含 `from/name/subtitle/transname/wikiurl`，MID 返回原请求引用，两者上游码均为 0 |
 | Q015 | 内容展示 | `SongApi.get_similar_song` | 是 | `pending` | 相似歌曲 |
 | Q016 | 内容展示 | `SongApi.get_labels` | 是 | `pending` | 歌曲标签 |
 | Q017 | 内容展示 | `SongApi.get_related_songlist` | 是 | `pending` | 相关歌单 |

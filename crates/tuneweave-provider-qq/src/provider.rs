@@ -21,6 +21,8 @@ const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
 const HOTKEY_METHOD: &str = "GetHotkeyForQQMusicMobile";
 const QUERY_SONG_MODULE: &str = "music.trackInfo.UniformRuleCtrl";
 const QUERY_SONG_METHOD: &str = "CgiGetTrackInfo";
+const SONG_DETAIL_MODULE: &str = "music.pf_song_detail_svr";
+const SONG_DETAIL_METHOD: &str = "get_song_detail_yqq";
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -257,11 +259,16 @@ impl MusicProvider for QqProvider {
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
-        self.tracks(&[id.to_owned()], account)
+        validate_qq_public_account(account, "QQ track detail")?;
+        let (request, identifier) = song_detail_request(id)?;
+        let response = self
+            .client
+            .request_web(&[request])
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| qq_track_not_found(id))
+            .ok_or_else(|| qq_data_error("QQ song detail returned no response"))?;
+        map_song_detail_response(&identifier, response)
     }
 
     async fn tracks(&self, ids: &[String], account: Option<&str>) -> Result<Vec<Track>> {
@@ -802,27 +809,7 @@ fn query_song_request(ids: &[String]) -> Result<(QqApiRequest, Vec<QqTrackIdenti
     }
     let values = ids
         .iter()
-        .map(|value| {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err(TuneWeaveError::invalid_request(
-                    "QQ track query cannot contain an empty ID or MID",
-                )
-                .with_platform(Platform::Qq));
-            }
-            if value.chars().all(|character| character.is_ascii_digit()) {
-                value
-                    .parse::<u64>()
-                    .map(QqTrackIdentifier::Numeric)
-                    .map_err(|_| {
-                        TuneWeaveError::invalid_request("QQ numeric track ID is out of range")
-                            .with_platform(Platform::Qq)
-                            .with_details(json!({ "id": value }))
-                    })
-            } else {
-                Ok(QqTrackIdentifier::Mid(value.to_owned()))
-            }
-        })
+        .map(|value| parse_qq_track_identifier(value))
         .collect::<Result<Vec<_>>>()?;
     let numeric = values
         .iter()
@@ -864,6 +851,40 @@ fn query_song_request(ids: &[String]) -> Result<(QqApiRequest, Vec<QqTrackIdenti
     ))
 }
 
+fn song_detail_request(id: &str) -> Result<(QqApiRequest, QqTrackIdentifier)> {
+    let identifier = parse_qq_track_identifier(id)?;
+    let param = match &identifier {
+        QqTrackIdentifier::Numeric(id) => json!({ "song_id": id }),
+        QqTrackIdentifier::Mid(mid) => json!({ "song_mid": mid }),
+    };
+    Ok((
+        QqApiRequest::new(SONG_DETAIL_MODULE, SONG_DETAIL_METHOD, param),
+        identifier,
+    ))
+}
+
+fn parse_qq_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ track identifier cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        value
+            .parse::<u64>()
+            .map(QqTrackIdentifier::Numeric)
+            .map_err(|_| {
+                TuneWeaveError::invalid_request("QQ numeric track ID is out of range")
+                    .with_platform(Platform::Qq)
+                    .with_details(json!({ "id": value }))
+            })
+    } else {
+        Ok(QqTrackIdentifier::Mid(value.to_owned()))
+    }
+}
+
 fn map_query_song_response(
     requested: &[QqTrackIdentifier],
     response: QqApiResponse,
@@ -898,6 +919,98 @@ fn map_query_song_response(
         tracks.push(track);
     }
     Ok(tracks)
+}
+
+fn map_song_detail_response(
+    requested: &QqTrackIdentifier,
+    response: QqApiResponse,
+) -> Result<Track> {
+    let raw_track = response
+        .data
+        .get("track_info")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| qq_track_not_found(&qq_track_identifier_value(requested)))?;
+    validate_song_detail_info(response.data.get("info"))?;
+    if response
+        .data
+        .get("extras")
+        .is_some_and(|extras| !extras.is_object() && !extras.is_null())
+    {
+        return Err(qq_data_error(
+            "QQ song detail extras field is not an object",
+        ));
+    }
+    let mut track = map_track(raw_track)?;
+    if !track_matches_identifier(&track, requested) {
+        return Err(qq_data_error(
+            "QQ song detail returned a different track than requested",
+        ));
+    }
+    track.extensions.insert(
+        "detail_identifier_kind".to_owned(),
+        json!(match requested {
+            QqTrackIdentifier::Numeric(_) => "numeric_id",
+            QqTrackIdentifier::Mid(_) => "mid",
+        }),
+    );
+    track.extensions.insert(
+        "detail_info".to_owned(),
+        response
+            .data
+            .get("info")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    track.extensions.insert(
+        "detail_extras".to_owned(),
+        response
+            .data
+            .get("extras")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    track
+        .extensions
+        .insert("detail_response".to_owned(), response.raw);
+    Ok(track)
+}
+
+fn validate_song_detail_info(info: Option<&Value>) -> Result<()> {
+    let Some(info) = info.filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let info = info
+        .as_object()
+        .ok_or_else(|| qq_data_error("QQ song detail info field is not an object"))?;
+    for name in ["company", "genre", "intro", "lan", "pub_time"] {
+        let Some(section) = info.get(name).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let section = section.as_object().ok_or_else(|| {
+            qq_data_error(format!("QQ song detail {name} section is not an object"))
+        })?;
+        let Some(content) = section.get("content").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let content = content.as_array().ok_or_else(|| {
+            qq_data_error(format!(
+                "QQ song detail {name} content field is not an array"
+            ))
+        })?;
+        for item in content {
+            let valid = item.get("id").and_then(json_i64).is_some()
+                && item.get("value").and_then(Value::as_str).is_some()
+                && item.get("show_type").and_then(json_i64).is_some()
+                && item.get("jumpurl").and_then(Value::as_str).is_some();
+            if !valid {
+                return Err(qq_data_error(format!(
+                    "QQ song detail {name} contains an invalid content item"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn track_matches_identifier(track: &Track, identifier: &QqTrackIdentifier) -> bool {
@@ -2168,6 +2281,119 @@ mod tests {
     }
 
     #[test]
+    fn song_detail_request_keeps_numeric_id_and_mid_branches_exact() {
+        let (numeric, identifier) = song_detail_request("100").expect("numeric detail request");
+        assert_eq!(numeric.module, SONG_DETAIL_MODULE);
+        assert_eq!(numeric.method, SONG_DETAIL_METHOD);
+        assert_eq!(numeric.param, json!({"song_id": 100}));
+        assert_eq!(identifier, QqTrackIdentifier::Numeric(100));
+
+        let (mid, identifier) = song_detail_request("003w2xz20QlUZt").expect("MID detail request");
+        assert_eq!(mid.module, SONG_DETAIL_MODULE);
+        assert_eq!(mid.method, SONG_DETAIL_METHOD);
+        assert_eq!(mid.param, json!({"song_mid": "003w2xz20QlUZt"}));
+        assert_eq!(
+            identifier,
+            QqTrackIdentifier::Mid("003w2xz20QlUZt".to_owned())
+        );
+    }
+
+    #[test]
+    fn song_detail_mapping_keeps_rich_sections_extras_and_complete_response() {
+        let track = sample_track(100, "003w2xz20QlUZt", "可爱女人");
+        let data = json!({
+            "track_info": track,
+            "info": {
+                "company": {"content": [{
+                    "id": 1,
+                    "value": "杰威尔音乐",
+                    "show_type": 0,
+                    "jumpurl": ""
+                }]},
+                "genre": {"content": [{
+                    "id": 2,
+                    "value": "流行",
+                    "show_type": 0,
+                    "jumpurl": ""
+                }]},
+                "intro": {"content": []},
+                "lan": {"content": [{
+                    "id": 3,
+                    "value": "国语",
+                    "show_type": 0,
+                    "jumpurl": ""
+                }]},
+                "pub_time": {"content": [{
+                    "id": 4,
+                    "value": "2000-11-07",
+                    "show_type": 0,
+                    "jumpurl": ""
+                }]}
+            },
+            "extras": {"album_name": "Jay"}
+        });
+        let mapped = map_song_detail_response(
+            &QqTrackIdentifier::Numeric(100),
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map rich song detail");
+        assert_eq!(mapped.resource_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(mapped.extensions["detail_identifier_kind"], "numeric_id");
+        assert_eq!(
+            mapped.extensions["detail_info"]["company"]["content"][0]["value"],
+            "杰威尔音乐"
+        );
+        assert_eq!(
+            mapped.extensions["detail_info"]["genre"]["content"][0]["value"],
+            "流行"
+        );
+        assert_eq!(
+            mapped.extensions["detail_info"]["lan"]["content"][0]["value"],
+            "国语"
+        );
+        assert_eq!(
+            mapped.extensions["detail_info"]["pub_time"]["content"][0]["value"],
+            "2000-11-07"
+        );
+        assert_eq!(mapped.extensions["detail_extras"]["album_name"], "Jay");
+        assert_eq!(mapped.extensions["detail_response"]["code"], 0);
+    }
+
+    #[test]
+    fn song_detail_mapping_rejects_missing_mismatched_and_malformed_data() {
+        let requested = QqTrackIdentifier::Numeric(100);
+        let missing = map_song_detail_response(&requested, response(json!({})))
+            .expect_err("missing track detail");
+        assert_eq!(missing.code, ErrorCode::ResourceNotFound);
+
+        let mismatch = map_song_detail_response(
+            &requested,
+            response(json!({
+                "track_info": sample_track(97_773, "0039MnYb0qxYhV", "晴天")
+            })),
+        )
+        .expect_err("mismatched track detail");
+        assert_eq!(mismatch.code, ErrorCode::UpstreamError);
+
+        for malformed in [
+            json!({"info": []}),
+            json!({"info": {"company": []}}),
+            json!({"info": {"company": {"content": {}}}}),
+            json!({"info": {"company": {"content": [{}]}}}),
+            json!({"extras": []}),
+        ] {
+            let mut data = malformed;
+            data["track_info"] = sample_track(100, "003w2xz20QlUZt", "可爱女人");
+            let error = map_song_detail_response(&requested, response(data))
+                .expect_err("malformed song detail");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn artist_mapping_preserves_counts_identity_and_raw_search_fields() {
         let item = map_artist_search_item(json!({
             "singerID": 4558,
@@ -3055,6 +3281,26 @@ mod tests {
         assert_eq!(mids[0].resource_ref.to_string(), "qq:003w2xz20QlUZt");
         assert!(mids[0].extensions["media_mid"].as_str().is_some());
         assert!(mids[0].extensions.contains_key("song_type"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_rich_track_detail_accepts_numeric_id_and_mid() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let numeric = provider.track("100", None).await.expect("numeric detail");
+        assert_eq!(numeric.extensions["numeric_id"], "100");
+        assert_eq!(numeric.extensions["detail_identifier_kind"], "numeric_id");
+        assert!(numeric.extensions["detail_info"].is_object());
+        assert!(numeric.extensions["detail_extras"].is_object());
+        assert_eq!(numeric.extensions["detail_response"]["code"], 0);
+
+        let mid = provider
+            .track("003w2xz20QlUZt", None)
+            .await
+            .expect("MID detail");
+        assert_eq!(mid.resource_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(mid.extensions["detail_identifier_kind"], "mid");
+        assert_eq!(mid.extensions["detail_response"]["code"], 0);
     }
 
     #[tokio::test]

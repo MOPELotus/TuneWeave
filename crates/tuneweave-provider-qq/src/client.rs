@@ -17,6 +17,7 @@ use crate::{
 const API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const QUICK_SEARCH_ENDPOINT: &str = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
 const ANDROID_USER_AGENT: &str = "QQMusic 14090008(android 10)";
+const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[derive(Clone, Default)]
 pub struct QqConfig {
@@ -113,6 +114,20 @@ impl QqClient {
         let device = self.lock_device()?.device().clone();
         let comm = android_comm(&device);
         self.post_api(&comm, requests).await
+    }
+
+    pub(crate) async fn request_web(
+        &self,
+        requests: &[QqApiRequest],
+    ) -> Result<Vec<QqApiResponse>> {
+        if requests.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ API batch must contain at least one request",
+            )
+            .with_platform(Platform::Qq));
+        }
+        self.post_api_with_user_agent(&web_comm(), requests, Some(WEB_USER_AGENT))
+            .await
     }
 
     pub(crate) async fn request_quick_search(&self, keyword: &str) -> Result<Value> {
@@ -230,6 +245,15 @@ impl QqClient {
         comm: &Value,
         requests: &[QqApiRequest],
     ) -> Result<Vec<QqApiResponse>> {
+        self.post_api_with_user_agent(comm, requests, None).await
+    }
+
+    async fn post_api_with_user_agent(
+        &self,
+        comm: &Value,
+        requests: &[QqApiRequest],
+        user_agent: Option<&str>,
+    ) -> Result<Vec<QqApiResponse>> {
         let mut payload = Map::new();
         payload.insert("comm".to_owned(), comm.clone());
         for (index, request) in requests.iter().enumerate() {
@@ -242,13 +266,11 @@ impl QqClient {
                 }),
             );
         }
-        let response = self
-            .http
-            .post(API_ENDPOINT)
-            .json(&Value::Object(payload))
-            .send()
-            .await
-            .map_err(network_error)?;
+        let mut request = self.http.post(API_ENDPOINT).json(&Value::Object(payload));
+        if let Some(user_agent) = user_agent {
+            request = request.header(reqwest::header::USER_AGENT, user_agent);
+        }
+        let response = request.send().await.map_err(network_error)?;
         let status = response.status();
         if !status.is_success() {
             return Err(http_error(status));
@@ -329,6 +351,23 @@ fn android_comm(device: &QqDevice) -> Value {
         object.insert("sid".to_owned(), Value::String(sid.to_owned()));
     }
     comm
+}
+
+fn web_comm() -> Value {
+    json!({
+        "ct": 24,
+        "cv": 4747474,
+        "platform": "yqq.json",
+        "chid": "0",
+        "uin": 0,
+        "g_tk": 5381,
+        "g_tk_new_20200303": 5381,
+        "format": "json",
+        "inCharset": "utf-8",
+        "outCharset": "utf-8",
+        "notice": 0,
+        "needNewCode": 1
+    })
 }
 
 fn booleans_to_integers(value: Value) -> Value {
@@ -427,6 +466,27 @@ mod tests {
         assert_eq!(comm["QIMEI36"], "q36");
         assert!(comm.get("uid").is_none());
         assert!(comm.get("sid").is_none());
+    }
+
+    #[test]
+    fn web_comm_matches_the_reference_profile_without_device_identity() {
+        assert_eq!(
+            web_comm(),
+            json!({
+                "ct": 24,
+                "cv": 4747474,
+                "platform": "yqq.json",
+                "chid": "0",
+                "uin": 0,
+                "g_tk": 5381,
+                "g_tk_new_20200303": 5381,
+                "format": "json",
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "notice": 0,
+                "needNewCode": 1
+            })
+        );
     }
 
     #[test]
