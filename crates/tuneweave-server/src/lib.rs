@@ -669,6 +669,9 @@ struct SearchParams {
     limit: Option<String>,
     offset: Option<String>,
     account: Option<String>,
+    #[serde(alias = "searchid")]
+    search_id: Option<String>,
+    highlight: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -949,6 +952,12 @@ async fn search(
         .map(str::trim)
         .filter(|account| !account.is_empty())
         .map(str::to_owned);
+    let search_id = params
+        .search_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|search_id| !search_id.is_empty())
+        .map(str::to_owned);
     let query = SearchQuery {
         query: query_text.to_owned(),
         kind,
@@ -956,6 +965,8 @@ async fn search(
         limit,
         offset,
         account: account.clone(),
+        search_id,
+        highlight: parse_bool_parameter("highlight", params.highlight.as_deref(), false)?,
     };
     let page = provider.search_catalog(&query).await?;
     let mut response = ApiResponse::new(page.items)
@@ -11273,6 +11284,8 @@ mod tests {
             extensions.insert("variant".to_owned(), json!(query.variant));
             extensions.insert("query".to_owned(), json!(query.query));
             extensions.insert("account".to_owned(), json!(query.account));
+            extensions.insert("search_id".to_owned(), json!(query.search_id));
+            extensions.insert("highlight".to_owned(), json!(query.highlight));
             Ok(Page {
                 items: vec![item],
                 pagination: PageMeta {
@@ -14848,6 +14861,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_forwards_platform_search_session_and_highlight_controls() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&platform=netease&searchid=session-42&highlight=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["search_id"],
+            "session-42"
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["highlight"], true);
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&search_id=second-session&highlight=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["search_id"],
+            "second-session"
+        );
+        assert_eq!(json["meta"]["pagination"]["extensions"]["highlight"], false);
+    }
+
+    #[tokio::test]
     async fn search_exposes_legacy_and_cloud_variants_on_the_same_endpoint() {
         for (input, expected) in [
             ("legacy", "legacy"),
@@ -18162,6 +18202,7 @@ mod tests {
             "/v1/search?q=clock&limit=101",
             "/v1/search?q=clock&type=book",
             "/v1/search?type=1",
+            "/v1/search?q=clock&highlight=sometimes",
             "/v1/search?q=clock&unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;

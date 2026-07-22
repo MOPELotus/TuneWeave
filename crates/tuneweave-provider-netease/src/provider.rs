@@ -14641,6 +14641,7 @@ fn search_item_keyword(item: &SearchItem) -> Option<String> {
         SearchItem::Video(video) => Some(video.title.as_str()),
         SearchItem::RadioStation(station) => Some(station.name.as_str()),
         SearchItem::Podcast(podcast) => Some(podcast.name.as_str()),
+        SearchItem::PodcastEpisode(episode) => Some(episode.name.as_str()),
         SearchItem::Opaque(item) => item.title.as_deref(),
     }?;
     let value = value.trim();
@@ -17412,6 +17413,8 @@ mod tests {
                 limit: 10,
                 offset: 0,
                 account: None,
+                search_id: None,
+                highlight: false,
             },
         )
         .await
@@ -29032,6 +29035,8 @@ mod tests {
                 limit: 3,
                 offset: 0,
                 account: None,
+                search_id: None,
+                highlight: false,
             },
         )
         .await
@@ -29291,6 +29296,8 @@ mod tests {
                     limit: 2,
                     offset: 0,
                     account: None,
+                    search_id: None,
+                    highlight: false,
                 },
             )
             .await
@@ -29335,6 +29342,8 @@ mod tests {
                     limit: 2,
                     offset: 0,
                     account: None,
+                    search_id: None,
+                    highlight: false,
                 },
             )
             .await

@@ -11,14 +11,14 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=99`、`partial=1`、`implemented=0`、`verified=0`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=99`、`partial=0`、`implemented=1`、`verified=0`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
 | Q001 | 搜索与发现 | `SearchApi.get_hotkey` | 是 | `pending` | 热搜目录 |
 | Q002 | 搜索与发现 | `SearchApi.complete` | 是 | `pending` | 搜索建议 |
 | Q003 | 搜索与发现 | `SearchApi.quick_search` | 是 | `pending` | 兼容独立 Smartbox HTTP 链 |
-| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `partial` | `GET /v1/search?platform=qq&kind=...` 已接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV 和歌词 6 类：自动申请并持久化 QIMEI/设备会话；按实测静默失败边界分别使用歌曲/专辑/MV/歌词 60、歌手 40、歌单 30 的最大可用页宽，统一 `limit<=100` 与任意 `offset` 由同批子请求按上游逻辑槽位切片。歌单桶偶发少一项时不跨窗口补项或导致续页重复，`next_offset` 仍按槽位推进，`omitted_slots/upstream_item_counts` 明示缺口；非稀疏分类缺项及缺少码/总数/列表均拒绝为假成功。歌曲数字 ID/MID/媒体 MID/`songType`/文件规格/付费字段，歌词命中文本，歌手与专辑 ID/MID/计数，歌单 `dissid`/创建者 `uin`/计数/日期，MV VID/数字 ID/创作者/时长/播放量及每类完整原项分别保留。2026-07-22 Rust provider 与 release 统一 HTTP 均真实搜索“周杰伦”，歌曲返回《晴天》且重启复用 QIMEI/会话，歌手/专辑/歌单/MV/歌词返回对应统一类型；歌单 offset 25/limit 20 跨页按逻辑窗口推进，并另以宽关键词验证稀疏页不会补入窗口外项目；用户、节目专辑和节目 3 类仍待接入，故不提前标为完成 |
+| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `implemented` | `GET /v1/search?platform=qq&kind=...` 已完整接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和节目 9 类，并保留 `searchid` 搜索会话及 `highlight` 分支：自动申请并持久化 QIMEI/设备会话；按已验收的静默失败边界分别使用歌曲/专辑/MV/歌词 60、歌手 40、歌单 30 的页宽，用户/节目专辑/节目使用上游公开测试覆盖的 10，统一 `limit<=100` 与任意 `offset` 由同批子请求按上游逻辑槽位切片。歌单桶偶发少一项时不跨窗口补项或导致续页重复，`next_offset` 仍按槽位推进，`omitted_slots/upstream_item_counts` 明示缺口；非稀疏分类缺项及缺少码/总数/列表均拒绝为假成功。用户优先保留加密 UIN 并另存数字 UIN；节目专辑映射为 `Podcast`，节目映射为含完整可播放 `Track` 的 `PodcastEpisode`；所有类别均保留稳定身份、核心展示字段及完整原项。2026-07-22 Rust provider 与 release 统一 HTTP 已真实验收前 6 类及稀疏歌单跨页；最后 3 类的类型、字段优先级、分页和单批请求已有离线测试，但真实合并请求当前被 QQ 匿名风控返回 `code=2001`，待窗口解除后补统一 HTTP 验收，故标为 `implemented` 而非 `verified` |
 | Q005 | 搜索与发现 | `SearchApi.general_search` | 是 | `pending` | 综合搜索及多字段续页游标 |
 | Q006 | 搜索与发现 | `RecommendApi.get_home_feed` | 是 | `pending` | 首页推荐卡片和防重复游标 |
 | Q007 | 搜索与发现 | `RecommendApi.get_recommend_songlist` | 是 | `pending` | 推荐歌单 |

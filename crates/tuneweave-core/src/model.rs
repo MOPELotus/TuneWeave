@@ -60,6 +60,10 @@ pub struct SearchQuery {
     pub limit: u32,
     pub offset: u32,
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_id: Option<String>,
+    #[serde(default)]
+    pub highlight: bool,
 }
 
 impl SearchQuery {
@@ -71,6 +75,8 @@ impl SearchQuery {
             limit,
             offset,
             account: None,
+            search_id: None,
+            highlight: false,
         }
     }
 }
@@ -353,6 +359,7 @@ pub enum SearchItem {
     Video(Video),
     RadioStation(RadioStation),
     Podcast(Podcast),
+    PodcastEpisode(Box<PodcastEpisode>),
     Opaque(SearchOpaqueItem),
 }
 
@@ -5178,6 +5185,14 @@ mod tests {
         let value = serde_json::to_value(podcast).expect("serialize podcast search item");
         assert_eq!(value["type"], "podcast");
         assert_eq!(value["data"]["ref"], "netease:336355127");
+
+        let episode = SearchItem::PodcastEpisode(Box::new(PodcastEpisode::new(
+            ResourceRef::new(Platform::Netease, "34001").expect("valid podcast episode reference"),
+            "声音节目",
+        )));
+        let value = serde_json::to_value(episode).expect("serialize podcast episode search item");
+        assert_eq!(value["type"], "podcast_episode");
+        assert_eq!(value["data"]["ref"], "netease:34001");
 
         let mut extensions = Extensions::new();
         extensions.insert(

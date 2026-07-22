@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
     Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
-    MusicProvider, Page, PageMeta, Platform, Playlist, Quality, ResourceRef, Result, SearchItem,
-    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError, Video,
+    MusicProvider, Page, PageMeta, Platform, Playlist, Podcast, PodcastEpisode, Quality,
+    ResourceRef, Result, SearchItem, SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
+    User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
@@ -20,6 +21,16 @@ struct TypedSearchSpec {
     context: &'static str,
     upstream_page_size: u32,
     sparse: bool,
+}
+
+type SearchItemMapper = fn(Value) -> Result<SearchItem>;
+
+struct TypedSearchBatch {
+    limit: u32,
+    skip: u32,
+    responses: Vec<QqApiResponse>,
+    search_id: String,
+    highlight: bool,
 }
 
 const TRACK_SEARCH: TypedSearchSpec = TypedSearchSpec {
@@ -64,6 +75,27 @@ const LYRIC_SEARCH: TypedSearchSpec = TypedSearchSpec {
     upstream_page_size: 60,
     sparse: false,
 };
+const USER_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 8,
+    item_pointer: "/body/item_user",
+    context: "QQ user search",
+    upstream_page_size: 10,
+    sparse: false,
+};
+const PODCAST_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 15,
+    item_pointer: "/body/item_audio",
+    context: "QQ podcast search",
+    upstream_page_size: 10,
+    sparse: false,
+};
+const VOICE_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 18,
+    item_pointer: "/body/item_song",
+    context: "QQ podcast episode search",
+    upstream_page_size: 10,
+    sparse: false,
+};
 
 #[derive(Clone)]
 pub struct QqProvider {
@@ -100,6 +132,9 @@ impl MusicProvider for QqProvider {
             Capability::SearchPlaylists,
             Capability::SearchMvs,
             Capability::SearchLyrics,
+            Capability::SearchUsers,
+            Capability::SearchPodcasts,
+            Capability::SearchVoices,
         ])
     }
 
@@ -110,8 +145,10 @@ impl MusicProvider for QqProvider {
                 capability_for_search(query.kind),
             ));
         }
-        let (limit, skip, responses) = self.typed_search(query, TRACK_SEARCH).await?;
-        map_track_search_response(query.offset, limit, skip, responses)
+        let batch = self.typed_search(query, TRACK_SEARCH).await?;
+        let page =
+            map_track_search_response(query.offset, batch.limit, batch.skip, batch.responses)?;
+        Ok(with_search_context(page, batch.search_id, batch.highlight))
     }
 
     async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
@@ -122,12 +159,15 @@ impl MusicProvider for QqProvider {
                 pagination: page.pagination,
             });
         }
-        let (spec, mapper): (TypedSearchSpec, fn(Value) -> Result<SearchItem>) = match query.kind {
+        let (spec, mapper): (TypedSearchSpec, SearchItemMapper) = match query.kind {
             SearchKind::Artist => (ARTIST_SEARCH, map_artist_search_item),
             SearchKind::Album => (ALBUM_SEARCH, map_album_search_item),
             SearchKind::Playlist => (PLAYLIST_SEARCH, map_playlist_search_item),
             SearchKind::Mv => (MV_SEARCH, map_mv_search_item),
             SearchKind::Lyric => (LYRIC_SEARCH, map_lyric_search_item),
+            SearchKind::User => (USER_SEARCH, map_user_search_item),
+            SearchKind::Podcast => (PODCAST_SEARCH, map_podcast_search_item),
+            SearchKind::Voice => (VOICE_SEARCH, map_voice_search_item),
             kind => {
                 return Err(TuneWeaveError::unsupported(
                     Platform::Qq,
@@ -135,8 +175,16 @@ impl MusicProvider for QqProvider {
                 ));
             }
         };
-        let (limit, skip, responses) = self.typed_search(query, spec).await?;
-        map_catalog_search_response(query.offset, limit, skip, responses, spec, mapper)
+        let batch = self.typed_search(query, spec).await?;
+        let page = map_catalog_search_response(
+            query.offset,
+            batch.limit,
+            batch.skip,
+            batch.responses,
+            spec,
+            mapper,
+        )?;
+        Ok(with_search_context(page, batch.search_id, batch.highlight))
     }
 }
 
@@ -145,10 +193,16 @@ impl QqProvider {
         &self,
         query: &SearchQuery,
         spec: TypedSearchSpec,
-    ) -> Result<(u32, u32, Vec<QqApiResponse>)> {
+    ) -> Result<TypedSearchBatch> {
         let keyword = validate_search_query(query)?;
         let limit = query.limit.clamp(1, 100);
-        let search_id = generate_search_id()?;
+        let search_id = query
+            .search_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|search_id| !search_id.is_empty())
+            .map(str::to_owned)
+            .map_or_else(generate_search_id, Ok)?;
         let first_page = query.offset / spec.upstream_page_size + 1;
         let skip = query.offset % spec.upstream_page_size;
         let page_count = skip.saturating_add(limit).div_ceil(spec.upstream_page_size);
@@ -160,11 +214,18 @@ impl QqProvider {
                     spec.code,
                     first_page.saturating_add(page_offset),
                     spec.upstream_page_size,
+                    query.highlight,
                 )
             })
             .collect::<Vec<_>>();
         let responses = self.client.request_android(&requests).await?;
-        Ok((limit, skip, responses))
+        Ok(TypedSearchBatch {
+            limit,
+            skip,
+            responses,
+            search_id,
+            highlight: query.highlight,
+        })
     }
 }
 
@@ -205,6 +266,7 @@ fn typed_search_request(
     search_type: i64,
     page: u32,
     page_size: u32,
+    highlight: bool,
 ) -> QqApiRequest {
     QqApiRequest::new(
         SEARCH_MODULE,
@@ -215,10 +277,20 @@ fn typed_search_request(
             "search_type": search_type,
             "num_per_page": page_size,
             "page_num": page,
-            "highlight": false,
+            "highlight": highlight,
             "grp": true
         }),
     )
+}
+
+fn with_search_context<T>(mut page: Page<T>, search_id: String, highlight: bool) -> Page<T> {
+    page.pagination
+        .extensions
+        .insert("search_id".to_owned(), Value::String(search_id));
+    page.pagination
+        .extensions
+        .insert("highlight".to_owned(), Value::Bool(highlight));
+    page
 }
 
 fn map_track_search_response(
@@ -242,7 +314,7 @@ fn map_catalog_search_response(
     skip: u32,
     responses: Vec<QqApiResponse>,
     spec: TypedSearchSpec,
-    mapper: fn(Value) -> Result<SearchItem>,
+    mapper: SearchItemMapper,
 ) -> Result<Page<SearchItem>> {
     let (raw_items, pagination) = collect_search_items(offset, limit, skip, responses, spec)?;
     let items = raw_items
@@ -736,6 +808,225 @@ fn map_lyric_search_item(raw: Value) -> Result<SearchItem> {
     map_track(raw).map(SearchItem::Track)
 }
 
+fn map_user_search_item(raw: Value) -> Result<SearchItem> {
+    let encrypted_id = [
+        "encrypt_uin",
+        "encryptUin",
+        "EncryptUin",
+        "encrypted_uin",
+        "euin",
+    ]
+    .into_iter()
+    .find_map(|field| nonempty_string(raw.get(field)));
+    let numeric_id = ["uin", "Uin", "id"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let id = encrypted_id
+        .clone()
+        .or_else(|| numeric_id.clone())
+        .ok_or_else(|| qq_data_error("QQ user search item is missing its account ID"))?;
+    let name = ["nick", "nickname", "name", "Name", "NickName"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ user search item is missing its name"))?;
+    let mut extensions = Extensions::new();
+    insert_some(&mut extensions, "encrypted_uin", encrypted_id);
+    insert_some(&mut extensions, "numeric_uin", numeric_id);
+    insert_value(&mut extensions, "user_type", raw.get("user_type"));
+    insert_value(&mut extensions, "identity", raw.get("identity"));
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::User(User {
+        resource_ref: qq_ref(&id, "user")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        avatar_url: ["avatar", "avatar_url", "Avatar", "AvatarUrl", "pic"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        signature: ["signature", "Signature", "desc"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        followed: ["isFollow", "followed", "is_follow"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_bool)),
+        mutual: ["isMutual", "mutual", "is_mutual"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_bool)),
+        extensions,
+    }))
+}
+
+fn map_podcast_search_item(raw: Value) -> Result<SearchItem> {
+    let mid = ["mid", "albumMid", "albumMID", "albummid"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    let numeric_id = ["id", "albumID"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let id = mid.clone().or_else(|| numeric_id.clone()).ok_or_else(|| {
+        qq_data_error("QQ podcast search item is missing both MID and numeric ID")
+    })?;
+    let name = ["name", "title", "albumName"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ podcast search item is missing its name"))?;
+    let creator = raw
+        .get("singer_list")
+        .or_else(|| raw.get("singerList"))
+        .and_then(Value::as_array)
+        .map(|creators| first_creator(creators))
+        .transpose()?
+        .flatten();
+    let cover_url = ["pic", "picurl", "cover_url"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .or_else(|| {
+            ["pmid", "logo"]
+                .into_iter()
+                .find_map(|field| nonempty_string(raw.get(field)))
+                .or_else(|| mid.clone())
+                .map(|pmid| qq_cover_url("T002", &pmid))
+        });
+    let mut extensions = Extensions::new();
+    insert_some(&mut extensions, "numeric_id", numeric_id);
+    insert_some(&mut extensions, "mid", mid);
+    insert_value(&mut extensions, "audio_play", raw.get("audio_play"));
+    insert_value(&mut extensions, "hotness", raw.get("hotness"));
+    insert_value(
+        &mut extensions,
+        "album_config",
+        raw.get("core_album_config"),
+    );
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::Podcast(Podcast {
+        resource_ref: qq_ref(&id, "podcast")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        description: raw
+            .pointer("/desc_detail/desc")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                ["description2", "description"]
+                    .into_iter()
+                    .find_map(|field| nonempty_string(raw.get(field)))
+            })
+            .unwrap_or_default(),
+        cover_url,
+        creator,
+        category: nonempty_string(raw.get("category")),
+        secondary_category: None,
+        episode_count: ["song_num", "songNum", "songnum"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        subscriber_count: None,
+        play_count: raw.pointer("/audio_play/play_num").and_then(json_u64),
+        subscribed: None,
+        paid: None,
+        purchased: None,
+        price: None,
+        created_at: ["publish_date", "time_public", "publishDate"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        extensions,
+    }))
+}
+
+fn map_voice_search_item(raw: Value) -> Result<SearchItem> {
+    let track = map_track(raw.clone())?;
+    let creator = raw
+        .get("singer")
+        .and_then(Value::as_array)
+        .map(|creators| first_creator(creators))
+        .transpose()?
+        .flatten();
+    let podcast_ref = raw
+        .get("album")
+        .and_then(|album| {
+            nonempty_string(album.get("mid")).or_else(|| value_as_string(album.get("id")))
+        })
+        .filter(|id| id != "0")
+        .map(|id| qq_ref(&id, "podcast"))
+        .transpose()?;
+    let mut extensions = Extensions::new();
+    insert_value(&mut extensions, "song_type", raw.get("type"));
+    insert_value(&mut extensions, "pay", raw.get("pay"));
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::PodcastEpisode(Box::new(PodcastEpisode {
+        resource_ref: track.resource_ref.clone(),
+        platform: Platform::Qq,
+        id: track.id.clone(),
+        podcast_ref,
+        name: track.name.clone(),
+        description: ["desc", "content"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field)))
+            .unwrap_or_default(),
+        cover_url: track
+            .album
+            .as_ref()
+            .and_then(|album| album.cover_url.clone()),
+        creator,
+        duration_ms: track.duration_ms,
+        published_at: ["time_public", "publish_date"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        serial_number: ["index_album", "index"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        listener_count: ["play_count", "listennum"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        liked_count: None,
+        comment_count: None,
+        share_count: None,
+        subscribed: None,
+        has_lyrics: None,
+        paid: None,
+        purchased: None,
+        audio: Some(track),
+        extensions,
+    })))
+}
+
+fn map_creator(raw: &Value) -> Result<Option<CreatorSummary>> {
+    let Some(name) = ["name", "title", "singerName", "nickname", "nick"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+    else {
+        return Ok(None);
+    };
+    let mid = ["mid", "singerMid", "singerMID", "singer_mid"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    let id = mid.clone().or_else(|| {
+        ["id", "singerId", "singerID", "uin"]
+            .into_iter()
+            .find_map(|field| value_as_string(raw.get(field)))
+            .filter(|id| id != "0")
+    });
+    Ok(Some(CreatorSummary {
+        resource_ref: id.as_deref().map(|id| qq_ref(id, "creator")).transpose()?,
+        name,
+        avatar_url: ["avatar", "avatar_url", "pic", "singerPic"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field)))
+            .or_else(|| mid.as_deref().map(|mid| qq_cover_url("T001", mid))),
+    }))
+}
+
+fn first_creator(values: &[Value]) -> Result<Option<CreatorSummary>> {
+    for value in values {
+        if let Some(creator) = map_creator(value)? {
+            return Ok(Some(creator));
+        }
+    }
+    Ok(None)
+}
+
 fn map_playlist_creator(raw: &Value) -> Result<Option<ArtistSummary>> {
     let Some(name) = ["name", "nickname", "nick"]
         .into_iter()
@@ -929,6 +1220,18 @@ fn json_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
+fn json_bool(value: &Value) -> Option<bool> {
+    value.as_bool().or_else(|| match json_u64(value) {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => value.as_str().and_then(|value| match value.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }),
+    })
+}
+
 fn insert_some(extensions: &mut Extensions, key: &str, value: Option<String>) {
     if let Some(value) = value {
         extensions.insert(key.to_owned(), Value::String(value));
@@ -1007,6 +1310,8 @@ mod tests {
             limit,
             offset,
             account: None,
+            search_id: None,
+            highlight: false,
         }
     }
 
@@ -1185,6 +1490,92 @@ mod tests {
     }
 
     #[test]
+    fn user_mapping_prefers_the_encrypted_homepage_identity() {
+        let item = map_user_search_item(json!({
+            "encrypt_uin": "ow6yoK6v7Kcl",
+            "uin": "12345678",
+            "nick": "听歌用户",
+            "avatar": "https://example.test/user.jpg",
+            "signature": "音乐是生活",
+            "isFollow": 1,
+            "isMutual": 0,
+            "identity": 2
+        }))
+        .expect("map user");
+        let SearchItem::User(user) = item else {
+            panic!("expected user");
+        };
+        assert_eq!(user.resource_ref.to_string(), "qq:ow6yoK6v7Kcl");
+        assert_eq!(user.extensions["numeric_uin"], "12345678");
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://example.test/user.jpg")
+        );
+        assert_eq!(user.followed, Some(true));
+        assert_eq!(user.mutual, Some(false));
+        assert_eq!(user.extensions["search_item"]["identity"], 2);
+    }
+
+    #[test]
+    fn podcast_mapping_keeps_show_identity_creator_and_episode_count() {
+        let item = map_podcast_search_item(json!({
+            "id": 9001,
+            "mid": "004PodcastMid",
+            "name": "音乐播客",
+            "pic": "https://example.test/podcast.jpg",
+            "desc_detail": {"desc": "节目专辑介绍"},
+            "publish_date": "2026-01-02",
+            "song_num": 42,
+            "singer_list": [{"id": 4558, "mid": "0025NhlN2yWrP4", "name": "周杰伦"}],
+            "audio_play": {"play_num": 12345}
+        }))
+        .expect("map podcast");
+        let SearchItem::Podcast(podcast) = item else {
+            panic!("expected podcast");
+        };
+        assert_eq!(podcast.resource_ref.to_string(), "qq:004PodcastMid");
+        assert_eq!(podcast.extensions["numeric_id"], "9001");
+        assert_eq!(podcast.description, "节目专辑介绍");
+        assert_eq!(podcast.episode_count, Some(42));
+        assert_eq!(podcast.play_count, Some(12345));
+        assert_eq!(
+            podcast
+                .creator
+                .as_ref()
+                .and_then(|creator| creator.resource_ref.as_ref())
+                .expect("creator ref")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+    }
+
+    #[test]
+    fn voice_mapping_exposes_a_playable_podcast_episode_without_losing_track_data() {
+        let mut raw = sample_track(8001, "004VoiceMid", "一期节目");
+        raw["type"] = json!(2);
+        raw["content"] = json!("节目内容简介");
+        let item = map_voice_search_item(raw).expect("map podcast episode");
+        let SearchItem::PodcastEpisode(episode) = item else {
+            panic!("expected podcast episode");
+        };
+        assert_eq!(episode.resource_ref.to_string(), "qq:004VoiceMid");
+        assert_eq!(episode.description, "节目内容简介");
+        assert_eq!(episode.duration_ms, Some(269_000));
+        assert_eq!(
+            episode
+                .podcast_ref
+                .as_ref()
+                .expect("podcast ref")
+                .to_string(),
+            "qq:000MkMni19ClKG"
+        );
+        let audio = episode.audio.as_ref().expect("playable track");
+        assert_eq!(audio.resource_ref.to_string(), "qq:004VoiceMid");
+        assert_eq!(audio.extensions["media_mid"], "003Qui1q2u1Zho");
+        assert_eq!(episode.extensions["song_type"], 2);
+    }
+
+    #[test]
     fn page_mapping_supports_non_aligned_offsets_across_two_upstream_pages() {
         let first = (0..60)
             .map(|id| sample_track(id, &format!("mid{id}"), &format!("track{id}")))
@@ -1219,6 +1610,9 @@ mod tests {
         assert_eq!(PLAYLIST_SEARCH.upstream_page_size, 30);
         assert_eq!(MV_SEARCH.upstream_page_size, 60);
         assert_eq!(LYRIC_SEARCH.upstream_page_size, 60);
+        assert_eq!(USER_SEARCH.upstream_page_size, 10);
+        assert_eq!(PODCAST_SEARCH.upstream_page_size, 10);
+        assert_eq!(VOICE_SEARCH.upstream_page_size, 10);
         let first = (0..30)
             .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
             .collect::<Vec<_>>();
@@ -1253,6 +1647,36 @@ mod tests {
         assert_eq!(page.pagination.next_offset, Some(45));
         assert_eq!(page.pagination.extensions["upstream_page_size"], 30);
         assert_eq!(page.pagination.extensions["omitted_slots"], 0);
+    }
+
+    #[test]
+    fn typed_search_preserves_the_upstream_session_and_highlight_controls() {
+        let request = typed_search_request("周杰伦", "session-42", 8, 3, 10, true);
+        assert_eq!(request.module, SEARCH_MODULE);
+        assert_eq!(request.method, SEARCH_METHOD);
+        assert_eq!(request.param["searchid"], "session-42");
+        assert_eq!(request.param["search_type"], 8);
+        assert_eq!(request.param["page_num"], 3);
+        assert_eq!(request.param["num_per_page"], 10);
+        assert_eq!(request.param["highlight"], true);
+
+        let page = with_search_context(
+            Page {
+                items: Vec::<SearchItem>::new(),
+                pagination: PageMeta {
+                    limit: 10,
+                    offset: 20,
+                    total: Some(0),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::new(),
+                },
+            },
+            "session-42".to_owned(),
+            true,
+        );
+        assert_eq!(page.pagination.extensions["search_id"], "session-42");
+        assert_eq!(page.pagination.extensions["highlight"], true);
     }
 
     #[test]
@@ -1382,7 +1806,55 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live QQ Music services"]
-    async fn live_artist_album_playlist_mv_and_lyric_search_return_typed_catalogs() {
+    async fn live_user_podcast_and_voice_search_share_one_batch() {
+        let client = QqClient::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("client");
+        let search_id = generate_search_id().expect("search ID");
+        let categories: [(SearchKind, TypedSearchSpec, SearchItemMapper); 3] = [
+            (SearchKind::User, USER_SEARCH, map_user_search_item),
+            (SearchKind::Podcast, PODCAST_SEARCH, map_podcast_search_item),
+            (SearchKind::Voice, VOICE_SEARCH, map_voice_search_item),
+        ];
+        let requests = categories
+            .iter()
+            .map(|(_, spec, _)| {
+                typed_search_request(
+                    "周杰伦",
+                    &search_id,
+                    spec.code,
+                    1,
+                    spec.upstream_page_size,
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let responses = client
+            .request_android(&requests)
+            .await
+            .expect("live batched catalog search");
+
+        for ((kind, spec, mapper), response) in categories.into_iter().zip(responses) {
+            let page = map_catalog_search_response(0, 2, 0, vec![response], spec, mapper)
+                .expect("map live catalog response");
+            assert_eq!(page.items.len(), 2);
+            assert!(page.pagination.total.is_some_and(|total| total > 0));
+            assert!(page.items.iter().all(|item| match (kind, item) {
+                (SearchKind::User, SearchItem::User(user)) => !user.name.is_empty(),
+                (SearchKind::Podcast, SearchItem::Podcast(podcast)) => !podcast.name.is_empty(),
+                (SearchKind::Voice, SearchItem::PodcastEpisode(episode)) => {
+                    !episode.name.is_empty() && episode.audio.is_some()
+                }
+                _ => false,
+            }));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_all_typed_search_categories_return_typed_catalogs() {
         let provider = QqProvider::new(QqConfig {
             device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
             ..QqConfig::default()
@@ -1394,6 +1866,9 @@ mod tests {
             SearchKind::Playlist,
             SearchKind::Mv,
             SearchKind::Lyric,
+            SearchKind::User,
+            SearchKind::Podcast,
+            SearchKind::Voice,
         ] {
             let page = provider
                 .search_catalog(&search_query(kind, 2, 0))
@@ -1414,6 +1889,11 @@ mod tests {
                         .get("search_content")
                         .and_then(Value::as_str)
                         .is_some_and(|content| !content.is_empty()),
+                    (SearchKind::User, SearchItem::User(user)) => !user.name.is_empty(),
+                    (SearchKind::Podcast, SearchItem::Podcast(podcast)) => !podcast.name.is_empty(),
+                    (SearchKind::Voice, SearchItem::PodcastEpisode(episode)) => {
+                        !episode.name.is_empty() && episode.audio.is_some()
+                    }
                     _ => false,
                 }
             }));

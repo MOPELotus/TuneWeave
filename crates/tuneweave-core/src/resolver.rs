@@ -120,6 +120,8 @@ impl StreamResolver {
                     limit: self.search_limit,
                     offset: 0,
                     account: account.clone(),
+                    search_id: None,
+                    highlight: false,
                 };
                 let page = match provider.search(&search).await {
                     Ok(page) => page,
