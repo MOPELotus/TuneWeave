@@ -7,7 +7,7 @@ future ports can be audited precisely.
 ## NeteaseCloudMusicApiEnhanced/api-enhanced
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
-- Reviewed commit: `321c25bd7d041711f1a9ab9e4b55997ce661313c`
+- Reviewed commit: `41bd6d82ce3b494d6375a784f5af391340ed9c1b`
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.
@@ -15,7 +15,7 @@ future ports can be audited precisely.
 ## MOPELotus/Lotus-ReFactor
 
 - Source: https://github.com/MOPELotus/Lotus-ReFactor
-- Reviewed commit: `646400c1cf098c3887ef90886617625169fb58de`
+- Reviewed commit: `004bbff438bc811f0f28a9ddf4181e8b77a510ba`
 - License: Lotus-ReFactor Source-Available Proprietary License
 - Used for: NetEase Music Partner request logic and implementation details.
 - Authorization: MOPELotus states that they contributed 100% of
@@ -26,7 +26,7 @@ future ports can be audited precisely.
 ## L-1124/QQMusicApi
 
 - Source: https://github.com/L-1124/QQMusicApi
-- Reviewed commit: `b859d8e01566b92c27e78dd400f4f8c6950685f2`
+- Reviewed commit: `1b0aae0db3ee6876b3a77b8d1ce3057b4b3c9cd5`
 - License: GNU General Public License v3.0 or later
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.
@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `07303dfaa1ebcfe4f24a291de6a536e3403d6043`
+- Reviewed commit: `14c55ffbbbd1a90afe5e6ac45425f7b7988730bd`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.
