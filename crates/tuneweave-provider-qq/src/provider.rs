@@ -5,14 +5,17 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
     MusicProvider, Page, PageMeta, Platform, Playlist, Podcast, PodcastEpisode, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
-    User, Video,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchVariant, Track,
+    TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
+const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
+const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -135,6 +138,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchUsers,
             Capability::SearchPodcasts,
             Capability::SearchVoices,
+            Capability::SearchSuggestions,
         ])
     }
 
@@ -185,6 +189,36 @@ impl MusicProvider for QqProvider {
             mapper,
         )?;
         Ok(with_search_context(page, batch.search_id, batch.highlight))
+    }
+
+    async fn search_suggestions(
+        &self,
+        request: &SearchSuggestionRequest,
+    ) -> Result<SearchSuggestionList> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(
+                TuneWeaveError::invalid_request("search suggestion query cannot be empty")
+                    .with_platform(Platform::Qq),
+            );
+        }
+        if request.client != SearchSuggestionClient::Mobile {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ SmartBox completion currently requires client=mobile",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "allowed": ["mobile"] })));
+        }
+        validate_qq_public_account(request.account.as_deref(), "QQ search suggestions")?;
+        let search_id = generate_search_id()?;
+        let response = self
+            .client
+            .request_android(&[smartbox_request(query, &search_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ SmartBox returned no response"))?;
+        map_smartbox_response(query, request.client, &search_id, response)
     }
 }
 
@@ -260,6 +294,21 @@ fn validate_search_query(query: &SearchQuery) -> Result<&str> {
     Ok(keyword)
 }
 
+fn validate_qq_public_account(account: Option<&str>, context: &str) -> Result<()> {
+    let Some(account) = account
+        .map(str::trim)
+        .filter(|account| !account.is_empty() && *account != "default")
+    else {
+        return Ok(());
+    };
+    Err(TuneWeaveError::new(
+        ErrorCode::AuthenticationRequired,
+        format!("{context} cannot select a QQ account before QQ login is configured"),
+    )
+    .with_platform(Platform::Qq)
+    .with_details(json!({ "account": account })))
+}
+
 fn typed_search_request(
     keyword: &str,
     search_id: &str,
@@ -291,6 +340,223 @@ fn with_search_context<T>(mut page: Page<T>, search_id: String, highlight: bool)
         .extensions
         .insert("highlight".to_owned(), Value::Bool(highlight));
     page
+}
+
+fn smartbox_request(keyword: &str, search_id: &str) -> QqApiRequest {
+    QqApiRequest::new(
+        SMARTBOX_MODULE,
+        SMARTBOX_METHOD,
+        json!({
+            "search_id": search_id,
+            "query": keyword,
+            "num_per_page": 0,
+            "page_idx": 0
+        }),
+    )
+}
+
+fn map_smartbox_response(
+    query: &str,
+    client: SearchSuggestionClient,
+    requested_search_id: &str,
+    response: QqApiResponse,
+) -> Result<SearchSuggestionList> {
+    if !response.data.is_object() {
+        return Err(qq_data_error("QQ SmartBox response data is not an object"));
+    }
+    let mut suggestions = qq_optional_array(&response.data, "items", "QQ SmartBox")?
+        .into_iter()
+        .map(|raw| map_smartbox_keyword_suggestion(raw, "items"))
+        .collect::<Result<Vec<_>>>()?;
+    let recommendations = qq_optional_array(&response.data, "vec_related_items", "QQ SmartBox")?
+        .into_iter()
+        .map(|raw| map_smartbox_keyword_suggestion(raw, "related"))
+        .collect::<Result<Vec<_>>>()?;
+    let mut direct = qq_optional_array(&response.data, "vec_direct_items", "QQ SmartBox")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let position = raw
+                .get("insert_pos")
+                .and_then(json_u64)
+                .and_then(|position| usize::try_from(position).ok())
+                .unwrap_or(usize::MAX);
+            map_smartbox_direct_suggestion(raw).map(|suggestion| (position, index, suggestion))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    direct.sort_by_key(|(position, index, _)| (*position, *index));
+    let mut previous_position = None;
+    let mut same_position_count = 0_usize;
+    for (position, _, suggestion) in direct {
+        if previous_position == Some(position) {
+            same_position_count = same_position_count.saturating_add(1);
+        } else {
+            previous_position = Some(position);
+            same_position_count = 0;
+        }
+        let target = position
+            .saturating_add(same_position_count)
+            .min(suggestions.len());
+        suggestions.insert(target, suggestion);
+    }
+    let search_id = nonempty_string(response.data.get("search_id"))
+        .unwrap_or_else(|| requested_search_id.to_owned());
+    Ok(SearchSuggestionList {
+        query: query.to_owned(),
+        client,
+        suggestions,
+        recommendations,
+        extensions: Extensions::from([
+            ("search_id".to_owned(), Value::String(search_id)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn qq_optional_array(container: &Value, field: &str, context: &str) -> Result<Vec<Value>> {
+    match container.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => Ok(values.clone()),
+        Some(_) => Err(qq_data_error(format!(
+            "{context} response field {field} is not an array"
+        ))),
+    }
+}
+
+fn map_smartbox_keyword_suggestion(raw: Value, bucket: &'static str) -> Result<SearchSuggestion> {
+    let keyword = smartbox_keyword(&raw)
+        .ok_or_else(|| qq_data_error(format!("QQ SmartBox {bucket} item is missing its hint")))?;
+    let resource_type = smartbox_resource_type(&raw);
+    let kind = resource_type.as_deref().and_then(smartbox_search_kind);
+    let display_text = ["hint_hilight", "display", "description"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .filter(|value| value != &keyword);
+    let icon_url = ["icon", "pic_url", "cover_url"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    Ok(SearchSuggestion {
+        keyword,
+        kind,
+        display_text,
+        icon_url,
+        resource: None,
+        extensions: Extensions::from([
+            ("bucket".to_owned(), json!(bucket)),
+            ("response".to_owned(), raw),
+        ]),
+    })
+}
+
+fn map_smartbox_direct_suggestion(raw: Value) -> Result<SearchSuggestion> {
+    let keyword = smartbox_keyword(&raw).ok_or_else(|| {
+        qq_data_error("QQ SmartBox direct item is missing its search history, title, or hint")
+    })?;
+    let resource_type = smartbox_resource_type(&raw);
+    let kind = resource_type.as_deref().and_then(smartbox_search_kind);
+    let resource = map_smartbox_direct_resource(&raw, kind, &keyword)?;
+    let display_text = ["title", "hint", "desc"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .filter(|value| value != &keyword);
+    let icon_url = ["cover_url", "pic_url", "icon"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    Ok(SearchSuggestion {
+        keyword,
+        kind,
+        display_text,
+        icon_url,
+        resource,
+        extensions: Extensions::from([
+            ("bucket".to_owned(), json!("direct")),
+            ("response".to_owned(), raw),
+        ]),
+    })
+}
+
+fn smartbox_keyword(raw: &Value) -> Option<String> {
+    raw.pointer("/custom_info/search_history")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            ["hint", "keyword", "search_word", "title", "name", "query"]
+                .into_iter()
+                .find_map(|field| nonempty_string(raw.get(field)))
+        })
+}
+
+fn smartbox_resource_type(raw: &Value) -> Option<String> {
+    ["res_type", "restype", "resource_type"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+}
+
+fn smartbox_search_kind(value: &str) -> Option<SearchKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "song" | "track" => Some(SearchKind::Track),
+        "singer" | "artist" => Some(SearchKind::Artist),
+        "album" => Some(SearchKind::Album),
+        "songlist" | "playlist" => Some(SearchKind::Playlist),
+        "user" => Some(SearchKind::User),
+        "mv" => Some(SearchKind::Mv),
+        "video" => Some(SearchKind::Video),
+        "audio_album" | "podcast" => Some(SearchKind::Podcast),
+        "audio" | "voice" => Some(SearchKind::Voice),
+        _ => None,
+    }
+}
+
+fn map_smartbox_direct_resource(
+    raw: &Value,
+    kind: Option<SearchKind>,
+    keyword: &str,
+) -> Result<Option<SearchItem>> {
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    let mid = nonempty_string(raw.pointer("/custom_info/mid"));
+    let numeric_id = value_as_string(raw.get("direct_id"));
+    let id = mid
+        .clone()
+        .or_else(|| numeric_id.clone())
+        .or_else(|| value_as_string(raw.get("docid")));
+    if kind == SearchKind::Artist {
+        if let Some(id) = id.clone() {
+            let mut extensions = Extensions::new();
+            insert_some(&mut extensions, "mid", mid);
+            insert_some(&mut extensions, "numeric_id", numeric_id);
+            extensions.insert("smartbox_item".to_owned(), raw.clone());
+            return Ok(Some(SearchItem::Artist(Artist {
+                resource_ref: qq_ref(&id, "artist")?,
+                platform: Platform::Qq,
+                id,
+                name: keyword.to_owned(),
+                aliases: Vec::new(),
+                description: nonempty_string(raw.get("desc")).unwrap_or_default(),
+                biography_sections: Vec::new(),
+                avatar_url: ["cover_url", "pic_url"]
+                    .into_iter()
+                    .find_map(|field| nonempty_string(raw.get(field))),
+                cover_url: None,
+                album_count: None,
+                track_count: None,
+                mv_count: None,
+                video_count: None,
+                identities: Vec::new(),
+                extensions,
+            })));
+        }
+    }
+    Ok(Some(SearchItem::Opaque(SearchOpaqueItem {
+        platform: Platform::Qq,
+        kind: smartbox_resource_type(raw).unwrap_or_else(|| "direct".to_owned()),
+        id,
+        title: Some(keyword.to_owned()),
+        extensions: Extensions::from([("response".to_owned(), raw.clone())]),
+    })))
 }
 
 fn map_track_search_response(
@@ -1680,6 +1946,121 @@ mod tests {
     }
 
     #[test]
+    fn smartbox_mapping_keeps_keyword_related_and_direct_result_buckets() {
+        let request = smartbox_request("周杰伦", "session-42");
+        assert_eq!(request.module, SMARTBOX_MODULE);
+        assert_eq!(request.method, SMARTBOX_METHOD);
+        assert_eq!(request.param["search_id"], "session-42");
+        assert_eq!(request.param["query"], "周杰伦");
+        assert_eq!(request.param["num_per_page"], 0);
+        assert_eq!(request.param["page_idx"], 0);
+
+        let data = json!({
+            "items": [{
+                "docid": "17675977119827593594",
+                "hint": "周杰伦 晴天",
+                "hint_hilight": "<em>周杰伦</em> 晴天",
+                "res_type": "search",
+                "pre_search": false,
+                "score": 9584.28
+            }],
+            "vec_related_items": [{
+                "hint": "周杰伦 七里香",
+                "res_type": "search"
+            }],
+            "vec_direct_items": [{
+                "direct_id": 4558,
+                "restype": "singer",
+                "insert_pos": 0,
+                "title": "歌手: 周杰伦",
+                "hint": "歌手: 周杰伦",
+                "cover_url": "https://example.test/artist.jpg",
+                "custom_info": {
+                    "mid": "0025NhlN2yWrP4",
+                    "search_history": "周杰伦"
+                }
+            }],
+            "search_id": "341894897306691299",
+            "total_num": 174
+        });
+        let result = map_smartbox_response(
+            "周杰伦",
+            SearchSuggestionClient::Mobile,
+            "requested-session",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map SmartBox response");
+        assert_eq!(result.query, "周杰伦");
+        assert_eq!(result.client, SearchSuggestionClient::Mobile);
+        assert_eq!(result.suggestions.len(), 2);
+        assert_eq!(result.suggestions[0].keyword, "周杰伦");
+        assert_eq!(result.suggestions[0].kind, Some(SearchKind::Artist));
+        let Some(SearchItem::Artist(artist)) = &result.suggestions[0].resource else {
+            panic!("expected direct artist resource");
+        };
+        assert_eq!(artist.resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(artist.extensions["numeric_id"], "4558");
+        assert_eq!(result.suggestions[0].extensions["bucket"], "direct");
+        assert_eq!(result.suggestions[1].keyword, "周杰伦 晴天");
+        assert_eq!(
+            result.suggestions[1].display_text.as_deref(),
+            Some("<em>周杰伦</em> 晴天")
+        );
+        assert_eq!(result.recommendations.len(), 1);
+        assert_eq!(result.recommendations[0].keyword, "周杰伦 七里香");
+        assert_eq!(result.extensions["search_id"], "341894897306691299");
+        assert_eq!(result.extensions["response"]["data"]["total_num"], 174);
+    }
+
+    #[test]
+    fn smartbox_mapping_rejects_malformed_buckets_instead_of_faking_empty_results() {
+        let data = json!({"items": {}, "search_id": "session"});
+        let error = map_smartbox_response(
+            "周杰伦",
+            SearchSuggestionClient::Mobile,
+            "requested-session",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect_err("malformed SmartBox bucket");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.platform, Some(Platform::Qq));
+    }
+
+    #[tokio::test]
+    async fn smartbox_rejects_unimplemented_clients_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SearchSuggestions)
+        );
+        let mut request = SearchSuggestionRequest {
+            query: "周杰伦".to_owned(),
+            client: SearchSuggestionClient::Web,
+            account: None,
+        };
+        let error = provider
+            .search_suggestions(&request)
+            .await
+            .expect_err("web client is reserved for quick search");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        request.client = SearchSuggestionClient::Mobile;
+        request.account = Some("green-diamond".to_owned());
+        let error = provider
+            .search_suggestions(&request)
+            .await
+            .expect_err("unconfigured account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn sparse_playlist_pages_advance_by_upstream_slots_without_duplicates() {
         let first = (0..29)
             .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
@@ -1802,6 +2183,35 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_mobile_search_suggestions_keep_keywords_and_direct_results() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let result = provider
+            .search_suggestions(&SearchSuggestionRequest {
+                query: "周杰伦".to_owned(),
+                client: SearchSuggestionClient::Mobile,
+                account: Some("default".to_owned()),
+            })
+            .await
+            .expect("live smartbox suggestions");
+        assert_eq!(result.query, "周杰伦");
+        assert_eq!(result.client, SearchSuggestionClient::Mobile);
+        assert!(!result.suggestions.is_empty());
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .all(|suggestion| !suggestion.keyword.is_empty())
+        );
+        assert!(result.extensions["search_id"].as_str().is_some());
+        assert!(result.extensions["response"]["data"].is_object());
     }
 
     #[tokio::test]

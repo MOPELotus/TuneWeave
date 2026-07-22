@@ -1107,6 +1107,8 @@ QQ 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和
 
 搜索建议的 `client` 缺省为 `web`。统一条目始终给出可直接重新搜索的 `keyword`，可选 `kind/display_text/icon_url`；web 建议中的歌曲、专辑、歌手、歌单等实际资源同时以统一 `SearchItem` 放入 `resource`，mobile/PC 纯关键词不会伪造资源。PC 的 `recs` 与普通 `suggests` 分别位于 `recommendations/suggestions`。网易云 web/mobile 分别固定使用 WeAPI `/api/search/suggest/web`、`/api/search/suggest/keyword`，PC 固定使用 EAPI `/api/search/pc/suggest/keyword/get`；未知或零 `type` 不会遮住可映射的 `resourceType`，为兼容参考输入，`type=mobile` 等同 `client=mobile`。
 
+QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSmartBoxResult`：普通 `items` 与 `vec_related_items` 分别进入 `suggestions/recommendations`，`vec_direct_items` 依据 `insert_pos` 插回建议序列并尽可能提升为统一资源。搜索会话 ID 位于列表扩展；高亮展示、图标、跳转、分值、预搜索标志、关联资源 ID 及完整上游包装逐项保留。当前 `client=web` 留给参考 `quick_search` 的独立 Smartbox HTTP 链，`pc` 没有对应上游分支；两者在接入前明确报错，不会偷换成移动端结果。2026-07-22 release 统一 HTTP 真实返回 21 项“周杰伦”建议，首项为歌手直达资源。
+
 多重搜索的 `kind` 缺省为 `track`，接受与普通搜索相同的统一名称和网易云数字类型，参考字段 `type` 是其别名。网易云固定使用 WeAPI `/api/search/suggest/multimatch` 并精确提交 `s/type`；非空 `result.orders` 决定分区顺序，值为 `null` 时回退兼容字段 `order`，未列入顺序但实际返回的数组仍会追加保留。`artist/playlist/new_mlog` 等已知分区分别规范化为统一歌手、歌单与视频资源，空/零视频或创作者 ID 和零时长不会遮蔽有效兼容值，未知分区以不透明条目表达；完整上游响应位于结果扩展。
 
 本地歌曲匹配的 `md5` 必填并按 32 位十六进制校验，标题、专辑和歌手允许为空以保留参考模块的默认分支；时长省略时按参考行为使用 0。若同时提供毫秒与秒数，两者四舍五入到毫秒后必须一致。网易云固定使用未加密直连 API `/api/search/match/new`，把一项标签记录序列化进 `songs`；上游 `result.ids/songs` 分别映射为匹配 ID 和统一候选曲目，空数组原样表达无命中。
