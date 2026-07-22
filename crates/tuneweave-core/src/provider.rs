@@ -6,10 +6,10 @@ use crate::{
     AccountProfile, Album, AlbumListRequest, AlbumStats, AnonymousSession, AntiCheatToken,
     AntiCheatTokenVersion, Artist, ArtistChart, ArtistChartRequest, ArtistListRequest,
     ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, Banner, BannerListRequest, Capability, ChartCatalog,
-    ChartCatalogRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, Banner, BannerListRequest, Capability,
+    ChartCatalog, ChartCatalogRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
     CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest,
@@ -1101,6 +1101,13 @@ pub trait MusicProvider: Send + Sync {
 
     async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
         self.lyrics(id, request.account.as_deref()).await
+    }
+
+    async fn audio_cdn_dispatch(&self, _account: Option<&str>) -> Result<AudioCdnDispatch> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AudioCdnDispatch,
+        ))
     }
 
     async fn stream(&self, _track: &Track, _request: &StreamRequest) -> Result<MediaStream> {

@@ -3498,6 +3498,28 @@ pub struct ResolutionAttempt {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioCdnNode {
+    pub url: String,
+    pub quic: u64,
+    pub ip_stack: u64,
+    pub quic_host: Option<String>,
+    pub plaintext_quic: u64,
+    pub encrypted_quic: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioCdnDispatch {
+    pub roots: Vec<String>,
+    pub nodes: Vec<AudioCdnNode>,
+    pub test_file: String,
+    pub expires_in_seconds: u64,
+    pub refresh_after_seconds: u64,
+    pub cache_for_seconds: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MediaStream {
     pub url: String,
     pub backup_urls: Vec<String>,

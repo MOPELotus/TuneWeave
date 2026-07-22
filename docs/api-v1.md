@@ -1178,6 +1178,7 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
 | POST | `/v1/audio/recognize` | `{platform?, account?, fingerprint, duration_seconds}`；指纹最大 131072 字节，时长 1–300 秒 | `AudioRecognition`；命中起点跳过不可解析的首选字段并读取有效兼容值 |
+| GET | `/v1/media/cdn` | `platform?`、`account?` | `AudioCdnDispatch`；CDN 根地址、QUIC 节点、相对探活文件及缓存时限 |
 | GET | `/v1/tracks/{ref}/lyrics` | `account?`、`word_synced/qrc?`、`translated/trans?`、`romanized/roma?`、`song_type/type?`；引用决定平台 | `Lyrics`；QQ 省略歌词选项时保持上游 `false/false/false/type=1` 默认 |
 | GET | `/v1/episodes/{ref}/lyrics` | `account?` | `PodcastEpisodeLyrics`；真实无歌词分支也返回可检查的成功数据 |
 | GET | `/v1/episodes/{ref}/stream` | 与歌曲流相同的音质、后端、播放平台、回退、解灰和账户参数 | `PodcastEpisodeStream`；节目、原音频和最终解析资源身份分离 |
@@ -1195,6 +1196,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | GET | `/v1/videos/{ref}/parts` | 分页；B 站 Basic 阶段接入 | `VideoPart[]` |
 
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
+
+CDN 调度是播放地址解析的底层目录能力，不代替歌曲流端点。`roots` 保留平台给出的顺序和重复项，调用方可把相对 `test_file` 拼接到候选根地址做连通性探测；`nodes` 额外表达 QUIC、IP 栈和主机信息，`expires_in_seconds/refresh_after_seconds/cache_for_seconds` 决定目录生命周期。QQ 每次请求使用新的 GUID，固定启用新域名与 IPv6；TuneWeave 只接受无嵌入凭据的 HTTP(S) 根地址，并拒绝绝对探活 URL、空目录、非正计时及业务失败，完整平台响应仍保存在扩展供诊断。
 
 音频流的统一音质为 `auto/low/standard/higher/high/lossless/hires/surround/spatial/dolby/master`。网易云兼容字段 `level` 是 `quality` 的别名，并完整接受 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster`，其中 `exhigh/jyeffect/sky/jymaster` 分别映射为 `high/surround/spatial/master`。`variant=default|legacy|modern` 选择 provider 推荐后端、旧版码率后端或新版等级后端；兼容字段 `backend` 接受 `v0/song_url` 与 `v1/song_url_v1` 等别名。网易云缺省使用现代 v1；`variant=legacy` 时 `bitrate`（兼容 `br`）按原始无符号 bit/s 精确提交，省略时再由 `quality` 映射默认码率；现代后端按参考行为忽略 `br`。
 

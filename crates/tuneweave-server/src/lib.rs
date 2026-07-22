@@ -25,18 +25,19 @@ use tuneweave_core::{
     AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart,
     ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats,
     ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
-    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
-    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
+    ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -264,6 +265,7 @@ pub fn build_router(state: AppState) -> Router {
             get(podcast_episode_stream_redirect),
         )
         .route("/audio/recognize", post(audio_recognize))
+        .route("/media/cdn", get(audio_cdn_dispatch))
         .route(
             "/tracks/streams",
             get(track_streams_get).post(track_streams_post),
@@ -1684,6 +1686,29 @@ async fn audio_recognize(
         })
         .await?;
     let mut response = ApiResponse::new(recognition).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioCdnParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn audio_cdn_dispatch(
+    State(state): State<AppState>,
+    params: Result<Query<AudioCdnParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<AudioCdnDispatch>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let dispatch = provider.audio_cdn_dispatch(account.as_deref()).await?;
+    let mut response = ApiResponse::new(dispatch).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -11241,7 +11266,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioRecognitionMatch,
+        ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioRecognitionMatch,
         BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
         CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
         MusicProvider, Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation,
@@ -11342,6 +11367,7 @@ mod tests {
                 Capability::PlaylistRead,
                 Capability::PlaylistWrite,
                 Capability::Lyrics,
+                Capability::AudioCdnDispatch,
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
                 Capability::AudioDownload,
@@ -11726,6 +11752,30 @@ mod tests {
                 query_id: Some("query-1".to_owned()),
                 no_match_reason: None,
                 extensions,
+            })
+        }
+
+        async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
+            Ok(AudioCdnDispatch {
+                roots: vec![
+                    "https://isure6.stream.qqmusic.qq.com/".to_owned(),
+                    "http://aqqmusic.tc.qq.com/".to_owned(),
+                    "http://aqqmusic.tc.qq.com/".to_owned(),
+                ],
+                nodes: vec![AudioCdnNode {
+                    url: "https://isure6.stream.qqmusic.qq.com/".to_owned(),
+                    quic: 1,
+                    ip_stack: 3,
+                    quic_host: Some("isure6.stream.qqmusic.qq.com".to_owned()),
+                    plaintext_quic: 0,
+                    encrypted_quic: 1,
+                    extensions: Extensions::from([("source".to_owned(), json!("test"))]),
+                }],
+                test_file: "C400001.mp4?vkey=temporary".to_owned(),
+                expires_in_seconds: 86_400,
+                refresh_after_seconds: 1_800,
+                cache_for_seconds: 86_400,
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
 
@@ -17401,6 +17451,40 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(json["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_cdn_dispatch_preserves_catalog_and_response_metadata() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/media/cdn?platform=netease&account=green-vip",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["roots"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["data"]["roots"][1], json["data"]["roots"][2]);
+        assert_eq!(json["data"]["nodes"][0]["quic"], 1);
+        assert_eq!(json["data"]["nodes"][0]["ip_stack"], 3);
+        assert_eq!(json["data"]["test_file"], "C400001.mp4?vkey=temporary");
+        assert_eq!(json["data"]["expires_in_seconds"], 86_400);
+        assert_eq!(json["data"]["refresh_after_seconds"], 1_800);
+        assert_eq!(json["data"]["cache_for_seconds"], 86_400);
+        assert_eq!(json["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(json["meta"]["platform"], "netease");
+        assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn audio_cdn_dispatch_rejects_unknown_platforms_and_query_fields() {
+        for path in [
+            "/v1/media/cdn?platform=unknown",
+            "/v1/media/cdn?unexpected=true",
+        ] {
+            let (status, json) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
         }
     }
 

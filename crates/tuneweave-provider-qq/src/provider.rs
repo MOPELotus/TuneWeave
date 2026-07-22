@@ -3,12 +3,12 @@ use std::{collections::BTreeSet, time::SystemTime};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
-    Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
-    PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
+    Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch, AudioCdnNode, Capability,
+    CreatorSummary, ErrorCode, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta,
+    Platform, Playlist, Podcast, PodcastEpisode, Quality, ResourceRef, Result, SearchItem,
+    SearchKind, SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
@@ -26,6 +26,8 @@ const SONG_DETAIL_MODULE: &str = "music.pf_song_detail_svr";
 const SONG_DETAIL_METHOD: &str = "get_song_detail_yqq";
 const LYRIC_MODULE: &str = "music.musichallSong.PlayLyricInfo";
 const LYRIC_METHOD: &str = "GetPlayLyricInfo";
+const CDN_DISPATCH_MODULE: &str = "music.audioCdnDispatch.cdnDispatch";
+const CDN_DISPATCH_METHOD: &str = "GetCdnDispatch";
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -158,6 +160,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchTrending,
             Capability::TrackDetail,
             Capability::Lyrics,
+            Capability::AudioCdnDispatch,
         ])
     }
 
@@ -301,6 +304,19 @@ impl MusicProvider for QqProvider {
 
     async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
         self.qq_lyrics(id, request).await
+    }
+
+    async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
+        validate_qq_public_account(account, "QQ audio CDN dispatch")?;
+        let (request, guid) = cdn_dispatch_request();
+        let response = self
+            .client
+            .request_android(&[request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ CDN dispatch returned no response"))?;
+        map_cdn_dispatch_response(&guid, response)
     }
 }
 
@@ -920,6 +936,23 @@ fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqT
     ))
 }
 
+fn cdn_dispatch_request() -> (QqApiRequest, String) {
+    let guid = hex::encode(rand::random::<[u8; 16]>());
+    (
+        QqApiRequest::new(
+            CDN_DISPATCH_MODULE,
+            CDN_DISPATCH_METHOD,
+            json!({
+                "guid": guid,
+                "uid": "0",
+                "use_new_domain": 1,
+                "use_ipv6": 1
+            }),
+        ),
+        guid,
+    )
+}
+
 fn parse_qq_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
     let value = value.trim();
     if value.is_empty() {
@@ -1161,6 +1194,157 @@ fn decode_lyric_field(
         value.to_owned()
     };
     Ok((!decoded.trim().is_empty()).then_some(decoded))
+}
+
+fn map_cdn_dispatch_response(guid: &str, response: QqApiResponse) -> Result<AudioCdnDispatch> {
+    let retcode = required_i64(&response.data, "retcode", "QQ CDN dispatch")?;
+    if retcode != 0 {
+        return Err(
+            qq_data_error(format!("QQ CDN dispatch returned business code {retcode}"))
+                .with_details(json!({ "retcode": retcode })),
+        );
+    }
+    let roots = response
+        .data
+        .get("sip")
+        .and_then(Value::as_array)
+        .ok_or_else(|| qq_data_error("QQ CDN dispatch response is missing its sip array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| qq_data_error("QQ CDN dispatch sip entry is not a string"))
+                .and_then(validate_cdn_root)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if roots.is_empty() {
+        return Err(qq_data_error(
+            "QQ CDN dispatch response contains no CDN roots",
+        ));
+    }
+    let nodes = match response.data.get("sipinfo") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(nodes)) => nodes.iter().map(map_cdn_node).collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(qq_data_error(
+                "QQ CDN dispatch sipinfo field is not an array",
+            ));
+        }
+    };
+    let test_file = response
+        .data
+        .get("keepalivefile")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ CDN dispatch response is missing its keepalive file"))?;
+    if reqwest::Url::parse(test_file).is_ok()
+        || test_file.starts_with("//")
+        || test_file.starts_with("\\\\")
+    {
+        return Err(qq_data_error(
+            "QQ CDN dispatch keepalive file must be a relative path",
+        ));
+    }
+    Ok(AudioCdnDispatch {
+        roots,
+        nodes,
+        test_file: test_file.to_owned(),
+        expires_in_seconds: required_positive_u64(&response.data, "expiration", "QQ CDN dispatch")?,
+        refresh_after_seconds: required_positive_u64(
+            &response.data,
+            "refreshTime",
+            "QQ CDN dispatch",
+        )?,
+        cache_for_seconds: required_positive_u64(&response.data, "cacheTime", "QQ CDN dispatch")?,
+        extensions: Extensions::from([
+            ("request_guid".to_owned(), json!(guid)),
+            ("retcode".to_owned(), json!(retcode)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_cdn_node(value: &Value) -> Result<AudioCdnNode> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| qq_data_error("QQ CDN dispatch node is not an object"))?;
+    let url = optional_string(object.get("cdn"), "QQ CDN dispatch node cdn")?;
+    let url = if url.trim().is_empty() {
+        String::new()
+    } else {
+        validate_cdn_root(&url)?
+    };
+    Ok(AudioCdnNode {
+        url,
+        quic: optional_u64(object.get("quic"), "QQ CDN dispatch node quic")?,
+        ip_stack: optional_u64(object.get("ipstack"), "QQ CDN dispatch node ipstack")?,
+        quic_host: nonempty_optional_string(
+            object.get("quichost"),
+            "QQ CDN dispatch node quichost",
+        )?,
+        plaintext_quic: optional_u64(
+            object.get("plaintextquic"),
+            "QQ CDN dispatch node plaintextquic",
+        )?,
+        encrypted_quic: optional_u64(
+            object.get("encryptquic"),
+            "QQ CDN dispatch node encryptquic",
+        )?,
+        extensions: Extensions::from([("response".to_owned(), value.clone())]),
+    })
+}
+
+fn validate_cdn_root(value: &str) -> Result<String> {
+    let value = value.trim();
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| qq_data_error("QQ CDN dispatch returned an invalid CDN root URL"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(qq_data_error(
+            "QQ CDN dispatch returned an unsafe CDN root URL",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn required_i64(value: &Value, field: &str, context: &str) -> Result<i64> {
+    value
+        .get(field)
+        .and_then(json_i64)
+        .ok_or_else(|| qq_data_error(format!("{context} is missing a valid {field} field")))
+}
+
+fn required_positive_u64(value: &Value, field: &str, context: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(json_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| qq_data_error(format!("{context} is missing a positive {field} field")))
+}
+
+fn optional_u64(value: Option<&Value>, context: &str) -> Result<u64> {
+    match value {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => json_u64(value)
+            .ok_or_else(|| qq_data_error(format!("{context} field is not an unsigned integer"))),
+    }
+}
+
+fn optional_string(value: Option<&Value>, context: &str) -> Result<String> {
+    match value {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(value)) => Ok(value.clone()),
+        Some(_) => Err(qq_data_error(format!("{context} field is not a string"))),
+    }
+}
+
+fn nonempty_optional_string(value: Option<&Value>, context: &str) -> Result<Option<String>> {
+    let value = optional_string(value, context)?.trim().to_owned();
+    Ok((!value.is_empty()).then_some(value))
 }
 
 fn validate_song_detail_info(info: Option<&Value>) -> Result<()> {
@@ -2695,6 +2879,118 @@ mod tests {
     }
 
     #[test]
+    fn cdn_dispatch_request_uses_a_fresh_lowercase_guid_and_exact_controls() {
+        let (request, guid) = cdn_dispatch_request();
+        assert_eq!(request.module, CDN_DISPATCH_MODULE);
+        assert_eq!(request.method, CDN_DISPATCH_METHOD);
+        assert_eq!(guid.len(), 32);
+        assert!(
+            guid.chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        );
+        assert_eq!(
+            request.param,
+            json!({
+                "guid": guid,
+                "uid": "0",
+                "use_new_domain": 1,
+                "use_ipv6": 1
+            })
+        );
+        let (_, other_guid) = cdn_dispatch_request();
+        assert_ne!(guid, other_guid);
+    }
+
+    #[test]
+    fn cdn_dispatch_mapping_preserves_roots_nodes_timers_and_raw_response() {
+        let dispatch = map_cdn_dispatch_response(
+            "0123456789abcdef0123456789abcdef",
+            response(json!({
+                "retcode": 0,
+                "sip": [
+                    "http://aqqmusic.tc.qq.com/",
+                    "http://aqqmusic.tc.qq.com/",
+                    "https://sjy6.stream.qqmusic.qq.com/"
+                ],
+                "sipinfo": [
+                    {
+                        "cdn": "http://aqqmusic.tc.qq.com/",
+                        "quic": 0,
+                        "ipstack": 3,
+                        "quichost": "aqqmusic.tc.qq.com",
+                        "plaintextquic": 0,
+                        "encryptquic": 1,
+                        "future": "kept"
+                    },
+                    {}
+                ],
+                "keepalivefile": "C400test.m4a?vkey=public",
+                "expiration": 86400,
+                "refreshTime": 1800,
+                "cacheTime": 86400
+            })),
+        )
+        .expect("map CDN dispatch");
+        assert_eq!(dispatch.roots.len(), 3);
+        assert_eq!(dispatch.roots[0], dispatch.roots[1]);
+        assert_eq!(dispatch.nodes.len(), 2);
+        assert_eq!(dispatch.nodes[0].ip_stack, 3);
+        assert_eq!(dispatch.nodes[0].encrypted_quic, 1);
+        assert_eq!(
+            dispatch.nodes[0].quic_host.as_deref(),
+            Some("aqqmusic.tc.qq.com")
+        );
+        assert_eq!(dispatch.nodes[0].extensions["response"]["future"], "kept");
+        assert_eq!(dispatch.nodes[1].url, "");
+        assert_eq!(dispatch.expires_in_seconds, 86400);
+        assert_eq!(dispatch.refresh_after_seconds, 1800);
+        assert_eq!(dispatch.cache_for_seconds, 86400);
+        assert_eq!(
+            dispatch.extensions["request_guid"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(dispatch.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn cdn_dispatch_mapping_rejects_unusable_or_malformed_catalogs() {
+        let base = json!({
+            "retcode": 0,
+            "sip": ["https://aqqmusic.tc.qq.com/"],
+            "sipinfo": [],
+            "keepalivefile": "C400test.m4a?vkey=public",
+            "expiration": 86400,
+            "refreshTime": 1800,
+            "cacheTime": 86400
+        });
+        let mut fixtures = Vec::new();
+        for (field, value) in [
+            ("retcode", json!(1)),
+            ("sip", json!([])),
+            ("sip", json!(["ftp://example.test/file/"])),
+            ("sip", json!(["https://user:secret@example.test/"])),
+            ("sipinfo", json!({})),
+            ("sipinfo", json!([[]])),
+            ("keepalivefile", json!("https://attacker.test/file")),
+            ("expiration", json!(0)),
+            ("refreshTime", json!("invalid")),
+            ("cacheTime", json!(null)),
+        ] {
+            let mut fixture = base.clone();
+            fixture[field] = value;
+            fixtures.push(fixture);
+        }
+        let mut missing_sip = base;
+        missing_sip.as_object_mut().expect("object").remove("sip");
+        fixtures.push(missing_sip);
+        for fixture in fixtures {
+            let error = map_cdn_dispatch_response("guid", response(fixture))
+                .expect_err("invalid CDN dispatch");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn artist_mapping_preserves_counts_identity_and_raw_search_fields() {
         let item = map_artist_search_item(json!({
             "singerID": 4558,
@@ -3640,6 +3936,37 @@ mod tests {
         assert_eq!(rich.extensions["numeric_id"], "213086592");
         assert_eq!(rich.extensions["requested_options"]["qrc"], true);
         assert_eq!(rich.extensions["response"]["code"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_cdn_dispatch_returns_usable_roots_nodes_and_timers() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let dispatch = provider
+            .audio_cdn_dispatch(None)
+            .await
+            .expect("live CDN dispatch");
+        assert!(!dispatch.roots.is_empty());
+        assert!(
+            dispatch
+                .roots
+                .iter()
+                .all(|root| root.starts_with("http://") || root.starts_with("https://"))
+        );
+        assert!(!dispatch.nodes.is_empty());
+        assert!(!dispatch.test_file.is_empty());
+        assert!(dispatch.expires_in_seconds > 0);
+        assert!(dispatch.refresh_after_seconds > 0);
+        assert!(dispatch.cache_for_seconds > 0);
+        assert_eq!(
+            dispatch.extensions["request_guid"].as_str().map(str::len),
+            Some(32)
+        );
+        assert_eq!(dispatch.extensions["response"]["code"], 0);
     }
 
     #[tokio::test]
