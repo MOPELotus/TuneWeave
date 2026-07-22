@@ -1105,6 +1105,8 @@ QQ 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和
 
 热搜目录按 `rank` 从 1 开始排序，`keyword` 必填，说明、分数、图标类型、图标 URL 和目标 URL 均按平台实际返回可空。`detail` 缺省为 `full`，也接受 `brief`，并兼容 `mode` 查询名及 `simple/detail/detailed` 值。网易云简略榜固定使用 EAPI `/api/search/hot` 和 `type=1111`，详细榜固定使用 WeAPI `/api/hotsearchlist/get`；两套响应不会互相补造缺失字段，完整原文位于列表与条目扩展。
 
+QQ 热词固定使用 Android `music.musicsearch.HotkeyService/GetHotkeyForQQMusicMobile` 并提交按参考算法生成的搜索会话 ID。上游只有一份富目录，因此 full/brief 复用同一真实快照：full 映射说明、分值、趋势类型、图标和跳转，brief 隐去这些可选字段；展示活动标题不会覆盖可重新搜索的 `query`。封面、热词/直达/歌曲 ID、置顶态、排序与趋势对象、来源及完整原项始终保留在扩展。2026-07-22 release 统一 HTTP 的 full/brief 均真实返回同序 30 项，首项为“周杰伦”，上游 `ret_code=0`。
+
 搜索建议的 `client` 缺省为 `web`。统一条目始终给出可直接重新搜索的 `keyword`，可选 `kind/display_text/icon_url`；web 建议中的歌曲、专辑、歌手、歌单等实际资源同时以统一 `SearchItem` 放入 `resource`，mobile/PC 纯关键词不会伪造资源。PC 的 `recs` 与普通 `suggests` 分别位于 `recommendations/suggestions`。网易云 web/mobile 分别固定使用 WeAPI `/api/search/suggest/web`、`/api/search/suggest/keyword`，PC 固定使用 EAPI `/api/search/pc/suggest/keyword/get`；未知或零 `type` 不会遮住可映射的 `resourceType`，为兼容参考输入，`type=mobile` 等同 `client=mobile`。
 
 QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSmartBoxResult`：普通 `items` 与 `vec_related_items` 分别进入 `suggestions/recommendations`，`vec_direct_items` 依据 `insert_pos` 插回建议序列并尽可能提升为统一资源。搜索会话 ID 位于列表扩展；高亮展示、图标、跳转、分值、预搜索标志、关联资源 ID 及完整上游包装逐项保留。当前 `client=web` 留给参考 `quick_search` 的独立 Smartbox HTTP 链，`pc` 没有对应上游分支；两者在接入前明确报错，不会偷换成移动端结果。2026-07-22 release 统一 HTTP 真实返回 21 项“周杰伦”建议，首项为歌手直达资源。

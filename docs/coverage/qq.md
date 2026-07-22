@@ -11,11 +11,11 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=98`、`partial=0`、`implemented=1`、`verified=1`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=97`、`partial=0`、`implemented=1`、`verified=2`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
-| Q001 | 搜索与发现 | `SearchApi.get_hotkey` | 是 | `pending` | 热搜目录 |
+| Q001 | 搜索与发现 | `SearchApi.get_hotkey` | 是 | `verified` | `GET /v1/search/trending?platform=qq&detail=...` 精确调用 Android `music.musicsearch.HotkeyService/GetHotkeyForQQMusicMobile` 并提交参考算法生成的 `search_id`。`vec_hotkey` 原始顺序映射为从 1 开始的稳定排名，实际搜索 `query` 不被活动展示 `title` 覆盖；`detail=full` 提供说明、字符串分值转无符号整数、趋势/序列类型、图标与跳转，`brief` 只收敛关键字和排名，但两种模式都在条目扩展保留标题、封面、热词/直达/歌曲 ID、置顶态、排序、趋势、来源及完整原项。`ret_code` 非零、缺失或目录缺失均拒绝为假成功；实验 ID、榜单时段、列表 ID 与完整响应保留在列表扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 30 项，首项排名 1“周杰伦”，full 分值存在、brief 富字段为空，上游码 0 |
 | Q002 | 搜索与发现 | `SearchApi.complete` | 是 | `verified` | `GET /v1/search/suggestions?platform=qq&client=mobile&q=...` 精确调用 Android `music.smartboxCgi.SmartBoxCgi/GetSmartBoxResult`，参考固定的 `search_id/query/num_per_page=0/page_idx=0` 均保留。`items` 普通补全、`vec_related_items` 相关词和按 `insert_pos` 插入的 `vec_direct_items` 直达结果不会合并丢失；歌手直达结果提升为统一 `Artist`，其他已知类型保留 `kind`，无法安全提升的直达结构以含完整原文的 `opaque` 资源表达。搜索会话、展示高亮、图标、跳转、分值、关联 ID 和完整响应均保留，非数组桶拒绝为假空结果。2026-07-22 同一持久匿名设备的 provider 与 release 统一 HTTP 真实搜索“周杰伦”，返回 21 项，首项为 `artist/qq:0025NhlN2yWrP4`，上游码 0 |
 | Q003 | 搜索与发现 | `SearchApi.quick_search` | 是 | `pending` | 兼容独立 Smartbox HTTP 链 |
 | Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `implemented` | `GET /v1/search?platform=qq&kind=...` 已完整接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和节目 9 类，并保留 `searchid` 搜索会话及 `highlight` 分支：自动申请并持久化 QIMEI/设备会话；按已验收的静默失败边界分别使用歌曲/专辑/MV/歌词 60、歌手 40、歌单 30 的页宽，用户/节目专辑/节目使用上游公开测试覆盖的 10，统一 `limit<=100` 与任意 `offset` 由同批子请求按上游逻辑槽位切片。歌单桶偶发少一项时不跨窗口补项或导致续页重复，`next_offset` 仍按槽位推进，`omitted_slots/upstream_item_counts` 明示缺口；非稀疏分类缺项及缺少码/总数/列表均拒绝为假成功。用户优先保留加密 UIN 并另存数字 UIN；节目专辑映射为 `Podcast`，节目映射为含完整可播放 `Track` 的 `PodcastEpisode`；所有类别均保留稳定身份、核心展示字段及完整原项。2026-07-22 Rust provider 与 release 统一 HTTP 已真实验收前 6 类及稀疏歌单跨页；最后 3 类的类型、字段优先级、分页和单批请求已有离线测试，但真实合并请求当前被 QQ 匿名风控返回 `code=2001`，待窗口解除后补统一 HTTP 验收，故标为 `implemented` 而非 `verified` |

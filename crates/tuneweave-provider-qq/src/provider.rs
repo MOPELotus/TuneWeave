@@ -6,7 +6,8 @@ use tuneweave_core::{
     Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
     MusicProvider, Page, PageMeta, Platform, Playlist, Podcast, PodcastEpisode, Quality,
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchVariant, Track,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, Track,
     TuneWeaveError, User, Video,
 };
 
@@ -16,6 +17,8 @@ const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
+const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
+const HOTKEY_METHOD: &str = "GetHotkeyForQQMusicMobile";
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -139,6 +142,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchPodcasts,
             Capability::SearchVoices,
             Capability::SearchSuggestions,
+            Capability::SearchTrending,
         ])
     }
 
@@ -219,6 +223,22 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ SmartBox returned no response"))?;
         map_smartbox_response(query, request.client, &search_id, response)
+    }
+
+    async fn trending_searches(
+        &self,
+        request: &SearchTrendingRequest,
+    ) -> Result<SearchTrendingList> {
+        validate_qq_public_account(request.account.as_deref(), "QQ trending searches")?;
+        let search_id = generate_search_id()?;
+        let response = self
+            .client
+            .request_android(&[hotkey_request(&search_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ hotkey service returned no response"))?;
+        map_hotkey_response(request.detail, &search_id, response)
     }
 }
 
@@ -557,6 +577,125 @@ fn map_smartbox_direct_resource(
         title: Some(keyword.to_owned()),
         extensions: Extensions::from([("response".to_owned(), raw.clone())]),
     })))
+}
+
+fn hotkey_request(search_id: &str) -> QqApiRequest {
+    QqApiRequest::new(
+        HOTKEY_MODULE,
+        HOTKEY_METHOD,
+        json!({"search_id": search_id}),
+    )
+}
+
+fn map_hotkey_response(
+    detail: SearchTrendingDetail,
+    requested_search_id: &str,
+    response: QqApiResponse,
+) -> Result<SearchTrendingList> {
+    let code = response
+        .data
+        .get("ret_code")
+        .and_then(json_i64)
+        .ok_or_else(|| qq_data_error("QQ hotkey response is missing ret_code"))?;
+    if code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ hotkey service failed with code {code}"),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_code": code })));
+    }
+    let hotkeys = response
+        .data
+        .get("vec_hotkey")
+        .and_then(Value::as_array)
+        .ok_or_else(|| qq_data_error("QQ hotkey response is missing vec_hotkey"))?;
+    let entries = hotkeys
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| map_hotkey_entry(detail, index, raw.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::new();
+    extensions.insert(
+        "search_id".to_owned(),
+        Value::String(requested_search_id.to_owned()),
+    );
+    insert_value(&mut extensions, "experiment_id", response.data.get("expid"));
+    insert_value(
+        &mut extensions,
+        "hotkey_time",
+        response.data.get("hotkey_time"),
+    );
+    insert_value(
+        &mut extensions,
+        "track_list_id",
+        response.data.get("track_list_id"),
+    );
+    extensions.insert("response".to_owned(), response.raw);
+    Ok(SearchTrendingList {
+        detail,
+        entries,
+        extensions,
+    })
+}
+
+fn map_hotkey_entry(
+    detail: SearchTrendingDetail,
+    index: usize,
+    raw: Value,
+) -> Result<SearchTrendingEntry> {
+    let keyword = ["query", "title"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ hotkey entry is missing its query"))?;
+    let full = detail == SearchTrendingDetail::Full;
+    let mut extensions = Extensions::new();
+    insert_some(
+        &mut extensions,
+        "display_title",
+        nonempty_string(raw.get("title")),
+    );
+    insert_some(
+        &mut extensions,
+        "cover_url",
+        ["cover_pic_url", "pic_url"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+    );
+    insert_value(&mut extensions, "hotkey_id", raw.get("hotkey_id"));
+    insert_value(&mut extensions, "direct_id", raw.get("direct_id"));
+    insert_value(
+        &mut extensions,
+        "track_id",
+        raw.pointer("/custom_param/track_id"),
+    );
+    insert_value(&mut extensions, "kind", raw.get("kind"));
+    insert_value(&mut extensions, "need_top", raw.get("need_top"));
+    insert_value(&mut extensions, "order_info", raw.get("order_info"));
+    insert_value(&mut extensions, "sequence", raw.get("seqence"));
+    insert_value(&mut extensions, "source", raw.get("source"));
+    insert_value(&mut extensions, "type", raw.get("type"));
+    extensions.insert("response".to_owned(), raw.clone());
+    Ok(SearchTrendingEntry {
+        rank: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+        keyword,
+        description: full
+            .then(|| nonempty_string(raw.get("description")))
+            .flatten(),
+        score: full.then(|| raw.get("score").and_then(json_u64)).flatten(),
+        icon_type: full
+            .then(|| raw.pointer("/seqence/seqence_kind").and_then(json_i64))
+            .flatten(),
+        icon_url: full
+            .then(|| {
+                ["desc_icon_url", "gif_url"]
+                    .into_iter()
+                    .find_map(|field| nonempty_string(raw.get(field)))
+            })
+            .flatten(),
+        target_url: full.then(|| nonempty_string(raw.get("jump_url"))).flatten(),
+        extensions,
+    })
 }
 
 fn map_track_search_response(
@@ -1486,6 +1625,13 @@ fn json_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
 fn json_bool(value: &Value) -> Option<bool> {
     value.as_bool().or_else(|| match json_u64(value) {
         Some(0) => Some(false),
@@ -2032,6 +2178,98 @@ mod tests {
         assert_eq!(error.platform, Some(Platform::Qq));
     }
 
+    #[test]
+    fn hotkey_mapping_preserves_rank_detail_and_platform_metadata() {
+        let request = hotkey_request("session-42");
+        assert_eq!(request.module, HOTKEY_MODULE);
+        assert_eq!(request.method, HOTKEY_METHOD);
+        assert_eq!(request.param, json!({"search_id": "session-42"}));
+
+        let data = json!({
+            "ret_code": 0,
+            "expid": "1462002",
+            "hotkey_time": "20260722108",
+            "track_list_id": "20260722108",
+            "vec_hotkey": [{
+                "query": "周杰伦",
+                "title": "716周杰伦日",
+                "description": "一年一度周杰伦日",
+                "score": "809039",
+                "hotkey_id": "3.2.1.0:周杰伦",
+                "direct_id": 97773,
+                "cover_pic_url": "https://example.test/album.jpg",
+                "custom_param": {"track_id": "97773"},
+                "seqence": {"seqence_kind": 4, "seqence_value": 1},
+                "kind": 1,
+                "need_top": 1,
+                "source": 2,
+                "type": 3
+            }, {
+                "query": "无人之岛",
+                "title": "无人之岛",
+                "description": "正在热搜",
+                "score": "498012",
+                "seqence": {"seqence_kind": 2, "seqence_value": 4}
+            }]
+        });
+        let full = map_hotkey_response(
+            SearchTrendingDetail::Full,
+            "session-42",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data.clone()}),
+            },
+        )
+        .expect("map full hotkeys");
+        assert_eq!(full.entries.len(), 2);
+        assert_eq!(full.entries[0].rank, 1);
+        assert_eq!(full.entries[0].keyword, "周杰伦");
+        assert_eq!(
+            full.entries[0].description.as_deref(),
+            Some("一年一度周杰伦日")
+        );
+        assert_eq!(full.entries[0].score, Some(809_039));
+        assert_eq!(full.entries[0].icon_type, Some(4));
+        assert_eq!(full.entries[0].extensions["display_title"], "716周杰伦日");
+        assert_eq!(full.entries[0].extensions["track_id"], "97773");
+        assert_eq!(full.entries[1].rank, 2);
+        assert_eq!(full.extensions["search_id"], "session-42");
+        assert_eq!(full.extensions["hotkey_time"], "20260722108");
+        assert_eq!(full.extensions["response"]["data"]["ret_code"], 0);
+
+        let brief = map_hotkey_response(
+            SearchTrendingDetail::Brief,
+            "session-43",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map brief hotkeys");
+        assert_eq!(brief.entries[0].keyword, "周杰伦");
+        assert_eq!(brief.entries[0].description, None);
+        assert_eq!(brief.entries[0].score, None);
+        assert_eq!(brief.entries[0].icon_type, None);
+        assert_eq!(brief.entries[0].extensions["direct_id"], 97773);
+    }
+
+    #[test]
+    fn hotkey_mapping_rejects_business_failures_and_missing_catalogs() {
+        for data in [json!({"ret_code": 1001}), json!({"ret_code": 0})] {
+            let error = map_hotkey_response(
+                SearchTrendingDetail::Full,
+                "session",
+                QqApiResponse {
+                    data: data.clone(),
+                    raw: json!({"code": 0, "data": data}),
+                },
+            )
+            .expect_err("invalid hotkey response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+    }
+
     #[tokio::test]
     async fn smartbox_rejects_unimplemented_clients_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -2039,6 +2277,11 @@ mod tests {
             provider
                 .capabilities()
                 .contains(&Capability::SearchSuggestions)
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SearchTrending)
         );
         let mut request = SearchSuggestionRequest {
             query: "周杰伦".to_owned(),
@@ -2057,6 +2300,15 @@ mod tests {
             .search_suggestions(&request)
             .await
             .expect_err("unconfigured account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let error = provider
+            .trending_searches(&SearchTrendingRequest {
+                detail: SearchTrendingDetail::Full,
+                account: Some("green-diamond".to_owned()),
+            })
+            .await
+            .expect_err("unconfigured trending account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -2212,6 +2464,36 @@ mod tests {
         );
         assert!(result.extensions["search_id"].as_str().is_some());
         assert!(result.extensions["response"]["data"].is_object());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_hotkeys_return_ranked_rich_entries() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let result = provider
+            .trending_searches(&SearchTrendingRequest {
+                detail: SearchTrendingDetail::Full,
+                account: Some("default".to_owned()),
+            })
+            .await
+            .expect("live hotkeys");
+        assert_eq!(result.detail, SearchTrendingDetail::Full);
+        assert!(!result.entries.is_empty());
+        assert!(
+            result
+                .entries
+                .iter()
+                .enumerate()
+                .all(
+                    |(index, entry)| entry.rank == u32::try_from(index + 1).unwrap_or(u32::MAX)
+                        && !entry.keyword.is_empty()
+                )
+        );
+        assert_eq!(result.extensions["response"]["data"]["ret_code"], 0);
     }
 
     #[tokio::test]
