@@ -268,6 +268,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tracks/streams",
             get(track_streams_get).post(track_streams_post),
         )
+        .route("/tracks", get(tracks_get).post(tracks_post))
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route(
@@ -1692,6 +1693,136 @@ async fn audio_recognize(
 #[derive(Debug, Default, Deserialize)]
 struct AccountParams {
     account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackBatchParams {
+    refs: Option<String>,
+    ids: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackBatchBody {
+    refs: Option<StreamReferenceInput>,
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn tracks_get(
+    State(state): State<AppState>,
+    params: Result<Query<TrackBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let params = query_params(params)?;
+    tracks_response(
+        &state,
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        params.account,
+    )
+    .await
+}
+
+async fn tracks_post(
+    State(state): State<AppState>,
+    body: Result<Json<TrackBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let body = json_body(body)?;
+    tracks_response(
+        &state,
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        body.account,
+    )
+    .await
+}
+
+async fn tracks_response(
+    state: &AppState,
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    account: Option<String>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let references = parse_track_batch_references(refs, ids, platform, state.default_platform)?;
+    let selected_platform = references[0].platform();
+    if references
+        .iter()
+        .any(|reference| reference.platform() != selected_platform)
+    {
+        return Err(
+            TuneWeaveError::invalid_request("track detail batches must use one platform")
+                .with_details(json!({
+                    "platforms": references
+                        .iter()
+                        .map(ResourceRef::platform)
+                        .collect::<BTreeSet<_>>()
+                }))
+                .into(),
+        );
+    }
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let account = optional_trimmed(account);
+    let provider = state.registry.require(selected_platform)?;
+    let tracks = provider.tracks(&ids, account.as_deref()).await?;
+    let mut response = ApiResponse::new(tracks).with_platform(selected_platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn parse_track_batch_references(
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    default_platform: Platform,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    let (kind, values) = match (refs, ids) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "refs and ids cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["refs", "ids"] })));
+        }
+        (None, None) => {
+            return Err(TuneWeaveError::invalid_request(
+                "one of refs or ids must be provided",
+            ));
+        }
+        (Some(values), None) => {
+            if platform.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "platform can only be used with ids",
+                ));
+            }
+            ("refs", split_stream_batch_values("refs", values)?)
+        }
+        (None, Some(values)) => ("ids", split_stream_batch_values("ids", values)?),
+    };
+    if kind == "refs" {
+        values.into_iter().map(parse_reference).collect()
+    } else {
+        let platform = platform.map_or(Ok(default_platform), parse_platform_parameter)?;
+        values
+            .into_iter()
+            .map(|id| {
+                ResourceRef::new(platform, &id).map_err(|error| {
+                    TuneWeaveError::invalid_request(format!("invalid track id: {error}"))
+                        .with_details(json!({ "id": id, "platform": platform }))
+                })
+            })
+            .collect()
+    }
 }
 
 async fn track(
@@ -17235,6 +17366,78 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["ref"], "netease:185809");
         assert_eq!(json["data"]["artists"][0]["name"], "周杰伦");
+    }
+
+    #[tokio::test]
+    async fn track_batches_accept_ids_and_refs_without_losing_order_or_duplicates() {
+        let (status, get) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks?ids=185809,185809&platform=netease&account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(get["data"].as_array().map(Vec::len), Some(2));
+        assert_eq!(get["data"][0]["ref"], "netease:185809");
+        assert_eq!(get["data"][1]["ref"], "netease:185809");
+        assert_eq!(get["data"][0]["extensions"]["account"], "vip");
+        assert_eq!(get["meta"]["platform"], "netease");
+        assert_eq!(get["meta"]["account"], "vip");
+
+        let (status, post) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/tracks",
+            Some(json!({
+                "refs": ["netease:2", "netease:1", "netease:2"],
+                "account": "saved"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            post["data"]
+                .as_array()
+                .expect("track batch")
+                .iter()
+                .map(|track| track["ref"].as_str().expect("track ref"))
+                .collect::<Vec<_>>(),
+            ["netease:2", "netease:1", "netease:2"]
+        );
+        assert_eq!(post["meta"]["account"], "saved");
+    }
+
+    #[tokio::test]
+    async fn track_batches_reject_ambiguous_empty_and_cross_platform_inputs() {
+        for (method, path, body) in [
+            (Method::GET, "/v1/tracks", None),
+            (Method::GET, "/v1/tracks?refs=netease:1&ids=1", None),
+            (
+                Method::GET,
+                "/v1/tracks?refs=netease:1&platform=netease",
+                None,
+            ),
+            (
+                Method::GET,
+                "/v1/tracks?refs=netease:1,qq:003w2xz20QlUZt",
+                None,
+            ),
+            (Method::GET, "/v1/tracks?ids=1&unknown=true", None),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"ids": [], "platform": "netease"})),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"ids": ["1"], "unknown": true})),
+            ),
+        ] {
+            let (status, json) =
+                json_request_from(test_app_with_provider(), method, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
+            assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
+        }
     }
 
     #[tokio::test]

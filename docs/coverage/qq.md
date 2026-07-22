@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=96`、`partial=0`、`implemented=1`、`verified=3`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=95`、`partial=0`、`implemented=1`、`verified=4`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -27,7 +27,7 @@
 | Q010 | 搜索与发现 | `RecommendApi.get_radar_recommend` | 是 | `pending` | 雷达推荐 |
 | Q011 | 搜索与发现 | `TopApi.get_category` | 是 | `pending` | 榜单目录 |
 | Q012 | 搜索与发现 | `TopApi.get_detail` | 是 | `pending` | 榜单歌曲及分页 |
-| Q013 | 内容展示 | `SongApi.query_song` | 是 | `pending` | 批量歌曲查询，分别保留数字 ID、MID、媒体 MID 和 `songType` |
+| Q013 | 内容展示 | `SongApi.query_song` | 是 | `verified` | `GET/POST /v1/tracks` 完整保留参考批量能力：GET 接受逗号分隔 `refs` 或 `platform+ids`，POST 接受单值/数组；完整引用批次必须属于同一平台，输入顺序与重复项原样保留，账户参数统一透传。QQ 精确调用 Android `music.trackInfo.UniformRuleCtrl/CgiGetTrackInfo`，每项提交 `types=0/modify_stamp=0` 及固定 `ctx=0/client=1`；纯十进制字符串按数字 ID 批次提交，其他值按 MID 批次提交，严格拒绝两种标识混用。响应按请求标识重新对齐，不因上游排序或去重丢失重复项；缺失 `tracks` 拒绝为假空结果，请求项缺失明确返回资源不存在。统一 `Track` 分别保留数字 ID、MID、媒体 MID、`songType`、文件规格、付费信息、状态和完整原始歌曲项，公开引用优先使用 MID。单条 `/v1/tracks/{ref}` 在 Q014 富详情接入前复用同一查询协议。2026-07-22 provider 与 release 统一 GET/POST 已真实验证数字 ID `100` 的重复批次和 MID `003w2xz20QlUZt`；前者稳定返回两项同引用 `qq:003a7WZv0CYKYn`，后者返回请求 MID，数字 ID/MID/媒体 MID/`songType=1` 均存在 |
 | Q014 | 内容展示 | `SongApi.get_detail` | 是 | `pending` | 单曲详情 |
 | Q015 | 内容展示 | `SongApi.get_similar_song` | 是 | `pending` | 相似歌曲 |
 | Q016 | 内容展示 | `SongApi.get_labels` | 是 | `pending` | 歌曲标签 |

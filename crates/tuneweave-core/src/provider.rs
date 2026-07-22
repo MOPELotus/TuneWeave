@@ -483,6 +483,14 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn tracks(&self, ids: &[String], account: Option<&str>) -> Result<Vec<Track>> {
+        let mut tracks = Vec::with_capacity(ids.len());
+        for id in ids {
+            tracks.push(self.track(id, account).await?);
+        }
+        Ok(tracks)
+    }
+
     async fn track_availability(
         &self,
         _id: &str,
