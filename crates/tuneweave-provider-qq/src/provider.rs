@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, time::SystemTime};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    Album, AlbumSummary, Artist, ArtistSummary, Capability, ErrorCode, Extensions, MusicProvider,
-    Page, PageMeta, Platform, Playlist, Quality, ResourceRef, Result, SearchItem, SearchKind,
-    SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Album, AlbumSummary, Artist, ArtistSummary, Capability, CreatorSummary, ErrorCode, Extensions,
+    MusicProvider, Page, PageMeta, Platform, Playlist, Quality, ResourceRef, Result, SearchItem,
+    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
@@ -50,6 +50,20 @@ const PLAYLIST_SEARCH: TypedSearchSpec = TypedSearchSpec {
     upstream_page_size: 30,
     sparse: true,
 };
+const MV_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 4,
+    item_pointer: "/body/item_mv",
+    context: "QQ MV search",
+    upstream_page_size: 60,
+    sparse: false,
+};
+const LYRIC_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 7,
+    item_pointer: "/body/item_song",
+    context: "QQ lyric search",
+    upstream_page_size: 60,
+    sparse: false,
+};
 
 #[derive(Clone)]
 pub struct QqProvider {
@@ -84,6 +98,8 @@ impl MusicProvider for QqProvider {
             Capability::SearchArtists,
             Capability::SearchAlbums,
             Capability::SearchPlaylists,
+            Capability::SearchMvs,
+            Capability::SearchLyrics,
         ])
     }
 
@@ -110,6 +126,8 @@ impl MusicProvider for QqProvider {
             SearchKind::Artist => (ARTIST_SEARCH, map_artist_search_item),
             SearchKind::Album => (ALBUM_SEARCH, map_album_search_item),
             SearchKind::Playlist => (PLAYLIST_SEARCH, map_playlist_search_item),
+            SearchKind::Mv => (MV_SEARCH, map_mv_search_item),
+            SearchKind::Lyric => (LYRIC_SEARCH, map_lyric_search_item),
             kind => {
                 return Err(TuneWeaveError::unsupported(
                     Platform::Qq,
@@ -639,6 +657,85 @@ fn map_playlist_search_item(raw: Value) -> Result<SearchItem> {
     }))
 }
 
+fn map_mv_search_item(raw: Value) -> Result<SearchItem> {
+    let vid = nonempty_string(raw.get("vid"));
+    let numeric_id = ["id", "mvid", "sid"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let id = vid
+        .clone()
+        .or_else(|| numeric_id.clone())
+        .ok_or_else(|| qq_data_error("QQ MV search item is missing both VID and numeric ID"))?;
+    let title = ["title", "name", "mvname"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ MV search item is missing its title"))?;
+    let singer_mid = ["singermid", "singerMid", "singer_mid"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    let singer_id = ["singerid", "singerId", "singer_id"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let creators = ["singername", "singerName", "singer_name"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .map(|name| {
+            let creator_id = singer_mid.clone().or_else(|| singer_id.clone());
+            Ok(CreatorSummary {
+                resource_ref: creator_id
+                    .as_deref()
+                    .map(|id| qq_ref(id, "MV creator"))
+                    .transpose()?,
+                name,
+                avatar_url: singer_mid.as_deref().map(|mid| qq_cover_url("T001", mid)),
+            })
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
+    let mut extensions = Extensions::new();
+    insert_some(&mut extensions, "numeric_id", numeric_id);
+    insert_some(&mut extensions, "vid", vid);
+    insert_some(&mut extensions, "singer_numeric_id", singer_id);
+    insert_some(&mut extensions, "singer_mid", singer_mid);
+    insert_value(
+        &mut extensions,
+        "mv_type",
+        raw.get("type").or_else(|| raw.get("vt")),
+    );
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::Video(Video {
+        resource_ref: qq_ref(&id, "MV")?,
+        platform: Platform::Qq,
+        id,
+        title,
+        creators,
+        description: ["desc", "description"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field)))
+            .unwrap_or_default(),
+        cover_url: ["pic", "cover", "picurl"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        duration_ms: raw
+            .get("duration")
+            .and_then(json_u64)
+            .map(|seconds| seconds.saturating_mul(1_000)),
+        published_at: ["publish_date", "publishDate", "pubdate"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        play_count: ["play_count", "playCount", "listennum"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        subscribed: None,
+        extensions,
+    }))
+}
+
+fn map_lyric_search_item(raw: Value) -> Result<SearchItem> {
+    map_track(raw).map(SearchItem::Track)
+}
+
 fn map_playlist_creator(raw: &Value) -> Result<Option<ArtistSummary>> {
     let Some(name) = ["name", "nickname", "nick"]
         .into_iter()
@@ -1036,6 +1133,58 @@ mod tests {
     }
 
     #[test]
+    fn mv_mapping_prefers_vid_and_preserves_creator_counts_and_raw_item() {
+        let item = map_mv_search_item(json!({
+            "id": 293791,
+            "vid": "w0026q7f01a",
+            "title": "晴天",
+            "pic": "https://example.test/mv.jpg",
+            "play_count": 120108934,
+            "duration": 317,
+            "publish_date": "2003-07-29",
+            "singerid": 4558,
+            "singermid": "0025NhlN2yWrP4",
+            "singername": "周杰伦",
+            "type": 0
+        }))
+        .expect("map MV");
+        let SearchItem::Video(video) = item else {
+            panic!("expected video");
+        };
+        assert_eq!(video.resource_ref.to_string(), "qq:w0026q7f01a");
+        assert_eq!(video.extensions["numeric_id"], "293791");
+        assert_eq!(video.duration_ms, Some(317_000));
+        assert_eq!(video.play_count, Some(120108934));
+        assert_eq!(video.published_at.as_deref(), Some("2003-07-29"));
+        assert_eq!(video.creators[0].name, "周杰伦");
+        assert_eq!(
+            video.creators[0]
+                .resource_ref
+                .as_ref()
+                .expect("creator ref")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(video.extensions["search_item"]["type"], 0);
+    }
+
+    #[test]
+    fn lyric_mapping_keeps_the_full_track_and_search_hit_content() {
+        let mut raw = sample_track(97_773, "0039MnYb0qxYhV", "晴天");
+        raw["content"] = json!("故事的小黄花\n从出生那年就飘着");
+        let item = map_lyric_search_item(raw).expect("map lyric hit");
+        let SearchItem::Track(track) = item else {
+            panic!("expected track");
+        };
+        assert_eq!(track.resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(
+            track.extensions["search_content"],
+            "故事的小黄花\n从出生那年就飘着"
+        );
+        assert_eq!(track.extensions["media_mid"], "003Qui1q2u1Zho");
+    }
+
+    #[test]
     fn page_mapping_supports_non_aligned_offsets_across_two_upstream_pages() {
         let first = (0..60)
             .map(|id| sample_track(id, &format!("mid{id}"), &format!("track{id}")))
@@ -1068,6 +1217,8 @@ mod tests {
         assert_eq!(ARTIST_SEARCH.upstream_page_size, 40);
         assert_eq!(ALBUM_SEARCH.upstream_page_size, 60);
         assert_eq!(PLAYLIST_SEARCH.upstream_page_size, 30);
+        assert_eq!(MV_SEARCH.upstream_page_size, 60);
+        assert_eq!(LYRIC_SEARCH.upstream_page_size, 60);
         let first = (0..30)
             .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
             .collect::<Vec<_>>();
@@ -1231,24 +1382,40 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live QQ Music services"]
-    async fn live_artist_album_and_playlist_search_return_typed_catalogs() {
+    async fn live_artist_album_playlist_mv_and_lyric_search_return_typed_catalogs() {
         let provider = QqProvider::new(QqConfig {
             device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
             ..QqConfig::default()
         })
         .expect("provider");
-        for kind in [SearchKind::Artist, SearchKind::Album, SearchKind::Playlist] {
+        for kind in [
+            SearchKind::Artist,
+            SearchKind::Album,
+            SearchKind::Playlist,
+            SearchKind::Mv,
+            SearchKind::Lyric,
+        ] {
             let page = provider
                 .search_catalog(&search_query(kind, 2, 0))
                 .await
                 .expect("live catalog search");
             assert_eq!(page.items.len(), 2);
             assert!(page.pagination.total.is_some_and(|total| total > 0));
-            assert!(page.items.iter().all(|item| match (kind, item) {
-                (SearchKind::Artist, SearchItem::Artist(artist)) => !artist.name.is_empty(),
-                (SearchKind::Album, SearchItem::Album(album)) => !album.name.is_empty(),
-                (SearchKind::Playlist, SearchItem::Playlist(playlist)) => !playlist.name.is_empty(),
-                _ => false,
+            assert!(page.items.iter().all(|item| {
+                match (kind, item) {
+                    (SearchKind::Artist, SearchItem::Artist(artist)) => !artist.name.is_empty(),
+                    (SearchKind::Album, SearchItem::Album(album)) => !album.name.is_empty(),
+                    (SearchKind::Playlist, SearchItem::Playlist(playlist)) => {
+                        !playlist.name.is_empty()
+                    }
+                    (SearchKind::Mv, SearchItem::Video(video)) => !video.title.is_empty(),
+                    (SearchKind::Lyric, SearchItem::Track(track)) => track
+                        .extensions
+                        .get("search_content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| !content.is_empty()),
+                    _ => false,
+                }
             }));
         }
     }
