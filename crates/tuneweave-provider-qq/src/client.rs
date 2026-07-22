@@ -15,6 +15,7 @@ use crate::{
 };
 
 const API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const QUICK_SEARCH_ENDPOINT: &str = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
 const ANDROID_USER_AGENT: &str = "QQMusic 14090008(android 10)";
 
 #[derive(Clone, Default)]
@@ -112,6 +113,34 @@ impl QqClient {
         let device = self.lock_device()?.device().clone();
         let comm = android_comm(&device);
         self.post_api(&comm, requests).await
+    }
+
+    pub(crate) async fn request_quick_search(&self, keyword: &str) -> Result<Value> {
+        let mut endpoint = reqwest::Url::parse(QUICK_SEARCH_ENDPOINT).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("QQ quick search endpoint is invalid: {error}"),
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        endpoint.query_pairs_mut().append_pair("key", keyword);
+        let response = self
+            .http
+            .get(endpoint)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(http_error(status));
+        }
+        response.json().await.map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("QQ quick search returned invalid JSON: {error}"),
+            )
+            .with_platform(Platform::Qq)
+        })
     }
 
     async fn ensure_qimei(&self) -> Result<()> {

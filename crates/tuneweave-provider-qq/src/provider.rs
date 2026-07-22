@@ -206,23 +206,29 @@ impl MusicProvider for QqProvider {
                     .with_platform(Platform::Qq),
             );
         }
-        if request.client != SearchSuggestionClient::Mobile {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ SmartBox completion currently requires client=mobile",
+        validate_qq_public_account(request.account.as_deref(), "QQ search suggestions")?;
+        match request.client {
+            SearchSuggestionClient::Mobile => {
+                let search_id = generate_search_id()?;
+                let response = self
+                    .client
+                    .request_android(&[smartbox_request(query, &search_id)])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| qq_data_error("QQ SmartBox returned no response"))?;
+                map_smartbox_response(query, request.client, &search_id, response)
+            }
+            SearchSuggestionClient::Web => {
+                let response = self.client.request_quick_search(query).await?;
+                map_quick_search_response(query, response)
+            }
+            SearchSuggestionClient::Pc => Err(TuneWeaveError::invalid_request(
+                "QQ search suggestions do not expose a PC-specific upstream branch",
             )
             .with_platform(Platform::Qq)
-            .with_details(json!({ "allowed": ["mobile"] })));
+            .with_details(json!({ "allowed": ["web", "mobile"] }))),
         }
-        validate_qq_public_account(request.account.as_deref(), "QQ search suggestions")?;
-        let search_id = generate_search_id()?;
-        let response = self
-            .client
-            .request_android(&[smartbox_request(query, &search_id)])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ SmartBox returned no response"))?;
-        map_smartbox_response(query, request.client, &search_id, response)
     }
 
     async fn trending_searches(
@@ -577,6 +583,176 @@ fn map_smartbox_direct_resource(
         title: Some(keyword.to_owned()),
         extensions: Extensions::from([("response".to_owned(), raw.clone())]),
     })))
+}
+
+fn map_quick_search_response(query: &str, response: Value) -> Result<SearchSuggestionList> {
+    for field in ["code", "subcode"] {
+        let code = response
+            .get(field)
+            .and_then(json_i64)
+            .ok_or_else(|| qq_data_error(format!("QQ quick search is missing {field}")))?;
+        if code != 0 {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("QQ quick search failed with {field}={code}"),
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "field": field, "platform_code": code })));
+        }
+    }
+    let data = response
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| qq_data_error("QQ quick search is missing its data object"))?;
+    let mut sections = Vec::new();
+    for (section_name, section) in data {
+        let Some(section_object) = section.as_object() else {
+            continue;
+        };
+        let known_kind = quick_search_kind(section_name, section);
+        let itemlist = match section_object.get("itemlist") {
+            Some(Value::Array(items)) => items.clone(),
+            Some(_) => {
+                return Err(qq_data_error(format!(
+                    "QQ quick search section {section_name} itemlist is not an array"
+                )));
+            }
+            None if known_kind.is_some() => {
+                return Err(qq_data_error(format!(
+                    "QQ quick search section {section_name} is missing itemlist"
+                )));
+            }
+            None => continue,
+        };
+        let order = section.get("order").and_then(json_i64).unwrap_or(i64::MAX);
+        sections.push((order, section_name.clone(), known_kind, itemlist, section));
+    }
+    sections.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut suggestions = Vec::new();
+    for (_, section_name, kind, items, section) in sections {
+        for raw in items {
+            suggestions.push(map_quick_search_suggestion(
+                &section_name,
+                kind,
+                section,
+                raw,
+            )?);
+        }
+    }
+    Ok(SearchSuggestionList {
+        query: query.to_owned(),
+        client: SearchSuggestionClient::Web,
+        suggestions,
+        recommendations: Vec::new(),
+        extensions: Extensions::from([("response".to_owned(), response)]),
+    })
+}
+
+fn quick_search_kind(section_name: &str, section: &Value) -> Option<SearchKind> {
+    smartbox_search_kind(section_name).or_else(|| {
+        section
+            .get("type")
+            .and_then(json_i64)
+            .and_then(|kind| match kind {
+                1 => Some(SearchKind::Track),
+                2 => Some(SearchKind::Artist),
+                3 => Some(SearchKind::Album),
+                4 => Some(SearchKind::Mv),
+                _ => None,
+            })
+    })
+}
+
+fn map_quick_search_suggestion(
+    section_name: &str,
+    kind: Option<SearchKind>,
+    section: &Value,
+    raw: Value,
+) -> Result<SearchSuggestion> {
+    if !raw.is_object() {
+        return Err(qq_data_error(format!(
+            "QQ quick search section {section_name} contains a non-object item"
+        )));
+    }
+    let keyword = ["name", "title", "query"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| {
+            qq_data_error(format!(
+                "QQ quick search section {section_name} item is missing its name"
+            ))
+        })?;
+    let resource = map_quick_search_resource(section_name, kind, &keyword, &raw)?;
+    let mut extensions = Extensions::new();
+    extensions.insert("section".to_owned(), Value::String(section_name.to_owned()));
+    insert_value(&mut extensions, "section_name", section.get("name"));
+    insert_value(&mut extensions, "section_order", section.get("order"));
+    insert_value(&mut extensions, "section_type", section.get("type"));
+    insert_value(&mut extensions, "section_count", section.get("count"));
+    extensions.insert("response".to_owned(), raw.clone());
+    Ok(SearchSuggestion {
+        keyword,
+        kind,
+        display_text: nonempty_string(raw.get("singer")),
+        icon_url: ["pic", "cover_url", "pic_url"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        resource: Some(resource),
+        extensions,
+    })
+}
+
+fn map_quick_search_resource(
+    section_name: &str,
+    kind: Option<SearchKind>,
+    keyword: &str,
+    raw: &Value,
+) -> Result<SearchItem> {
+    let Some(kind) = kind else {
+        return Ok(quick_search_opaque_resource(section_name, keyword, raw));
+    };
+    let mut adapted = raw.clone();
+    let singer = nonempty_string(raw.get("singer"));
+    match kind {
+        SearchKind::Track | SearchKind::Lyric => {
+            if let Some(singer) = singer {
+                adapted["singer"] = json!([{ "name": singer }]);
+            }
+            map_track(adapted).map(SearchItem::Track)
+        }
+        SearchKind::Artist => map_artist_search_item(adapted),
+        SearchKind::Album => {
+            if let Some(singer) = singer {
+                adapted["singer_list"] = json!([{ "name": singer }]);
+            }
+            map_album_search_item(adapted)
+        }
+        SearchKind::Playlist => map_playlist_search_item(adapted),
+        SearchKind::User => map_user_search_item(adapted),
+        SearchKind::Mv | SearchKind::Video => {
+            if let Some(singer) = singer {
+                adapted["singername"] = Value::String(singer);
+            }
+            map_mv_search_item(adapted)
+        }
+        SearchKind::Podcast => map_podcast_search_item(adapted),
+        SearchKind::Voice => map_voice_search_item(adapted),
+        SearchKind::RadioStation | SearchKind::Mixed => {
+            Ok(quick_search_opaque_resource(section_name, keyword, raw))
+        }
+    }
+}
+
+fn quick_search_opaque_resource(section_name: &str, keyword: &str, raw: &Value) -> SearchItem {
+    SearchItem::Opaque(SearchOpaqueItem {
+        platform: Platform::Qq,
+        kind: section_name.to_owned(),
+        id: ["mid", "id", "docid"]
+            .into_iter()
+            .find_map(|field| value_as_string(raw.get(field))),
+        title: Some(keyword.to_owned()),
+        extensions: Extensions::from([("response".to_owned(), raw.clone())]),
+    })
 }
 
 fn hotkey_request(search_id: &str) -> QqApiRequest {
@@ -2179,6 +2355,153 @@ mod tests {
     }
 
     #[test]
+    fn quick_search_mapping_orders_dynamic_sections_and_keeps_typed_resources() {
+        let result = map_quick_search_response(
+            "周杰伦",
+            json!({
+                "code": 0,
+                "subcode": 0,
+                "data": {
+                    "mv": {
+                        "count": 1,
+                        "name": "MV",
+                        "order": 3,
+                        "type": 4,
+                        "itemlist": [{
+                            "docid": "293791",
+                            "id": "293791",
+                            "mid": "00061J2t0b0PPW",
+                            "name": "晴天",
+                            "singer": "周杰伦",
+                            "vid": "w0026q7f01a"
+                        }]
+                    },
+                    "album": {
+                        "count": 1,
+                        "name": "专辑",
+                        "order": 2,
+                        "type": 3,
+                        "itemlist": [{
+                            "docid": "1713",
+                            "id": "1713",
+                            "mid": "002Neh8l0uciQZ",
+                            "name": "叶惠美",
+                            "singer": "周杰伦"
+                        }]
+                    },
+                    "ticket": {
+                        "count": 1,
+                        "name": "未来资源",
+                        "order": 4,
+                        "type": 99,
+                        "itemlist": [{"id": "future-1", "name": "未来入口"}]
+                    },
+                    "singer": {
+                        "count": 1,
+                        "name": "歌手",
+                        "order": 1,
+                        "type": 2,
+                        "itemlist": [{
+                            "docid": "4558",
+                            "id": "4558",
+                            "mid": "0025NhlN2yWrP4",
+                            "name": "周杰伦",
+                            "pic": "https://example.test/artist.jpg",
+                            "singer": "周杰伦"
+                        }]
+                    },
+                    "song": {
+                        "count": 1,
+                        "name": "单曲",
+                        "order": 0,
+                        "type": 1,
+                        "itemlist": [{
+                            "docid": "97773",
+                            "id": "97773",
+                            "mid": "0039MnYb0qxYhV",
+                            "name": "晴天",
+                            "singer": "周杰伦"
+                        }]
+                    }
+                }
+            }),
+        )
+        .expect("map quick search");
+
+        assert_eq!(result.client, SearchSuggestionClient::Web);
+        assert_eq!(result.suggestions.len(), 5);
+        assert_eq!(
+            result
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.kind)
+                .collect::<Vec<_>>(),
+            [
+                Some(SearchKind::Track),
+                Some(SearchKind::Artist),
+                Some(SearchKind::Album),
+                Some(SearchKind::Mv),
+                None,
+            ]
+        );
+
+        let Some(SearchItem::Track(track)) = &result.suggestions[0].resource else {
+            panic!("expected track suggestion");
+        };
+        assert_eq!(track.resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(track.artists[0].name, "周杰伦");
+
+        let Some(SearchItem::Artist(artist)) = &result.suggestions[1].resource else {
+            panic!("expected artist suggestion");
+        };
+        assert_eq!(artist.resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+
+        let Some(SearchItem::Album(album)) = &result.suggestions[2].resource else {
+            panic!("expected album suggestion");
+        };
+        assert_eq!(album.resource_ref.to_string(), "qq:002Neh8l0uciQZ");
+        assert_eq!(album.artists[0].name, "周杰伦");
+
+        let Some(SearchItem::Video(video)) = &result.suggestions[3].resource else {
+            panic!("expected MV suggestion");
+        };
+        assert_eq!(video.resource_ref.to_string(), "qq:w0026q7f01a");
+        assert_eq!(video.creators[0].name, "周杰伦");
+
+        let Some(SearchItem::Opaque(future)) = &result.suggestions[4].resource else {
+            panic!("expected opaque future suggestion");
+        };
+        assert_eq!(future.kind, "ticket");
+        assert_eq!(future.id.as_deref(), Some("future-1"));
+        assert_eq!(result.suggestions[4].extensions["section_order"], 4);
+        assert_eq!(result.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn quick_search_mapping_rejects_business_failures_and_malformed_known_sections() {
+        for response in [
+            json!({"code": 1001, "subcode": 0, "data": {}}),
+            json!({"code": 0, "subcode": 2, "data": {}}),
+            json!({"code": 0, "subcode": 0}),
+            json!({
+                "code": 0,
+                "subcode": 0,
+                "data": {"song": {"order": 0, "type": 1}}
+            }),
+            json!({
+                "code": 0,
+                "subcode": 0,
+                "data": {"song": {"order": 0, "type": 1, "itemlist": {}}}
+            }),
+        ] {
+            let error = map_quick_search_response("周杰伦", response)
+                .expect_err("invalid quick search response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+    }
+
+    #[test]
     fn hotkey_mapping_preserves_rank_detail_and_platform_metadata() {
         let request = hotkey_request("session-42");
         assert_eq!(request.module, HOTKEY_MODULE);
@@ -2271,7 +2594,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smartbox_rejects_unimplemented_clients_and_accounts_before_network_access() {
+    async fn suggestions_reject_unsupported_clients_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(
             provider
@@ -2285,13 +2608,13 @@ mod tests {
         );
         let mut request = SearchSuggestionRequest {
             query: "周杰伦".to_owned(),
-            client: SearchSuggestionClient::Web,
+            client: SearchSuggestionClient::Pc,
             account: None,
         };
         let error = provider
             .search_suggestions(&request)
             .await
-            .expect_err("web client is reserved for quick search");
+            .expect_err("PC client has no dedicated upstream branch");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
 
         request.client = SearchSuggestionClient::Mobile;
@@ -2464,6 +2787,44 @@ mod tests {
         );
         assert!(result.extensions["search_id"].as_str().is_some());
         assert!(result.extensions["response"]["data"].is_object());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_web_quick_search_returns_typed_sections() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let result = provider
+            .search_suggestions(&SearchSuggestionRequest {
+                query: "周杰伦".to_owned(),
+                client: SearchSuggestionClient::Web,
+                account: None,
+            })
+            .await
+            .expect("live quick search");
+        assert_eq!(result.client, SearchSuggestionClient::Web);
+        assert!(!result.suggestions.is_empty());
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .all(|item| item.resource.is_some())
+        );
+        for expected in [
+            SearchKind::Track,
+            SearchKind::Artist,
+            SearchKind::Album,
+            SearchKind::Mv,
+        ] {
+            assert!(
+                result
+                    .suggestions
+                    .iter()
+                    .any(|suggestion| suggestion.kind == Some(expected)),
+                "missing {expected:?} quick-search section"
+            );
+        }
+        assert_eq!(result.extensions["response"]["code"], 0);
+        assert_eq!(result.extensions["response"]["subcode"], 0);
     }
 
     #[tokio::test]
