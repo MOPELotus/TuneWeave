@@ -25,11 +25,11 @@ use tuneweave_core::{
     AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart,
     ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats,
     ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
-    ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch,
+    AudioFileRequest, AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod,
+    ChartCatalog, ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
     CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
@@ -266,12 +266,14 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/audio/recognize", post(audio_recognize))
         .route("/media/cdn", get(audio_cdn_dispatch))
+        .route("/media/files", post(audio_files))
         .route(
             "/tracks/streams",
             get(track_streams_get).post(track_streams_post),
         )
         .route("/tracks", get(tracks_get).post(tracks_post))
         .route("/tracks/{reference}", get(track))
+        .route("/tracks/{reference}/files", get(track_files))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route(
             "/tracks/{reference}/download/redirect",
@@ -1709,6 +1711,169 @@ async fn audio_cdn_dispatch(
     let provider = state.registry.require(platform)?;
     let dispatch = provider.audio_cdn_dispatch(account.as_deref()).await?;
     let mut response = ApiResponse::new(dispatch).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackFilesParams {
+    account: Option<String>,
+    #[serde(alias = "file_type")]
+    spec: Option<String>,
+    song_type: Option<i64>,
+    #[serde(alias = "media_mid")]
+    media_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioFileItemBody {
+    #[serde(rename = "ref")]
+    resource_ref: Option<ResourceRef>,
+    mid: Option<String>,
+    #[serde(alias = "file_type")]
+    spec: Option<Value>,
+    song_type: Option<i64>,
+    #[serde(alias = "media_mid")]
+    media_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioFilesBody {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "file_info")]
+    items: Option<Vec<AudioFileItemBody>>,
+    #[serde(alias = "file_type")]
+    default_spec: Option<Value>,
+}
+
+async fn track_files(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackFilesParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<AudioFileBatch>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let files = provider
+        .audio_files(&AudioFileRequest {
+            items: vec![AudioFileRequestItem {
+                track_ref: reference,
+                spec: optional_trimmed(params.spec),
+                song_type: params.song_type,
+                media_id: optional_trimmed(params.media_id),
+            }],
+            default_spec: None,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(files).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn audio_files(
+    State(state): State<AppState>,
+    body: Result<Json<AudioFilesBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AudioFileBatch>>, ApiError> {
+    let body = json_body(body)?;
+    let items = body
+        .items
+        .ok_or_else(|| TuneWeaveError::invalid_request("items/file_info is required"))?;
+    if items.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "items/file_info must contain at least one item",
+        )
+        .into());
+    }
+    let explicit_platform = body
+        .platform
+        .as_deref()
+        .map(parse_platform_parameter)
+        .transpose()?;
+    let reference_platforms = items
+        .iter()
+        .filter_map(|item| item.resource_ref.as_ref().map(ResourceRef::platform))
+        .collect::<BTreeSet<_>>();
+    if reference_platforms.len() > 1 {
+        return Err(TuneWeaveError::invalid_request(
+            "audio file request cannot mix track reference platforms",
+        )
+        .into());
+    }
+    let reference_platform = reference_platforms.iter().next().copied();
+    if explicit_platform
+        .zip(reference_platform)
+        .is_some_and(|(explicit, reference)| explicit != reference)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "platform conflicts with the track references",
+        )
+        .into());
+    }
+    let platform = explicit_platform
+        .or(reference_platform)
+        .unwrap_or(state.default_platform);
+    let items = items
+        .into_iter()
+        .map(|item| {
+            let mid = optional_trimmed(item.mid);
+            let track_ref = match (item.resource_ref, mid) {
+                (Some(reference), Some(mid)) if reference.id() != mid => {
+                    return Err(TuneWeaveError::invalid_request(
+                        "item ref and mid identify different tracks",
+                    ));
+                }
+                (Some(reference), _) => reference,
+                (None, Some(mid)) => ResourceRef::new(platform, mid)
+                    .map_err(|error| TuneWeaveError::invalid_request(error.to_string()))?,
+                (None, None) => {
+                    return Err(TuneWeaveError::invalid_request(
+                        "each audio file item requires ref or mid",
+                    ));
+                }
+            };
+            if track_ref.platform() != platform {
+                return Err(TuneWeaveError::invalid_request(
+                    "audio file item platform conflicts with the request platform",
+                ));
+            }
+            Ok(AudioFileRequestItem {
+                track_ref,
+                spec: item
+                    .spec
+                    .as_ref()
+                    .map(|value| required_string_or_number("spec/file_type", value))
+                    .transpose()?,
+                song_type: item.song_type,
+                media_id: optional_trimmed(item.media_id),
+            })
+        })
+        .collect::<Result<Vec<_>, TuneWeaveError>>()?;
+    let default_spec = body
+        .default_spec
+        .as_ref()
+        .map(|value| required_string_or_number("default_spec/file_type", value))
+        .transpose()?;
+    let account = optional_trimmed(body.account);
+    let provider = state.registry.require(platform)?;
+    let files = provider
+        .audio_files(&AudioFileRequest {
+            items,
+            default_spec,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(files).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -11266,12 +11431,12 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioRecognitionMatch,
-        BannerTargetKind, Chart, ChartGroup, ChartTrackPreview, CommentMutationAction,
-        CommentReplyReference, CommentThreadStats, CreatorSummary, DimensionChartTrackEntry,
-        MusicProvider, Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation,
-        ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
-        Result, SearchQuery, StreamRequest, VideoResolution,
+        ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
+        AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup, ChartTrackPreview,
+        CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
+        DimensionChartTrackEntry, MusicProvider, Page, PageMeta, PodcastCategory,
+        PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption, RadioPlaybackItem,
+        RadioStyle, RadioStyleSource, Result, SearchQuery, StreamRequest, VideoResolution,
     };
 
     use super::*;
@@ -11368,6 +11533,7 @@ mod tests {
                 Capability::PlaylistWrite,
                 Capability::Lyrics,
                 Capability::AudioCdnDispatch,
+                Capability::AudioFileAccess,
                 Capability::AudioStream,
                 Capability::AudioStreamBatch,
                 Capability::AudioDownload,
@@ -11776,6 +11942,40 @@ mod tests {
                 refresh_after_seconds: 1_800,
                 cache_for_seconds: 86_400,
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn audio_files(&self, request: &AudioFileRequest) -> Result<AudioFileBatch> {
+            Ok(AudioFileBatch {
+                expires_in_seconds: 7_200,
+                files: request
+                    .items
+                    .iter()
+                    .map(|item| AudioFileAccess {
+                        track_ref: item.track_ref.clone(),
+                        spec: item
+                            .spec
+                            .clone()
+                            .or_else(|| request.default_spec.clone())
+                            .unwrap_or_else(|| "mp3_128".to_owned()),
+                        filename: format!("M500{}.mp3", item.track_ref.id()),
+                        relative_url: Some("M500test.mp3?vkey=temporary".to_owned()),
+                        access_token: Some("temporary".to_owned()),
+                        decryption_key: None,
+                        available: true,
+                        encrypted: false,
+                        format: "mp3".to_owned(),
+                        codec: "mp3".to_owned(),
+                        bitrate: Some(128_000),
+                        quality: Some(Quality::Standard),
+                        platform_code: 0,
+                        extensions: Extensions::from([
+                            ("song_type".to_owned(), json!(item.song_type)),
+                            ("media_id".to_owned(), json!(item.media_id)),
+                        ]),
+                    })
+                    .collect(),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -17486,6 +17686,78 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "path: {path}");
             assert_eq!(json["error"]["code"], "invalid_request", "path: {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn audio_file_routes_accept_unified_and_reference_compatible_inputs() {
+        let (status, single) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:185809/files?file_type=ogg_640&song_type=1&media_mid=media123&account=vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["files"][0]["ref"], "netease:185809");
+        assert_eq!(single["data"]["files"][0]["spec"], "ogg_640");
+        assert_eq!(single["data"]["files"][0]["extensions"]["song_type"], 1);
+        assert_eq!(
+            single["data"]["files"][0]["extensions"]["media_id"],
+            "media123"
+        );
+        assert_eq!(single["meta"]["account"], "vip");
+
+        let (status, batch) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/media/files",
+            Some(json!({
+                "platform": "netease",
+                "account": "batch-vip",
+                "file_type": 13,
+                "file_info": [
+                    {"mid": "185809", "file_type": 8, "song_type": 7},
+                    {"ref": "netease:347230", "media_mid": "media456"}
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(batch["data"]["files"].as_array().map(Vec::len), Some(2));
+        assert_eq!(batch["data"]["files"][0]["ref"], "netease:185809");
+        assert_eq!(batch["data"]["files"][0]["spec"], "8");
+        assert_eq!(batch["data"]["files"][1]["ref"], "netease:347230");
+        assert_eq!(batch["data"]["files"][1]["spec"], "13");
+        assert_eq!(batch["meta"]["platform"], "netease");
+        assert_eq!(batch["meta"]["account"], "batch-vip");
+    }
+
+    #[tokio::test]
+    async fn audio_file_routes_reject_ambiguous_mixed_and_unknown_inputs() {
+        for body in [
+            json!({}),
+            json!({"items": []}),
+            json!({"items": [{"song_type": 1}]}),
+            json!({"items": [{"ref": "netease:1", "mid": "2"}]}),
+            json!({"platform": "qq", "items": [{"ref": "netease:1"}]}),
+            json!({"items": [{"ref": "netease:1"}, {"ref": "qq:2"}]}),
+            json!({"items": [{"ref": "netease:1"}], "unexpected": true}),
+        ] {
+            let (status, json) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/media/files",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["error"]["code"], "invalid_request");
+        }
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:1/files?unexpected=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

@@ -5,9 +5,10 @@ use std::{
 };
 
 use reqwest::{Client, Proxy, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
-use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
 
 use crate::{
     device::{DeviceStore, QqDevice, unix_seconds_now},
@@ -23,6 +24,7 @@ const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb
 pub struct QqConfig {
     pub proxy_url: Option<String>,
     pub device_path: Option<PathBuf>,
+    pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl fmt::Debug for QqConfig {
@@ -34,7 +36,110 @@ impl fmt::Debug for QqConfig {
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
             .field("device_path", &self.device_path)
+            .field(
+                "credential_store_configured",
+                &self.credential_store.is_some(),
+            )
             .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct QqCredential {
+    #[serde(default)]
+    pub openid: String,
+    #[serde(default, rename = "refresh_token", alias = "refreshToken")]
+    pub refresh_token: String,
+    #[serde(default, rename = "access_token", alias = "accessToken")]
+    pub access_token: String,
+    #[serde(default, rename = "expired_at", alias = "expiredAt")]
+    pub expired_at: u64,
+    #[serde(default, rename = "musicid", alias = "music_id")]
+    pub music_id: u64,
+    #[serde(default)]
+    pub musickey: String,
+    #[serde(default)]
+    pub unionid: String,
+    #[serde(default, rename = "str_musicid", alias = "strMusicid")]
+    pub str_music_id: String,
+    #[serde(default, rename = "refresh_key", alias = "refreshKey")]
+    pub refresh_key: String,
+    #[serde(default, rename = "musickeyCreateTime", alias = "musickey_create_time")]
+    pub musickey_create_time: u64,
+    #[serde(default, rename = "keyExpiresIn", alias = "key_expires_in")]
+    pub key_expires_in: u64,
+    #[serde(default, rename = "firstLogin", alias = "first_login")]
+    pub first_login: i64,
+    #[serde(default, rename = "bindAccountType", alias = "bind_account_type")]
+    pub bind_account_type: i64,
+    #[serde(default, rename = "needRefreshKeyIn", alias = "need_refresh_key_in")]
+    pub need_refresh_key_in: i64,
+    #[serde(default, rename = "encryptUin", alias = "encrypt_uin")]
+    pub encrypt_uin: String,
+    #[serde(default, rename = "loginType", alias = "login_type")]
+    pub login_type: i64,
+}
+
+impl fmt::Debug for QqCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QqCredential")
+            .field("music_id_configured", &(self.music_id > 0))
+            .field("musickey_configured", &(!self.musickey.is_empty()))
+            .field("login_type", &self.login_type)
+            .finish()
+    }
+}
+
+impl QqCredential {
+    pub(crate) fn normalize(mut self) -> Result<Self> {
+        self.str_music_id = self.str_music_id.trim().to_owned();
+        self.musickey = self.musickey.trim().to_owned();
+        if self.music_id == 0 && !self.str_music_id.is_empty() {
+            self.music_id = self.str_music_id.parse().map_err(|_| {
+                credential_data_error("stored QQ str_musicid is not an unsigned integer")
+            })?;
+        }
+        if self.str_music_id.is_empty() && self.music_id > 0 {
+            self.str_music_id = self.music_id.to_string();
+        }
+        if self.music_id == 0 || self.str_music_id.is_empty() || self.musickey.is_empty() {
+            return Err(credential_data_error(
+                "stored QQ credential is missing musicid or musickey",
+            ));
+        }
+        if !self
+            .str_music_id
+            .chars()
+            .all(|character| character.is_ascii_digit())
+            || self
+                .musickey
+                .chars()
+                .any(|character| character.is_ascii_control() || character == ';')
+        {
+            return Err(credential_data_error(
+                "stored QQ credential contains invalid cookie data",
+            ));
+        }
+        if self.login_type == 0 {
+            self.login_type = if self.musickey.starts_with("W_X") {
+                1
+            } else {
+                2
+            };
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn string_music_id(&self) -> &str {
+        &self.str_music_id
+    }
+
+    fn cookie_header(&self) -> String {
+        format!(
+            "uin={0}; qqmusic_uin={0}; qm_keyst={1}; qqmusic_key={1}",
+            self.str_music_id, self.musickey
+        )
     }
 }
 
@@ -104,6 +209,14 @@ impl QqClient {
         &self,
         requests: &[QqApiRequest],
     ) -> Result<Vec<QqApiResponse>> {
+        self.request_android_with_credential(requests, None).await
+    }
+
+    pub(crate) async fn request_android_with_credential(
+        &self,
+        requests: &[QqApiRequest],
+        credential: Option<&QqCredential>,
+    ) -> Result<Vec<QqApiResponse>> {
         if requests.is_empty() {
             return Err(TuneWeaveError::invalid_request(
                 "QQ API batch must contain at least one request",
@@ -112,8 +225,16 @@ impl QqClient {
         }
         self.ensure_android_session().await?;
         let device = self.lock_device()?.device().clone();
-        let comm = android_comm(&device);
-        self.post_api(&comm, requests).await
+        let comm = android_comm(&device, credential);
+        let response = self.post_api(&comm, requests, credential).await;
+        if credential.is_none() && response.as_ref().is_err_and(is_anonymous_session_rejection) {
+            self.invalidate_android_session()?;
+            self.ensure_android_session().await?;
+            let device = self.lock_device()?.device().clone();
+            let comm = android_comm(&device, None);
+            return self.post_api(&comm, requests, None).await;
+        }
+        response
     }
 
     pub(crate) async fn request_web(
@@ -126,7 +247,7 @@ impl QqClient {
             )
             .with_platform(Platform::Qq));
         }
-        self.post_api_with_user_agent(&web_comm(), requests, Some(WEB_USER_AGENT))
+        self.post_api_with_user_agent(&web_comm(), requests, Some(WEB_USER_AGENT), None)
             .await
     }
 
@@ -195,7 +316,7 @@ impl QqClient {
             return Ok(());
         }
         let device = self.lock_device()?.device().clone();
-        let comm = android_comm(&device);
+        let comm = android_comm(&device, None);
         let request = QqApiRequest::new(
             "music.getSession.session",
             "GetSession",
@@ -205,7 +326,7 @@ impl QqClient {
                 "caller": 0
             }),
         );
-        let response = self.post_api(&comm, &[request]).await?;
+        let response = self.post_api(&comm, &[request], None).await?;
         let session = response[0]
             .data
             .get("session")
@@ -244,8 +365,10 @@ impl QqClient {
         &self,
         comm: &Value,
         requests: &[QqApiRequest],
+        credential: Option<&QqCredential>,
     ) -> Result<Vec<QqApiResponse>> {
-        self.post_api_with_user_agent(comm, requests, None).await
+        self.post_api_with_user_agent(comm, requests, None, credential)
+            .await
     }
 
     async fn post_api_with_user_agent(
@@ -253,6 +376,7 @@ impl QqClient {
         comm: &Value,
         requests: &[QqApiRequest],
         user_agent: Option<&str>,
+        credential: Option<&QqCredential>,
     ) -> Result<Vec<QqApiResponse>> {
         let mut payload = Map::new();
         payload.insert("comm".to_owned(), comm.clone());
@@ -269,6 +393,9 @@ impl QqClient {
         let mut request = self.http.post(API_ENDPOINT).json(&Value::Object(payload));
         if let Some(user_agent) = user_agent {
             request = request.header(reqwest::header::USER_AGENT, user_agent);
+        }
+        if let Some(credential) = credential {
+            request = request.header(reqwest::header::COOKIE, credential.cookie_header());
         }
         let response = request.send().await.map_err(network_error)?;
         let status = response.status();
@@ -312,9 +439,24 @@ impl QqClient {
                 .with_platform(Platform::Qq)
         })
     }
+
+    fn invalidate_android_session(&self) -> Result<()> {
+        let mut store = self.lock_device()?;
+        let previous = store.device().clone();
+        let device = store.device_mut();
+        device.session_uid = None;
+        device.session_sid = None;
+        device.session_vkey = None;
+        device.session_saved_at = None;
+        if let Err(error) = store.save() {
+            *store.device_mut() = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
-fn android_comm(device: &QqDevice) -> Value {
+fn android_comm(device: &QqDevice, credential: Option<&QqCredential>) -> Value {
     let mut comm = json!({
         "ct": 11,
         "cv": 14090008,
@@ -350,7 +492,22 @@ fn android_comm(device: &QqDevice) -> Value {
     {
         object.insert("sid".to_owned(), Value::String(sid.to_owned()));
     }
+    if let Some(credential) = credential {
+        object.insert(
+            "qq".to_owned(),
+            Value::String(credential.music_id.to_string()),
+        );
+        object.insert(
+            "authst".to_owned(),
+            Value::String(credential.musickey.clone()),
+        );
+        object.insert("tmeLoginType".to_owned(), json!(credential.login_type));
+    }
     comm
+}
+
+fn credential_data_error(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::InternalError, message).with_platform(Platform::Qq)
 }
 
 fn web_comm() -> Value {
@@ -402,12 +559,25 @@ fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
     if code == 0 {
         return Ok(());
     }
-    Err(TuneWeaveError::new(
-        ErrorCode::UpstreamError,
-        format!("{context} failed with code {code}"),
+    let error_code = match code {
+        1000 | 104_400 | 104_401 => ErrorCode::AuthenticationRequired,
+        2001 => ErrorCode::RateLimited,
+        _ => ErrorCode::UpstreamError,
+    };
+    Err(
+        TuneWeaveError::new(error_code, format!("{context} failed with code {code}"))
+            .with_platform(Platform::Qq)
+            .retryable(code == 2001)
+            .with_details(json!({ "platform_code": code })),
     )
-    .with_platform(Platform::Qq)
-    .with_details(json!({ "platform_code": code })))
+}
+
+fn is_anonymous_session_rejection(error: &TuneWeaveError) -> bool {
+    error.code == ErrorCode::AuthenticationRequired
+        && matches!(
+            error.details.get("platform_code").and_then(Value::as_i64),
+            Some(1000 | 104_400 | 104_401)
+        )
 }
 
 fn platform_code(value: &Value) -> Option<i64> {
@@ -461,11 +631,50 @@ mod tests {
             qimei36: Some("q36".to_owned()),
             ..QqDevice::default()
         };
-        let comm = android_comm(&device);
+        let comm = android_comm(&device, None);
         assert_eq!(comm["QIMEI"], "q16");
         assert_eq!(comm["QIMEI36"], "q36");
         assert!(comm.get("uid").is_none());
         assert!(comm.get("sid").is_none());
+    }
+
+    #[test]
+    fn stored_credentials_infer_login_type_and_only_enter_authenticated_comm() {
+        let credential: QqCredential = serde_json::from_value(json!({
+            "musicid": 123456,
+            "musickey": "Q_H_L_private",
+            "str_musicid": "123456"
+        }))
+        .expect("credential shape");
+        let credential = credential.normalize().expect("valid credential");
+        assert_eq!(credential.login_type, 2);
+        assert_eq!(credential.string_music_id(), "123456");
+        let debug = format!("{credential:?}");
+        assert!(!debug.contains("Q_H_L_private"));
+
+        let device = QqDevice::default();
+        let anonymous = android_comm(&device, None);
+        assert!(anonymous.get("qq").is_none());
+        assert!(anonymous.get("authst").is_none());
+        let authenticated = android_comm(&device, Some(&credential));
+        assert_eq!(authenticated["qq"], "123456");
+        assert_eq!(authenticated["authst"], "Q_H_L_private");
+        assert_eq!(authenticated["tmeLoginType"], 2);
+        assert!(credential.cookie_header().contains("qqmusic_uin=123456"));
+    }
+
+    #[test]
+    fn stored_credentials_reject_missing_or_cookie_unsafe_secrets() {
+        for value in [
+            json!({"musicid": 123456, "musickey": ""}),
+            json!({"musicid": 123456, "musickey": "secret; injected=true"}),
+            json!({"str_musicid": "not-a-number", "musickey": "secret"}),
+        ] {
+            let credential: QqCredential = serde_json::from_value(value).expect("credential shape");
+            let error = credential.normalize().expect_err("invalid credential");
+            assert_eq!(error.code, ErrorCode::InternalError);
+            assert!(!error.message.contains("secret; injected=true"));
+        }
     }
 
     #[test]
@@ -494,6 +703,21 @@ mod tests {
         let error = ensure_zero_code(&json!({"code": 1001}), "search").expect_err("failure");
         assert_eq!(error.code, ErrorCode::UpstreamError);
         assert_eq!(error.details["platform_code"], 1001);
+    }
+
+    #[test]
+    fn credential_and_rate_limit_codes_keep_their_stable_error_classes() {
+        for code in [1000, 104_400, 104_401] {
+            let error =
+                ensure_zero_code(&json!({"code": code}), "audio").expect_err("credential failure");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+            assert!(is_anonymous_session_rejection(&error));
+            assert!(!error.retryable);
+        }
+        let limited = ensure_zero_code(&json!({"code": 2001}), "audio").expect_err("rate limited");
+        assert_eq!(limited.code, ErrorCode::RateLimited);
+        assert!(limited.retryable);
+        assert!(!is_anonymous_session_rejection(&limited));
     }
 
     #[test]

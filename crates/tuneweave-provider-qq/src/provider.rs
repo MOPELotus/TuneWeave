@@ -1,17 +1,18 @@
-use std::{collections::BTreeSet, time::SystemTime};
+use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch, AudioCdnNode, Capability,
-    CreatorSummary, ErrorCode, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta,
-    Platform, Playlist, Podcast, PodcastEpisode, Quality, ResourceRef, Result, SearchItem,
-    SearchKind, SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
+    AccountCredentialStore, Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch,
+    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, Capability, CreatorSummary,
+    ErrorCode, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform,
+    Playlist, Podcast, PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind,
+    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
 };
 
-use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
+use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
 use crate::qrc::decrypt_qrc;
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
@@ -28,6 +29,358 @@ const LYRIC_MODULE: &str = "music.musichallSong.PlayLyricInfo";
 const LYRIC_METHOD: &str = "GetPlayLyricInfo";
 const CDN_DISPATCH_MODULE: &str = "music.audioCdnDispatch.cdnDispatch";
 const CDN_DISPATCH_METHOD: &str = "GetCdnDispatch";
+const SONG_URL_MODULE: &str = "music.vkey.GetVkey";
+const SONG_URL_METHOD: &str = "UrlGetVkey";
+const ENCRYPTED_SONG_URL_MODULE: &str = "music.vkey.GetEVkey";
+const ENCRYPTED_SONG_URL_METHOD: &str = "CgiGetEVkey";
+const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
+const MAX_SONG_URL_ITEMS: usize = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqAudioFileSpec {
+    name: &'static str,
+    prefix: &'static str,
+    extension: &'static str,
+    encrypted: bool,
+    codec: &'static str,
+    bitrate: Option<u64>,
+    quality: Option<Quality>,
+}
+
+const fn qq_file_spec(
+    name: &'static str,
+    prefix: &'static str,
+    extension: &'static str,
+    encrypted: bool,
+    codec: &'static str,
+    bitrate: Option<u64>,
+    quality: Option<Quality>,
+) -> QqAudioFileSpec {
+    QqAudioFileSpec {
+        name,
+        prefix,
+        extension,
+        encrypted,
+        codec,
+        bitrate,
+        quality,
+    }
+}
+
+// Indices 0..=43 exactly match QQMusicApi's public Web integer mapping. Index 44 exposes
+// SpecialSongFileType.TRY_OGG_640, which is public in the SDK but absent from that Web tuple.
+const QQ_AUDIO_FILE_SPECS: &[QqAudioFileSpec] = &[
+    qq_file_spec(
+        "dts_x",
+        "DT03",
+        ".mp4",
+        false,
+        "dts",
+        None,
+        Some(Quality::Surround),
+    ),
+    qq_file_spec(
+        "master",
+        "AI00",
+        ".flac",
+        false,
+        "flac",
+        None,
+        Some(Quality::Master),
+    ),
+    qq_file_spec(
+        "atmos_2",
+        "Q000",
+        ".flac",
+        false,
+        "flac",
+        None,
+        Some(Quality::Hires),
+    ),
+    qq_file_spec(
+        "atmos_5_1",
+        "Q001",
+        ".flac",
+        false,
+        "flac",
+        None,
+        Some(Quality::Spatial),
+    ),
+    qq_file_spec(
+        "atmos_7_1",
+        "Q003",
+        ".ogg",
+        false,
+        "ogg",
+        None,
+        Some(Quality::Spatial),
+    ),
+    qq_file_spec(
+        "dolby_atmos",
+        "D004",
+        ".mp4",
+        false,
+        "eac3",
+        None,
+        Some(Quality::Dolby),
+    ),
+    qq_file_spec(
+        "nac",
+        "TL01",
+        ".nac",
+        false,
+        "nac",
+        None,
+        Some(Quality::Higher),
+    ),
+    qq_file_spec(
+        "flac",
+        "F000",
+        ".flac",
+        false,
+        "flac",
+        None,
+        Some(Quality::Lossless),
+    ),
+    qq_file_spec(
+        "ogg_640",
+        "O801",
+        ".ogg",
+        false,
+        "ogg",
+        Some(640_000),
+        Some(Quality::Lossless),
+    ),
+    qq_file_spec(
+        "ogg_320",
+        "O800",
+        ".ogg",
+        false,
+        "ogg",
+        Some(320_000),
+        Some(Quality::High),
+    ),
+    qq_file_spec(
+        "ogg_192",
+        "O600",
+        ".ogg",
+        false,
+        "ogg",
+        Some(192_000),
+        Some(Quality::Higher),
+    ),
+    qq_file_spec(
+        "ogg_96",
+        "O400",
+        ".ogg",
+        false,
+        "ogg",
+        Some(96_000),
+        Some(Quality::Low),
+    ),
+    qq_file_spec(
+        "mp3_320",
+        "M800",
+        ".mp3",
+        false,
+        "mp3",
+        Some(320_000),
+        Some(Quality::High),
+    ),
+    qq_file_spec(
+        "mp3_128",
+        "M500",
+        ".mp3",
+        false,
+        "mp3",
+        Some(128_000),
+        Some(Quality::Standard),
+    ),
+    qq_file_spec(
+        "aac_192",
+        "C600",
+        ".m4a",
+        false,
+        "aac",
+        Some(192_000),
+        Some(Quality::Higher),
+    ),
+    qq_file_spec(
+        "aac_96",
+        "C400",
+        ".m4a",
+        false,
+        "aac",
+        Some(96_000),
+        Some(Quality::Low),
+    ),
+    qq_file_spec(
+        "aac_48",
+        "C200",
+        ".m4a",
+        false,
+        "aac",
+        Some(48_000),
+        Some(Quality::Low),
+    ),
+    qq_file_spec(
+        "encrypted_dts_x",
+        "DTM3",
+        ".mmp4",
+        true,
+        "dts",
+        None,
+        Some(Quality::Surround),
+    ),
+    qq_file_spec(
+        "encrypted_vinyl",
+        "V0M0",
+        ".mflac",
+        true,
+        "flac",
+        None,
+        Some(Quality::Hires),
+    ),
+    qq_file_spec(
+        "encrypted_master",
+        "AIM0",
+        ".mflac",
+        true,
+        "flac",
+        None,
+        Some(Quality::Master),
+    ),
+    qq_file_spec(
+        "encrypted_atmos_2",
+        "Q0M0",
+        ".mflac",
+        true,
+        "flac",
+        None,
+        Some(Quality::Hires),
+    ),
+    qq_file_spec(
+        "encrypted_atmos_5_1",
+        "Q0M1",
+        ".mflac",
+        true,
+        "flac",
+        None,
+        Some(Quality::Spatial),
+    ),
+    qq_file_spec(
+        "encrypted_atmos_7_1",
+        "Q0M3",
+        ".mgg",
+        true,
+        "ogg",
+        None,
+        Some(Quality::Spatial),
+    ),
+    qq_file_spec(
+        "encrypted_dolby_atmos",
+        "D0M4",
+        ".mmp4",
+        true,
+        "eac3",
+        None,
+        Some(Quality::Dolby),
+    ),
+    qq_file_spec(
+        "encrypted_nac",
+        "TLM1",
+        ".mnac",
+        true,
+        "nac",
+        None,
+        Some(Quality::Higher),
+    ),
+    qq_file_spec(
+        "encrypted_flac",
+        "F0M0",
+        ".mflac",
+        true,
+        "flac",
+        None,
+        Some(Quality::Lossless),
+    ),
+    qq_file_spec(
+        "encrypted_ogg_640",
+        "O8M1",
+        ".mgg",
+        true,
+        "ogg",
+        Some(640_000),
+        Some(Quality::Lossless),
+    ),
+    qq_file_spec(
+        "encrypted_ogg_320",
+        "O8M0",
+        ".mgg",
+        true,
+        "ogg",
+        Some(320_000),
+        Some(Quality::High),
+    ),
+    qq_file_spec(
+        "encrypted_ogg_192",
+        "O6M0",
+        ".mgg",
+        true,
+        "ogg",
+        Some(192_000),
+        Some(Quality::Higher),
+    ),
+    qq_file_spec(
+        "encrypted_ogg_96",
+        "O4M0",
+        ".mgg",
+        true,
+        "ogg",
+        Some(96_000),
+        Some(Quality::Low),
+    ),
+    qq_file_spec(
+        "trial",
+        "RS02",
+        ".mp3",
+        false,
+        "mp3",
+        None,
+        Some(Quality::Standard),
+    ),
+    qq_file_spec("accompaniment", "O801", ".ogg", false, "ogg", None, None),
+    qq_file_spec("multi_track", "O601", ".ogg", false, "ogg", None, None),
+    qq_file_spec("piano", "AI01", ".ogg", false, "ogg", None, None),
+    qq_file_spec("music_box", "AI02", ".ogg", false, "ogg", None, None),
+    qq_file_spec("guzheng", "AI03", ".ogg", false, "ogg", None, None),
+    qq_file_spec("qudi", "AI04", ".ogg", false, "ogg", None, None),
+    qq_file_spec("hulusi", "AI05", ".ogg", false, "ogg", None, None),
+    qq_file_spec("suona", "AI06", ".ogg", false, "ogg", None, None),
+    qq_file_spec("handpan", "AI07", ".ogg", false, "ogg", None, None),
+    qq_file_spec("electric_guitar", "AI08", ".ogg", false, "ogg", None, None),
+    qq_file_spec("drums", "AI09", ".ogg", false, "ogg", None, None),
+    qq_file_spec("kazoo", "A200", ".ogg", false, "ogg", None, None),
+    qq_file_spec("therapy", "AA01", ".ogg", false, "ogg", None, None),
+    qq_file_spec(
+        "trial_ogg_640",
+        "O802",
+        ".ogg",
+        false,
+        "ogg",
+        Some(640_000),
+        Some(Quality::Lossless),
+    ),
+];
+
+struct PreparedQqAudioFile {
+    track_ref: ResourceRef,
+    mid: String,
+    media_id: Option<String>,
+    song_type: i64,
+    spec: &'static QqAudioFileSpec,
+    filename: String,
+}
 
 #[derive(Clone, Copy)]
 struct TypedSearchSpec {
@@ -121,17 +474,23 @@ const VOICE_SEARCH: TypedSearchSpec = TypedSearchSpec {
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
+    credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl QqProvider {
     pub fn new(config: QqConfig) -> Result<Self> {
+        let credential_store = config.credential_store.clone();
         Ok(Self {
             client: QqClient::new(config)?,
+            credential_store,
         })
     }
 
     pub const fn from_client(client: QqClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            credential_store: None,
+        }
     }
 }
 
@@ -161,6 +520,7 @@ impl MusicProvider for QqProvider {
             Capability::TrackDetail,
             Capability::Lyrics,
             Capability::AudioCdnDispatch,
+            Capability::AudioFileAccess,
         ])
     }
 
@@ -318,9 +678,161 @@ impl MusicProvider for QqProvider {
             .ok_or_else(|| qq_data_error("QQ CDN dispatch returned no response"))?;
         map_cdn_dispatch_response(&guid, response)
     }
+
+    async fn audio_files(&self, request: &AudioFileRequest) -> Result<AudioFileBatch> {
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let prepared = self.prepare_audio_file_items(request).await?;
+        let default_spec = parse_qq_audio_file_spec(request.default_spec.as_deref())?;
+        let (api_request, guid) = song_urls_request(&prepared, default_spec, credential.as_ref());
+        let response = self
+            .client
+            .request_android_with_credential(&[api_request], credential.as_ref())
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ song URL service returned no response"))?;
+        map_song_urls_response(&prepared, default_spec, &guid, response)
+    }
 }
 
 impl QqProvider {
+    fn qq_credential(&self, account: Option<&str>) -> Result<Option<QqCredential>> {
+        let Some(account) = account.map(str::trim).filter(|account| !account.is_empty()) else {
+            return Ok(None);
+        };
+        if account.len() > 64 {
+            return Err(
+                TuneWeaveError::invalid_request("QQ account alias cannot exceed 64 bytes")
+                    .with_platform(Platform::Qq),
+            );
+        }
+        let store = self.credential_store.as_ref().ok_or_else(|| {
+            qq_authentication_required(account, "QQ account storage is not configured")
+        })?;
+        let stored = store
+            .load_platform(Platform::Qq)?
+            .into_iter()
+            .find(|credential| credential.account == account)
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        if stored.kind != QQ_CREDENTIAL_KIND {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "stored QQ account has an unsupported credential format",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "account": account })));
+        }
+        let credential = serde_json::from_str::<QqCredential>(stored.secret())
+            .map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "stored QQ account credential is malformed",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "account": account }))
+            })?
+            .normalize()?;
+        Ok(Some(credential))
+    }
+
+    async fn prepare_audio_file_items(
+        &self,
+        request: &AudioFileRequest,
+    ) -> Result<Vec<PreparedQqAudioFile>> {
+        if request.items.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "audio file request must contain at least one item",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request.items.len() > MAX_SONG_URL_ITEMS {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "QQ audio file request cannot exceed {MAX_SONG_URL_ITEMS} items"
+            ))
+            .with_platform(Platform::Qq));
+        }
+        let default_spec = parse_qq_audio_file_spec(request.default_spec.as_deref())?;
+        let numeric_ids = request
+            .items
+            .iter()
+            .filter(|item| {
+                item.track_ref
+                    .id()
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+            })
+            .map(|item| item.track_ref.id().to_owned())
+            .collect::<Vec<_>>();
+        let resolved_numeric = if numeric_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.tracks(&numeric_ids, None).await?
+        };
+        let mut resolved_numeric = resolved_numeric.into_iter();
+        request
+            .items
+            .iter()
+            .map(|item| {
+                if item.track_ref.platform() != Platform::Qq {
+                    return Err(TuneWeaveError::invalid_request(
+                        "QQ audio file request contains a non-QQ track reference",
+                    )
+                    .with_platform(Platform::Qq));
+                }
+                let mid = if item
+                    .track_ref
+                    .id()
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+                {
+                    resolved_numeric
+                        .next()
+                        .and_then(|track| {
+                            track
+                                .extensions
+                                .get("mid")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .ok_or_else(|| qq_data_error("QQ track lookup did not return a MID"))?
+                } else {
+                    item.track_ref.id().to_owned()
+                };
+                validate_qq_media_id(&mid, "song MID")?;
+                let media_id = item
+                    .media_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| {
+                        validate_qq_media_id(value, "media MID")?;
+                        Ok(value.to_owned())
+                    })
+                    .transpose()?;
+                let spec = item
+                    .spec
+                    .as_deref()
+                    .map(|spec| parse_qq_audio_file_spec(Some(spec)))
+                    .transpose()?
+                    .unwrap_or(default_spec);
+                let filename = match media_id.as_deref() {
+                    Some(media_id) => {
+                        format!("{}{media_id}{}", spec.prefix, spec.extension)
+                    }
+                    None => format!("{}{mid}{mid}{}", spec.prefix, spec.extension),
+                };
+                Ok(PreparedQqAudioFile {
+                    track_ref: item.track_ref.clone(),
+                    mid,
+                    media_id,
+                    song_type: item.song_type.unwrap_or(0),
+                    spec,
+                    filename,
+                })
+            })
+            .collect()
+    }
+
     async fn qq_lyrics(&self, id: &str, options: &LyricsRequest) -> Result<Lyrics> {
         validate_qq_public_account(options.account.as_deref(), "QQ lyrics")?;
         let (request, identifier) = lyric_request(id, options)?;
@@ -953,6 +1465,102 @@ fn cdn_dispatch_request() -> (QqApiRequest, String) {
     )
 }
 
+fn parse_qq_audio_file_spec(value: Option<&str>) -> Result<&'static QqAudioFileSpec> {
+    let Some(value) = value else {
+        return Ok(&QQ_AUDIO_FILE_SPECS[13]);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ audio file spec cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        let index = value.parse::<usize>().map_err(|_| {
+            TuneWeaveError::invalid_request("QQ audio file spec index is invalid")
+                .with_platform(Platform::Qq)
+        })?;
+        return QQ_AUDIO_FILE_SPECS.get(index).ok_or_else(|| {
+            TuneWeaveError::invalid_request(format!(
+                "QQ audio file spec index must be between 0 and {}",
+                QQ_AUDIO_FILE_SPECS.len().saturating_sub(1)
+            ))
+            .with_platform(Platform::Qq)
+        });
+    }
+    let normalized = value.to_ascii_lowercase().replace(['-', ' '], "_");
+    let canonical = match normalized.as_str() {
+        "atmos_51" => "atmos_5_1",
+        "atmos_71" => "atmos_7_1",
+        "atmos_db" => "dolby_atmos",
+        "acc_192" => "aac_192",
+        "acc_96" => "aac_96",
+        "acc_48" => "aac_48",
+        "encrypted_atmos_51" => "encrypted_atmos_5_1",
+        "encrypted_atmos_71" => "encrypted_atmos_7_1",
+        "encrypted_atmos_db" => "encrypted_dolby_atmos",
+        "try" => "trial",
+        "try_ogg_640" => "trial_ogg_640",
+        "accom" => "accompaniment",
+        "multi" => "multi_track",
+        "bayin" => "music_box",
+        "shoudie" => "handpan",
+        "guitar" => "electric_guitar",
+        value => value,
+    };
+    QQ_AUDIO_FILE_SPECS
+        .iter()
+        .find(|spec| spec.name == canonical)
+        .ok_or_else(|| {
+            TuneWeaveError::invalid_request(format!("unsupported QQ audio file spec: {value}"))
+                .with_platform(Platform::Qq)
+        })
+}
+
+fn song_urls_request(
+    items: &[PreparedQqAudioFile],
+    default_spec: &QqAudioFileSpec,
+    credential: Option<&QqCredential>,
+) -> (QqApiRequest, String) {
+    let guid = hex::encode(rand::random::<[u8; 16]>());
+    let (module, method) = if default_spec.encrypted {
+        (ENCRYPTED_SONG_URL_MODULE, ENCRYPTED_SONG_URL_METHOD)
+    } else {
+        (SONG_URL_MODULE, SONG_URL_METHOD)
+    };
+    (
+        QqApiRequest::new(
+            module,
+            method,
+            json!({
+                "uin": credential.map(QqCredential::string_music_id).unwrap_or(""),
+                "filename": items.iter().map(|item| item.filename.as_str()).collect::<Vec<_>>(),
+                "guid": guid,
+                "songmid": items.iter().map(|item| item.mid.as_str()).collect::<Vec<_>>(),
+                "songtype": items.iter().map(|item| item.song_type).collect::<Vec<_>>(),
+                "ctx": 0
+            }),
+        ),
+        guid,
+    )
+}
+
+fn validate_qq_media_id(value: &str, name: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ {name} must contain 1 to 128 ASCII letters or digits"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
 fn parse_qq_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
     let value = value.trim();
     if value.is_empty() {
@@ -1265,6 +1873,128 @@ fn map_cdn_dispatch_response(guid: &str, response: QqApiResponse) -> Result<Audi
     })
 }
 
+fn map_song_urls_response(
+    requested: &[PreparedQqAudioFile],
+    default_spec: &QqAudioFileSpec,
+    guid: &str,
+    response: QqApiResponse,
+) -> Result<AudioFileBatch> {
+    let expires_in_seconds = response
+        .data
+        .get("expiration")
+        .and_then(json_u64)
+        .ok_or_else(|| qq_data_error("QQ song URL response is missing a valid expiration"))?;
+    let entries = response
+        .data
+        .get("midurlinfo")
+        .and_then(Value::as_array)
+        .ok_or_else(|| qq_data_error("QQ song URL response is missing its midurlinfo array"))?;
+    if entries.len() != requested.len() {
+        return Err(qq_data_error(format!(
+            "QQ song URL response returned {} entries for {} requests",
+            entries.len(),
+            requested.len()
+        )));
+    }
+    let files = requested
+        .iter()
+        .zip(entries)
+        .map(|(request, entry)| map_song_url_entry(request, entry))
+        .collect::<Result<Vec<_>>>()?;
+    let (module, method) = if default_spec.encrypted {
+        (ENCRYPTED_SONG_URL_MODULE, ENCRYPTED_SONG_URL_METHOD)
+    } else {
+        (SONG_URL_MODULE, SONG_URL_METHOD)
+    };
+    Ok(AudioFileBatch {
+        expires_in_seconds,
+        files,
+        extensions: Extensions::from([
+            ("default_spec".to_owned(), json!(default_spec.name)),
+            ("request_guid".to_owned(), json!(guid)),
+            ("module".to_owned(), json!(module)),
+            ("method".to_owned(), json!(method)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_song_url_entry(request: &PreparedQqAudioFile, entry: &Value) -> Result<AudioFileAccess> {
+    let object = entry
+        .as_object()
+        .ok_or_else(|| qq_data_error("QQ song URL entry is not an object"))?;
+    let mid = required_string_field(object.get("songmid"), "QQ song URL songmid")?;
+    if mid != request.mid {
+        return Err(qq_data_error(
+            "QQ song URL response MID does not match its request",
+        ));
+    }
+    let filename = required_string_field(object.get("filename"), "QQ song URL filename")?;
+    if filename != request.filename {
+        return Err(qq_data_error(
+            "QQ song URL response filename does not match its request",
+        ));
+    }
+    let relative_url = optional_string(object.get("purl"), "QQ song URL purl")?;
+    let relative_url = validate_relative_media_url(&relative_url)?;
+    let access_token = nonempty_optional_string(object.get("vkey"), "QQ song URL vkey")?;
+    let decryption_key = nonempty_optional_string(object.get("ekey"), "QQ song URL ekey")?;
+    let platform_code = object
+        .get("result")
+        .and_then(json_i64)
+        .ok_or_else(|| qq_data_error("QQ song URL entry is missing a valid result code"))?;
+    if platform_code == 0 && relative_url.is_none() {
+        return Err(qq_data_error(
+            "QQ song URL entry reports success without a relative URL",
+        ));
+    }
+    if platform_code == 0 && request.spec.encrypted && decryption_key.is_none() {
+        return Err(qq_data_error(
+            "QQ encrypted song URL reports success without a decryption key",
+        ));
+    }
+    let available = platform_code == 0 && relative_url.is_some();
+    Ok(AudioFileAccess {
+        track_ref: request.track_ref.clone(),
+        spec: request.spec.name.to_owned(),
+        filename,
+        relative_url,
+        access_token,
+        decryption_key,
+        available,
+        encrypted: request.spec.encrypted,
+        format: request.spec.extension.trim_start_matches('.').to_owned(),
+        codec: request.spec.codec.to_owned(),
+        bitrate: request.spec.bitrate,
+        quality: request.spec.quality,
+        platform_code,
+        extensions: Extensions::from([
+            ("request_mid".to_owned(), json!(request.mid)),
+            ("request_media_id".to_owned(), json!(request.media_id)),
+            ("request_song_type".to_owned(), json!(request.song_type)),
+            ("response".to_owned(), entry.clone()),
+        ]),
+    })
+}
+
+fn required_string_field(value: Option<&Value>, context: &str) -> Result<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| qq_data_error(format!("{context} field is not a string")))
+}
+
+fn validate_relative_media_url(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if reqwest::Url::parse(value).is_ok() || value.starts_with("//") || value.starts_with("\\\\") {
+        return Err(qq_data_error("QQ song URL purl must be a relative URL"));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 fn map_cdn_node(value: &Value) -> Result<AudioCdnNode> {
     let object = value
         .as_object()
@@ -1345,6 +2075,12 @@ fn optional_string(value: Option<&Value>, context: &str) -> Result<String> {
 fn nonempty_optional_string(value: Option<&Value>, context: &str) -> Result<Option<String>> {
     let value = optional_string(value, context)?.trim().to_owned();
     Ok((!value.is_empty()).then_some(value))
+}
+
+fn qq_authentication_required(account: &str, message: &str) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::AuthenticationRequired, message)
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "account": account }))
 }
 
 fn validate_song_detail_info(info: Option<&Value>) -> Result<()> {
@@ -2511,6 +3247,38 @@ const fn capability_for_search(kind: SearchKind) -> Capability {
 mod tests {
     use super::*;
 
+    struct StaticCredentialStore {
+        credentials: Vec<tuneweave_core::StoredAccountCredential>,
+    }
+
+    impl AccountCredentialStore for StaticCredentialStore {
+        fn load_platform(
+            &self,
+            platform: Platform,
+        ) -> Result<Vec<tuneweave_core::StoredAccountCredential>> {
+            Ok(self
+                .credentials
+                .iter()
+                .filter(|credential| credential.platform == platform)
+                .cloned()
+                .collect())
+        }
+
+        fn put(&self, _credential: &tuneweave_core::StoredAccountCredential) -> Result<()> {
+            Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "static credential store is read-only",
+            ))
+        }
+
+        fn remove(&self, _platform: Platform, _account: &str) -> Result<bool> {
+            Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "static credential store is read-only",
+            ))
+        }
+    }
+
     fn response(data: Value) -> QqApiResponse {
         QqApiResponse {
             data: data.clone(),
@@ -2988,6 +3756,285 @@ mod tests {
                 .expect_err("invalid CDN dispatch");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn audio_file_specs_cover_every_sdk_variant_and_web_integer_mapping() {
+        assert_eq!(QQ_AUDIO_FILE_SPECS.len(), 45);
+        let names = QQ_AUDIO_FILE_SPECS
+            .iter()
+            .map(|spec| spec.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), QQ_AUDIO_FILE_SPECS.len());
+        assert_eq!(
+            parse_qq_audio_file_spec(None).expect("default").name,
+            "mp3_128"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("0")).expect("index").name,
+            "dts_x"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("43"))
+                .expect("web index")
+                .name,
+            "therapy"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("44"))
+                .expect("SDK extension")
+                .name,
+            "trial_ogg_640"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("ACC_96"))
+                .expect("upstream alias")
+                .name,
+            "aac_96"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("ATMOS_51"))
+                .expect("upstream alias")
+                .name,
+            "atmos_5_1"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("ENCRYPTED_ATMOS_DB"))
+                .expect("upstream alias")
+                .name,
+            "encrypted_dolby_atmos"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("TRY"))
+                .expect("upstream alias")
+                .name,
+            "trial"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("BAYIN"))
+                .expect("upstream alias")
+                .name,
+            "music_box"
+        );
+        assert!(parse_qq_audio_file_spec(Some("45")).is_err());
+        assert!(parse_qq_audio_file_spec(Some("future_codec")).is_err());
+        assert!(parse_qq_audio_file_spec(Some(" ")).is_err());
+    }
+
+    #[test]
+    fn song_urls_request_preserves_default_family_per_item_overrides_and_credential_uin() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private"
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("valid credential");
+        let items = vec![
+            PreparedQqAudioFile {
+                track_ref: qq_ref("003w2xz20QlUZt", "track").expect("ref"),
+                mid: "003w2xz20QlUZt".to_owned(),
+                media_id: Some("media001".to_owned()),
+                song_type: 7,
+                spec: parse_qq_audio_file_spec(Some("encrypted_flac")).expect("spec"),
+                filename: "F0M0media001.mflac".to_owned(),
+            },
+            PreparedQqAudioFile {
+                track_ref: qq_ref("000akynZ2Rbro5", "track").expect("ref"),
+                mid: "000akynZ2Rbro5".to_owned(),
+                media_id: None,
+                song_type: 0,
+                spec: parse_qq_audio_file_spec(Some("encrypted_ogg_640")).expect("spec"),
+                filename: "O8M1000akynZ2Rbro5000akynZ2Rbro5.mgg".to_owned(),
+            },
+        ];
+        let default = parse_qq_audio_file_spec(Some("encrypted_flac")).expect("default");
+        let (request, guid) = song_urls_request(&items, default, Some(&credential));
+        assert_eq!(request.module, ENCRYPTED_SONG_URL_MODULE);
+        assert_eq!(request.method, ENCRYPTED_SONG_URL_METHOD);
+        assert_eq!(request.param["uin"], "123456");
+        assert_eq!(
+            request.param["filename"],
+            json!(["F0M0media001.mflac", "O8M1000akynZ2Rbro5000akynZ2Rbro5.mgg"])
+        );
+        assert_eq!(
+            request.param["songmid"],
+            json!(["003w2xz20QlUZt", "000akynZ2Rbro5"])
+        );
+        assert_eq!(request.param["songtype"], json!([7, 0]));
+        assert_eq!(request.param["ctx"], 0);
+        assert_eq!(request.param["guid"], guid);
+        assert_eq!(guid.len(), 32);
+
+        let normal_default = parse_qq_audio_file_spec(Some("mp3_128")).expect("normal");
+        let (normal, other_guid) = song_urls_request(&items, normal_default, None);
+        assert_eq!(normal.module, SONG_URL_MODULE);
+        assert_eq!(normal.method, SONG_URL_METHOD);
+        assert_eq!(normal.param["uin"], "");
+        assert_ne!(guid, other_guid);
+    }
+
+    #[test]
+    fn song_urls_mapping_preserves_success_denial_encryption_and_raw_items() {
+        let requested = vec![
+            PreparedQqAudioFile {
+                track_ref: qq_ref("003w2xz20QlUZt", "track").expect("ref"),
+                mid: "003w2xz20QlUZt".to_owned(),
+                media_id: Some("003w2xz20QlUZt".to_owned()),
+                song_type: 1,
+                spec: parse_qq_audio_file_spec(Some("encrypted_ogg_640")).expect("spec"),
+                filename: "O8M1003w2xz20QlUZt.mgg".to_owned(),
+            },
+            PreparedQqAudioFile {
+                track_ref: qq_ref("000akynZ2Rbro5", "track").expect("ref"),
+                mid: "000akynZ2Rbro5".to_owned(),
+                media_id: None,
+                song_type: 0,
+                spec: parse_qq_audio_file_spec(Some("encrypted_flac")).expect("spec"),
+                filename: "F0M0000akynZ2Rbro5000akynZ2Rbro5.mflac".to_owned(),
+            },
+        ];
+        let default = parse_qq_audio_file_spec(Some("encrypted_flac")).expect("default");
+        let batch = map_song_urls_response(
+            &requested,
+            default,
+            "0123456789abcdef0123456789abcdef",
+            response(json!({
+                "expiration": 80400,
+                "midurlinfo": [{
+                    "songmid": "003w2xz20QlUZt",
+                    "filename": "O8M1003w2xz20QlUZt.mgg",
+                    "purl": "O8M1003w2xz20QlUZt.mgg?vkey=temporary",
+                    "vkey": "temporary",
+                    "ekey": "decrypt-temporary",
+                    "result": 0,
+                    "future": "kept"
+                }, {
+                    "songmid": "000akynZ2Rbro5",
+                    "filename": "F0M0000akynZ2Rbro5000akynZ2Rbro5.mflac",
+                    "purl": "",
+                    "vkey": "",
+                    "ekey": "",
+                    "result": 104003
+                }]
+            })),
+        )
+        .expect("map song URLs");
+        assert_eq!(batch.expires_in_seconds, 80400);
+        assert_eq!(batch.files.len(), 2);
+        assert!(batch.files[0].available);
+        assert!(batch.files[0].encrypted);
+        assert_eq!(batch.files[0].quality, Some(Quality::Lossless));
+        assert_eq!(batch.files[0].bitrate, Some(640_000));
+        assert_eq!(
+            batch.files[0].decryption_key.as_deref(),
+            Some("decrypt-temporary")
+        );
+        assert_eq!(batch.files[0].extensions["response"]["future"], "kept");
+        assert!(!batch.files[1].available);
+        assert_eq!(batch.files[1].platform_code, 104003);
+        assert_eq!(batch.files[1].relative_url, None);
+        assert_eq!(batch.extensions["module"], ENCRYPTED_SONG_URL_MODULE);
+        assert_eq!(batch.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn song_urls_mapping_rejects_misaligned_unsafe_and_false_success_responses() {
+        let requested = vec![PreparedQqAudioFile {
+            track_ref: qq_ref("003w2xz20QlUZt", "track").expect("ref"),
+            mid: "003w2xz20QlUZt".to_owned(),
+            media_id: Some("003w2xz20QlUZt".to_owned()),
+            song_type: 1,
+            spec: parse_qq_audio_file_spec(Some("encrypted_flac")).expect("spec"),
+            filename: "F0M0003w2xz20QlUZt.mflac".to_owned(),
+        }];
+        let default = parse_qq_audio_file_spec(Some("encrypted_flac")).expect("default");
+        let valid_entry = json!({
+            "songmid": "003w2xz20QlUZt",
+            "filename": "F0M0003w2xz20QlUZt.mflac",
+            "purl": "F0M0003w2xz20QlUZt.mflac?vkey=temporary",
+            "vkey": "temporary",
+            "ekey": "decrypt-temporary",
+            "result": 0
+        });
+        let mut wrong_mid = valid_entry.clone();
+        wrong_mid["songmid"] = json!("different");
+        let mut fixtures = vec![
+            json!({"expiration": 7200}),
+            json!({"expiration": 7200, "midurlinfo": []}),
+            json!({"expiration": 7200, "midurlinfo": [wrong_mid]}),
+        ];
+        for (field, value) in [
+            ("filename", json!("different.mflac")),
+            ("purl", json!("https://attacker.test/file")),
+            ("purl", json!("")),
+            ("ekey", json!("")),
+            ("result", json!("invalid")),
+        ] {
+            let mut entry = valid_entry.clone();
+            entry[field] = value;
+            fixtures.push(json!({"expiration": 7200, "midurlinfo": [entry]}));
+        }
+        for fixture in fixtures {
+            let error = map_song_urls_response(&requested, default, "guid", response(fixture))
+                .expect_err("invalid song URL response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_files_reject_named_accounts_before_network_without_a_store() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let error = provider
+            .audio_files(&AudioFileRequest {
+                items: vec![tuneweave_core::AudioFileRequestItem {
+                    track_ref: qq_ref("003w2xz20QlUZt", "track").expect("ref"),
+                    spec: Some("mp3_128".to_owned()),
+                    song_type: None,
+                    media_id: None,
+                }],
+                default_spec: None,
+                account: Some("vip".to_owned()),
+            })
+            .await
+            .expect_err("account store required");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "vip");
+    }
+
+    #[test]
+    fn qq_account_alias_loads_the_exact_stored_credential_without_exposing_secrets() {
+        let stored = tuneweave_core::StoredAccountCredential::new(
+            Platform::Qq,
+            "green-vip",
+            QQ_CREDENTIAL_KIND,
+            serde_json::to_string(&json!({
+                "musicid": 123456,
+                "str_musicid": "123456",
+                "musickey": "Q_H_L_private"
+            }))
+            .expect("credential JSON"),
+        )
+        .expect("stored credential");
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(Arc::new(StaticCredentialStore {
+                credentials: vec![stored],
+            })),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let credential = provider
+            .qq_credential(Some("green-vip"))
+            .expect("load credential")
+            .expect("credential present");
+        assert_eq!(credential.string_music_id(), "123456");
+        assert_eq!(credential.login_type, 2);
+        assert!(!format!("{credential:?}").contains("Q_H_L_private"));
+        let error = provider
+            .qq_credential(Some("missing"))
+            .expect_err("missing alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
@@ -3967,6 +5014,55 @@ mod tests {
             Some(32)
         );
         assert_eq!(dispatch.extensions["response"]["code"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_song_urls_cover_normal_encrypted_and_every_special_file_spec() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let reference = qq_ref("003w2xz20QlUZt", "track").expect("reference");
+        for (range, default_spec) in [
+            (0..17, "mp3_128"),
+            (17..30, "encrypted_flac"),
+            (30..45, "trial"),
+        ] {
+            let specs = &QQ_AUDIO_FILE_SPECS[range];
+            let batch = provider
+                .audio_files(&AudioFileRequest {
+                    items: specs
+                        .iter()
+                        .map(|spec| tuneweave_core::AudioFileRequestItem {
+                            track_ref: reference.clone(),
+                            spec: Some(spec.name.to_owned()),
+                            song_type: Some(1),
+                            media_id: Some("003w2xz20QlUZt".to_owned()),
+                        })
+                        .collect(),
+                    default_spec: Some(default_spec.to_owned()),
+                    account: None,
+                })
+                .await
+                .expect("live song URLs");
+            assert_eq!(batch.files.len(), specs.len());
+            assert!(batch.expires_in_seconds > 0);
+            for (file, spec) in batch.files.iter().zip(specs) {
+                assert_eq!(file.spec, spec.name);
+                assert_eq!(file.encrypted, spec.encrypted);
+                assert_eq!(file.available, file.platform_code == 0);
+                if file.available {
+                    assert!(file.relative_url.is_some());
+                    assert!(file.access_token.is_some());
+                    if file.encrypted {
+                        assert!(file.decryption_key.is_some());
+                    }
+                }
+            }
+            assert_eq!(batch.extensions["response"]["code"], 0);
+        }
     }
 
     #[tokio::test]

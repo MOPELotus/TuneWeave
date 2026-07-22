@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=92`、`partial=0`、`implemented=1`、`verified=7`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=91`、`partial=0`、`implemented=2`、`verified=7`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -55,7 +55,7 @@
 | Q038 | 内容展示 | `MvApi.get_detail` | 是 | `pending` | 批量 MV 详情 |
 | Q039 | 内容展示 | `MvApi.get_mv_list` | 是 | `pending` | 地区、版本、排序 MV 目录 |
 | Q040 | 播放与权益 | `SongApi.get_cdn_dispatch` | 是 | `verified` | `GET /v1/media/cdn?platform=qq` 精确调用 Android `music.audioCdnDispatch.cdnDispatch/GetCdnDispatch`，每次生成独立 32 位小写十六进制 GUID，并完整提交参考参数 `uid="0"/use_new_domain=1/use_ipv6=1`。统一 `AudioCdnDispatch` 保留 CDN 根地址的上游顺序与重复项、QUIC 节点参数、相对探活文件及过期/刷新/缓存秒数；只接受无凭据的 HTTP(S) 根地址，畸形目录、绝对探活 URL、非零 `retcode`、空根目录和非正计时不会伪装为成功。节点原项、完整响应及本次 GUID 保存在扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 10 个根地址、9 个节点和 1 个重复根，HTTP/HTTPS 均存在，`expiration/cacheTime=86400`、`refreshTime=1800`、顶层及业务码均为 0 |
-| Q041 | 播放与权益 | `SongApi.get_song_urls` | 是 | `pending` | 全文件规格、GUID/UIN/VKey、试听与 VIP 播放地址 |
+| Q041 | 播放与权益 | `SongApi.get_song_urls` | 是 | `implemented` | `GET /v1/tracks/{qq-ref}/files` 与 `POST /v1/media/files` 完整保留 1–100 项批量、顶层默认规格、逐项规格/MID/`song_type`/`media_mid` 及输入顺序。已登记并实现普通 17 种、加密 13 种、试听/伴奏/多轨/AI 演奏等特殊 15 种共 45 种 SDK 文件规格；参考 Web 的整数 `0..43` 原样兼容，SDK 已公开但 Web 元组遗漏的 `TRY_OGG_640` 以稳定 `44/trial_ogg_640` 补齐。顶层默认规格严格决定普通 `music.vkey.GetVkey/UrlGetVkey` 或加密 `music.vkey.GetEVkey/CgiGetEVkey`，逐项覆盖仍按原方法生成文件名；提供 `media_mid` 时使用一次媒体 MID，省略时保留参考的两次歌曲 MID 拼接分支。每批生成独立 GUID，匿名 `uin=""`；提供账户别名时从共享私有凭据库精确读取 `qq_credential_v1`，在 Android `comm` 和四项 Cookie 中注入对应 UIN/Key/LoginType，Debug、错误和日志不输出密钥。响应逐项校验 MID、文件名、数量与顺序，保留相对 `purl`、VKey、加密 EKey、过期秒数和 `result`；`result=0` 却缺 URL、加密成功却缺 EKey、绝对 URL 或畸形字段均拒绝为假成功，`104003` 等权限结果仍作为可检查的单项数据。匿名会话遇到 `1000/104400/104401` 会原子清除 sid 并仅重试一次，仍失败则稳定映射 `authentication_required`；`2001` 映射可重试限流，不无限轮换设备。2026-07-22 三个 provider 批请求真实覆盖全部 45 种规格；release HTTP 又验证 OGG 640、加密 OGG 640/FLAC、普通试听及 OGG 640 试听，分别得到真实 `0/104003` 权限码、加密 EKey 和 7200/80400 秒有效期。当前缺真实 QQ 登录/VIP 账户验收及下一小块的统一流/下载/resolver 接线，故标为 `implemented` 而非 `verified` |
 | Q042 | 播放与权益 | `MvApi.get_mv_urls` | 是 | `pending` | MV 多清晰度播放地址 |
 | Q043 | 登录与账户 | `LoginApi.check_expired` | 是 | `pending` | 凭据有效性和账户状态 |
 | Q044 | 登录与账户 | `LoginApi.refresh_credential` | 是 | `pending` | 凭据刷新并原子替换账户代际 |

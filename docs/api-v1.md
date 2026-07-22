@@ -1179,6 +1179,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | --- | --- | --- | --- |
 | POST | `/v1/audio/recognize` | `{platform?, account?, fingerprint, duration_seconds}`；指纹最大 131072 字节，时长 1–300 秒 | `AudioRecognition`；命中起点跳过不可解析的首选字段并读取有效兼容值 |
 | GET | `/v1/media/cdn` | `platform?`、`account?` | `AudioCdnDispatch`；CDN 根地址、QUIC 节点、相对探活文件及缓存时限 |
+| GET | `/v1/tracks/{ref}/files` | `spec/file_type?`、`song_type?`、`media_id/media_mid?`、`account?` | 单项 `AudioFileBatch`；精确文件规格授权，不代替自动音质选择 |
+| POST | `/v1/media/files` | `{platform?, account?, items/file_info, default_spec/file_type?}`；每项使用 `{ref|mid, spec/file_type?, song_type?, media_id/media_mid?}` | 1–100 项 `AudioFileBatch`；同平台、保序、保留重复项 |
 | GET | `/v1/tracks/{ref}/lyrics` | `account?`、`word_synced/qrc?`、`translated/trans?`、`romanized/roma?`、`song_type/type?`；引用决定平台 | `Lyrics`；QQ 省略歌词选项时保持上游 `false/false/false/type=1` 默认 |
 | GET | `/v1/episodes/{ref}/lyrics` | `account?` | `PodcastEpisodeLyrics`；真实无歌词分支也返回可检查的成功数据 |
 | GET | `/v1/episodes/{ref}/stream` | 与歌曲流相同的音质、后端、播放平台、回退、解灰和账户参数 | `PodcastEpisodeStream`；节目、原音频和最终解析资源身份分离 |
@@ -1198,6 +1200,17 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 CDN 调度是播放地址解析的底层目录能力，不代替歌曲流端点。`roots` 保留平台给出的顺序和重复项，调用方可把相对 `test_file` 拼接到候选根地址做连通性探测；`nodes` 额外表达 QUIC、IP 栈和主机信息，`expires_in_seconds/refresh_after_seconds/cache_for_seconds` 决定目录生命周期。QQ 每次请求使用新的 GUID，固定启用新域名与 IPv6；TuneWeave 只接受无嵌入凭据的 HTTP(S) 根地址，并拒绝绝对探活 URL、空目录、非正计时及业务失败，完整平台响应仍保存在扩展供诊断。
+
+精确文件端点用于不能被统一音质枚举完整表达的 QQ 文件能力。`AudioFileAccess` 明确返回 `spec/filename/relative_url/access_token/decryption_key/available/encrypted/format/codec/bitrate/quality/platform_code`；`relative_url` 仍需与 `/v1/media/cdn` 的根地址拼接，加密文件需要调用方使用 EKey 解密。不可用文件不是整批失败，`available=false` 与真实 `platform_code` 可逐项检查；但成功码缺 URL、加密成功缺 EKey、返回项错位或不安全绝对 URL 会作为上游错误拒绝。批量引用必须属于同一平台，`ref` 与 `mid` 同时提供时必须一致，输入顺序和重复项原样保留。
+
+QQ 文件规格的稳定整数/名称映射如下。`0..43` 与参考 Web API 完全同序；`44` 是 SDK 已公开、Web 路由元组漏列的 `SpecialSongFileType.TRY_OGG_640`，TuneWeave 不因此删除该能力。
+
+- `0..16`：`dts_x, master, atmos_2, atmos_5_1, atmos_7_1, dolby_atmos, nac, flac, ogg_640, ogg_320, ogg_192, ogg_96, mp3_320, mp3_128, aac_192, aac_96, aac_48`。
+- `17..29`：`encrypted_dts_x, encrypted_vinyl, encrypted_master, encrypted_atmos_2, encrypted_atmos_5_1, encrypted_atmos_7_1, encrypted_dolby_atmos, encrypted_nac, encrypted_flac, encrypted_ogg_640, encrypted_ogg_320, encrypted_ogg_192, encrypted_ogg_96`。
+- `30..43`：`trial, accompaniment, multi_track, piano, music_box, guzheng, qudi, hulusi, suona, handpan, electric_guitar, drums, kazoo, therapy`。
+- `44`：`trial_ogg_640`。同时兼容参考枚举名 `ACC_*/ATMOS_51/ATMOS_71/ATMOS_DB/TRY/ACCOM/MULTI/BAYIN/SHOUDIE/GUITAR` 及对应加密名称，名称不区分大小写。
+
+顶层 `default_spec/file_type` 缺省为 `mp3_128`，并像参考方法一样决定整批使用普通 `GetVkey` 还是加密 `GetEVkey`；逐项 `spec/file_type` 只覆盖该项文件前缀。`media_id/media_mid` 存在时文件名使用一次媒体 MID，省略时保留参考实现的两次歌曲 MID 拼接行为。`account` 省略时使用匿名 UIN；提供时必须命中 QQ 平台下的持久账户别名，UIN、Key 与 LoginType 只由 provider 注入，调用方不能在请求中提交 Cookie 或密钥。匿名 sid 被 `1000/104400/104401` 拒绝时仅清除并刷新一次；账户凭据失效不会被匿名重试掩盖。
 
 音频流的统一音质为 `auto/low/standard/higher/high/lossless/hires/surround/spatial/dolby/master`。网易云兼容字段 `level` 是 `quality` 的别名，并完整接受 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster`，其中 `exhigh/jyeffect/sky/jymaster` 分别映射为 `high/surround/spatial/master`。`variant=default|legacy|modern` 选择 provider 推荐后端、旧版码率后端或新版等级后端；兼容字段 `backend` 接受 `v0/song_url` 与 `v1/song_url_v1` 等别名。网易云缺省使用现代 v1；`variant=legacy` 时 `bitrate`（兼容 `br`）按原始无符号 bit/s 精确提交，省略时再由 `quality` 映射默认码率；现代后端按参考行为忽略 `br`。
 

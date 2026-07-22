@@ -3519,6 +3519,48 @@ pub struct AudioCdnDispatch {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioFileRequestItem {
+    #[serde(rename = "ref")]
+    pub track_ref: ResourceRef,
+    pub spec: Option<String>,
+    pub song_type: Option<i64>,
+    pub media_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioFileRequest {
+    pub items: Vec<AudioFileRequestItem>,
+    pub default_spec: Option<String>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioFileAccess {
+    #[serde(rename = "ref")]
+    pub track_ref: ResourceRef,
+    pub spec: String,
+    pub filename: String,
+    pub relative_url: Option<String>,
+    pub access_token: Option<String>,
+    pub decryption_key: Option<String>,
+    pub available: bool,
+    pub encrypted: bool,
+    pub format: String,
+    pub codec: String,
+    pub bitrate: Option<u64>,
+    pub quality: Option<Quality>,
+    pub platform_code: i64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioFileBatch {
+    pub expires_in_seconds: u64,
+    pub files: Vec<AudioFileAccess>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MediaStream {
     pub url: String,
@@ -4465,6 +4507,49 @@ mod tests {
         assert_eq!(value["requested_quality"], "spatial");
         assert_eq!(value["actual_quality"], "auto");
         assert_eq!(value["platform_code"], -110);
+    }
+
+    #[test]
+    fn audio_file_access_keeps_exact_specs_tokens_and_per_item_failures_typed() {
+        let reference = ResourceRef::new(Platform::Qq, "003w2xz20QlUZt").expect("reference");
+        let request = AudioFileRequest {
+            items: vec![AudioFileRequestItem {
+                track_ref: reference.clone(),
+                spec: Some("encrypted_ogg_640".to_owned()),
+                song_type: Some(1),
+                media_id: Some("003w2xz20QlUZt".to_owned()),
+            }],
+            default_spec: Some("encrypted_flac".to_owned()),
+            account: Some("green-vip".to_owned()),
+        };
+        assert_eq!(request.items[0].track_ref, reference);
+        assert_eq!(request.account.as_deref(), Some("green-vip"));
+
+        let batch = AudioFileBatch {
+            expires_in_seconds: 80_400,
+            files: vec![AudioFileAccess {
+                track_ref: reference,
+                spec: "encrypted_ogg_640".to_owned(),
+                filename: "O8M1003w2xz20QlUZt.mgg".to_owned(),
+                relative_url: Some("O8M1file.mgg?vkey=temporary".to_owned()),
+                access_token: Some("temporary".to_owned()),
+                decryption_key: Some("decrypt-temporary".to_owned()),
+                available: true,
+                encrypted: true,
+                format: "mgg".to_owned(),
+                codec: "ogg".to_owned(),
+                bitrate: Some(640_000),
+                quality: Some(Quality::Lossless),
+                platform_code: 0,
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(batch).expect("serialize audio files");
+        assert_eq!(value["files"][0]["ref"], "qq:003w2xz20QlUZt");
+        assert_eq!(value["files"][0]["quality"], "lossless");
+        assert_eq!(value["files"][0]["encrypted"], true);
+        assert_eq!(value["expires_in_seconds"], 80_400);
     }
 
     #[test]

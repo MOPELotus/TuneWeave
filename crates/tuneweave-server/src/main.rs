@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .map(|ip| ip.trim().parse::<Ipv4Addr>())
             .transpose()?,
         random_cn_ip: env_bool("TUNEWEAVE_NETEASE_RANDOM_CN_IP")?,
-        credential_store: Some(credential_store),
+        credential_store: Some(credential_store.clone()),
         ..NeteaseConfig::default()
     };
     registry.register(NeteaseProvider::new(netease_config)?)?;
@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
         device_path: Some(data_dir.join("qq-device.json")),
+        credential_store: Some(credential_store),
     })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);

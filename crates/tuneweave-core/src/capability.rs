@@ -87,6 +87,7 @@ pub enum Capability {
     AudioStreamBatch,
     AudioDownload,
     AudioCdnDispatch,
+    AudioFileAccess,
     VideoCatalog,
     VideoTaxonomy,
     VideoDetail,
@@ -255,6 +256,11 @@ mod tests {
             serde_json::to_value(Capability::AudioCdnDispatch)
                 .expect("serialize audio CDN dispatch capability"),
             serde_json::json!("audio_cdn_dispatch")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AudioFileAccess)
+                .expect("serialize audio file access capability"),
+            serde_json::json!("audio_file_access")
         );
         assert_eq!(
             serde_json::to_value(Capability::ChartCatalog)
