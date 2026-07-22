@@ -11,14 +11,14 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=100`、`partial=0`、`implemented=0`、`verified=0`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=99`、`partial=1`、`implemented=0`、`verified=0`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
 | Q001 | 搜索与发现 | `SearchApi.get_hotkey` | 是 | `pending` | 热搜目录 |
 | Q002 | 搜索与发现 | `SearchApi.complete` | 是 | `pending` | 搜索建议 |
 | Q003 | 搜索与发现 | `SearchApi.quick_search` | 是 | `pending` | 兼容独立 Smartbox HTTP 链 |
-| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `pending` | 歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑、节目分类搜索 |
+| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `partial` | `GET /v1/search?platform=qq&kind=track` 已接入 Android `DoSearchForQQMusicMobile`：自动申请并持久化 QIMEI/设备会话，单次上游页严格限制为实测可用的 60 项，统一 `limit<=100` 与任意 `offset` 由最多 3 个同批子请求精确切片；歌曲数字 ID、MID、媒体 MID、`songType`、文件规格、付费字段和完整原文分别保留，缺少码/总数/列表或“声称非空但列表为空”均拒绝为假成功。2026-07-22 Rust provider 与统一 HTTP 真实搜索“周杰伦”返回《晴天》，总数 1001，重启后复用同一 QIMEI/会话；歌手、专辑、歌单、MV、歌词、用户、节目专辑和节目 8 类仍待接入，故不提前标为完成 |
 | Q005 | 搜索与发现 | `SearchApi.general_search` | 是 | `pending` | 综合搜索及多字段续页游标 |
 | Q006 | 搜索与发现 | `RecommendApi.get_home_feed` | 是 | `pending` | 首页推荐卡片和防重复游标 |
 | Q007 | 搜索与发现 | `RecommendApi.get_recommend_songlist` | 是 | `pending` | 推荐歌单 |

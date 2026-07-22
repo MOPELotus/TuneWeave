@@ -2,6 +2,7 @@
 members = [
     "crates/tuneweave-core",
     "crates/tuneweave-provider-netease",
+    "crates/tuneweave-provider-qq",
     "crates/tuneweave-server",
 ]
 default-members = ["crates/tuneweave-server"]
@@ -35,12 +36,13 @@ reqwest = { version = "0.13.4", default-features = false, features = ["brotli", 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tuneweave-core = { path = "crates/tuneweave-core" }
 tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
+tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
 url = "2.5.8"
 
 [workspace.lints.rust]

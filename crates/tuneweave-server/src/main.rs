@@ -15,6 +15,7 @@ use tuneweave_core::{
     ProviderRegistry, UniPlaylistStore,
 };
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
+use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_server::{AppState, build_router};
 
 #[tokio::main]
@@ -54,6 +55,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         ..NeteaseConfig::default()
     };
     registry.register(NeteaseProvider::new(netease_config)?)?;
+    registry.register(QqProvider::new(QqConfig {
+        proxy_url: env::var("TUNEWEAVE_QQ_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
+        device_path: Some(data_dir.join("qq-device.json")),
+    })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);
     let app = build_router(state);

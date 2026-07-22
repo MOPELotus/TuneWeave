@@ -1802,6 +1802,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuneweave-provider-qq"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "async-trait",
+ "base64",
+ "cbc",
+ "md-5",
+ "num-bigint",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tuneweave-core",
+]
+
+[[package]]
 name = "tuneweave-server"
 version = "0.1.0"
 dependencies = [
@@ -1816,6 +1834,7 @@ dependencies = [
  "tracing-subscriber",
  "tuneweave-core",
  "tuneweave-provider-netease",
+ "tuneweave-provider-qq",
 ]
 
 [[package]]
