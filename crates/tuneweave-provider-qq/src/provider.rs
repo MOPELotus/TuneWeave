@@ -3,16 +3,53 @@ use std::{collections::BTreeSet, time::SystemTime};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, Capability, ErrorCode, Extensions, MusicProvider, Page, PageMeta,
-    Platform, Quality, ResourceRef, Result, SearchKind, SearchQuery, SearchVariant, Track,
-    TuneWeaveError,
+    Album, AlbumSummary, Artist, ArtistSummary, Capability, ErrorCode, Extensions, MusicProvider,
+    Page, PageMeta, Platform, Playlist, Quality, ResourceRef, Result, SearchItem, SearchKind,
+    SearchQuery, SearchVariant, Track, TuneWeaveError,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig};
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
-const UPSTREAM_PAGE_SIZE: u32 = 60;
+
+#[derive(Clone, Copy)]
+struct TypedSearchSpec {
+    code: i64,
+    item_pointer: &'static str,
+    context: &'static str,
+    upstream_page_size: u32,
+    sparse: bool,
+}
+
+const TRACK_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 0,
+    item_pointer: "/body/item_song",
+    context: "QQ track search",
+    upstream_page_size: 60,
+    sparse: false,
+};
+const ARTIST_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 1,
+    item_pointer: "/body/singer",
+    context: "QQ artist search",
+    upstream_page_size: 40,
+    sparse: false,
+};
+const ALBUM_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 2,
+    item_pointer: "/body/item_album",
+    context: "QQ album search",
+    upstream_page_size: 60,
+    sparse: false,
+};
+const PLAYLIST_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 3,
+    item_pointer: "/body/item_songlist",
+    context: "QQ playlist search",
+    upstream_page_size: 30,
+    sparse: true,
+};
 
 #[derive(Clone)]
 pub struct QqProvider {
@@ -42,7 +79,12 @@ impl MusicProvider for QqProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks])
+        BTreeSet::from([
+            Capability::SearchTracks,
+            Capability::SearchArtists,
+            Capability::SearchAlbums,
+            Capability::SearchPlaylists,
+        ])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -52,51 +94,91 @@ impl MusicProvider for QqProvider {
                 capability_for_search(query.kind),
             ));
         }
-        let keyword = query.query.trim();
-        if keyword.is_empty() {
-            return Err(
-                TuneWeaveError::invalid_request("search query cannot be empty")
-                    .with_platform(Platform::Qq),
-            );
+        let (limit, skip, responses) = self.typed_search(query, TRACK_SEARCH).await?;
+        map_track_search_response(query.offset, limit, skip, responses)
+    }
+
+    async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        if query.kind == SearchKind::Track {
+            let page = self.search(query).await?;
+            return Ok(Page {
+                items: page.items.into_iter().map(SearchItem::Track).collect(),
+                pagination: page.pagination,
+            });
         }
-        if query.variant != SearchVariant::Default {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ typed search only supports the default variant",
-            )
-            .with_platform(Platform::Qq)
-            .with_details(json!({ "variant": query.variant })));
-        }
-        if let Some(account) = query
-            .account
-            .as_deref()
-            .map(str::trim)
-            .filter(|account| !account.is_empty())
-        {
-            return Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                "QQ account selection is not available before QQ login is configured",
-            )
-            .with_platform(Platform::Qq)
-            .with_details(json!({ "account": account })));
-        }
+        let (spec, mapper): (TypedSearchSpec, fn(Value) -> Result<SearchItem>) = match query.kind {
+            SearchKind::Artist => (ARTIST_SEARCH, map_artist_search_item),
+            SearchKind::Album => (ALBUM_SEARCH, map_album_search_item),
+            SearchKind::Playlist => (PLAYLIST_SEARCH, map_playlist_search_item),
+            kind => {
+                return Err(TuneWeaveError::unsupported(
+                    Platform::Qq,
+                    capability_for_search(kind),
+                ));
+            }
+        };
+        let (limit, skip, responses) = self.typed_search(query, spec).await?;
+        map_catalog_search_response(query.offset, limit, skip, responses, spec, mapper)
+    }
+}
+
+impl QqProvider {
+    async fn typed_search(
+        &self,
+        query: &SearchQuery,
+        spec: TypedSearchSpec,
+    ) -> Result<(u32, u32, Vec<QqApiResponse>)> {
+        let keyword = validate_search_query(query)?;
         let limit = query.limit.clamp(1, 100);
         let search_id = generate_search_id()?;
-        let first_page = query.offset / UPSTREAM_PAGE_SIZE + 1;
-        let skip = query.offset % UPSTREAM_PAGE_SIZE;
-        let page_count = skip.saturating_add(limit).div_ceil(UPSTREAM_PAGE_SIZE);
+        let first_page = query.offset / spec.upstream_page_size + 1;
+        let skip = query.offset % spec.upstream_page_size;
+        let page_count = skip.saturating_add(limit).div_ceil(spec.upstream_page_size);
         let requests = (0..page_count)
             .map(|page_offset| {
                 typed_search_request(
                     keyword,
                     &search_id,
-                    0,
+                    spec.code,
                     first_page.saturating_add(page_offset),
+                    spec.upstream_page_size,
                 )
             })
             .collect::<Vec<_>>();
         let responses = self.client.request_android(&requests).await?;
-        map_track_search_response(query.offset, limit, skip, responses)
+        Ok((limit, skip, responses))
     }
+}
+
+fn validate_search_query(query: &SearchQuery) -> Result<&str> {
+    let keyword = query.query.trim();
+    if keyword.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("search query cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if query.variant != SearchVariant::Default {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ typed search only supports the default variant",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "variant": query.variant })));
+    }
+    if let Some(account) = query
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::AuthenticationRequired,
+            "QQ account selection is not available before QQ login is configured",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "account": account })));
+    }
+    Ok(keyword)
 }
 
 fn typed_search_request(
@@ -104,6 +186,7 @@ fn typed_search_request(
     search_id: &str,
     search_type: i64,
     page: u32,
+    page_size: u32,
 ) -> QqApiRequest {
     QqApiRequest::new(
         SEARCH_MODULE,
@@ -112,7 +195,7 @@ fn typed_search_request(
             "searchid": search_id,
             "query": keyword,
             "search_type": search_type,
-            "num_per_page": UPSTREAM_PAGE_SIZE,
+            "num_per_page": page_size,
             "page_num": page,
             "highlight": false,
             "grp": true
@@ -126,59 +209,149 @@ fn map_track_search_response(
     skip: u32,
     responses: Vec<QqApiResponse>,
 ) -> Result<Page<Track>> {
+    let (raw_items, pagination) =
+        collect_search_items(offset, limit, skip, responses, TRACK_SEARCH)?;
+    let items = raw_items
+        .into_iter()
+        .map(map_track)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page { items, pagination })
+}
+
+fn map_catalog_search_response(
+    offset: u32,
+    limit: u32,
+    skip: u32,
+    responses: Vec<QqApiResponse>,
+    spec: TypedSearchSpec,
+    mapper: fn(Value) -> Result<SearchItem>,
+) -> Result<Page<SearchItem>> {
+    let (raw_items, pagination) = collect_search_items(offset, limit, skip, responses, spec)?;
+    let items = raw_items
+        .into_iter()
+        .map(mapper)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page { items, pagination })
+}
+
+fn collect_search_items(
+    offset: u32,
+    limit: u32,
+    skip: u32,
+    responses: Vec<QqApiResponse>,
+    spec: TypedSearchSpec,
+) -> Result<(Vec<Value>, PageMeta)> {
     let first = responses
         .first()
-        .ok_or_else(|| qq_data_error("QQ track search returned no response"))?;
-    ensure_data_success(&first.data, "QQ track search")?;
+        .ok_or_else(|| qq_data_error(format!("{} returned no response", spec.context)))?;
+    ensure_data_success(&first.data, spec.context)?;
     let total = first
         .data
         .pointer("/meta/sum")
         .and_then(json_u64)
-        .ok_or_else(|| qq_data_error("QQ track search response is missing total count"))?;
-    let mut raw_items = Vec::new();
-    for response in &responses {
-        ensure_data_success(&response.data, "QQ track search")?;
+        .ok_or_else(|| {
+            qq_data_error(format!("{} response is missing total count", spec.context))
+        })?;
+    let window_start = u64::from(offset);
+    let window_end = if total <= window_start {
+        window_start
+    } else {
+        window_start.saturating_add(u64::from(limit)).min(total)
+    };
+    let first_page_start = window_start.saturating_sub(u64::from(skip));
+    let mut available = Vec::new();
+    let mut upstream_item_counts = Vec::with_capacity(responses.len());
+    let mut omitted_slots = 0_u64;
+    for (index, response) in responses.iter().enumerate() {
+        ensure_data_success(&response.data, spec.context)?;
+        let response_total = response
+            .data
+            .pointer("/meta/sum")
+            .and_then(json_u64)
+            .ok_or_else(|| {
+                qq_data_error(format!("{} response is missing total count", spec.context))
+            })?;
+        if response_total != total {
+            return Err(qq_data_error(format!(
+                "{} returned inconsistent total counts",
+                spec.context
+            )));
+        }
         let items = response
             .data
-            .pointer("/body/item_song")
+            .pointer(spec.item_pointer)
             .and_then(Value::as_array)
-            .ok_or_else(|| qq_data_error("QQ track search response is missing item_song"))?;
-        raw_items.extend(items.iter().cloned());
+            .ok_or_else(|| {
+                qq_data_error(format!(
+                    "{} response is missing {}",
+                    spec.context, spec.item_pointer
+                ))
+            })?;
+        if items.len() > usize::try_from(spec.upstream_page_size).unwrap_or(usize::MAX) {
+            return Err(qq_data_error(format!(
+                "{} returned more items than its requested page size",
+                spec.context
+            )));
+        }
+        upstream_item_counts.push(items.len());
+        let page_start = first_page_start.saturating_add(
+            u64::try_from(index)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::from(spec.upstream_page_size)),
+        );
+        let slot_start = page_start.max(window_start);
+        let slot_end = page_start
+            .saturating_add(u64::from(spec.upstream_page_size))
+            .min(window_end);
+        if slot_start >= slot_end {
+            continue;
+        }
+        let item_start = usize::try_from(slot_start.saturating_sub(page_start))
+            .unwrap_or(usize::MAX)
+            .min(items.len());
+        let item_end = usize::try_from(slot_end.saturating_sub(page_start))
+            .unwrap_or(usize::MAX)
+            .min(items.len());
+        available.extend(items[item_start..item_end].iter().cloned());
+        let requested_slots = slot_end.saturating_sub(slot_start);
+        let returned_slots = u64::try_from(item_end.saturating_sub(item_start)).unwrap_or(u64::MAX);
+        omitted_slots =
+            omitted_slots.saturating_add(requested_slots.saturating_sub(returned_slots));
     }
-    let available = raw_items
-        .into_iter()
-        .skip(usize::try_from(skip).unwrap_or(usize::MAX))
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
-        .collect::<Vec<_>>();
-    if total > u64::from(offset) && available.is_empty() {
-        return Err(qq_data_error(
-            "QQ track search reported results but returned an empty item list",
-        ));
+    if !spec.sparse && omitted_slots > 0 {
+        return Err(qq_data_error(format!(
+            "{} omitted items inside the requested result window",
+            spec.context
+        )));
     }
-    let items = available
-        .into_iter()
-        .map(map_track)
-        .collect::<Result<Vec<_>>>()?;
-    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    let next_offset = offset.saturating_add(consumed);
-    let has_more = u64::from(next_offset) < total && consumed > 0;
+    let next_offset = u32::try_from(window_end).ok();
+    let has_more = window_end < total && next_offset.is_some_and(|next| next > offset);
     let mut extensions = Extensions::new();
-    extensions.insert("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE));
+    extensions.insert(
+        "upstream_page_size".to_owned(),
+        json!(spec.upstream_page_size),
+    );
+    extensions.insert("pagination_basis".to_owned(), json!("upstream_slots"));
+    extensions.insert("omitted_slots".to_owned(), json!(omitted_slots));
+    extensions.insert(
+        "upstream_item_counts".to_owned(),
+        json!(upstream_item_counts),
+    );
     extensions.insert(
         "upstream_responses".to_owned(),
         Value::Array(responses.into_iter().map(|response| response.raw).collect()),
     );
-    Ok(Page {
-        items,
-        pagination: PageMeta {
+    Ok((
+        available,
+        PageMeta {
             limit,
             offset,
             total: Some(total),
-            next_offset: has_more.then_some(next_offset),
+            next_offset: has_more.then_some(next_offset.expect("checked above")),
             has_more,
             extensions,
         },
-    })
+    ))
 }
 
 fn map_track(raw: Value) -> Result<Track> {
@@ -255,6 +428,232 @@ fn map_track(raw: Value) -> Result<Track> {
         available_qualities,
         extensions,
     })
+}
+
+fn map_artist_search_item(raw: Value) -> Result<SearchItem> {
+    let mid = ["mid", "singerMID", "singerMid", "singer_mid"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    let numeric_id = ["id", "singerID", "singerId", "singer_id"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let id = mid
+        .clone()
+        .or_else(|| numeric_id.clone())
+        .ok_or_else(|| qq_data_error("QQ artist search item is missing both MID and numeric ID"))?;
+    let name = ["name", "title", "singerName"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ artist search item is missing its name"))?;
+    let avatar_url = ["singerPic", "pic", "avatar"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .or_else(|| mid.as_deref().map(|mid| qq_cover_url("T001", mid)));
+    let mut extensions = Extensions::new();
+    insert_some(&mut extensions, "numeric_id", numeric_id);
+    insert_some(&mut extensions, "mid", mid);
+    insert_value(&mut extensions, "type", raw.get("type"));
+    insert_value(&mut extensions, "identity", raw.get("identity"));
+    insert_value(&mut extensions, "followed", raw.get("isFollow"));
+    insert_value(&mut extensions, "uin", raw.get("uin"));
+    insert_value(&mut extensions, "pmid", raw.get("pmid"));
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::Artist(Artist {
+        resource_ref: qq_ref(&id, "artist")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        aliases: Vec::new(),
+        description: nonempty_string(raw.get("subtitle")).unwrap_or_default(),
+        biography_sections: Vec::new(),
+        avatar_url,
+        cover_url: None,
+        album_count: ["albumNum", "album_num"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        track_count: ["songNum", "song_num"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        mv_count: ["mvNum", "mv_num"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        video_count: None,
+        identities: Vec::new(),
+        extensions,
+    }))
+}
+
+fn map_album_search_item(raw: Value) -> Result<SearchItem> {
+    let mid = ["mid", "albumMid", "albumMID", "albummid"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    let numeric_id = ["id", "albumID"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let id = mid
+        .clone()
+        .or_else(|| numeric_id.clone())
+        .ok_or_else(|| qq_data_error("QQ album search item is missing both MID and numeric ID"))?;
+    let name = ["name", "title", "albumName"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ album search item is missing its name"))?;
+    let aliases = ["subtitle", "albumTranName"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .into_iter()
+        .collect();
+    let artists = raw
+        .get("singer_list")
+        .or_else(|| raw.get("singerList"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| map_artist_summary(artist).transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let cover_url = ["pic", "picurl", "cover_url"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .or_else(|| {
+            ["pmid", "logo"]
+                .into_iter()
+                .find_map(|field| nonempty_string(raw.get(field)))
+                .or_else(|| mid.clone())
+                .map(|pmid| qq_cover_url("T002", &pmid))
+        });
+    let description = raw
+        .pointer("/desc_detail/desc")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| nonempty_string(raw.get("description2")))
+        .unwrap_or_default();
+    let mut extensions = Extensions::new();
+    insert_some(&mut extensions, "numeric_id", numeric_id);
+    insert_some(&mut extensions, "mid", mid);
+    insert_value(&mut extensions, "pmid", raw.get("pmid"));
+    insert_value(
+        &mut extensions,
+        "album_type",
+        raw.pointer("/core_album_config/album_type")
+            .or_else(|| raw.get("type")),
+    );
+    insert_value(
+        &mut extensions,
+        "award_label",
+        raw.pointer("/core_album_config/award_label")
+            .or_else(|| raw.get("award_label")),
+    );
+    insert_value(&mut extensions, "hotness", raw.get("hotness"));
+    insert_value(&mut extensions, "audio_play", raw.get("audio_play"));
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::Album(Album {
+        resource_ref: qq_ref(&id, "album")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        aliases,
+        artists,
+        description,
+        cover_url,
+        published_at: ["time_public", "publish_date", "publishDate"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        track_count: ["song_num", "songNum", "songnum"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        company: nonempty_string(raw.get("company")),
+        kind: raw
+            .pointer("/core_album_config/album_type")
+            .and_then(|value| value_as_string(Some(value)))
+            .or_else(|| value_as_string(raw.get("type"))),
+        extensions,
+    }))
+}
+
+fn map_playlist_search_item(raw: Value) -> Result<SearchItem> {
+    let id = ["id", "dissid", "tid"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)))
+        .filter(|value| value != "0")
+        .ok_or_else(|| qq_data_error("QQ playlist search item is missing its ID"))?;
+    let name = ["title", "name", "dissname"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+        .ok_or_else(|| qq_data_error("QQ playlist search item is missing its name"))?;
+    let creator = raw
+        .get("creator")
+        .map(map_playlist_creator)
+        .transpose()?
+        .flatten()
+        .or(map_playlist_creator(&raw)?);
+    let tags = raw
+        .get("tags")
+        .or_else(|| raw.get("tag_list"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tag| match tag {
+            Value::String(tag) => Some(tag.as_str()),
+            Value::Object(tag) => tag
+                .get("name")
+                .or_else(|| tag.get("title"))
+                .and_then(Value::as_str),
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut extensions = Extensions::new();
+    insert_value(&mut extensions, "dir_id", raw.get("dirid"));
+    insert_value(&mut extensions, "dir_type", raw.get("dirtype"));
+    insert_value(&mut extensions, "listen_count", raw.get("listennum"));
+    insert_value(&mut extensions, "nickname", raw.get("nickname"));
+    insert_value(&mut extensions, "uin", raw.get("uin"));
+    insert_value(&mut extensions, "type", raw.get("type"));
+    insert_value(&mut extensions, "hotness", raw.get("hotness"));
+    extensions.insert("search_item".to_owned(), raw.clone());
+    Ok(SearchItem::Playlist(Playlist {
+        resource_ref: qq_ref(&id, "playlist")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        description: ["subhead", "description", "desc"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field)))
+            .unwrap_or_default(),
+        cover_url: ["picurl", "logo", "cover_url"]
+            .into_iter()
+            .find_map(|field| nonempty_string(raw.get(field))),
+        creator,
+        track_count: ["songnum", "song_num", "songNum"]
+            .into_iter()
+            .find_map(|field| raw.get(field).and_then(json_u64)),
+        tags,
+        subscribed: None,
+        created_at: nonempty_string(raw.get("createtime")),
+        updated_at: nonempty_string(raw.get("modifytime")),
+        extensions,
+    }))
+}
+
+fn map_playlist_creator(raw: &Value) -> Result<Option<ArtistSummary>> {
+    let Some(name) = ["name", "nickname", "nick"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)))
+    else {
+        return Ok(None);
+    };
+    let id = ["uin", "id"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)))
+        .filter(|id| id != "0");
+    Ok(Some(ArtistSummary {
+        resource_ref: id.map(|id| qq_ref(&id, "playlist creator")).transpose()?,
+        name,
+    }))
 }
 
 fn map_artist_summary(raw: &Value) -> Result<Option<ArtistSummary>> {
@@ -503,6 +902,17 @@ mod tests {
         })
     }
 
+    fn search_query(kind: SearchKind, limit: u32, offset: u32) -> SearchQuery {
+        SearchQuery {
+            query: "周杰伦".to_owned(),
+            kind,
+            variant: SearchVariant::Default,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+
     #[test]
     fn track_mapping_preserves_every_qq_identifier() {
         let track = map_track(sample_track(97_773, "0039MnYb0qxYhV", "晴天")).expect("map track");
@@ -518,6 +928,111 @@ mod tests {
         assert!(track.available_qualities.contains(&Quality::Lossless));
         assert!(track.available_qualities.contains(&Quality::Master));
         assert!(track.available_qualities.contains(&Quality::Surround));
+    }
+
+    #[test]
+    fn artist_mapping_preserves_counts_identity_and_raw_search_fields() {
+        let item = map_artist_search_item(json!({
+            "singerID": 4558,
+            "singerMID": "0025NhlN2yWrP4",
+            "singerName": "周杰伦",
+            "singerPic": "https://example.test/artist.jpg",
+            "songNum": 1013,
+            "albumNum": 43,
+            "mvNum": 10426,
+            "subtitle": "歌曲:1013  专辑:43  视频:10426",
+            "type": 0
+        }))
+        .expect("map artist");
+        let SearchItem::Artist(artist) = item else {
+            panic!("expected artist");
+        };
+        assert_eq!(artist.resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(artist.extensions["numeric_id"], "4558");
+        assert_eq!(artist.track_count, Some(1013));
+        assert_eq!(artist.album_count, Some(43));
+        assert_eq!(artist.mv_count, Some(10426));
+        assert_eq!(
+            artist.avatar_url.as_deref(),
+            Some("https://example.test/artist.jpg")
+        );
+        assert_eq!(artist.extensions["search_item"]["type"], 0);
+    }
+
+    #[test]
+    fn album_mapping_keeps_mid_numeric_id_artists_date_and_platform_fields() {
+        let item = map_album_search_item(json!({
+            "id": 60671,
+            "mid": "0024bjiL2aocxT",
+            "name": "十一月的萧邦",
+            "subtitle": "November's Chopin",
+            "time_public": "2005-11-01",
+            "pmid": "0024bjiL2aocxT_5",
+            "pic": "https://example.test/album.jpg",
+            "desc_detail": {"desc": "专辑介绍"},
+            "core_album_config": {"album_type": 1},
+            "singer_list": [{"id": 4558, "mid": "0025NhlN2yWrP4", "name": "周杰伦"}],
+            "award_label": "殿堂史诗唱片"
+        }))
+        .expect("map album");
+        let SearchItem::Album(album) = item else {
+            panic!("expected album");
+        };
+        assert_eq!(album.resource_ref.to_string(), "qq:0024bjiL2aocxT");
+        assert_eq!(album.extensions["numeric_id"], "60671");
+        assert_eq!(album.aliases, ["November's Chopin"]);
+        assert_eq!(album.description, "专辑介绍");
+        assert_eq!(album.published_at.as_deref(), Some("2005-11-01"));
+        assert_eq!(album.kind.as_deref(), Some("1"));
+        assert_eq!(
+            album.artists[0]
+                .resource_ref
+                .as_ref()
+                .expect("artist ref")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(album.extensions["award_label"], "殿堂史诗唱片");
+    }
+
+    #[test]
+    fn playlist_mapping_preserves_owner_counts_and_complete_raw_item() {
+        let item = map_playlist_search_item(json!({
+            "dissid": "7039749142",
+            "dissname": "百听不厌的周杰伦",
+            "logo": "https://example.test/playlist.jpg",
+            "description": "99首",
+            "subhead": "周杰伦精选歌单",
+            "songnum": 99,
+            "listennum": 406419550,
+            "nickname": "今晚月色很美",
+            "uin": "2904004371",
+            "createtime": "2019-06-28",
+            "modifytime": "2019-08-16",
+            "dirtype": 0
+        }))
+        .expect("map playlist");
+        let SearchItem::Playlist(playlist) = item else {
+            panic!("expected playlist");
+        };
+        assert_eq!(playlist.resource_ref.to_string(), "qq:7039749142");
+        assert_eq!(playlist.track_count, Some(99));
+        assert_eq!(
+            playlist
+                .creator
+                .as_ref()
+                .expect("creator")
+                .resource_ref
+                .as_ref()
+                .expect("creator ref")
+                .to_string(),
+            "qq:2904004371"
+        );
+        assert_eq!(playlist.description, "周杰伦精选歌单");
+        assert_eq!(playlist.created_at.as_deref(), Some("2019-06-28"));
+        assert_eq!(playlist.updated_at.as_deref(), Some("2019-08-16"));
+        assert_eq!(playlist.extensions["listen_count"], 406419550_u64);
+        assert_eq!(playlist.extensions["search_item"]["dirtype"], 0);
     }
 
     #[test]
@@ -546,6 +1061,88 @@ mod tests {
         assert_eq!(page.items[0].name, "track50");
         assert_eq!(page.items[99].name, "track149");
         assert_eq!(page.pagination.next_offset, Some(150));
+    }
+
+    #[test]
+    fn catalog_mapping_uses_each_category_safe_page_width_and_exact_slicing() {
+        assert_eq!(ARTIST_SEARCH.upstream_page_size, 40);
+        assert_eq!(ALBUM_SEARCH.upstream_page_size, 60);
+        assert_eq!(PLAYLIST_SEARCH.upstream_page_size, 30);
+        let first = (0..30)
+            .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
+            .collect::<Vec<_>>();
+        let second = (30..60)
+            .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
+            .collect::<Vec<_>>();
+        let page = map_catalog_search_response(
+            25,
+            20,
+            25,
+            vec![
+                response(
+                    json!({"code": 0, "meta": {"sum": 100}, "body": {"item_songlist": first}}),
+                ),
+                response(
+                    json!({"code": 0, "meta": {"sum": 100}, "body": {"item_songlist": second}}),
+                ),
+            ],
+            PLAYLIST_SEARCH,
+            map_playlist_search_item,
+        )
+        .expect("map playlist page");
+        assert_eq!(page.items.len(), 20);
+        let SearchItem::Playlist(first) = &page.items[0] else {
+            panic!("expected playlist");
+        };
+        let SearchItem::Playlist(last) = &page.items[19] else {
+            panic!("expected playlist");
+        };
+        assert_eq!(first.name, "playlist25");
+        assert_eq!(last.name, "playlist44");
+        assert_eq!(page.pagination.next_offset, Some(45));
+        assert_eq!(page.pagination.extensions["upstream_page_size"], 30);
+        assert_eq!(page.pagination.extensions["omitted_slots"], 0);
+    }
+
+    #[test]
+    fn sparse_playlist_pages_advance_by_upstream_slots_without_duplicates() {
+        let first = (0..29)
+            .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
+            .collect::<Vec<_>>();
+        let second = (30..59)
+            .map(|id| json!({"id": id + 1, "title": format!("playlist{id}")}))
+            .collect::<Vec<_>>();
+        let page = map_catalog_search_response(
+            25,
+            20,
+            25,
+            vec![
+                response(
+                    json!({"code": 0, "meta": {"sum": 100}, "body": {"item_songlist": first}}),
+                ),
+                response(
+                    json!({"code": 0, "meta": {"sum": 100}, "body": {"item_songlist": second}}),
+                ),
+            ],
+            PLAYLIST_SEARCH,
+            map_playlist_search_item,
+        )
+        .expect("map sparse playlist page");
+        assert_eq!(page.items.len(), 19);
+        let SearchItem::Playlist(first) = &page.items[0] else {
+            panic!("expected playlist");
+        };
+        let SearchItem::Playlist(last) = &page.items[18] else {
+            panic!("expected playlist");
+        };
+        assert_eq!(first.name, "playlist25");
+        assert_eq!(last.name, "playlist44");
+        assert_eq!(page.pagination.next_offset, Some(45));
+        assert_eq!(page.pagination.extensions["omitted_slots"], 1);
+        assert_eq!(
+            page.pagination.extensions["upstream_item_counts"],
+            json!([29, 29])
+        );
     }
 
     #[test]
@@ -592,6 +1189,22 @@ mod tests {
         query.account = Some("green-diamond".to_owned());
         let account_error = provider.search(&query).await.expect_err("account failure");
         assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+
+        let mut album_query = search_query(SearchKind::Album, 2, 0);
+        album_query.variant = SearchVariant::Legacy;
+        let variant_error = provider
+            .search_catalog(&album_query)
+            .await
+            .expect_err("catalog variant failure");
+        assert_eq!(variant_error.code, ErrorCode::InvalidRequest);
+
+        album_query.variant = SearchVariant::Default;
+        album_query.account = Some("green-diamond".to_owned());
+        let account_error = provider
+            .search_catalog(&album_query)
+            .await
+            .expect_err("catalog account failure");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -614,5 +1227,29 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_artist_album_and_playlist_search_return_typed_catalogs() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for kind in [SearchKind::Artist, SearchKind::Album, SearchKind::Playlist] {
+            let page = provider
+                .search_catalog(&search_query(kind, 2, 0))
+                .await
+                .expect("live catalog search");
+            assert_eq!(page.items.len(), 2);
+            assert!(page.pagination.total.is_some_and(|total| total > 0));
+            assert!(page.items.iter().all(|item| match (kind, item) {
+                (SearchKind::Artist, SearchItem::Artist(artist)) => !artist.name.is_empty(),
+                (SearchKind::Album, SearchItem::Album(album)) => !album.name.is_empty(),
+                (SearchKind::Playlist, SearchItem::Playlist(playlist)) => !playlist.name.is_empty(),
+                _ => false,
+            }));
+        }
     }
 }

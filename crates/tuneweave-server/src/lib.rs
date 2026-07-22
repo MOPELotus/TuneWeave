@@ -657,10 +657,11 @@ async fn capabilities(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchParams {
     #[serde(alias = "keywords")]
     q: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", alias = "kind")]
     kind: Option<String>,
     #[serde(alias = "backend")]
     variant: Option<String>,
@@ -924,8 +925,9 @@ async fn execute_local_track_match(
 
 async fn search(
     State(state): State<AppState>,
-    Query(params): Query<SearchParams>,
+    params: Result<Query<SearchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<SearchItem>>>, ApiError> {
+    let params = query_params(params)?;
     let query_text = params
         .q
         .as_deref()
@@ -14827,6 +14829,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_accepts_unified_kind_without_silently_defaulting_to_tracks() {
+        for (kind, item_type, reference) in [
+            ("artist", "artist", "netease:6452"),
+            ("album", "album", "netease:18915"),
+            ("playlist", "playlist", "netease:3778678"),
+        ] {
+            let path = format!("/v1/search?q=clock&kind={kind}");
+            let (status, json) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "kind={kind}");
+            assert_eq!(json["data"][0]["type"], item_type, "kind={kind}");
+            assert_eq!(json["data"][0]["data"]["ref"], reference, "kind={kind}");
+            assert_eq!(
+                json["meta"]["pagination"]["extensions"]["kind"], kind,
+                "kind={kind}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn search_exposes_legacy_and_cloud_variants_on_the_same_endpoint() {
         for (input, expected) in [
             ("legacy", "legacy"),
@@ -18141,6 +18162,7 @@ mod tests {
             "/v1/search?q=clock&limit=101",
             "/v1/search?q=clock&type=book",
             "/v1/search?type=1",
+            "/v1/search?q=clock&unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
