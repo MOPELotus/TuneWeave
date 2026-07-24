@@ -23,8 +23,8 @@ use tuneweave_core::{
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
 use crate::login::{
-    QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
-    qq_login_business_error, refresh_qq_credential, send_phone_authcode,
+    QqLogoutOutcome, QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
+    logout_qq_credential, qq_login_business_error, refresh_qq_credential, send_phone_authcode,
 };
 use crate::qrc::decrypt_qrc;
 
@@ -628,6 +628,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioFileAccess,
             Capability::QrLogin,
             Capability::PhoneLogin,
+            Capability::SessionManagement,
         ])
     }
 
@@ -1134,6 +1135,28 @@ impl MusicProvider for QqProvider {
         );
         Ok(profile)
     }
+
+    async fn logout(&self, account: &str) -> Result<bool> {
+        let credential = match self.qq_credential(Some(account)) {
+            Ok(Some(credential)) => credential,
+            Ok(None) => return Ok(false),
+            Err(error) if error.code == ErrorCode::AuthenticationRequired => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let outcome = logout_qq_credential(&self.client, &credential).await?;
+        self.remove_qq_credential(account).map_err(|_| {
+            let upstream_state = match outcome {
+                QqLogoutOutcome::LoggedOut => "logged_out",
+                QqLogoutOutcome::CredentialExpired => "credential_expired",
+            };
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "QQ account was closed upstream but local credential removal failed",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "upstream_state": upstream_state }))
+        })
+    }
 }
 
 impl QqProvider {
@@ -1221,6 +1244,18 @@ impl QqProvider {
             })?
             .normalize()?;
         Ok(Some(credential))
+    }
+
+    fn remove_qq_credential(&self, account: &str) -> Result<bool> {
+        let account = account.trim();
+        let store = self.credential_store.as_ref().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "QQ account storage is not configured",
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        store.remove(Platform::Qq, account)
     }
 
     async fn prepare_audio_file_items(
@@ -5586,6 +5621,11 @@ mod tests {
         assert!(!format!("{:?}", stored[0]).contains("Q_H_L_private"));
         assert!(provider.capabilities().contains(&Capability::QrLogin));
         assert!(provider.capabilities().contains(&Capability::PhoneLogin));
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SessionManagement)
+        );
     }
 
     #[tokio::test]
@@ -5636,6 +5676,48 @@ mod tests {
             .expect_err("missing account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["account"], "missing-account");
+    }
+
+    #[tokio::test]
+    async fn missing_logout_alias_is_idempotent_without_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(!provider.logout("missing-account").await.expect("logout"));
+    }
+
+    #[test]
+    fn local_logout_removes_only_the_selected_qq_account() {
+        let store = Arc::new(RecordingCredentialStore::default());
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(store.clone()),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        provider
+            .persist_qq_credential("personal", &credential)
+            .expect("persist personal");
+        provider
+            .persist_qq_credential("green-vip", &credential)
+            .expect("persist premium");
+
+        assert!(
+            provider
+                .remove_qq_credential("personal")
+                .expect("remove personal")
+        );
+        let stored = store
+            .load_platform(Platform::Qq)
+            .expect("stored credentials");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].account, "green-vip");
     }
 
     #[test]

@@ -68,6 +68,12 @@ pub(crate) enum QqQrPollOutcome {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QqLogoutOutcome {
+    LoggedOut,
+    CredentialExpired,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct QqQrTransactions {
     entries: Arc<Mutex<BTreeMap<String, QqQrEntry>>>,
@@ -416,6 +422,20 @@ pub(crate) async fn refresh_qq_credential(
         ));
     }
     parse_login_credential(response.data)
+}
+
+pub(crate) async fn logout_qq_credential(
+    client: &QqClient,
+    credential: &QqCredential,
+) -> Result<QqLogoutOutcome> {
+    let response = client
+        .request_android_business_with_credential(
+            QqApiRequest::new("music.login.LoginServer", "Logout", json!({})),
+            &[],
+            Some(credential),
+        )
+        .await?;
+    logout_outcome(response.code)
 }
 
 async fn poll_qq_qr(
@@ -1227,6 +1247,17 @@ fn refresh_credential_param(credential: &QqCredential) -> serde_json::Value {
     }
 }
 
+fn logout_outcome(code: i64) -> Result<QqLogoutOutcome> {
+    match code {
+        0 => Ok(QqLogoutOutcome::LoggedOut),
+        1000 | 104_400 | 104_401 => Ok(QqLogoutOutcome::CredentialExpired),
+        code => Err(qq_login_business_error(
+            code,
+            "QQ failed to log out the account",
+        )),
+    }
+}
+
 fn insert_phone_principal(
     param: &mut serde_json::Map<String, serde_json::Value>,
     principal: QqPhonePrincipal,
@@ -1754,6 +1785,26 @@ mod tests {
                 "refresh_key": "refresh-key",
                 "loginMode": 2
             })
+        );
+    }
+
+    #[test]
+    fn logout_only_accepts_success_or_an_already_expired_credential() {
+        assert_eq!(
+            logout_outcome(0).expect("logged out"),
+            QqLogoutOutcome::LoggedOut
+        );
+        assert_eq!(
+            logout_outcome(104_401).expect("expired credential"),
+            QqLogoutOutcome::CredentialExpired
+        );
+        assert_eq!(
+            logout_outcome(104_604).expect_err("rate limited").code,
+            ErrorCode::RateLimited
+        );
+        assert_eq!(
+            logout_outcome(20_261).expect_err("invalid request").code,
+            ErrorCode::InvalidRequest
         );
     }
 

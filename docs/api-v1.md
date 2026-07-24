@@ -1308,6 +1308,8 @@ QQ 会话状态固定调用 Android `music.UserInfo.userInfoServer/GetLoginUserI
 
 QQ 会话刷新调用 Android `music.login.LoginServer/Login` 并固定 `loginMode=2`。`loginType=1`、`loginType=2` 和其他登录类型分别保留微信、QQ 及移动端/验证码凭据所需的不同字段集合，`comm.tmeLoginType` 与原凭据一致；旧凭据同时进入 Android `comm` 和 Cookie。只有平台返回成功且新凭据完整通过强类型校验后，才原子替换同一 `(qq, account)` 的凭据代际；网络、业务码、响应解析或写盘失败都不会预先删除旧凭据。
 
+QQ 退出调用同一 Android 登录服务的 `Logout`，并把精确账户凭据同时放入 `comm` 与 Cookie。平台成功或明确返回凭据已经失效时删除本地对应 `(qq, account)`；不存在的别名幂等返回 `removed=false`。限流、未知业务码和网络失败保留本地凭据以便重试，不会影响同平台其他账户；若上游已关闭会话但本地删除失败，则返回明确的本地持久化错误，而不是伪报退出完成。
+
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 
 `POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云当前返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。QQ 音乐支持 `login_type=qq/default`、`wx/wechat/weixin` 和 `mobile/app`，分别返回 QQ 互联 PNG、微信 JPEG 和 QQ 音乐客户端 PNG；这些平台二维码没有可安全复用的独立扫码文本，因此 `url` 与 `image_data_url` 均为同一自包含图片。移动端二维码在图片返回前已建立持久 MQTT 订阅，后续 GET 轮询可跨请求接收扫码、取消、过期、失败和确认事件，不会在两次请求间临时断开订阅。QQ 的 qrsig、微信 uuid、移动端二维码 ID、OAuth code、MQTT token 和临时 Cookie 只存在于 10 分钟进程内事务，HTTP 响应仍只暴露随机外层事务 ID；确认成功后才按 `(qq, account)` 持久化凭据。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。
