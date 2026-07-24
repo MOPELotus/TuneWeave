@@ -1,15 +1,21 @@
-use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch,
-    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, Capability, CreatorSummary,
-    ErrorCode, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform,
-    Playlist, Podcast, PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
+    Capability, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
+    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
+    PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, Track, TuneWeaveError, User, Video,
+    SearchTrendingRequest, SearchVariant, StreamRequest, Track, TrialWindow, TuneWeaveError, User,
+    Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -67,8 +73,8 @@ const fn qq_file_spec(
     }
 }
 
-// Indices 0..=43 exactly match QQMusicApi's public Web integer mapping. Index 44 exposes
-// SpecialSongFileType.TRY_OGG_640, which is public in the SDK but absent from that Web tuple.
+// Indices 0..=43 match QQMusicApi's pre-v0.7 Web integer mapping. Index 44 exposes
+// SpecialSongFileType.TRY_OGG_640; v0.7 appended the three ringtone formats at 45..=47.
 const QQ_AUDIO_FILE_SPECS: &[QqAudioFileSpec] = &[
     qq_file_spec(
         "dts_x",
@@ -371,6 +377,33 @@ const QQ_AUDIO_FILE_SPECS: &[QqAudioFileSpec] = &[
         Some(640_000),
         Some(Quality::Lossless),
     ),
+    qq_file_spec(
+        "ring_128",
+        "R500",
+        ".mp3",
+        false,
+        "mp3",
+        Some(128_000),
+        Some(Quality::Standard),
+    ),
+    qq_file_spec(
+        "ring_96",
+        "R400",
+        ".m4a",
+        false,
+        "aac",
+        Some(96_000),
+        Some(Quality::Low),
+    ),
+    qq_file_spec(
+        "ring_48",
+        "R200",
+        ".m4a",
+        false,
+        "aac",
+        Some(48_000),
+        Some(Quality::Low),
+    ),
 ];
 
 struct PreparedQqAudioFile {
@@ -380,6 +413,50 @@ struct PreparedQqAudioFile {
     song_type: i64,
     spec: &'static QqAudioFileSpec,
     filename: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QqTrackFileMetadata {
+    media_id: Option<String>,
+    size_dolby: Option<u64>,
+    size_flac: Option<u64>,
+    size_192_ogg: Option<u64>,
+    size_96_ogg: Option<u64>,
+    size_320_mp3: Option<u64>,
+    size_128_mp3: Option<u64>,
+    size_192_aac: Option<u64>,
+    size_96_aac: Option<u64>,
+    size_48_aac: Option<u64>,
+    size_trial: Option<u64>,
+    modern_sizes: Vec<Option<u64>>,
+    trial_start_ms: Option<u64>,
+    trial_end_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QqTrackAudioMetadata {
+    song_type: Option<i64>,
+    media_id: Option<String>,
+    file: QqTrackFileMetadata,
+    version_media_ids: Vec<Option<String>>,
+    variant_info: Vec<Option<i64>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QqPlayableCandidate {
+    spec: &'static QqAudioFileSpec,
+    media_id: Option<String>,
+    size: Option<u64>,
+    trial: Option<TrialWindow>,
+}
+
+struct QqAudioResolution {
+    candidates: Vec<QqPlayableCandidate>,
+    files: AudioFileBatch,
+    dispatch: Option<AudioCdnDispatch>,
+    selected_index: Option<usize>,
+    url: Option<String>,
+    backup_urls: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -519,6 +596,8 @@ impl MusicProvider for QqProvider {
             Capability::SearchTrending,
             Capability::TrackDetail,
             Capability::Lyrics,
+            Capability::AudioStream,
+            Capability::AudioDownload,
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
         ])
@@ -584,7 +663,7 @@ impl MusicProvider for QqProvider {
                     .with_platform(Platform::Qq),
             );
         }
-        validate_qq_public_account(request.account.as_deref(), "QQ search suggestions")?;
+        self.validate_public_account(request.account.as_deref())?;
         match request.client {
             SearchSuggestionClient::Mobile => {
                 let search_id = generate_search_id()?;
@@ -613,7 +692,7 @@ impl MusicProvider for QqProvider {
         &self,
         request: &SearchTrendingRequest,
     ) -> Result<SearchTrendingList> {
-        validate_qq_public_account(request.account.as_deref(), "QQ trending searches")?;
+        self.validate_public_account(request.account.as_deref())?;
         let search_id = generate_search_id()?;
         let response = self
             .client
@@ -626,7 +705,7 @@ impl MusicProvider for QqProvider {
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
-        validate_qq_public_account(account, "QQ track detail")?;
+        self.validate_public_account(account)?;
         let (request, identifier) = song_detail_request(id)?;
         let response = self
             .client
@@ -639,7 +718,7 @@ impl MusicProvider for QqProvider {
     }
 
     async fn tracks(&self, ids: &[String], account: Option<&str>) -> Result<Vec<Track>> {
-        validate_qq_public_account(account, "QQ track details")?;
+        self.validate_public_account(account)?;
         let (request, identifiers) = query_song_request(ids)?;
         let response = self
             .client
@@ -667,7 +746,7 @@ impl MusicProvider for QqProvider {
     }
 
     async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
-        validate_qq_public_account(account, "QQ audio CDN dispatch")?;
+        self.validate_public_account(account)?;
         let (request, guid) = cdn_dispatch_request();
         let response = self
             .client
@@ -693,9 +772,125 @@ impl MusicProvider for QqProvider {
             .ok_or_else(|| qq_data_error("QQ song URL service returned no response"))?;
         map_song_urls_response(&prepared, default_spec, &guid, response)
     }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        let resolution = self.resolve_audio(track, request, true).await?;
+        let selected_index = resolution
+            .selected_index
+            .ok_or_else(|| qq_stream_unavailable(request, &resolution.files))?;
+        let candidate = &resolution.candidates[selected_index];
+        let file = &resolution.files.files[selected_index];
+        let dispatch = resolution.dispatch.as_ref().ok_or_else(|| {
+            qq_data_error("QQ resolved an audio file without CDN dispatch metadata")
+        })?;
+        let url = resolution.url.ok_or_else(|| {
+            qq_data_error("QQ resolved an audio file without an absolute media URL")
+        })?;
+        Ok(MediaStream {
+            url,
+            backup_urls: resolution.backup_urls,
+            headers: BTreeMap::new(),
+            expires_at: qq_expiration_rfc3339(
+                resolution
+                    .files
+                    .expires_in_seconds
+                    .min(dispatch.expires_in_seconds),
+            ),
+            format: Some(file.format.clone()),
+            codec: Some(file.codec.clone()),
+            bitrate: file.bitrate,
+            size: candidate.size.filter(|size| *size > 0),
+            duration_ms: track.duration_ms.filter(|duration| *duration > 0),
+            requested_quality: request.quality,
+            actual_quality: file.quality.unwrap_or(request.quality),
+            trial: candidate.trial.clone(),
+            origin_track: Some(track.resource_ref.clone()),
+            resolved_track: track.resource_ref.clone(),
+            resolved_platform: Platform::Qq,
+            match_score: Some(1.0),
+            attempts: Vec::new(),
+        })
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        let resolution = self.resolve_audio(track, request, false).await?;
+        let selected = resolution.selected_index.map(|index| {
+            (
+                &resolution.candidates[index],
+                &resolution.files.files[index],
+            )
+        });
+        let fallback = resolution
+            .files
+            .files
+            .first()
+            .zip(resolution.candidates.first());
+        let (file, candidate) = selected
+            .map(|(candidate, file)| (Some(file), Some(candidate)))
+            .or_else(|| fallback.map(|(file, candidate)| (Some(file), Some(candidate))))
+            .unwrap_or((None, None));
+        let available = selected.is_some() && resolution.url.is_some();
+        let expires_in_seconds =
+            resolution
+                .dispatch
+                .as_ref()
+                .map_or(resolution.files.expires_in_seconds, |dispatch| {
+                    resolution
+                        .files
+                        .expires_in_seconds
+                        .min(dispatch.expires_in_seconds)
+                });
+        let mut extensions = Extensions::from([
+            ("variant".to_owned(), json!(request.variant)),
+            ("bitrate".to_owned(), json!(request.bitrate)),
+            ("immersive_type".to_owned(), json!(request.immersive_type)),
+            ("authorization".to_owned(), json!(resolution.files)),
+            ("cdn_dispatch".to_owned(), json!(resolution.dispatch)),
+        ]);
+        if let Some(candidate) = candidate {
+            extensions.insert("selected_spec".to_owned(), json!(candidate.spec.name));
+            extensions.insert("trial".to_owned(), json!(candidate.trial));
+        }
+        if let Some(pay) = track.extensions.get("pay") {
+            extensions.insert("pay".to_owned(), pay.clone());
+        }
+        Ok(MediaDownload {
+            track_ref: track.resource_ref.clone(),
+            platform: Platform::Qq,
+            available,
+            url: resolution.url,
+            headers: BTreeMap::new(),
+            expires_at: available
+                .then(|| qq_expiration_rfc3339(expires_in_seconds))
+                .flatten(),
+            format: file.map(|file| file.format.clone()),
+            codec: file.map(|file| file.codec.clone()),
+            bitrate: file.and_then(|file| file.bitrate),
+            size: candidate.and_then(|candidate| candidate.size.filter(|size| *size > 0)),
+            duration_ms: track.duration_ms.filter(|duration| *duration > 0),
+            requested_quality: request.quality,
+            actual_quality: file
+                .and_then(|file| file.quality)
+                .unwrap_or(request.quality),
+            platform_code: file.map(|file| file.platform_code),
+            fee: None,
+            message: (!available).then(|| "QQ did not return a downloadable file".to_owned()),
+            extensions,
+        })
+    }
 }
 
 impl QqProvider {
+    fn validate_public_account(&self, account: Option<&str>) -> Result<()> {
+        let Some(account) = account
+            .map(str::trim)
+            .filter(|account| !account.is_empty() && *account != "default")
+        else {
+            return Ok(());
+        };
+        self.qq_credential(Some(account)).map(|_| ())
+    }
+
     fn qq_credential(&self, account: Option<&str>) -> Result<Option<QqCredential>> {
         let Some(account) = account.map(str::trim).filter(|account| !account.is_empty()) else {
             return Ok(None);
@@ -833,8 +1028,82 @@ impl QqProvider {
             .collect()
     }
 
+    async fn resolve_audio(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+        include_trial: bool,
+    ) -> Result<QqAudioResolution> {
+        validate_qq_stream_track(track)?;
+        let metadata = qq_track_audio_metadata(track)?;
+        let candidates = qq_playable_candidates_from_metadata(&metadata, request, include_trial)?;
+        if candidates.is_empty() {
+            let _ = self.qq_credential(request.account.as_deref())?;
+            return Ok(QqAudioResolution {
+                candidates,
+                files: AudioFileBatch {
+                    expires_in_seconds: 0,
+                    files: Vec::new(),
+                    extensions: Extensions::from([(
+                        "selection".to_owned(),
+                        json!("no_matching_file_metadata"),
+                    )]),
+                },
+                dispatch: None,
+                selected_index: None,
+                url: None,
+                backup_urls: Vec::new(),
+            });
+        }
+        let files = self
+            .audio_files(&AudioFileRequest {
+                items: candidates
+                    .iter()
+                    .map(|candidate| AudioFileRequestItem {
+                        track_ref: track.resource_ref.clone(),
+                        spec: Some(candidate.spec.name.to_owned()),
+                        song_type: metadata.song_type,
+                        media_id: candidate.media_id.clone(),
+                    })
+                    .collect(),
+                default_spec: Some(candidates[0].spec.name.to_owned()),
+                account: request.account.clone(),
+            })
+            .await?;
+        if files.files.len() != candidates.len() {
+            return Err(qq_data_error(
+                "QQ audio authorization did not preserve candidate cardinality",
+            ));
+        }
+        let selected_index = files.files.iter().position(|file| file.available);
+        let Some(selected_index) = selected_index else {
+            return Ok(QqAudioResolution {
+                candidates,
+                files,
+                dispatch: None,
+                selected_index: None,
+                url: None,
+                backup_urls: Vec::new(),
+            });
+        };
+        let relative_url = files.files[selected_index]
+            .relative_url
+            .as_deref()
+            .ok_or_else(|| qq_data_error("QQ available audio file is missing its relative URL"))?;
+        let dispatch = self.audio_cdn_dispatch(None).await?;
+        let (url, backup_urls) = qq_cdn_media_urls(&dispatch.roots, relative_url)?;
+        Ok(QqAudioResolution {
+            candidates,
+            files,
+            dispatch: Some(dispatch),
+            selected_index: Some(selected_index),
+            url: Some(url),
+            backup_urls,
+        })
+    }
+
     async fn qq_lyrics(&self, id: &str, options: &LyricsRequest) -> Result<Lyrics> {
-        validate_qq_public_account(options.account.as_deref(), "QQ lyrics")?;
+        self.validate_public_account(options.account.as_deref())?;
         let (request, identifier) = lyric_request(id, options)?;
         let response = self
             .client
@@ -851,6 +1120,7 @@ impl QqProvider {
         query: &SearchQuery,
         spec: TypedSearchSpec,
     ) -> Result<TypedSearchBatch> {
+        self.validate_public_account(query.account.as_deref())?;
         let keyword = validate_search_query(query)?;
         let limit = query.limit.clamp(1, 100);
         let search_id = query
@@ -901,35 +1171,7 @@ fn validate_search_query(query: &SearchQuery) -> Result<&str> {
         .with_platform(Platform::Qq)
         .with_details(json!({ "variant": query.variant })));
     }
-    if let Some(account) = query
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty())
-    {
-        return Err(TuneWeaveError::new(
-            ErrorCode::AuthenticationRequired,
-            "QQ account selection is not available before QQ login is configured",
-        )
-        .with_platform(Platform::Qq)
-        .with_details(json!({ "account": account })));
-    }
     Ok(keyword)
-}
-
-fn validate_qq_public_account(account: Option<&str>, context: &str) -> Result<()> {
-    let Some(account) = account
-        .map(str::trim)
-        .filter(|account| !account.is_empty() && *account != "default")
-    else {
-        return Ok(());
-    };
-    Err(TuneWeaveError::new(
-        ErrorCode::AuthenticationRequired,
-        format!("{context} cannot select a QQ account before QQ login is configured"),
-    )
-    .with_platform(Platform::Qq)
-    .with_details(json!({ "account": account })))
 }
 
 fn typed_search_request(
@@ -3043,6 +3285,466 @@ fn map_album_summary(raw: &Value) -> Result<Option<AlbumSummary>> {
     }))
 }
 
+fn validate_qq_stream_track(track: &Track) -> Result<()> {
+    if track.platform != Platform::Qq
+        || track.resource_ref.platform() != Platform::Qq
+        || track.resource_ref.id() != track.id
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ provider can only resolve consistent QQ tracks",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "track_ref": track.resource_ref, "track_id": track.id })));
+    }
+    validate_qq_media_id(track.resource_ref.id(), "song MID")
+}
+
+fn qq_track_audio_metadata(track: &Track) -> Result<QqTrackAudioMetadata> {
+    let file = match track.extensions.get("file") {
+        None | Some(Value::Null) => QqTrackFileMetadata::default(),
+        Some(Value::Object(file)) => QqTrackFileMetadata {
+            media_id: qq_metadata_string(file.get("media_mid"), "file.media_mid")?,
+            size_dolby: qq_metadata_u64(file.get("size_dolby"), "file.size_dolby")?,
+            size_flac: qq_metadata_u64(file.get("size_flac"), "file.size_flac")?,
+            size_192_ogg: qq_metadata_u64(file.get("size_192ogg"), "file.size_192ogg")?,
+            size_96_ogg: qq_metadata_u64(file.get("size_96ogg"), "file.size_96ogg")?,
+            size_320_mp3: qq_metadata_u64(file.get("size_320mp3"), "file.size_320mp3")?,
+            size_128_mp3: qq_metadata_u64(file.get("size_128mp3"), "file.size_128mp3")?,
+            size_192_aac: qq_metadata_u64(file.get("size_192aac"), "file.size_192aac")?,
+            size_96_aac: qq_metadata_u64(file.get("size_96aac"), "file.size_96aac")?,
+            size_48_aac: qq_metadata_u64(file.get("size_48aac"), "file.size_48aac")?,
+            size_trial: qq_metadata_u64(file.get("size_try"), "file.size_try")?,
+            modern_sizes: qq_metadata_u64_array(file.get("size_new"), "file.size_new")?,
+            trial_start_ms: qq_metadata_u64(file.get("try_begin"), "file.try_begin")?,
+            trial_end_ms: qq_metadata_u64(file.get("try_end"), "file.try_end")?,
+        },
+        Some(_) => return Err(qq_data_error("QQ track file metadata is not an object")),
+    };
+    let search_item = match track.extensions.get("search_item") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(item)) => Some(item),
+        Some(_) => return Err(qq_data_error("QQ track search metadata is not an object")),
+    };
+    let extension_song_type =
+        qq_metadata_i64(track.extensions.get("song_type"), "extensions.song_type")?;
+    let raw_song_type = qq_metadata_i64(
+        search_item.and_then(|item| item.get("type")),
+        "search_item.type",
+    )?;
+    if let (Some(extension), Some(raw)) = (extension_song_type, raw_song_type)
+        && extension != raw
+    {
+        return Err(qq_data_error(
+            "QQ track song type conflicts with its preserved source metadata",
+        ));
+    }
+    let extension_media_id =
+        qq_metadata_string(track.extensions.get("media_mid"), "extensions.media_mid")?;
+    if let (Some(extension), Some(file_media_id)) =
+        (extension_media_id.as_deref(), file.media_id.as_deref())
+        && extension != file_media_id
+    {
+        return Err(qq_data_error(
+            "QQ track media MID conflicts with its file metadata",
+        ));
+    }
+    let media_id = extension_media_id.or_else(|| file.media_id.clone());
+    if let Some(media_id) = media_id.as_deref() {
+        validate_qq_media_id(media_id, "media MID")?;
+    }
+    let version_media_ids = qq_metadata_string_array(
+        search_item.and_then(|item| item.get("vs")),
+        "search_item.vs",
+    )?;
+    Ok(QqTrackAudioMetadata {
+        song_type: extension_song_type.or(raw_song_type),
+        media_id,
+        file,
+        version_media_ids,
+        variant_info: qq_metadata_i64_array(
+            search_item.and_then(|item| item.get("vi")),
+            "search_item.vi",
+        )?,
+    })
+}
+
+fn qq_metadata_u64(value: Option<&Value>, context: &str) -> Result<Option<u64>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => json_u64(value).map(Some).ok_or_else(|| {
+            qq_data_error(format!("QQ {context} metadata is not an unsigned integer"))
+        }),
+    }
+}
+
+fn qq_metadata_i64(value: Option<&Value>, context: &str) -> Result<Option<i64>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => json_i64(value)
+            .map(Some)
+            .ok_or_else(|| qq_data_error(format!("QQ {context} metadata is not an integer"))),
+    }
+}
+
+fn qq_metadata_string(value: Option<&Value>, context: &str) -> Result<Option<String>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            Ok((!value.trim().is_empty()).then(|| value.trim().to_owned()))
+        }
+        Some(_) => Err(qq_data_error(format!(
+            "QQ {context} metadata is not a string"
+        ))),
+    }
+}
+
+fn qq_metadata_u64_array(value: Option<&Value>, context: &str) -> Result<Vec<Option<u64>>> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| qq_metadata_u64(Some(value), &format!("{context}[{index}]")))
+            .collect(),
+        Some(_) => Err(qq_data_error(format!(
+            "QQ {context} metadata is not an array"
+        ))),
+    }
+}
+
+fn qq_metadata_string_array(value: Option<&Value>, context: &str) -> Result<Vec<Option<String>>> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| qq_metadata_string(Some(value), &format!("{context}[{index}]")))
+            .collect(),
+        Some(_) => Err(qq_data_error(format!(
+            "QQ {context} metadata is not an array"
+        ))),
+    }
+}
+
+fn qq_metadata_i64_array(value: Option<&Value>, context: &str) -> Result<Vec<Option<i64>>> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| qq_metadata_i64(Some(value), &format!("{context}[{index}]")))
+            .collect(),
+        Some(_) => Err(qq_data_error(format!(
+            "QQ {context} metadata is not an array"
+        ))),
+    }
+}
+
+#[cfg(test)]
+fn qq_playable_candidates(
+    track: &Track,
+    request: &StreamRequest,
+    include_trial: bool,
+) -> Result<Vec<QqPlayableCandidate>> {
+    let metadata = qq_track_audio_metadata(track)?;
+    qq_playable_candidates_from_metadata(&metadata, request, include_trial)
+}
+
+fn qq_playable_candidates_from_metadata(
+    metadata: &QqTrackAudioMetadata,
+    request: &StreamRequest,
+    include_trial: bool,
+) -> Result<Vec<QqPlayableCandidate>> {
+    let names = qq_requested_audio_specs(request)?;
+    let mut candidates = names
+        .into_iter()
+        .map(|name| qq_playable_candidate(metadata, name, false))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if include_trial {
+        let trial_specs: &[&str] = match (request.bitrate, request.quality) {
+            (Some(128_000), _) | (None, Quality::Standard) => &["trial"],
+            (Some(640_000), _) | (None, Quality::Lossless) => &["trial_ogg_640"],
+            (None, Quality::Auto) => &["trial_ogg_640", "trial"],
+            _ => &[],
+        };
+        for name in trial_specs {
+            if let Some(candidate) = qq_playable_candidate(metadata, name, true)? {
+                candidates.push(candidate);
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn qq_requested_audio_specs(request: &StreamRequest) -> Result<Vec<&'static str>> {
+    if let Some(bitrate) = request.bitrate {
+        let specs = match bitrate {
+            48_000 => &["aac_48"][..],
+            96_000 => &["aac_96", "ogg_96"][..],
+            128_000 => &["mp3_128"][..],
+            192_000 => &["ogg_192", "aac_192"][..],
+            320_000 => &["ogg_320", "mp3_320"][..],
+            640_000 => &["ogg_640"][..],
+            _ => {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ bitrate must be one of 48000, 96000, 128000, 192000, 320000, or 640000 bit/s",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "bitrate": bitrate })));
+            }
+        };
+        return Ok(specs.to_vec());
+    }
+    let specs = match request.quality {
+        Quality::Auto => &[
+            "ogg_320", "mp3_320", "ogg_192", "aac_192", "mp3_128", "aac_96", "ogg_96", "aac_48",
+        ][..],
+        Quality::Low => &["aac_96", "ogg_96", "aac_48"][..],
+        Quality::Standard => &["mp3_128"][..],
+        Quality::Higher => &["ogg_192", "aac_192"][..],
+        Quality::High => &["ogg_320", "mp3_320"][..],
+        Quality::Lossless => &["flac", "ogg_640"][..],
+        Quality::Hires => &["atmos_2", "nac"][..],
+        Quality::Surround => &["dts_x"][..],
+        Quality::Spatial => match request.immersive_type {
+            None => &["atmos_7_1", "atmos_5_1"][..],
+            Some(ImmersiveAudioType::C51) => &["atmos_5_1"][..],
+            Some(ImmersiveAudioType::Ste) => &["atmos_2"][..],
+            Some(ImmersiveAudioType::Aac) => {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ spatial audio does not expose an AAC immersive variant",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "immersive_type": request.immersive_type })));
+            }
+        },
+        Quality::Dolby => &["dolby_atmos"][..],
+        Quality::Master => &["master"][..],
+    };
+    Ok(specs.to_vec())
+}
+
+fn qq_playable_candidate(
+    metadata: &QqTrackAudioMetadata,
+    name: &str,
+    trial: bool,
+) -> Result<Option<QqPlayableCandidate>> {
+    let spec = parse_qq_audio_file_spec(Some(name))?;
+    if spec.encrypted {
+        return Err(qq_data_error(
+            "QQ unified playback cannot select an encrypted audio file",
+        ));
+    }
+    let size = qq_audio_spec_size(&metadata.file, spec.name);
+    if size == Some(0) {
+        return Ok(None);
+    }
+    let media_id = qq_audio_spec_media_id(metadata, spec.name);
+    let trial_window = trial.then(|| qq_trial_window(metadata)).flatten();
+    if trial && (media_id.is_none() || trial_window.is_none()) {
+        return Ok(None);
+    }
+    Ok(Some(QqPlayableCandidate {
+        spec,
+        media_id,
+        size,
+        trial: trial_window,
+    }))
+}
+
+fn qq_audio_spec_size(file: &QqTrackFileMetadata, spec: &str) -> Option<u64> {
+    match spec {
+        "dolby_atmos" => return file.size_dolby,
+        "flac" => return file.size_flac,
+        "ogg_192" => return file.size_192_ogg,
+        "ogg_96" => return file.size_96_ogg,
+        "mp3_320" => return file.size_320_mp3,
+        "mp3_128" => return file.size_128_mp3,
+        "aac_192" => return file.size_192_aac,
+        "aac_96" => return file.size_96_aac,
+        "aac_48" => return file.size_48_aac,
+        "trial" => return file.size_trial,
+        _ => {}
+    }
+    let index = match spec {
+        "master" => Some(0),
+        "atmos_2" => Some(1),
+        "atmos_5_1" => Some(2),
+        "ogg_320" => Some(3),
+        "ogg_640" | "trial_ogg_640" => Some(5),
+        "atmos_7_1" => Some(6),
+        "nac" => Some(7),
+        "dts_x" => Some(9),
+        _ => None,
+    }?;
+    file.modern_sizes.get(index).copied().flatten()
+}
+
+fn qq_audio_spec_media_id(metadata: &QqTrackAudioMetadata, spec: &str) -> Option<String> {
+    let vs_index = match spec {
+        "trial" => Some(0),
+        "master" => Some(3),
+        "atmos_2" => Some(4),
+        "trial_ogg_640" => Some(23),
+        "atmos_7_1" => Some(24),
+        "nac" => Some(28),
+        "dts_x" => Some(30),
+        _ => None,
+    };
+    let version = vs_index
+        .and_then(|index| metadata.version_media_ids.get(index))
+        .cloned()
+        .flatten();
+    if matches!(spec, "trial" | "trial_ogg_640") {
+        version
+    } else {
+        version.or_else(|| metadata.media_id.clone())
+    }
+}
+
+fn qq_trial_window(metadata: &QqTrackAudioMetadata) -> Option<TrialWindow> {
+    let start_ms = metadata.file.trial_start_ms.or_else(|| {
+        metadata
+            .variant_info
+            .get(4)
+            .copied()
+            .flatten()
+            .and_then(|value| u64::try_from(value).ok())
+    })?;
+    let end_ms = metadata.file.trial_end_ms.or_else(|| {
+        metadata
+            .variant_info
+            .get(5)
+            .copied()
+            .flatten()
+            .and_then(|value| u64::try_from(value).ok())
+    })?;
+    (end_ms > start_ms).then_some(TrialWindow { start_ms, end_ms })
+}
+
+fn qq_cdn_media_urls(roots: &[String], relative_url: &str) -> Result<(String, Vec<String>)> {
+    let urls = roots
+        .iter()
+        .map(|root| qq_join_cdn_url(root, relative_url))
+        .collect::<Result<Vec<_>>>()?;
+    let primary_index = urls
+        .iter()
+        .position(|url| url.starts_with("https://"))
+        .unwrap_or(0);
+    let primary = urls
+        .get(primary_index)
+        .cloned()
+        .ok_or_else(|| qq_data_error("QQ CDN dispatch returned no media URL roots"))?;
+    let backup_urls = urls
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, url)| (index != primary_index).then_some(url))
+        .collect();
+    Ok((primary, backup_urls))
+}
+
+fn qq_join_cdn_url(root: &str, relative_url: &str) -> Result<String> {
+    let mut root = reqwest::Url::parse(root)
+        .map_err(|_| qq_data_error("QQ CDN root could not be parsed while resolving audio"))?;
+    let expected_scheme = root.scheme().to_owned();
+    let expected_host = root.host_str().map(str::to_owned);
+    let expected_port = root.port_or_known_default();
+    if !root.path().ends_with('/') {
+        let path = format!("{}/", root.path());
+        root.set_path(&path);
+    }
+    let url = root
+        .join(relative_url)
+        .map_err(|_| qq_data_error("QQ relative audio URL could not be joined to its CDN root"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.scheme() != expected_scheme
+        || url.host_str() != expected_host.as_deref()
+        || url.port_or_known_default() != expected_port
+    {
+        return Err(qq_data_error(
+            "QQ audio authorization produced an unsafe absolute media URL",
+        ));
+    }
+    Ok(url.to_string())
+}
+
+fn qq_stream_unavailable(request: &StreamRequest, files: &AudioFileBatch) -> TuneWeaveError {
+    let codes = files
+        .files
+        .iter()
+        .map(|file| file.platform_code)
+        .collect::<Vec<_>>();
+    let authenticated = request
+        .account
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|account| !account.is_empty() && account != "default");
+    let code = if files.files.is_empty() {
+        ErrorCode::ResourceNotFound
+    } else if codes.contains(&104013) {
+        ErrorCode::PermissionDenied
+    } else if codes.contains(&104003) {
+        if authenticated {
+            ErrorCode::PermissionDenied
+        } else {
+            ErrorCode::AuthenticationRequired
+        }
+    } else {
+        ErrorCode::UpstreamError
+    };
+    TuneWeaveError::new(code, "QQ did not return a playable audio file")
+        .with_platform(Platform::Qq)
+        .retryable(code == ErrorCode::UpstreamError)
+        .with_details(json!({
+            "requested_quality": request.quality,
+            "bitrate": request.bitrate,
+            "immersive_type": request.immersive_type,
+            "files": files.files.iter().map(|file| json!({
+                "spec": file.spec,
+                "platform_code": file.platform_code,
+                "available": file.available
+            })).collect::<Vec<_>>()
+        }))
+}
+
+fn qq_expiration_rfc3339(expires_in_seconds: u64) -> Option<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    qq_unix_rfc3339(now.checked_add(expires_in_seconds)?)
+}
+
+fn qq_unix_rfc3339(timestamp: u64) -> Option<String> {
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds = timestamp % 86_400;
+    let z = days.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
 fn map_available_qualities(file: &Value) -> Vec<Quality> {
     let mut qualities = Vec::new();
     push_quality(
@@ -3060,23 +3762,35 @@ fn map_available_qualities(file: &Value) -> Vec<Quality> {
     );
     push_quality(
         &mut qualities,
-        Quality::High,
-        any_positive(file, &["size_192ogg", "size_192aac", "size_320mp3"]),
+        Quality::Higher,
+        any_positive(file, &["size_192ogg", "size_192aac"]),
     );
     push_quality(
         &mut qualities,
-        Quality::Lossless,
-        any_positive(file, &["size_flac"]),
+        Quality::High,
+        any_positive(file, &["size_320mp3"]),
     );
     let modern = file
         .get("size_new")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
+    push_quality(&mut qualities, Quality::High, positive_index(modern, 3));
+    push_quality(
+        &mut qualities,
+        Quality::Lossless,
+        any_positive(file, &["size_flac"]) || positive_index(modern, 5),
+    );
+    push_quality(&mut qualities, Quality::Hires, positive_index(modern, 1));
     push_quality(&mut qualities, Quality::Master, positive_index(modern, 0));
     push_quality(
         &mut qualities,
         Quality::Surround,
+        any_positive(file, &["size_dts"]) || positive_index(modern, 9),
+    );
+    push_quality(
+        &mut qualities,
+        Quality::Spatial,
         positive_index(modern, 2) || positive_index(modern, 6),
     );
     push_quality(
@@ -3337,7 +4051,211 @@ mod tests {
         assert!(track.available_qualities.contains(&Quality::High));
         assert!(track.available_qualities.contains(&Quality::Lossless));
         assert!(track.available_qualities.contains(&Quality::Master));
-        assert!(track.available_qualities.contains(&Quality::Surround));
+        assert!(track.available_qualities.contains(&Quality::Spatial));
+        assert!(!track.available_qualities.contains(&Quality::Surround));
+    }
+
+    #[test]
+    fn unified_audio_candidates_prioritize_common_formats_and_preserve_trial_metadata() {
+        let mut raw = sample_track(97_773, "0039MnYb0qxYhV", "晴天");
+        raw["file"]["size_192ogg"] = json!(1_920);
+        raw["file"]["size_192aac"] = json!(1_921);
+        raw["file"]["size_96aac"] = json!(960);
+        raw["file"]["size_96ogg"] = json!(961);
+        raw["file"]["size_48aac"] = json!(480);
+        raw["file"]["size_try"] = json!(300);
+        raw["file"]["try_begin"] = json!(1_000);
+        raw["file"]["try_end"] = json!(31_000);
+        raw["file"]["size_new"] = json!([4, 0, 5, 3_200, 0, 6_400, 7_100]);
+        let mut versions = vec![json!(""); 31];
+        versions[0] = json!("TrialMediaMid01");
+        versions[23] = json!("TrialOggMedia23");
+        versions[24] = json!("SpatialMedia024");
+        raw["vs"] = Value::Array(versions);
+        raw["vi"] = json!([0, 0, 0, 0, 1_000, 31_000]);
+        let track = map_track(raw).expect("map track");
+
+        let auto = qq_playable_candidates(&track, &StreamRequest::default(), true)
+            .expect("auto candidates");
+        assert_eq!(
+            auto.iter()
+                .map(|candidate| candidate.spec.name)
+                .collect::<Vec<_>>(),
+            [
+                "ogg_320",
+                "mp3_320",
+                "ogg_192",
+                "aac_192",
+                "mp3_128",
+                "aac_96",
+                "ogg_96",
+                "aac_48",
+                "trial_ogg_640",
+                "trial"
+            ]
+        );
+        let trial = auto.last().expect("trial candidate");
+        assert_eq!(trial.media_id.as_deref(), Some("TrialMediaMid01"));
+        assert_eq!(
+            trial.trial,
+            Some(TrialWindow {
+                start_ms: 1_000,
+                end_ms: 31_000
+            })
+        );
+
+        let lossless = qq_playable_candidates(
+            &track,
+            &StreamRequest {
+                quality: Quality::Lossless,
+                ..StreamRequest::default()
+            },
+            false,
+        )
+        .expect("lossless candidates");
+        assert_eq!(
+            lossless
+                .iter()
+                .map(|candidate| candidate.spec.name)
+                .collect::<Vec<_>>(),
+            ["flac", "ogg_640"]
+        );
+        assert!(lossless.iter().all(|candidate| candidate.trial.is_none()));
+    }
+
+    #[test]
+    fn unified_audio_metadata_is_typed_and_rejects_conflicting_or_malformed_fields() {
+        let mut raw = sample_track(97_773, "0039MnYb0qxYhV", "晴天");
+        raw["vi"] = json!([-1, 0, 0, 0, 1_000, 31_000]);
+        let track = map_track(raw.clone()).expect("map typed metadata track");
+        let metadata = qq_track_audio_metadata(&track).expect("typed audio metadata");
+        assert_eq!(metadata.song_type, Some(1));
+        assert_eq!(metadata.variant_info[0], Some(-1));
+        assert_eq!(metadata.media_id.as_deref(), Some("003Qui1q2u1Zho"));
+
+        let mut malformed = raw.clone();
+        malformed["file"]["size_new"] = json!({"unexpected": true});
+        let malformed = map_track(malformed).expect("map raw track");
+        assert!(qq_track_audio_metadata(&malformed).is_err());
+
+        let mut conflict = map_track(raw).expect("map conflicting track");
+        conflict
+            .extensions
+            .insert("media_mid".to_owned(), json!("DifferentMediaMid"));
+        assert!(qq_track_audio_metadata(&conflict).is_err());
+    }
+
+    #[test]
+    fn unified_audio_selection_is_exact_for_bitrate_and_spatial_variants() {
+        let track = map_track(sample_track(97_773, "0039MnYb0qxYhV", "晴天")).expect("map track");
+        let exact = qq_requested_audio_specs(&StreamRequest {
+            quality: Quality::Auto,
+            bitrate: Some(192_000),
+            ..StreamRequest::default()
+        })
+        .expect("exact bitrate");
+        assert_eq!(exact, ["ogg_192", "aac_192"]);
+
+        let c51 = qq_requested_audio_specs(&StreamRequest {
+            quality: Quality::Spatial,
+            immersive_type: Some(ImmersiveAudioType::C51),
+            ..StreamRequest::default()
+        })
+        .expect("5.1 spatial variant");
+        assert_eq!(c51, ["atmos_5_1"]);
+        let ste = qq_requested_audio_specs(&StreamRequest {
+            quality: Quality::Spatial,
+            immersive_type: Some(ImmersiveAudioType::Ste),
+            ..StreamRequest::default()
+        })
+        .expect("stereo spatial variant");
+        assert_eq!(ste, ["atmos_2"]);
+        assert!(
+            qq_requested_audio_specs(&StreamRequest {
+                quality: Quality::Spatial,
+                immersive_type: Some(ImmersiveAudioType::Aac),
+                ..StreamRequest::default()
+            })
+            .is_err()
+        );
+        assert!(
+            qq_requested_audio_specs(&StreamRequest {
+                bitrate: Some(192_123),
+                ..StreamRequest::default()
+            })
+            .is_err()
+        );
+        assert_eq!(track.platform, Platform::Qq);
+    }
+
+    #[test]
+    fn unified_audio_urls_prefer_https_and_preserve_duplicate_backups() {
+        let roots = vec![
+            "http://cdn-a.example.test/base".to_owned(),
+            "https://cdn-b.example.test/base/".to_owned(),
+            "https://cdn-b.example.test/base/".to_owned(),
+        ];
+        let (url, backups) = qq_cdn_media_urls(&roots, "M5000039MnYb0qxYhV.mp3?vkey=temporary")
+            .expect("join CDN URLs");
+        assert_eq!(
+            url,
+            "https://cdn-b.example.test/base/M5000039MnYb0qxYhV.mp3?vkey=temporary"
+        );
+        assert_eq!(backups.len(), 2);
+        assert_eq!(
+            backups[0],
+            "http://cdn-a.example.test/base/M5000039MnYb0qxYhV.mp3?vkey=temporary"
+        );
+        assert_eq!(backups[1], url);
+        assert!(qq_join_cdn_url(&roots[0], "//attacker.example/file").is_err());
+    }
+
+    #[test]
+    fn unified_audio_unavailable_keeps_auth_permission_and_transport_distinct() {
+        let request = StreamRequest::default();
+        let batch = |platform_code| AudioFileBatch {
+            expires_in_seconds: 7_200,
+            files: vec![AudioFileAccess {
+                track_ref: qq_ref("0039MnYb0qxYhV", "track").expect("ref"),
+                spec: "mp3_128".to_owned(),
+                filename: "M5000039MnYb0qxYhV.mp3".to_owned(),
+                relative_url: None,
+                access_token: None,
+                decryption_key: None,
+                available: false,
+                encrypted: false,
+                format: "mp3".to_owned(),
+                codec: "mp3".to_owned(),
+                bitrate: Some(128_000),
+                quality: Some(Quality::Standard),
+                platform_code,
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        assert_eq!(
+            qq_stream_unavailable(&request, &batch(104003)).code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert_eq!(
+            qq_stream_unavailable(
+                &StreamRequest {
+                    account: Some("green-vip".to_owned()),
+                    ..StreamRequest::default()
+                },
+                &batch(104003)
+            )
+            .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            qq_stream_unavailable(&request, &batch(104013)).code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            qq_stream_unavailable(&request, &batch(104004)).code,
+            ErrorCode::UpstreamError
+        );
     }
 
     #[test]
@@ -3760,7 +4678,7 @@ mod tests {
 
     #[test]
     fn audio_file_specs_cover_every_sdk_variant_and_web_integer_mapping() {
-        assert_eq!(QQ_AUDIO_FILE_SPECS.len(), 45);
+        assert_eq!(QQ_AUDIO_FILE_SPECS.len(), 48);
         let names = QQ_AUDIO_FILE_SPECS
             .iter()
             .map(|spec| spec.name)
@@ -3782,9 +4700,21 @@ mod tests {
         );
         assert_eq!(
             parse_qq_audio_file_spec(Some("44"))
-                .expect("SDK extension")
+                .expect("special SDK extension")
                 .name,
             "trial_ogg_640"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("45"))
+                .expect("ringtone index")
+                .name,
+            "ring_128"
+        );
+        assert_eq!(
+            parse_qq_audio_file_spec(Some("RING_48"))
+                .expect("ringtone name")
+                .name,
+            "ring_48"
         );
         assert_eq!(
             parse_qq_audio_file_spec(Some("ACC_96"))
@@ -3816,7 +4746,7 @@ mod tests {
                 .name,
             "music_box"
         );
-        assert!(parse_qq_audio_file_spec(Some("45")).is_err());
+        assert!(parse_qq_audio_file_spec(Some("48")).is_err());
         assert!(parse_qq_audio_file_spec(Some("future_codec")).is_err());
         assert!(parse_qq_audio_file_spec(Some(" ")).is_err());
     }
@@ -5018,7 +5948,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live QQ Music services"]
-    async fn live_song_urls_cover_normal_encrypted_and_every_special_file_spec() {
+    async fn live_song_urls_cover_every_public_file_spec_family() {
         let provider = QqProvider::new(QqConfig {
             device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
             ..QqConfig::default()
@@ -5029,6 +5959,7 @@ mod tests {
             (0..17, "mp3_128"),
             (17..30, "encrypted_flac"),
             (30..45, "trial"),
+            (45..48, "ring_128"),
         ] {
             let specs = &QQ_AUDIO_FILE_SPECS[range];
             let batch = provider
@@ -5063,6 +5994,58 @@ mod tests {
             }
             assert_eq!(batch.extensions["response"]["code"], 0);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_unified_stream_and_download_join_authorization_to_cdn_dispatch() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let track = provider
+            .track("003w2xz20QlUZt", None)
+            .await
+            .expect("track detail");
+        let request = StreamRequest::default();
+        let stream = provider
+            .stream(&track, &request)
+            .await
+            .expect("unified stream");
+        assert!(stream.url.starts_with("https://"));
+        assert_eq!(stream.resolved_track, track.resource_ref);
+        assert_eq!(stream.resolved_platform, Platform::Qq);
+        assert_eq!(stream.requested_quality, Quality::Auto);
+        assert!(stream.format.is_some());
+        assert!(stream.expires_at.is_some());
+
+        let download = provider
+            .download(
+                &track,
+                &StreamRequest {
+                    quality: Quality::Lossless,
+                    ..StreamRequest::default()
+                },
+            )
+            .await
+            .expect("unified download");
+        assert!(download.available);
+        assert!(
+            download
+                .url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://"))
+        );
+        assert_eq!(download.track_ref, track.resource_ref);
+        assert_eq!(
+            download.extensions["authorization"]["extensions"]["response"]["code"],
+            0
+        );
+        assert_eq!(
+            download.extensions["cdn_dispatch"]["extensions"]["response"]["code"],
+            0
+        );
     }
 
     #[tokio::test]

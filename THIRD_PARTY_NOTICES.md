@@ -26,7 +26,7 @@ future ports can be audited precisely.
 ## L-1124/QQMusicApi
 
 - Source: https://github.com/L-1124/QQMusicApi
-- Reviewed commit: `1b0aae0db3ee6876b3a77b8d1ce3057b4b3c9cd5`
+- Reviewed commit: `261326eec051e7f444296b5c461e7412c4b25bb9`
 - License: GNU General Public License v3.0 or later
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.

@@ -1,8 +1,8 @@
 # QQ 音乐 API 全量覆盖账本
 
-上游快照：`L-1124/QQMusicApi@1b0aae0db3ee6876b3a77b8d1ce3057b4b3c9cd5`
+上游快照：`L-1124/QQMusicApi@261326eec051e7f444296b5c461e7412c4b25bb9`
 
-本表逐项登记该快照 14 个公开 API 类的 100 个公开方法。QQMusicApi 是异步 Python SDK，不是 HTTP 服务；方法名用于固定验收分母，TuneWeave 将独立实现观察到的 QQ 音乐协议，不复制、翻译、链接或打包上游源码。内部辅助函数、会话封装、分页器和模型不重复计入业务方法分母，但 Basic 所需的平台协议单独列入 [`qq-basic.md`](qq-basic.md) 验收。
+本表逐项登记该快照 14 个公开 API 类的 104 个公开方法。QQMusicApi 是异步 Python SDK，不是 HTTP 服务；方法名用于固定验收分母，TuneWeave 将独立实现观察到的 QQ 音乐协议，不复制、翻译、链接或打包上游源码。内部辅助函数、会话封装、分页器和模型不重复计入业务方法分母，但 Basic 所需的平台协议单独列入 [`qq-basic.md`](qq-basic.md) 验收。
 
 状态含义：
 
@@ -11,14 +11,14 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=91`、`partial=0`、`implemented=2`、`verified=7`。其中 QQ Basic 为 73 项，QQ 全量后续项为 27 项。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=95`、`partial=3`、`implemented=1`、`verified=5`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
 | Q001 | 搜索与发现 | `SearchApi.get_hotkey` | 是 | `verified` | `GET /v1/search/trending?platform=qq&detail=...` 精确调用 Android `music.musicsearch.HotkeyService/GetHotkeyForQQMusicMobile` 并提交参考算法生成的 `search_id`。`vec_hotkey` 原始顺序映射为从 1 开始的稳定排名，实际搜索 `query` 不被活动展示 `title` 覆盖；`detail=full` 提供说明、字符串分值转无符号整数、趋势/序列类型、图标与跳转，`brief` 只收敛关键字和排名，但两种模式都在条目扩展保留标题、封面、热词/直达/歌曲 ID、置顶态、排序、趋势、来源及完整原项。`ret_code` 非零、缺失或目录缺失均拒绝为假成功；实验 ID、榜单时段、列表 ID 与完整响应保留在列表扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 30 项，首项排名 1“周杰伦”，full 分值存在、brief 富字段为空，上游码 0 |
 | Q002 | 搜索与发现 | `SearchApi.complete` | 是 | `verified` | `GET /v1/search/suggestions?platform=qq&client=mobile&q=...` 精确调用 Android `music.smartboxCgi.SmartBoxCgi/GetSmartBoxResult`，参考固定的 `search_id/query/num_per_page=0/page_idx=0` 均保留。`items` 普通补全、`vec_related_items` 相关词和按 `insert_pos` 插入的 `vec_direct_items` 直达结果不会合并丢失；歌手直达结果提升为统一 `Artist`，其他已知类型保留 `kind`，无法安全提升的直达结构以含完整原文的 `opaque` 资源表达。搜索会话、展示高亮、图标、跳转、分值、关联 ID 和完整响应均保留，非数组桶拒绝为假空结果。2026-07-22 同一持久匿名设备的 provider 与 release 统一 HTTP 真实搜索“周杰伦”，返回 21 项，首项为 `artist/qq:0025NhlN2yWrP4`，上游码 0 |
 | Q003 | 搜索与发现 | `SearchApi.quick_search` | 是 | `verified` | `GET /v1/search/suggestions?platform=qq&client=web&q=...` 精确调用固定 HTTPS `c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg`，查询参数经 URL 编码且不会开放任意域名、请求头或凭据注入。响应按各分区 `order` 动态排序，单曲、歌手、专辑、MV 分别提升为统一 `Track/Artist/Album/Video`，不会因 JSON 对象字段顺序变化而乱序；未来新增的未知分区仍逐项以携带完整原文的 `Opaque` 资源返回，不会静默丢弃。分区名称、顺序、类型、计数、原项和完整响应均保留；非零或缺失 `code/subcode`、缺失数据、已知分区缺失或畸形 `itemlist` 均拒绝为假成功。2026-07-22 provider 与 release 统一 HTTP 真实搜索“周杰伦”均通过，返回 10 项，依次覆盖 4 首单曲、2 位歌手、2 张专辑、2 个 MV，首项为 `track/qq:0039MnYb0qxYhV`“晴天”，上游 `code/subcode=0` |
-| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `implemented` | `GET /v1/search?platform=qq&kind=...` 已完整接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和节目 9 类，并保留 `searchid` 搜索会话及 `highlight` 分支：自动申请并持久化 QIMEI/设备会话；按已验收的静默失败边界分别使用歌曲/专辑/MV/歌词 60、歌手 40、歌单 30 的页宽，用户/节目专辑/节目使用上游公开测试覆盖的 10，统一 `limit<=100` 与任意 `offset` 由同批子请求按上游逻辑槽位切片。歌单桶偶发少一项时不跨窗口补项或导致续页重复，`next_offset` 仍按槽位推进，`omitted_slots/upstream_item_counts` 明示缺口；非稀疏分类缺项及缺少码/总数/列表均拒绝为假成功。用户优先保留加密 UIN 并另存数字 UIN；节目专辑映射为 `Podcast`，节目映射为含完整可播放 `Track` 的 `PodcastEpisode`；所有类别均保留稳定身份、核心展示字段及完整原项。2026-07-22 Rust provider 与 release 统一 HTTP 已真实验收前 6 类及稀疏歌单跨页；最后 3 类的类型、字段优先级、分页和单批请求已有离线测试，但真实合并请求当前被 QQ 匿名风控返回 `code=2001`，待窗口解除后补统一 HTTP 验收，故标为 `implemented` 而非 `verified` |
+| Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `partial` | `GET /v1/search?platform=qq&kind=...` 已接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV、歌词、用户、节目专辑和节目 9 类，并保留 `searchid/highlight`、按类别安全页宽、逻辑槽位分页、稀疏歌单缺口、稳定身份和完整原项。2026-07-22 前 6 类及稀疏歌单跨页已真实验收，最后 3 类离线完成但真实合并请求遇到 `code=2001`。2026-07-25 上游新增 `RINGTONE=10` 彩铃类型以及 `selectors/vec_selectors` 双请求形态和二维 selectors 响应；TuneWeave 尚未实现这两个新增分支，因此从 `implemented` 退回 `partial`，不得用旧 9 类覆盖冒充完整 |
 | Q005 | 搜索与发现 | `SearchApi.general_search` | 是 | `pending` | 综合搜索及多字段续页游标 |
 | Q006 | 搜索与发现 | `RecommendApi.get_home_feed` | 是 | `pending` | 首页推荐卡片和防重复游标 |
 | Q007 | 搜索与发现 | `RecommendApi.get_recommend_songlist` | 是 | `pending` | 推荐歌单 |
@@ -27,7 +27,7 @@
 | Q010 | 搜索与发现 | `RecommendApi.get_radar_recommend` | 是 | `pending` | 雷达推荐 |
 | Q011 | 搜索与发现 | `TopApi.get_category` | 是 | `pending` | 榜单目录 |
 | Q012 | 搜索与发现 | `TopApi.get_detail` | 是 | `pending` | 榜单歌曲及分页 |
-| Q013 | 内容展示 | `SongApi.query_song` | 是 | `verified` | `GET/POST /v1/tracks` 完整保留参考批量能力：GET 接受逗号分隔 `refs` 或 `platform+ids`，POST 接受单值/数组；完整引用批次必须属于同一平台，输入顺序与重复项原样保留，账户参数统一透传。QQ 精确调用 Android `music.trackInfo.UniformRuleCtrl/CgiGetTrackInfo`，每项提交 `types=0/modify_stamp=0` 及固定 `ctx=0/client=1`；纯十进制字符串按数字 ID 批次提交，其他值按 MID 批次提交，严格拒绝两种标识混用。响应按请求标识重新对齐，不因上游排序或去重丢失重复项；缺失 `tracks` 拒绝为假空结果，请求项缺失明确返回资源不存在。统一 `Track` 分别保留数字 ID、MID、媒体 MID、`songType`、文件规格、付费信息、状态和完整原始歌曲项，公开引用优先使用 MID。2026-07-22 provider 与 release 统一 GET/POST 已真实验证数字 ID `100` 的重复批次和 MID `003w2xz20QlUZt`；前者稳定返回两项同引用 `qq:003a7WZv0CYKYn`，后者返回请求 MID，数字 ID/MID/媒体 MID/`songType=1` 均存在 |
+| Q013 | 内容展示 | `SongApi.query_song` | 是 | `partial` | `GET/POST /v1/tracks` 已保留批量、顺序、重复项、数字 ID/MID 两条请求分支和严格响应对齐；2026-07-22 provider 与 release HTTP 已分别真实验证数字 ID 重复批次和 MID。2026-07-25 上游把输入扩展为逐项 `SongQueryInfo{id|mid,song_type?}`，允许每项指定类型并宣称可在同批中同时提交 ID/MID；当前 TuneWeave 仍把整批分为纯 ID 或纯 MID 且固定 `types=0`，因此退回 `partial`。参考实现把混合项拆成两个数组却保留原始单一 `types` 顺序，存在类型与标识对齐疑点；迁移前必须先做真实差分验证，再设计强类型逐项输入，不能机械复刻该可疑控制流 |
 | Q014 | 内容展示 | `SongApi.get_detail` | 是 | `verified` | `GET /v1/tracks/{qq-ref}` 精确调用固定 Web `music.pf_song_detail_svr/get_song_detail_yqq`，QQ 数字 ID 使用 `song_id`，MID 使用 `song_mid`，两种输入均不改写为另一分支。新增 Web JSON CGI 档案逐字段匹配参考：独立 Chrome 120 UA，`ct=24/cv=4747474/platform=yqq.json/chid=0/uin=0/g_tk=5381/g_tk_new_20200303=5381` 及字符集、通知、新码字段，不借用 Android UA 或设备身份。`track_info` 复用完整统一 `Track` 映射；`info.company/genre/intro/lan/pub_time.content`、`extras` 和含业务码的完整子响应分别保存在详情扩展，发行公司、流派、简介、语言、发布时间及未来平台字段不会丢失。缺失曲目明确返回资源不存在；请求/返回身份不一致，或已出现但类型、内容项结构畸形的富字段均拒绝为假成功。2026-07-22 provider 与 release 统一 HTTP 已真实验证数字 ID `100` 和 MID `003w2xz20QlUZt` 两条分支：数字 ID 返回 `qq:003a7WZv0CYKYn`，五类富内容各有 1 项，扩展含 `from/name/subtitle/transname/wikiurl`，MID 返回原请求引用，两者上游码均为 0 |
 | Q015 | 内容展示 | `SongApi.get_similar_song` | 是 | `pending` | 相似歌曲 |
 | Q016 | 内容展示 | `SongApi.get_labels` | 是 | `pending` | 歌曲标签 |
@@ -38,7 +38,11 @@
 | Q021 | 内容展示 | `SongApi.get_sheet` | 是 | `pending` | 曲谱详情；排在高频链路之后 |
 | Q022 | 内容展示 | `SongApi.has_sheet` | 是 | `pending` | 曲谱存在性；排在高频链路之后 |
 | Q023 | 内容展示 | `SongApi.get_fav_num` | 是 | `pending` | 歌曲收藏人数 |
-| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/lyrics` 精确调用 Android `music.musichallSong.PlayLyricInfo/GetPlayLyricInfo`，数字 ID 使用 `songId`、MID 使用 `songMid`，完整提交 `crypt=1/lrc_t=0/qrc_t=0/trans_t=0/roma_t=0/ct=11/cv=14090008`；统一 `word_synced/translated/romanized/song_type` 与参考 `qrc/trans/roma/type` 查询名成对兼容，省略时保持上游 `false/false/false/type=1` 默认。响应的 `lyric/trans/roma` 分别执行 QQ 历史字节序、自定义 PC-2 的 3DES EDE 与 zlib 解压，畸形十六进制、块长度、压缩流、UTF-8、字段、标志或数字 ID 错配全部拒绝为假成功；未引入整套歌词工具依赖。实际 `qrc=1` 时主歌词只进入 `word_synced` 且 `format=qrc`，绝不被低精度 LRC 覆盖；`qrc=0` 才映射 `plain/format=lrc`，翻译和罗马音独立保留，歌曲名、歌手、类型、贡献状态等常用元数据及完整子响应保存在扩展。2026-07-22 独立加密向量、provider 与 release HTTP 均已验证：数字 ID `100` 返回 LRC；MID `000akynZ2Rbro5`（`Lemon`）同时返回非空 QRC、翻译、罗马音并解析到数字 ID `213086592`。同日完成本轮第三接口后的上游复查，快照仍为 `1b0aae0db3ee6876b3a77b8d1ce3057b4b3c9cd5` |
+| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `partial` | `GET /v1/tracks/{qq-ref}/lyrics` 已完整覆盖数字 ID/MID、`song_type`、LRC/QRC、翻译、罗马音、严格解密和“逐字不被逐行覆盖”，2026-07-22 独立加密向量、provider 与 release HTTP 均已真实验证。2026-07-25 上游为同一方法新增 `singing_annotations`，提交 `needSingingAnnotations` 且以保留布尔值的请求分支返回 `singingAnnotationsLyric/singingAnnotationsTs`；TuneWeave 尚未建模助唱标注内容和时间戳，因此从 `verified` 退回 `partial` |
+| Q101 | 内容展示 | `LyricApi.get_singing_annotations_info` | 是 | `pending` | 助唱标注歌词存在性；精确请求 `GetSingingAnnotationsInfo` 的 `songID/needNum=false` 布尔分支，并以强类型布尔结果表达 |
+| Q102 | 内容展示 | `LyricApi.get_multi_style_trans_lyric` | 是 | `pending` | 多风格翻译歌词；完整保留 `style/styleName/lyric/timestamp`，每项独立解密，不能压入单一 `translated` 字符串 |
+| Q103 | 内容展示 | `LyricApi.is_ai_dict_exists` | 是 | `pending` | AI 歌词词典存在性；与词典详情分离，不因空列表猜测存在性 |
+| Q104 | 内容展示 | `LyricApi.get_ai_dict` | 是 | `pending` | AI 歌词词典详情；强类型建模短语、解释、原歌词、翻译和歌词时间戳，完整保留列表顺序 |
 | Q025 | 内容展示 | `AlbumApi.get_detail` | 是 | `pending` | 专辑详情 |
 | Q026 | 内容展示 | `AlbumApi.get_song` | 是 | `pending` | 专辑歌曲分页 |
 | Q027 | 内容展示 | `AlbumApi.get_new_album` | 是 | `pending` | 新专辑目录 |
@@ -55,7 +59,7 @@
 | Q038 | 内容展示 | `MvApi.get_detail` | 是 | `pending` | 批量 MV 详情 |
 | Q039 | 内容展示 | `MvApi.get_mv_list` | 是 | `pending` | 地区、版本、排序 MV 目录 |
 | Q040 | 播放与权益 | `SongApi.get_cdn_dispatch` | 是 | `verified` | `GET /v1/media/cdn?platform=qq` 精确调用 Android `music.audioCdnDispatch.cdnDispatch/GetCdnDispatch`，每次生成独立 32 位小写十六进制 GUID，并完整提交参考参数 `uid="0"/use_new_domain=1/use_ipv6=1`。统一 `AudioCdnDispatch` 保留 CDN 根地址的上游顺序与重复项、QUIC 节点参数、相对探活文件及过期/刷新/缓存秒数；只接受无凭据的 HTTP(S) 根地址，畸形目录、绝对探活 URL、非零 `retcode`、空根目录和非正计时不会伪装为成功。节点原项、完整响应及本次 GUID 保存在扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 10 个根地址、9 个节点和 1 个重复根，HTTP/HTTPS 均存在，`expiration/cacheTime=86400`、`refreshTime=1800`、顶层及业务码均为 0 |
-| Q041 | 播放与权益 | `SongApi.get_song_urls` | 是 | `implemented` | `GET /v1/tracks/{qq-ref}/files` 与 `POST /v1/media/files` 完整保留 1–100 项批量、顶层默认规格、逐项规格/MID/`song_type`/`media_mid` 及输入顺序。已登记并实现普通 17 种、加密 13 种、试听/伴奏/多轨/AI 演奏等特殊 15 种共 45 种 SDK 文件规格；参考 Web 的整数 `0..43` 原样兼容，SDK 已公开但 Web 元组遗漏的 `TRY_OGG_640` 以稳定 `44/trial_ogg_640` 补齐。顶层默认规格严格决定普通 `music.vkey.GetVkey/UrlGetVkey` 或加密 `music.vkey.GetEVkey/CgiGetEVkey`，逐项覆盖仍按原方法生成文件名；提供 `media_mid` 时使用一次媒体 MID，省略时保留参考的两次歌曲 MID 拼接分支。每批生成独立 GUID，匿名 `uin=""`；提供账户别名时从共享私有凭据库精确读取 `qq_credential_v1`，在 Android `comm` 和四项 Cookie 中注入对应 UIN/Key/LoginType，Debug、错误和日志不输出密钥。响应逐项校验 MID、文件名、数量与顺序，保留相对 `purl`、VKey、加密 EKey、过期秒数和 `result`；`result=0` 却缺 URL、加密成功却缺 EKey、绝对 URL 或畸形字段均拒绝为假成功，`104003` 等权限结果仍作为可检查的单项数据。匿名会话遇到 `1000/104400/104401` 会原子清除 sid 并仅重试一次，仍失败则稳定映射 `authentication_required`；`2001` 映射可重试限流，不无限轮换设备。2026-07-22 三个 provider 批请求真实覆盖全部 45 种规格；release HTTP 又验证 OGG 640、加密 OGG 640/FLAC、普通试听及 OGG 640 试听，分别得到真实 `0/104003` 权限码、加密 EKey 和 7200/80400 秒有效期。当前缺真实 QQ 登录/VIP 账户验收及下一小块的统一流/下载/resolver 接线，故标为 `implemented` 而非 `verified` |
+| Q041 | 播放与权益 | `SongApi.get_song_urls` | 是 | `implemented` | `GET /v1/tracks/{qq-ref}/files` 与 `POST /v1/media/files` 完整保留 1–100 项批量、顶层默认规格、逐项规格/MID/`song_type`/`media_mid`、顺序和重复项；参考实现未执行其声明的 100 项上限，TuneWeave 修正为明确边界。2026-07-25 同步上游后规格扩展为普通 17、加密 13、特殊 15、彩铃 3，共 48 种；整数 `0..47` 稳定映射，`44=trial_ogg_640`、`45..47=ring_128/ring_96/ring_48`。普通/加密模块选择、文件名双 MID/单媒体 MID、独立 GUID、匿名或 `(qq, account)` 凭据注入、MID/文件名/数量严格对齐、相对 PURL、VKey/EKey、过期秒数、权限业务码和单次匿名会话刷新均完整保留。统一 `AudioStream/AudioDownload` 只选择无需额外解密的可播放规格：`auto` 从常用 320k 向下回退，明确高阶音质不被自动误选，六档精确码率不猜测，试听窗口、实际音质、文件大小、最短有效期、HTTPS 首选 CDN 和保序备用地址均返回；下载不把试听冒充完整文件，`/download/redirect` 仅在真实 URL 存在时 302。QQ 已成为原始播放平台及跨平台 resolver 目标，2026-07-22 release HTTP 真实验证统一试听流、无损下载、302，并以网易云“青花瓷”严格匹配到 QQ 成功播放。已知文件/版本/试听元数据在解析前进入内部强类型结构，冲突或畸形字段拒绝。2026-07-22 全部旧 45 种规格真实覆盖；2026-07-25 新增 3 种彩铃离线差分通过，但全新匿名设备真实请求当前被 QQ 以 `code=1000` 拒绝。仍缺登录/VIP 账户和新增彩铃成功态真实验收，故保持 `implemented` |
 | Q042 | 播放与权益 | `MvApi.get_mv_urls` | 是 | `pending` | MV 多清晰度播放地址 |
 | Q043 | 登录与账户 | `LoginApi.check_expired` | 是 | `pending` | 凭据有效性和账户状态 |
 | Q044 | 登录与账户 | `LoginApi.refresh_credential` | 是 | `pending` | 凭据刷新并原子替换账户代际 |
