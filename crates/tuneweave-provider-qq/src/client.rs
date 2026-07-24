@@ -148,6 +148,7 @@ pub(crate) struct QqApiRequest {
     pub module: String,
     pub method: String,
     pub param: Value,
+    preserve_booleans: bool,
 }
 
 impl QqApiRequest {
@@ -156,7 +157,13 @@ impl QqApiRequest {
             module: module.to_owned(),
             method: method.to_owned(),
             param,
+            preserve_booleans: false,
         }
+    }
+
+    pub(crate) const fn preserving_booleans(mut self) -> Self {
+        self.preserve_booleans = true;
+        self
     }
 }
 
@@ -381,12 +388,13 @@ impl QqClient {
         let mut payload = Map::new();
         payload.insert("comm".to_owned(), comm.clone());
         for (index, request) in requests.iter().enumerate() {
+            let param = request_param(request);
             payload.insert(
                 format!("req_{index}"),
                 json!({
                     "module": request.module,
                     "method": request.method,
-                    "param": booleans_to_integers(request.param.clone())
+                    "param": param
                 }),
             );
         }
@@ -543,6 +551,14 @@ fn booleans_to_integers(value: Value) -> Value {
     }
 }
 
+fn request_param(request: &QqApiRequest) -> Value {
+    if request.preserve_booleans {
+        request.param.clone()
+    } else {
+        booleans_to_integers(request.param.clone())
+    }
+}
+
 fn value_as_string(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) => Some(value.trim().to_owned()),
@@ -622,6 +638,15 @@ mod tests {
             booleans_to_integers(json!({"top": true, "nested": [false, 3]})),
             json!({"top": 1, "nested": [0, 3]})
         );
+    }
+
+    #[test]
+    fn individual_requests_can_preserve_protocol_boolean_values() {
+        let regular = QqApiRequest::new("module", "method", json!({"flag": false}));
+        let preserved =
+            QqApiRequest::new("module", "method", json!({"flag": false})).preserving_booleans();
+        assert_eq!(request_param(&regular), json!({"flag": 0}));
+        assert_eq!(request_param(&preserved), json!({"flag": false}));
     }
 
     #[test]

@@ -1907,6 +1907,8 @@ struct LyricsParams {
     translated: Option<String>,
     #[serde(alias = "roma")]
     romanized: Option<String>,
+    #[serde(alias = "singingAnnotations", alias = "annotations")]
+    singing_annotations: Option<String>,
     #[serde(alias = "type")]
     song_type: Option<i64>,
 }
@@ -2818,6 +2820,11 @@ async fn track_lyrics(
         parse_bool_parameter("word_synced/qrc", params.word_synced.as_deref(), false)?;
     let translated = parse_bool_parameter("translated/trans", params.translated.as_deref(), false)?;
     let romanized = parse_bool_parameter("romanized/roma", params.romanized.as_deref(), false)?;
+    let singing_annotations = parse_bool_parameter(
+        "singing_annotations/singingAnnotations",
+        params.singing_annotations.as_deref(),
+        false,
+    )?;
     let lyrics = provider
         .lyrics_with_options(
             reference.id(),
@@ -2825,6 +2832,7 @@ async fn track_lyrics(
                 word_synced,
                 translated,
                 romanized,
+                singing_annotations,
                 song_type: params.song_type,
                 account: account.map(str::to_owned),
             },
@@ -12875,6 +12883,8 @@ mod tests {
                         })
                         .to_string(),
                     ),
+                    singing_annotations: None,
+                    singing_annotations_timestamp: None,
                     format: "netease_voice_json".to_owned(),
                     contributors: Vec::new(),
                     extensions: Extensions::from([("available".to_owned(), json!(true))]),
@@ -14154,6 +14164,8 @@ mod tests {
                 translated: None,
                 romanized: None,
                 word_synced: None,
+                singing_annotations: None,
+                singing_annotations_timestamp: None,
                 format: "lrc".to_owned(),
                 contributors: Vec::new(),
                 extensions: Default::default(),
@@ -14168,6 +14180,7 @@ mod tests {
                     "word_synced": request.word_synced,
                     "translated": request.translated,
                     "romanized": request.romanized,
+                    "singing_annotations": request.singing_annotations,
                     "song_type": request.song_type,
                     "account": request.account
                 }),
@@ -14541,6 +14554,8 @@ mod tests {
                 translated: None,
                 romanized: None,
                 word_synced: None,
+                singing_annotations: None,
+                singing_annotations_timestamp: None,
                 format: "lrc".to_owned(),
                 contributors: Vec::new(),
                 extensions,
@@ -20353,14 +20368,17 @@ mod tests {
     async fn track_lyrics_forward_unified_and_qq_reference_options() {
         for (query, song_type) in [
             (
-                "qrc=true&trans=true&roma=true&song_type=7&account=collector",
+                "qrc=true&trans=true&roma=true&singing_annotations=true&song_type=7&account=collector",
                 7,
             ),
             (
-                "word_synced=true&translated=true&romanized=true&type=9&account=collector",
+                "word_synced=true&translated=true&romanized=true&singingAnnotations=true&type=9&account=collector",
                 9,
             ),
-            ("qrc=1&trans=1&roma=1&type=11&account=collector", 11),
+            (
+                "qrc=1&trans=1&roma=1&annotations=1&type=11&account=collector",
+                11,
+            ),
         ] {
             let (status, json) = json_response_from(
                 test_app_with_provider(),
@@ -20372,6 +20390,7 @@ mod tests {
             assert_eq!(options["word_synced"], true);
             assert_eq!(options["translated"], true);
             assert_eq!(options["romanized"], true);
+            assert_eq!(options["singing_annotations"], true);
             assert_eq!(options["song_type"], song_type);
             assert_eq!(options["account"], "collector");
             assert_eq!(json["meta"]["account"], "collector");
@@ -20380,7 +20399,12 @@ mod tests {
 
     #[tokio::test]
     async fn track_lyrics_reject_invalid_options_and_unknown_fields() {
-        for query in ["qrc=maybe", "song_type=not-a-number", "unexpected=true"] {
+        for query in [
+            "qrc=maybe",
+            "singing_annotations=maybe",
+            "song_type=not-a-number",
+            "unexpected=true",
+        ] {
             let (status, json) = json_response_from(
                 test_app_with_provider(),
                 &format!("/v1/tracks/netease:185809/lyrics?{query}"),

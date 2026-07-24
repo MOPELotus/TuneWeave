@@ -1181,7 +1181,7 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | GET | `/v1/media/cdn` | `platform?`、`account?` | `AudioCdnDispatch`；CDN 根地址、QUIC 节点、相对探活文件及缓存时限 |
 | GET | `/v1/tracks/{ref}/files` | `spec/file_type?`、`song_type?`、`media_id/media_mid?`、`account?` | 单项 `AudioFileBatch`；精确文件规格授权，不代替自动音质选择 |
 | POST | `/v1/media/files` | `{platform?, account?, items/file_info, default_spec/file_type?}`；每项使用 `{ref|mid, spec/file_type?, song_type?, media_id/media_mid?}` | 1–100 项 `AudioFileBatch`；同平台、保序、保留重复项 |
-| GET | `/v1/tracks/{ref}/lyrics` | `account?`、`word_synced/qrc?`、`translated/trans?`、`romanized/roma?`、`song_type/type?`；引用决定平台 | `Lyrics`；QQ 省略歌词选项时保持上游 `false/false/false/type=1` 默认 |
+| GET | `/v1/tracks/{ref}/lyrics` | `account?`、`word_synced/qrc?`、`translated/trans?`、`romanized/roma?`、`singing_annotations/singingAnnotations/annotations?`、`song_type/type?`；引用决定平台 | `Lyrics`；助唱内容和时间戳为强类型字段，QQ 省略选项时保持上游 `false/false/false/false/type=1` 默认 |
 | GET | `/v1/episodes/{ref}/lyrics` | `account?` | `PodcastEpisodeLyrics`；真实无歌词分支也返回可检查的成功数据 |
 | GET | `/v1/episodes/{ref}/stream` | 与歌曲流相同的音质、后端、播放平台、回退、解灰和账户参数 | `PodcastEpisodeStream`；节目、原音频和最终解析资源身份分离 |
 | GET | `/v1/episodes/{ref}/stream/redirect` | 同上 | 成功解析节目音频后返回 302，不向客户端暴露账户凭据 |

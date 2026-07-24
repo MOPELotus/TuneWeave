@@ -1826,12 +1826,13 @@ fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqT
     let mut param = json!({
         "crypt": 1,
         "lrc_t": 0,
-        "qrc": options.word_synced,
+        "qrc": u8::from(options.word_synced),
         "qrc_t": 0,
-        "roma": options.romanized,
+        "roma": u8::from(options.romanized),
         "roma_t": 0,
-        "trans": options.translated,
+        "trans": u8::from(options.translated),
         "trans_t": 0,
+        "needSingingAnnotations": options.singing_annotations,
         "type": options.song_type.unwrap_or(1),
         "ct": 11,
         "cv": 14090008
@@ -1841,7 +1842,7 @@ fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqT
         QqTrackIdentifier::Mid(mid) => param["songMid"] = json!(mid),
     }
     Ok((
-        QqApiRequest::new(LYRIC_MODULE, LYRIC_METHOD, param),
+        QqApiRequest::new(LYRIC_MODULE, LYRIC_METHOD, param).preserving_booleans(),
         identifier,
     ))
 }
@@ -2102,6 +2103,19 @@ fn map_lyric_response(
     let lyric = decode_lyric_field(response.data.get("lyric"), crypt, "lyric", true)?;
     let translated = decode_lyric_field(response.data.get("trans"), crypt, "trans", false)?;
     let romanized = decode_lyric_field(response.data.get("roma"), crypt, "roma", false)?;
+    let singing_annotations = decode_lyric_field(
+        response.data.get("singingAnnotationsLyric"),
+        crypt,
+        "singingAnnotationsLyric",
+        false,
+    )?;
+    let singing_annotations_timestamp = match response.data.get("singingAnnotationsTs") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(json_u64(value).ok_or_else(|| {
+            qq_data_error("QQ lyric response has an invalid singing annotations timestamp")
+        })?)
+        .filter(|timestamp| *timestamp > 0),
+    };
     let (plain, word_synced, format) = if actual_qrc && lyric.is_some() {
         (None, lyric, "qrc")
     } else if lyric.is_some() {
@@ -2135,6 +2149,7 @@ fn map_lyric_response(
                 "qrc": options.word_synced,
                 "trans": options.translated,
                 "roma": options.romanized,
+                "singing_annotations": options.singing_annotations,
                 "song_type": options.song_type.unwrap_or(1)
             }),
         ),
@@ -2167,6 +2182,8 @@ fn map_lyric_response(
         translated,
         romanized,
         word_synced,
+        singing_annotations,
+        singing_annotations_timestamp,
         format: format.to_owned(),
         contributors: Vec::new(),
         extensions,
@@ -4751,6 +4768,7 @@ mod tests {
             word_synced: true,
             translated: true,
             romanized: true,
+            singing_annotations: true,
             song_type: Some(7),
             account: None,
         };
@@ -4762,12 +4780,13 @@ mod tests {
             json!({
                 "crypt": 1,
                 "lrc_t": 0,
-                "qrc": true,
+                "qrc": 1,
                 "qrc_t": 0,
-                "roma": true,
+                "roma": 1,
                 "roma_t": 0,
-                "trans": true,
+                "trans": 1,
                 "trans_t": 0,
+                "needSingingAnnotations": true,
                 "type": 7,
                 "ct": 11,
                 "cv": 14090008,
@@ -4779,9 +4798,10 @@ mod tests {
         let (mid, identifier) =
             lyric_request("000akynZ2Rbro5", &LyricsRequest::default()).expect("MID lyric request");
         assert_eq!(mid.param["songMid"], "000akynZ2Rbro5");
-        assert_eq!(mid.param["qrc"], false);
-        assert_eq!(mid.param["trans"], false);
-        assert_eq!(mid.param["roma"], false);
+        assert_eq!(mid.param["qrc"], 0);
+        assert_eq!(mid.param["trans"], 0);
+        assert_eq!(mid.param["roma"], 0);
+        assert_eq!(mid.param["needSingingAnnotations"], false);
         assert_eq!(mid.param["type"], 1);
         assert!(mid.param.get("songId").is_none());
         assert_eq!(
@@ -4807,6 +4827,8 @@ mod tests {
                 "lyric": "<QrcInfos><LyricInfo LyricContent=\"[0,1000](0,500)逐字\"/></QrcInfos>",
                 "trans": "[00:00.00]translation",
                 "roma": "[00:00.00]romanization",
+                "singingAnnotationsLyric": "<QrcInfos><LyricInfo LyricContent=\"[0,1000]助唱\"/></QrcInfos>",
+                "singingAnnotationsTs": 1768529601,
                 "hasContributor": 1
             })),
         )
@@ -4817,6 +4839,13 @@ mod tests {
         assert!(lyrics.plain.is_none());
         assert_eq!(lyrics.translated.as_deref(), Some("[00:00.00]translation"));
         assert_eq!(lyrics.romanized.as_deref(), Some("[00:00.00]romanization"));
+        assert!(
+            lyrics
+                .singing_annotations
+                .as_deref()
+                .is_some_and(|value| value.contains("助唱"))
+        );
+        assert_eq!(lyrics.singing_annotations_timestamp, Some(1_768_529_601));
         assert_eq!(lyrics.extensions["actual_qrc"], true);
         assert_eq!(lyrics.extensions["song_type"], 1);
         assert_eq!(lyrics.extensions["has_contributor"], 1);
@@ -4847,6 +4876,7 @@ mod tests {
             json!({"songID": 100, "crypt": 2, "qrc": 0, "lyric": "text"}),
             json!({"songID": 100, "crypt": 0, "qrc": 2, "lyric": "text"}),
             json!({"songID": 100, "crypt": 0, "qrc": 0}),
+            json!({"songID": 100, "crypt": 0, "qrc": 0, "lyric": "text", "singingAnnotationsTs": "invalid"}),
             json!({"songID": 100, "crypt": 0, "qrc": 0, "lyric": []}),
             json!({"songID": 100, "crypt": 1, "qrc": 1, "lyric": "00"}),
         ] {
@@ -6353,6 +6383,7 @@ mod tests {
                     word_synced: true,
                     translated: true,
                     romanized: true,
+                    singing_annotations: true,
                     song_type: Some(1),
                     account: None,
                 },
@@ -6368,6 +6399,25 @@ mod tests {
         assert_eq!(rich.extensions["numeric_id"], "213086592");
         assert_eq!(rich.extensions["requested_options"]["qrc"], true);
         assert_eq!(rich.extensions["response"]["code"], 0);
+
+        let annotated = provider
+            .lyrics_with_options(
+                "97773",
+                &LyricsRequest {
+                    singing_annotations: true,
+                    ..LyricsRequest::default()
+                },
+            )
+            .await
+            .expect("numeric singing annotations");
+        assert_eq!(annotated.track_ref.to_string(), "qq:97773");
+        assert!(
+            annotated
+                .singing_annotations
+                .as_deref()
+                .is_some_and(|value| value.contains("<QrcInfos>"))
+        );
+        assert!(annotated.singing_annotations_timestamp.is_some());
     }
 
     #[tokio::test]

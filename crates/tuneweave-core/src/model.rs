@@ -3405,6 +3405,8 @@ pub struct LyricsRequest {
     pub translated: bool,
     #[serde(default)]
     pub romanized: bool,
+    #[serde(default)]
+    pub singing_annotations: bool,
     pub song_type: Option<i64>,
     pub account: Option<String>,
 }
@@ -3416,6 +3418,8 @@ pub struct Lyrics {
     pub translated: Option<String>,
     pub romanized: Option<String>,
     pub word_synced: Option<String>,
+    pub singing_annotations: Option<String>,
+    pub singing_annotations_timestamp: Option<u64>,
     pub format: String,
     pub contributors: Vec<LyricContributor>,
     pub extensions: Extensions,

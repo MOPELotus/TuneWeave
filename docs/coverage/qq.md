@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=95`、`partial=1`、`implemented=1`、`verified=7`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors 与逐项歌曲查询已完成修正和真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=95`、`partial=0`、`implemented=1`、`verified=8`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -38,7 +38,7 @@
 | Q021 | 内容展示 | `SongApi.get_sheet` | 是 | `pending` | 曲谱详情；排在高频链路之后 |
 | Q022 | 内容展示 | `SongApi.has_sheet` | 是 | `pending` | 曲谱存在性；排在高频链路之后 |
 | Q023 | 内容展示 | `SongApi.get_fav_num` | 是 | `pending` | 歌曲收藏人数 |
-| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `partial` | `GET /v1/tracks/{qq-ref}/lyrics` 已完整覆盖数字 ID/MID、`song_type`、LRC/QRC、翻译、罗马音、严格解密和“逐字不被逐行覆盖”，2026-07-22 独立加密向量、provider 与 release HTTP 均已真实验证。2026-07-25 上游为同一方法新增 `singing_annotations`，提交 `needSingingAnnotations` 且以保留布尔值的请求分支返回 `singingAnnotationsLyric/singingAnnotationsTs`；TuneWeave 尚未建模助唱标注内容和时间戳，因此从 `verified` 退回 `partial` |
+| Q024 | 内容展示 | `LyricApi.get_lyric` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/lyrics` 完整覆盖数字 ID/MID、`song_type`、LRC/QRC、翻译、罗马音、助唱标注、严格解密和“逐字不被逐行覆盖”。Core 将助唱内容与时间戳建为独立强类型字段；QQ 请求对 `qrc/trans/roma` 保持整数，而 `needSingingAnnotations` 通过逐请求策略保留真实 JSON 布尔，避免全局改变其他 CGI。畸形助唱时间戳或密文拒绝为假成功。2026-07-25 上游 Python 差分确认数字 ID `97773` 存在助唱标注；Rust provider 与统一 HTTP 均真实返回并解密 8784 字符 QRC XML、时间戳 `1768529601`，同时原有 LRC/QRC/翻译/罗马音及 MID 分支回归通过 |
 | Q101 | 内容展示 | `LyricApi.get_singing_annotations_info` | 是 | `pending` | 助唱标注歌词存在性；精确请求 `GetSingingAnnotationsInfo` 的 `songID/needNum=false` 布尔分支，并以强类型布尔结果表达 |
 | Q102 | 内容展示 | `LyricApi.get_multi_style_trans_lyric` | 是 | `pending` | 多风格翻译歌词；完整保留 `style/styleName/lyric/timestamp`，每项独立解密，不能压入单一 `translated` 字符串 |
 | Q103 | 内容展示 | `LyricApi.is_ai_dict_exists` | 是 | `pending` | AI 歌词词典存在性；与词典详情分离，不因空列表猜测存在性 |
