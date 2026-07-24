@@ -975,12 +975,7 @@ impl MusicProvider for QqProvider {
         {
             None | Some("default" | "qq") => QqQrLoginKind::Qq,
             Some("wx" | "wechat" | "weixin") => QqQrLoginKind::Wechat,
-            Some("mobile" | "app") => {
-                return Err(TuneWeaveError::invalid_request(
-                    "QQ mobile-app QR login is not available until its MQTT state channel is enabled",
-                )
-                .with_platform(Platform::Qq));
-            }
+            Some("mobile" | "app") => QqQrLoginKind::Mobile,
             Some(value) => {
                 return Err(TuneWeaveError::invalid_request(format!(
                     "unsupported QQ QR login type: {value}"

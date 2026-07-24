@@ -264,19 +264,50 @@ impl QqClient {
         login_type: i64,
         login_method: Option<i64>,
     ) -> Result<QqApiResponse> {
+        let mut comm_fields = vec![("tmeLoginType", json!(login_type))];
+        if let Some(login_method) = login_method {
+            comm_fields.push(("tmeLoginMethod", json!(login_method)));
+        }
         self.ensure_android_session().await?;
+        self.post_android_with_comm_fields(&request, &comm_fields)
+            .await
+    }
+
+    pub(crate) async fn request_android_with_comm(
+        &self,
+        request: QqApiRequest,
+        comm_fields: &[(&str, Value)],
+    ) -> Result<QqApiResponse> {
+        self.ensure_android_session().await?;
+        let response = self
+            .post_android_with_comm_fields(&request, comm_fields)
+            .await;
+        if response.as_ref().is_err_and(is_anonymous_session_rejection) {
+            self.invalidate_android_session()?;
+            self.ensure_android_session().await?;
+            return self
+                .post_android_with_comm_fields(&request, comm_fields)
+                .await;
+        }
+        response
+    }
+
+    async fn post_android_with_comm_fields(
+        &self,
+        request: &QqApiRequest,
+        comm_fields: &[(&str, Value)],
+    ) -> Result<QqApiResponse> {
         let device = self.lock_device()?.device().clone();
         let mut comm = android_comm(&device, None);
         {
             let fields = comm
                 .as_object_mut()
                 .expect("QQ Android comm is always an object");
-            fields.insert("tmeLoginType".to_owned(), json!(login_type));
-            if let Some(login_method) = login_method {
-                fields.insert("tmeLoginMethod".to_owned(), json!(login_method));
+            for (name, value) in comm_fields {
+                fields.insert((*name).to_owned(), value.clone());
             }
         }
-        self.post_api(&comm, &[request], None)
+        self.post_api(&comm, std::slice::from_ref(request), None)
             .await?
             .into_iter()
             .next()

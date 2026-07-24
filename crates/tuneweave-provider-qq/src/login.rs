@@ -4,9 +4,25 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use bytes::BytesMut;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::{Response, StatusCode, Url, header};
+use rumqttc::v5::mqttbytes::v5::{
+    Connect, ConnectProperties, ConnectReturnCode, Filter, Packet, PingReq, Publish, Subscribe,
+    SubscribeProperties, SubscribeReasonCode,
+};
+use rumqttc::v5::mqttbytes::{Error as MqttCodecError, QoS};
 use serde_json::json;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::time::timeout;
+use tokio::{
+    sync::{Mutex as AsyncMutex, mpsc},
+    task::JoinHandle,
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
+};
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
 use crate::client::{QqApiRequest, QqClient, QqCredential};
@@ -19,14 +35,21 @@ const QQ_LOGIN_REFERER: &str = "https://xui.ptlogin2.qq.com/";
 const WECHAT_QR_CONNECT_ENDPOINT: &str = "https://open.weixin.qq.com/connect/qrconnect";
 const WECHAT_QR_IMAGE_ROOT: &str = "https://open.weixin.qq.com/connect/qrcode/";
 const WECHAT_QR_POLL_ENDPOINT: &str = "https://lp.open.weixin.qq.com/connect/l/qrconnect";
+const MOBILE_MQTT_ROOT: &str = "https://mu.y.qq.com:443";
+const MOBILE_MQTT_INITIAL_PATH: &str = "/ws/handshake";
 const QR_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const WECHAT_POLL_TIMEOUT: Duration = Duration::from_secs(35);
+const MOBILE_MQTT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const MOBILE_MQTT_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
+const MOBILE_MQTT_MAX_PACKET_BYTES: u32 = 1024 * 1024;
+const MOBILE_MQTT_MAX_REDIRECTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QqQrLoginKind {
     Qq,
     Wechat,
+    Mobile,
 }
 
 #[derive(Clone)]
@@ -60,6 +83,8 @@ struct QqQrTransaction {
     kind: QqQrLoginKind,
     identifier: String,
     cookies: BTreeMap<String, String>,
+    mobile_listener: Option<MobileQrListener>,
+    mobile_credentials: Option<(u64, String)>,
     terminal: Option<QqQrPollOutcome>,
 }
 
@@ -75,11 +100,19 @@ impl QqQrTransactions {
         let created = match kind {
             QqQrLoginKind::Qq => create_qq_qr(client).await?,
             QqQrLoginKind::Wechat => create_wechat_qr(client).await?,
+            QqQrLoginKind::Mobile => create_mobile_qr(client).await?,
+        };
+        let mobile_listener = if kind == QqQrLoginKind::Mobile {
+            Some(start_mobile_listener(client, &created.identifier).await?)
+        } else {
+            None
         };
         let transaction_id = self.insert(QqQrTransaction {
             kind,
             identifier: created.identifier,
             cookies: created.cookies,
+            mobile_listener,
+            mobile_credentials: None,
             terminal: None,
         })?;
         Ok(QqQrStart {
@@ -102,6 +135,7 @@ impl QqQrTransactions {
         let outcome = match transaction.kind {
             QqQrLoginKind::Qq => poll_qq_qr(client, &mut transaction).await?,
             QqQrLoginKind::Wechat => poll_wechat_qr(client, &mut transaction).await?,
+            QqQrLoginKind::Mobile => poll_mobile_qr(client, &mut transaction).await?,
         };
         if matches!(
             outcome,
@@ -247,6 +281,47 @@ async fn create_wechat_qr(client: &QqClient) -> Result<CreatedQr> {
     })
 }
 
+async fn create_mobile_qr(client: &QqClient) -> Result<CreatedQr> {
+    let response = client
+        .request_android_with_comm(
+            QqApiRequest::new(
+                "music.login.LoginServer",
+                "CreateQRCode",
+                json!({
+                    "tmeAppID": "qqmusic",
+                    "ct": 11,
+                    "cv": 14090008
+                }),
+            ),
+            &[("ct", json!(23)), ("cv", json!(0))],
+        )
+        .await?;
+    let identifier = response
+        .data
+        .get("qrcodeID")
+        .and_then(value_as_nonempty_string)
+        .ok_or_else(|| login_data_error("QQ mobile QR response is missing qrcodeID"))?;
+    validate_identifier(&identifier, "QQ mobile QR identifier")?;
+    let encoded = response
+        .data
+        .get("qrcode")
+        .and_then(value_as_nonempty_string)
+        .ok_or_else(|| login_data_error("QQ mobile QR response is missing image data"))?;
+    let encoded = encoded
+        .rsplit_once(',')
+        .map_or(encoded.as_str(), |(_, data)| data);
+    let image = BASE64.decode(encoded).map_err(|_| {
+        login_data_error("QQ mobile QR response contains invalid Base64 image data")
+    })?;
+    ensure_png(&image, "QQ mobile QR image")?;
+    Ok(CreatedQr {
+        identifier,
+        image_mime: "image/png",
+        image,
+        cookies: BTreeMap::new(),
+    })
+}
+
 async fn poll_qq_qr(
     client: &QqClient,
     transaction: &mut QqQrTransaction,
@@ -365,6 +440,474 @@ async fn poll_wechat_qr(
             "WeChat QR status returned unsupported state code {status}"
         ))),
     }
+}
+
+async fn poll_mobile_qr(
+    client: &QqClient,
+    transaction: &mut QqQrTransaction,
+) -> Result<QqQrPollOutcome> {
+    if let Some((music_id, token)) = transaction.mobile_credentials.clone() {
+        return authorize_mobile_qr(client, &transaction.identifier, music_id, &token).await;
+    }
+    let listener = transaction.mobile_listener.as_mut().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "QQ mobile QR transaction is missing its MQTT listener",
+        )
+        .with_platform(Platform::Qq)
+    })?;
+    let event = match timeout(MOBILE_MQTT_EVENT_TIMEOUT, listener.receiver.recv()).await {
+        Err(_) => return Ok(QqQrPollOutcome::Waiting),
+        Ok(Some(event)) => event,
+        Ok(None) => {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "QQ mobile QR MQTT listener stopped unexpectedly",
+            )
+            .with_platform(Platform::Qq)
+            .retryable(true));
+        }
+    };
+    match event {
+        MobileQrEvent::Scanned => Ok(QqQrPollOutcome::Scanned),
+        MobileQrEvent::Canceled => Ok(QqQrPollOutcome::Failed(
+            "QQ mobile QR login was canceled".to_owned(),
+        )),
+        MobileQrEvent::Expired => Ok(QqQrPollOutcome::Expired),
+        MobileQrEvent::LoginFailed => Ok(QqQrPollOutcome::Failed(
+            "QQ mobile QR login failed".to_owned(),
+        )),
+        MobileQrEvent::TransportFailed => Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ mobile QR MQTT connection failed",
+        )
+        .with_platform(Platform::Qq)
+        .retryable(true)),
+        MobileQrEvent::Credentials { music_id, token } => {
+            transaction.mobile_credentials = Some((music_id, token.clone()));
+            authorize_mobile_qr(client, &transaction.identifier, music_id, &token).await
+        }
+    }
+}
+
+async fn authorize_mobile_qr(
+    client: &QqClient,
+    identifier: &str,
+    music_id: u64,
+    token: &str,
+) -> Result<QqQrPollOutcome> {
+    let response = client
+        .request_android_login(
+            QqApiRequest::new(
+                "music.login.LoginServer",
+                "Login",
+                json!({
+                    "musicid": music_id,
+                    "qrCodeID": identifier,
+                    "token": token
+                }),
+            ),
+            6,
+            None,
+        )
+        .await?;
+    Ok(QqQrPollOutcome::Confirmed(Box::new(
+        parse_login_credential(response.data)?,
+    )))
+}
+
+struct MobileQrListener {
+    receiver: mpsc::Receiver<MobileQrEvent>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for MobileQrListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+enum MobileQrEvent {
+    Scanned,
+    Canceled,
+    Expired,
+    LoginFailed,
+    Credentials { music_id: u64, token: String },
+    TransportFailed,
+}
+
+struct MobileMqttSocket {
+    websocket: WebSocketStream<reqwest::Upgraded>,
+    buffered: BytesMut,
+}
+
+impl MobileMqttSocket {
+    async fn send_packet(&mut self, packet: Packet) -> Result<()> {
+        let mut encoded = BytesMut::with_capacity(packet.size());
+        packet
+            .write(&mut encoded, Some(MOBILE_MQTT_MAX_PACKET_BYTES))
+            .map_err(mqtt_codec_error)?;
+        self.websocket
+            .send(Message::Binary(encoded.freeze()))
+            .await
+            .map_err(|_| mobile_mqtt_error("failed to send MQTT packet"))
+    }
+
+    async fn next_packet(&mut self) -> Result<Packet> {
+        loop {
+            match Packet::read(&mut self.buffered, Some(MOBILE_MQTT_MAX_PACKET_BYTES)) {
+                Ok(packet) => return Ok(packet),
+                Err(MqttCodecError::InsufficientBytes(_)) => {}
+                Err(error) => return Err(mqtt_codec_error(error)),
+            }
+            let message = self
+                .websocket
+                .next()
+                .await
+                .ok_or_else(|| mobile_mqtt_error("WebSocket closed without an MQTT packet"))?
+                .map_err(|_| mobile_mqtt_error("WebSocket receive failed"))?;
+            match message {
+                Message::Binary(payload) => self.buffered.extend_from_slice(&payload),
+                Message::Ping(payload) => self
+                    .websocket
+                    .send(Message::Pong(payload))
+                    .await
+                    .map_err(|_| mobile_mqtt_error("failed to answer WebSocket ping"))?,
+                Message::Pong(_) => {}
+                Message::Close(_) => {
+                    return Err(mobile_mqtt_error(
+                        "WebSocket closed before the QR event completed",
+                    ));
+                }
+                Message::Text(_) | Message::Frame(_) => {
+                    return Err(mobile_mqtt_error(
+                        "WebSocket returned a non-binary MQTT frame",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+async fn start_mobile_listener(client: &QqClient, identifier: &str) -> Result<MobileQrListener> {
+    let mut socket = connect_mobile_mqtt(client, identifier).await?;
+    let topic = format!("management.qrcode_login/{identifier}");
+    socket
+        .send_packet(Packet::Subscribe(Subscribe {
+            pkid: 1,
+            filters: vec![Filter::new(&topic, QoS::AtMostOnce)],
+            properties: Some(SubscribeProperties {
+                id: None,
+                user_properties: vec![
+                    ("authorization".to_owned(), "tmelogin".to_owned()),
+                    ("pubsub".to_owned(), "unicast".to_owned()),
+                ],
+            }),
+        }))
+        .await?;
+    let suback = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
+        .await
+        .map_err(|_| mobile_mqtt_timeout("MQTT subscribe timed out"))??;
+    let Packet::SubAck(suback) = suback else {
+        return Err(mobile_mqtt_error(
+            "QQ mobile QR MQTT did not acknowledge the subscription",
+        ));
+    };
+    if suback.pkid != 1
+        || suback
+            .return_codes
+            .iter()
+            .any(|code| !matches!(code, SubscribeReasonCode::Success(_)))
+    {
+        return Err(mobile_mqtt_error(
+            "QQ mobile QR MQTT rejected the subscription",
+        ));
+    }
+
+    let (sender, receiver) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        let mut ping = tokio::time::interval(Duration::from_secs(20));
+        ping.tick().await;
+        let expiry = tokio::time::sleep(QR_TRANSACTION_TTL);
+        tokio::pin!(expiry);
+        loop {
+            tokio::select! {
+                packet = socket.next_packet() => {
+                    match packet {
+                        Ok(Packet::Publish(publish)) => {
+                            match parse_mobile_publish(&topic, &publish) {
+                                Ok(Some(event)) => {
+                                    let terminal = matches!(
+                                        event,
+                                        MobileQrEvent::Canceled
+                                            | MobileQrEvent::Expired
+                                            | MobileQrEvent::LoginFailed
+                                            | MobileQrEvent::Credentials { .. }
+                                    );
+                                    if sender.send(event).await.is_err() || terminal {
+                                        return;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(_) => {
+                                    let _ = sender.send(MobileQrEvent::TransportFailed).await;
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(Packet::PingResp(_)) => {}
+                        Ok(Packet::Disconnect(_)) | Err(_) => {
+                            let _ = sender.send(MobileQrEvent::TransportFailed).await;
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                _ = ping.tick() => {
+                    if socket.send_packet(Packet::PingReq(PingReq)).await.is_err() {
+                        let _ = sender.send(MobileQrEvent::TransportFailed).await;
+                        return;
+                    }
+                }
+                () = &mut expiry => {
+                    let _ = sender.send(MobileQrEvent::Expired).await;
+                    return;
+                }
+            }
+        }
+    });
+    Ok(MobileQrListener { receiver, task })
+}
+
+async fn connect_mobile_mqtt(client: &QqClient, identifier: &str) -> Result<MobileMqttSocket> {
+    let mut path = MOBILE_MQTT_INITIAL_PATH.to_owned();
+    for redirect_count in 0..=MOBILE_MQTT_MAX_REDIRECTS {
+        let mut socket = timeout(
+            MOBILE_MQTT_CONNECT_TIMEOUT,
+            open_mobile_mqtt_websocket(client, &path),
+        )
+        .await
+        .map_err(|_| mobile_mqtt_timeout("WebSocket handshake timed out"))??;
+        socket
+            .send_packet(Packet::Connect(
+                Connect {
+                    keep_alive: 45,
+                    client_id: format!("{}{}", unix_millis()?, rand::random_range(1000_u16..=9999)),
+                    clean_start: true,
+                    properties: Some(ConnectProperties {
+                        session_expiry_interval: None,
+                        receive_maximum: None,
+                        max_packet_size: None,
+                        topic_alias_max: None,
+                        request_response_info: None,
+                        request_problem_info: None,
+                        user_properties: vec![
+                            ("tmeAppID".to_owned(), "qqmusic".to_owned()),
+                            ("business".to_owned(), "management".to_owned()),
+                            ("hashTag".to_owned(), identifier.to_owned()),
+                            ("clientTag".to_owned(), "management.user".to_owned()),
+                            ("userID".to_owned(), identifier.to_owned()),
+                        ],
+                        authentication_method: Some("pass".to_owned()),
+                        authentication_data: None,
+                    }),
+                },
+                None,
+                None,
+            ))
+            .await?;
+        let connack = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
+            .await
+            .map_err(|_| mobile_mqtt_timeout("MQTT connect acknowledgement timed out"))??;
+        let Packet::ConnAck(connack) = connack else {
+            return Err(mobile_mqtt_error(
+                "QQ mobile QR MQTT did not return CONNACK",
+            ));
+        };
+        match connack.code {
+            ConnectReturnCode::Success => return Ok(socket),
+            ConnectReturnCode::UseAnotherServer | ConnectReturnCode::ServerMoved => {
+                let reference = connack
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.server_reference.as_deref())
+                    .ok_or_else(|| {
+                        mobile_mqtt_error("MQTT redirect is missing server reference")
+                    })?;
+                if redirect_count == MOBILE_MQTT_MAX_REDIRECTS {
+                    return Err(mobile_mqtt_error("MQTT redirect limit was exceeded"));
+                }
+                path = mobile_redirect_path(&path, reference)?;
+            }
+            _ => {
+                return Err(mobile_mqtt_error(format!(
+                    "QQ mobile QR MQTT rejected CONNECT with {:?}",
+                    connack.code
+                )));
+            }
+        }
+    }
+    Err(mobile_mqtt_error("MQTT redirect limit was exceeded"))
+}
+
+async fn open_mobile_mqtt_websocket(client: &QqClient, path: &str) -> Result<MobileMqttSocket> {
+    if !path.starts_with('/') || path.contains(['?', '#']) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "QQ mobile MQTT path is invalid",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let endpoint = fixed_url(&format!("{MOBILE_MQTT_ROOT}{path}"))?;
+    let key = BASE64.encode(rand::random::<[u8; 16]>());
+    let response = client
+        .login_http()
+        .get(endpoint)
+        .version(reqwest::Version::HTTP_11)
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", &key)
+        .header("sec-websocket-protocol", "mqtt")
+        .header(header::ORIGIN, "https://y.qq.com")
+        .header(header::REFERER, "https://y.qq.com/")
+        .header(
+            header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        )
+        .timeout(MOBILE_MQTT_CONNECT_TIMEOUT)
+        .send()
+        .await
+        .map_err(login_network_error)?;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS
+        || !header_contains_token(response.headers(), header::UPGRADE, "websocket")
+        || !header_contains_token(response.headers(), header::CONNECTION, "upgrade")
+        || !header_contains_token(
+            response.headers(),
+            header::HeaderName::from_static("sec-websocket-protocol"),
+            "mqtt",
+        )
+    {
+        return Err(mobile_mqtt_error(
+            "QQ mobile MQTT WebSocket handshake was rejected",
+        ));
+    }
+    let expected_accept = derive_accept_key(key.as_bytes());
+    let actual_accept = response
+        .headers()
+        .get("sec-websocket-accept")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    if actual_accept != Some(expected_accept.as_str()) {
+        return Err(mobile_mqtt_error(
+            "QQ mobile MQTT WebSocket accept key is invalid",
+        ));
+    }
+    let upgraded = response
+        .upgrade()
+        .await
+        .map_err(|_| mobile_mqtt_error("QQ mobile MQTT WebSocket upgrade failed"))?;
+    let websocket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
+    Ok(MobileMqttSocket {
+        websocket,
+        buffered: BytesMut::new(),
+    })
+}
+
+fn parse_mobile_publish(topic: &str, publish: &Publish) -> Result<Option<MobileQrEvent>> {
+    let publish_topic = std::str::from_utf8(&publish.topic)
+        .map_err(|_| mobile_mqtt_error("QQ mobile MQTT topic is not UTF-8"))?;
+    if publish_topic != topic {
+        return Ok(None);
+    }
+    let event_type = publish.properties.as_ref().and_then(|properties| {
+        properties
+            .user_properties
+            .iter()
+            .rev()
+            .find_map(|(name, value)| (name == "type").then_some(value.as_str()))
+    });
+    match event_type {
+        Some("scanned") => Ok(Some(MobileQrEvent::Scanned)),
+        Some("canceled") => Ok(Some(MobileQrEvent::Canceled)),
+        Some("timeout") => Ok(Some(MobileQrEvent::Expired)),
+        Some("loginFailed") => Ok(Some(MobileQrEvent::LoginFailed)),
+        Some("cookies") => {
+            let payload: serde_json::Value = serde_json::from_slice(&publish.payload)
+                .map_err(|_| mobile_mqtt_error("QQ mobile MQTT cookie payload is invalid JSON"))?;
+            let cookies = payload
+                .get("cookies")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| mobile_mqtt_error("QQ mobile MQTT payload is missing cookies"))?;
+            let music_id = cookies
+                .get("qqmusic_uin")
+                .and_then(|value| value.get("value"))
+                .and_then(value_as_nonempty_string)
+                .ok_or_else(|| mobile_mqtt_error("QQ mobile MQTT payload is missing music ID"))?
+                .parse::<u64>()
+                .map_err(|_| mobile_mqtt_error("QQ mobile MQTT music ID is invalid"))?;
+            let token = cookies
+                .get("qqmusic_key")
+                .and_then(|value| value.get("value"))
+                .and_then(value_as_nonempty_string)
+                .ok_or_else(|| {
+                    mobile_mqtt_error("QQ mobile MQTT payload is missing login token")
+                })?;
+            if token.len() > 4096
+                || token
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte == b';')
+            {
+                return Err(mobile_mqtt_error(
+                    "QQ mobile MQTT payload contains an unsafe login token",
+                ));
+            }
+            Ok(Some(MobileQrEvent::Credentials { music_id, token }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn mobile_redirect_path(current_path: &str, reference: &str) -> Result<String> {
+    if reference.is_empty()
+        || reference.len() > 256
+        || !reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
+    {
+        return Err(mobile_mqtt_error(
+            "QQ mobile MQTT redirect reference is invalid",
+        ));
+    }
+    let mut parts = current_path
+        .trim_end_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    if parts.last().is_some_and(|part| part.contains(':')) {
+        let last = parts.len() - 1;
+        parts[last] = reference;
+        Ok(parts.join("/"))
+    } else {
+        Ok(format!(
+            "{}/{}",
+            current_path.trim_end_matches('/'),
+            reference
+        ))
+    }
+}
+
+fn header_contains_token(
+    headers: &header::HeaderMap,
+    name: header::HeaderName,
+    expected: &str,
+) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case(expected))
+        })
+    })
 }
 
 async fn authorize_qq_qr(
@@ -488,6 +1031,17 @@ fn parse_login_credential(value: serde_json::Value) -> Result<QqCredential> {
     serde_json::from_value::<QqCredential>(value)
         .map_err(|_| login_data_error("QQ login returned a malformed credential"))?
         .normalize()
+}
+
+fn value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn parse_qq_status_arguments(body: &str) -> Result<Vec<String>> {
@@ -763,9 +1317,26 @@ fn login_data_error(message: impl Into<String>) -> TuneWeaveError {
         .retryable(true)
 }
 
+fn mqtt_codec_error(error: MqttCodecError) -> TuneWeaveError {
+    mobile_mqtt_error(format!("QQ mobile MQTT packet is invalid: {error}"))
+}
+
+fn mobile_mqtt_timeout(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::UpstreamTimeout, message)
+        .with_platform(Platform::Qq)
+        .retryable(true)
+}
+
+fn mobile_mqtt_error(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::UpstreamError, message)
+        .with_platform(Platform::Qq)
+        .retryable(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rumqttc::v5::mqttbytes::v5::PublishProperties;
 
     #[test]
     fn parses_qq_qr_callback_without_exposing_unquoted_text() {
@@ -815,6 +1386,41 @@ mod tests {
         assert!(matches!(&value[19..20], "8" | "9" | "a" | "b"));
     }
 
+    #[test]
+    fn mobile_redirects_append_then_replace_the_server_node() {
+        let redirected =
+            mobile_redirect_path("/ws/handshake", "node.example:443").expect("append redirect");
+        assert_eq!(redirected, "/ws/handshake/node.example:443");
+        assert_eq!(
+            mobile_redirect_path(&redirected, "next.example:443").expect("replace redirect"),
+            "/ws/handshake/next.example:443"
+        );
+        assert!(mobile_redirect_path("/ws/handshake", "../unsafe").is_err());
+    }
+
+    #[test]
+    fn mobile_cookie_publish_extracts_only_typed_login_fields() {
+        let topic = "management.qrcode_login/qr-id";
+        let publish = Publish::new(
+            topic,
+            QoS::AtMostOnce,
+            br#"{"cookies":{"qqmusic_uin":{"value":"123456"},"qqmusic_key":{"value":"mobile-key"}},"ignored":"secret"}"#
+                .as_slice(),
+            Some(PublishProperties {
+                user_properties: vec![("type".to_owned(), "cookies".to_owned())],
+                ..PublishProperties::default()
+            }),
+        );
+        let event = parse_mobile_publish(topic, &publish)
+            .expect("mobile publish")
+            .expect("mobile event");
+        let MobileQrEvent::Credentials { music_id, token } = event else {
+            panic!("expected mobile credentials");
+        };
+        assert_eq!(music_id, 123456);
+        assert_eq!(token, "mobile-key");
+    }
+
     #[tokio::test]
     #[ignore = "requires live QQ and WeChat login services"]
     async fn live_standard_qr_logins_create_images_and_report_waiting() {
@@ -822,6 +1428,7 @@ mod tests {
         for (kind, mime) in [
             (QqQrLoginKind::Qq, "image/png"),
             (QqQrLoginKind::Wechat, "image/jpeg"),
+            (QqQrLoginKind::Mobile, "image/png"),
         ] {
             let transactions = QqQrTransactions::default();
             let start = transactions.start(&client, kind).await.expect("QR start");
