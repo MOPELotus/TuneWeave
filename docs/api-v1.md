@@ -1304,7 +1304,7 @@ Uni Playlist 项流复用同一音质与路由参数，并额外以 `accounts` �
 
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 
-`POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云当前返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。调用方也可使用同一响应中的 `url` 自行渲染。
+`POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云当前返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。QQ 音乐支持 `login_type=qq/default` 和 `wx/wechat/weixin`，分别返回上游 PNG 与 JPEG；这两类平台二维码没有可安全复用的独立扫码文本，因此 `url` 与 `image_data_url` 均为同一自包含图片。QQ 的 qrsig、微信 uuid、OAuth code 和临时 Cookie 只存在于 10 分钟进程内事务，HTTP 响应仍只暴露随机外层事务 ID；确认成功后才按 `(qq, account)` 持久化凭据。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。
 
 文件账户后端默认位于 `.local/data/accounts`，可用 `TUNEWEAVE_DATA_DIR` 改变其父目录。账号别名在路径中使用 UTF-8 十六进制编码，不能构造路径穿越；每次更新先在同目录写入私有临时文件并同步，再以原子重命名发布新代际，启动只读取最新完整代际。Unix 权限为目录 `0700`、文件 `0600`，Windows 继承数据目录 ACL。文件内的平台会话凭据目前不做静态加密，因此运维必须保护该目录且不得同步或提交；它从不进入 Debug、普通错误、HTTP 响应或日志。`DELETE /v1/auth/session` 会删除对应 `platform/account` 的本地持久凭据；即使上游退出请求不可达，本地凭据仍会清除，错误详情以 `local_session_removed` 明确结果。
 

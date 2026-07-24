@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=95`、`partial=0`、`implemented=1`、`verified=8`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=93`、`partial=1`、`implemented=2`、`verified=8`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -64,8 +64,8 @@
 | Q043 | 登录与账户 | `LoginApi.check_expired` | 是 | `pending` | 凭据有效性和账户状态 |
 | Q044 | 登录与账户 | `LoginApi.refresh_credential` | 是 | `pending` | 凭据刷新并原子替换账户代际 |
 | Q045 | 登录与账户 | `LoginApi.logout` | 是 | `pending` | 上游退出并删除本地对应账户 |
-| Q046 | 登录与账户 | `LoginApi.get_qrcode` | 是 | `pending` | QQ、微信和 QQ 音乐移动端二维码创建 |
-| Q047 | 登录与账户 | `LoginApi.check_qrcode` | 是 | `pending` | QQ/微信扫码、确认、拒绝、过期和成功状态 |
+| Q046 | 登录与账户 | `LoginApi.get_qrcode` | 是 | `partial` | `POST /v1/auth/qr` 已接入 `login_type=qq/default` 与 `wx/wechat/weixin`：固定 QQ 互联/微信开放平台端点，分别取得 `qrsig` 或 `uuid`，返回本地 Base64 PNG/JPEG；上游 Cookie 和标识符仅存于 10 分钟进程内私有事务，外部只返回随机 `tw-auth-*`。2026-07-25 provider 与统一 HTTP 真实创建两类图片并成功进入等待态；QQ 音乐移动端 `CreateQRCode` 仍随 Q048 MQTT 状态链补齐，故保持 `partial` |
+| Q047 | 登录与账户 | `LoginApi.check_qrcode` | 是 | `implemented` | QQ `ptqrlogin` 的 `66/67/65/68/0` 与微信长轮询 `408/404/402/403/405` 已映射为统一等待、已扫码、过期、失败和确认；QQ 成功态继续完成 `check_sig`、OAuth code、`QQConnectLogin.LoginServer/QQLogin`，微信成功态调用 `music.login.LoginServer/Login`，凭据只在确认后按 `(qq, account)` 以 `qq_credential_v1` 原子持久化并返回脱敏账户资料。Cookie jar、并发重复轮询和终态缓存均隔离在短期事务内，网络错误不回显 qrsig、ptsigx、OAuth code 或 Cookie。2026-07-25 两种统一 HTTP 未扫码等待态真实通过，回调解析、终态隔离和凭据持久化已有离线单元覆盖，待真实扫码验收后升为 `verified` |
 | Q048 | 登录与账户 | `LoginApi.checking_mobile_qrcode` | 是 | `pending` | 移动端二维码 MQTT 状态链 |
 | Q049 | 登录与账户 | `LoginApi.send_authcode` | 是 | `pending` | 手机验证码发送；同一挑战上下文贯穿验证链 |
 | Q050 | 登录与账户 | `LoginApi.phone_authorize` | 是 | `pending` | 手机验证码登录及多账户持久化 |

@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use reqwest::{Client, Proxy, StatusCode};
+use reqwest::{Client, Proxy, StatusCode, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -176,6 +176,7 @@ pub(crate) struct QqApiResponse {
 #[derive(Clone)]
 pub struct QqClient {
     http: Client,
+    login_http: Client,
     device: Arc<Mutex<DeviceStore>>,
     qimei_refresh: Arc<AsyncMutex<()>>,
     session_refresh: Arc<AsyncMutex<()>>,
@@ -184,17 +185,22 @@ pub struct QqClient {
 impl QqClient {
     pub fn new(config: QqConfig) -> Result<Self> {
         let mut builder = Client::builder().user_agent(ANDROID_USER_AGENT);
-        if let Some(proxy_url) = config
+        let mut login_builder = Client::builder()
+            .user_agent(WEB_USER_AGENT)
+            .redirect(Policy::none());
+        let proxy_url = config
             .proxy_url
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
+            .map(str::to_owned);
+        if let Some(proxy_url) = proxy_url.as_deref() {
             let proxy = Proxy::all(proxy_url).map_err(|_| {
                 TuneWeaveError::invalid_request("QQ proxy configuration is invalid")
                     .with_platform(Platform::Qq)
             })?;
-            builder = builder.proxy(proxy);
+            builder = builder.proxy(proxy.clone());
+            login_builder = login_builder.proxy(proxy);
         }
         let http = builder.build().map_err(|error| {
             TuneWeaveError::new(
@@ -203,9 +209,17 @@ impl QqClient {
             )
             .with_platform(Platform::Qq)
         })?;
+        let login_http = login_builder.build().map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to build QQ login HTTP client: {error}"),
+            )
+            .with_platform(Platform::Qq)
+        })?;
         let device = DeviceStore::open(config.device_path)?;
         Ok(Self {
             http,
+            login_http,
             device: Arc::new(Mutex::new(device)),
             qimei_refresh: Arc::new(AsyncMutex::new(())),
             session_refresh: Arc::new(AsyncMutex::new(())),
@@ -242,6 +256,35 @@ impl QqClient {
             return self.post_api(&comm, requests, None).await;
         }
         response
+    }
+
+    pub(crate) async fn request_android_login(
+        &self,
+        request: QqApiRequest,
+        login_type: i64,
+        login_method: Option<i64>,
+    ) -> Result<QqApiResponse> {
+        self.ensure_android_session().await?;
+        let device = self.lock_device()?.device().clone();
+        let mut comm = android_comm(&device, None);
+        {
+            let fields = comm
+                .as_object_mut()
+                .expect("QQ Android comm is always an object");
+            fields.insert("tmeLoginType".to_owned(), json!(login_type));
+            if let Some(login_method) = login_method {
+                fields.insert("tmeLoginMethod".to_owned(), json!(login_method));
+            }
+        }
+        self.post_api(&comm, &[request], None)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ login service returned no response"))
+    }
+
+    pub(crate) fn login_http(&self) -> &Client {
+        &self.login_http
     }
 
     pub(crate) async fn request_web(

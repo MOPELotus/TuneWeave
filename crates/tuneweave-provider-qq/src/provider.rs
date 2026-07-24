@@ -5,20 +5,24 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountCredentialStore, Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch,
-    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
-    Capability, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
-    PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    AccountCredentialStore, AccountProfile, Album, AlbumSummary, Artist, ArtistSummary,
+    AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
+    AudioFileRequestItem, AuthState, Capability, CreatorSummary, ErrorCode, Extensions,
+    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
+    PageMeta, Platform, Playlist, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart,
+    Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery,
+    SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamRequest, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamRequest, Track,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
+    TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
+use crate::login::{QqQrLoginKind, QqQrPollOutcome, QqQrTransactions};
 use crate::qrc::decrypt_qrc;
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
@@ -567,6 +571,7 @@ const VOICE_SEARCH: TypedSearchSpec = TypedSearchSpec {
 pub struct QqProvider {
     client: QqClient,
     credential_store: Option<Arc<dyn AccountCredentialStore>>,
+    qr_transactions: QqQrTransactions,
 }
 
 impl QqProvider {
@@ -575,13 +580,15 @@ impl QqProvider {
         Ok(Self {
             client: QqClient::new(config)?,
             credential_store,
+            qr_transactions: QqQrTransactions::default(),
         })
     }
 
-    pub const fn from_client(client: QqClient) -> Self {
+    pub fn from_client(client: QqClient) -> Self {
         Self {
             client,
             credential_store: None,
+            qr_transactions: QqQrTransactions::default(),
         }
     }
 }
@@ -616,6 +623,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioDownload,
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
+            Capability::QrLogin,
         ])
     }
 
@@ -957,9 +965,123 @@ impl MusicProvider for QqProvider {
             extensions,
         })
     }
+
+    async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
+        let kind = match login_type
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("default" | "qq") => QqQrLoginKind::Qq,
+            Some("wx" | "wechat" | "weixin") => QqQrLoginKind::Wechat,
+            Some("mobile" | "app") => {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ mobile-app QR login is not available until its MQTT state channel is enabled",
+                )
+                .with_platform(Platform::Qq));
+            }
+            Some(value) => {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "unsupported QQ QR login type: {value}"
+                ))
+                .with_platform(Platform::Qq));
+            }
+        };
+        let start = self.qr_transactions.start(&self.client, kind).await?;
+        let image_data_url = format!(
+            "data:{};base64,{}",
+            start.image_mime,
+            BASE64.encode(start.image)
+        );
+        Ok(ProviderQrStart {
+            provider_transaction_id: start.provider_transaction_id,
+            url: image_data_url.clone(),
+            image_data_url: Some(image_data_url),
+            expires_at: None,
+        })
+    }
+
+    async fn poll_qr_login(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+    ) -> Result<ProviderQrPoll> {
+        let outcome = self
+            .qr_transactions
+            .poll(&self.client, provider_transaction_id)
+            .await?;
+        match outcome {
+            QqQrPollOutcome::Waiting => Ok(ProviderQrPoll {
+                state: AuthState::Waiting,
+                message: Some("waiting for QR scan".to_owned()),
+                profile: None,
+            }),
+            QqQrPollOutcome::Scanned => Ok(ProviderQrPoll {
+                state: AuthState::Scanned,
+                message: Some("QR scanned; waiting for confirmation".to_owned()),
+                profile: None,
+            }),
+            QqQrPollOutcome::Expired => Ok(ProviderQrPoll {
+                state: AuthState::Expired,
+                message: Some("QR login expired".to_owned()),
+                profile: None,
+            }),
+            QqQrPollOutcome::Failed(message) => Ok(ProviderQrPoll {
+                state: AuthState::Failed,
+                message: Some(message),
+                profile: None,
+            }),
+            QqQrPollOutcome::Confirmed(credential) => {
+                let profile = self.persist_qq_credential(account, &credential)?;
+                Ok(ProviderQrPoll {
+                    state: AuthState::Confirmed,
+                    message: Some("QQ Music account authenticated".to_owned()),
+                    profile: Some(profile),
+                })
+            }
+        }
+    }
 }
 
 impl QqProvider {
+    fn persist_qq_credential(
+        &self,
+        account: &str,
+        credential: &QqCredential,
+    ) -> Result<AccountProfile> {
+        let account = account.trim();
+        let store = self.credential_store.as_ref().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "QQ account storage is not configured",
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        let secret = serde_json::to_string(credential).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to serialize QQ account credential: {error}"),
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        store.put(&StoredAccountCredential::new(
+            Platform::Qq,
+            account,
+            QQ_CREDENTIAL_KIND,
+            secret,
+        )?)?;
+        let mut profile = AccountProfile::authenticated(Platform::Qq, account);
+        profile.user_id = Some(credential.string_music_id().to_owned());
+        profile
+            .extensions
+            .insert("login_type".to_owned(), json!(credential.login_type));
+        profile
+            .extensions
+            .insert("credential_kind".to_owned(), json!(QQ_CREDENTIAL_KIND));
+        Ok(profile)
+    }
+
     fn validate_public_account(&self, account: Option<&str>) -> Result<()> {
         let Some(account) = account
             .map(str::trim)
@@ -4238,9 +4360,47 @@ const fn capability_for_search(kind: SearchKind) -> Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     struct StaticCredentialStore {
         credentials: Vec<tuneweave_core::StoredAccountCredential>,
+    }
+
+    #[derive(Default)]
+    struct RecordingCredentialStore {
+        credentials: Mutex<Vec<tuneweave_core::StoredAccountCredential>>,
+    }
+
+    impl AccountCredentialStore for RecordingCredentialStore {
+        fn load_platform(
+            &self,
+            platform: Platform,
+        ) -> Result<Vec<tuneweave_core::StoredAccountCredential>> {
+            Ok(self
+                .credentials
+                .lock()
+                .expect("credential lock")
+                .iter()
+                .filter(|credential| credential.platform == platform)
+                .cloned()
+                .collect())
+        }
+
+        fn put(&self, credential: &tuneweave_core::StoredAccountCredential) -> Result<()> {
+            let mut credentials = self.credentials.lock().expect("credential lock");
+            credentials.retain(|stored| {
+                stored.platform != credential.platform || stored.account != credential.account
+            });
+            credentials.push(credential.clone());
+            Ok(())
+        }
+
+        fn remove(&self, platform: Platform, account: &str) -> Result<bool> {
+            let mut credentials = self.credentials.lock().expect("credential lock");
+            let original_len = credentials.len();
+            credentials.retain(|stored| stored.platform != platform || stored.account != account);
+            Ok(credentials.len() != original_len)
+        }
     }
 
     impl AccountCredentialStore for StaticCredentialStore {
@@ -5290,6 +5450,40 @@ mod tests {
             .qq_credential(Some("missing"))
             .expect_err("missing alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn confirmed_login_persists_one_exact_account_without_exposing_the_key() {
+        let store = Arc::new(RecordingCredentialStore::default());
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(store.clone()),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let profile = provider
+            .persist_qq_credential("green-vip", &credential)
+            .expect("persist credential");
+        assert_eq!(profile.account, "green-vip");
+        assert_eq!(profile.user_id.as_deref(), Some("123456"));
+        assert_eq!(profile.extensions["login_type"], 2);
+        let stored = store
+            .load_platform(Platform::Qq)
+            .expect("stored credentials");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].account, "green-vip");
+        assert_eq!(stored[0].kind, QQ_CREDENTIAL_KIND);
+        assert!(stored[0].secret().contains("Q_H_L_private"));
+        assert!(!format!("{:?}", stored[0]).contains("Q_H_L_private"));
+        assert!(provider.capabilities().contains(&Capability::QrLogin));
     }
 
     #[test]
