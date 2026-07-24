@@ -1314,6 +1314,8 @@ QQ 退出调用同一 Android 登录服务的 `Logout`，并把精确账户凭�
 
 QQ 的 `GET /v1/playlists/{ref}` 与 `/tracks` 固定调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss`。公开 `qq:<playlist-id>` 使用 `disstid`，账户特殊目录 `qq:dir:<dirid>` 使用 `disstid=0/dirid/enc_host_uin` 并要求精确 `account`；详情请求保留标签和创建者，歌曲分页使用 `onlysonglist=true` 并关闭不需要的标签/用户包装。`song_begin/song_num` 精确对应统一 offset/limit，当前页数量、总数和 `hasmore` 必须相互一致；歌曲完整复用 QQ 强类型 Track 映射。2026-07-25 使用 release 二进制真实验证公开歌单 `qq:7039749142`：详情成功，首个 2 曲分页总数 99、`has_more=true`，首曲为 `qq:0039MnYb0qxYhV`；账户特殊目录待真实登录态验收。
 
+QQ 喜欢歌曲使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET /v1/account/favorites/tracks?platform=qq&account=...` 从所选凭据读取 `encryptUin`；`GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 直接使用目标用户的加密 UIN，并允许可选 `account` 作为查看者会话。两者共享严格 offset/limit、分页一致性和 Track 映射；加密 UIN 作为不透明平台用户 ID 处理，不接受空白、控制字符或超长值，也不会以参考项目的占位凭据代替缺失账户。
+
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 
 `POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云当前返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。QQ 音乐支持 `login_type=qq/default`、`wx/wechat/weixin` 和 `mobile/app`，分别返回 QQ 互联 PNG、微信 JPEG 和 QQ 音乐客户端 PNG；这些平台二维码没有可安全复用的独立扫码文本，因此 `url` 与 `image_data_url` 均为同一自包含图片。移动端二维码在图片返回前已建立持久 MQTT 订阅，后续 GET 轮询可跨请求接收扫码、取消、过期、失败和确认事件，不会在两次请求间临时断开订阅。QQ 的 qrsig、微信 uuid、移动端二维码 ID、OAuth code、MQTT token 和临时 Cookie 只存在于 10 分钟进程内事务，HTTP 响应仍只暴露随机外层事务 ID；确认成功后才按 `(qq, account)` 持久化凭据。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。

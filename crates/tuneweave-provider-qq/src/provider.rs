@@ -847,6 +847,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
             Capability::PlaylistRead,
+            Capability::Favorites,
             Capability::QrLogin,
             Capability::PhoneLogin,
             Capability::SessionManagement,
@@ -1291,30 +1292,43 @@ impl MusicProvider for QqProvider {
         let locator = parse_qq_playlist_locator(id)?;
         let credential = self.qq_credential(request.account.as_deref())?;
         let encrypted_uin = qq_playlist_encrypted_uin(locator, credential.as_ref())?;
-        let limit = request.limit.clamp(1, 100);
-        let response = self
-            .client
-            .request_android_with_credential(
-                &[qq_playlist_detail_request(
-                    locator,
-                    QqPlaylistDetailOptions {
-                        offset: request.offset,
-                        limit,
-                        only_songs: true,
-                        include_tags: false,
-                        include_user: false,
-                    },
-                    encrypted_uin,
-                )],
+        self.qq_playlist_tracks_page(locator, request, credential.as_ref(), encrypted_uin)
+            .await
+    }
+
+    async fn favorite_tracks(&self, request: &tuneweave_core::PageRequest) -> Result<Page<Track>> {
+        let mut page = self.playlist_tracks("dir:201", request).await?;
+        page.pagination
+            .extensions
+            .insert("library_scope".to_owned(), json!("current_account"));
+        Ok(page)
+    }
+
+    async fn user_favorite_tracks(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Track>> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let mut page = self
+            .qq_playlist_tracks_page(
+                QqPlaylistLocator {
+                    playlist_id: 0,
+                    directory_id: 201,
+                },
+                request,
                 credential.as_ref(),
+                Some(encrypted_uin),
             )
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ playlist track request returned no response"))?;
-        let parsed = parse_qq_playlist_detail(response.data)?;
-        validate_qq_playlist_detail_page(&parsed, request.offset, limit)?;
-        map_qq_playlist_tracks(request.offset, limit, parsed, response.raw)
+            .await?;
+        page.pagination
+            .extensions
+            .insert("library_scope".to_owned(), json!("user"));
+        page.pagination
+            .extensions
+            .insert("user_encrypted_uin".to_owned(), json!(encrypted_uin));
+        Ok(page)
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -1602,6 +1616,39 @@ impl QqProvider {
             .with_platform(Platform::Qq)
         })?;
         store.remove(Platform::Qq, account)
+    }
+
+    async fn qq_playlist_tracks_page(
+        &self,
+        locator: QqPlaylistLocator,
+        request: &tuneweave_core::PageRequest,
+        credential: Option<&QqCredential>,
+        encrypted_uin: Option<&str>,
+    ) -> Result<Page<Track>> {
+        let limit = request.limit.clamp(1, 100);
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_playlist_detail_request(
+                    locator,
+                    QqPlaylistDetailOptions {
+                        offset: request.offset,
+                        limit,
+                        only_songs: true,
+                        include_tags: false,
+                        include_user: false,
+                    },
+                    encrypted_uin,
+                )],
+                credential,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ playlist track request returned no response"))?;
+        let parsed = parse_qq_playlist_detail(response.data)?;
+        validate_qq_playlist_detail_page(&parsed, request.offset, limit)?;
+        map_qq_playlist_tracks(request.offset, limit, parsed, response.raw)
     }
 
     async fn prepare_audio_file_items(
@@ -3751,18 +3798,24 @@ fn qq_favorite_playlists_request(encrypted_uin: &str, offset: u32, size: u32) ->
 }
 
 fn qq_encrypted_uin(credential: &QqCredential) -> Result<&str> {
-    let encrypted_uin = credential.encrypt_uin.trim();
-    if encrypted_uin.is_empty()
-        || encrypted_uin.len() > 512
-        || encrypted_uin.bytes().any(|byte| byte.is_ascii_control())
-    {
-        return Err(TuneWeaveError::new(
+    validate_qq_encrypted_uin(&credential.encrypt_uin, "account encrypted UIN").map_err(|_| {
+        TuneWeaveError::new(
             ErrorCode::AuthenticationRequired,
             "QQ account credential is missing the encrypted UIN required for personal playlists",
         )
-        .with_platform(Platform::Qq));
+        .with_platform(Platform::Qq)
+    })
+}
+
+fn validate_qq_encrypted_uin<'a>(value: &'a str, context: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(
+            TuneWeaveError::invalid_request(format!("QQ {context} is invalid"))
+                .with_platform(Platform::Qq),
+        );
     }
-    Ok(encrypted_uin)
+    Ok(value)
 }
 
 fn parse_created_playlists(value: Value) -> Result<QqCreatedPlaylistsResponse> {
@@ -6741,6 +6794,7 @@ mod tests {
                 .capabilities()
                 .contains(&Capability::AccountPlaylists)
         );
+        assert!(provider.capabilities().contains(&Capability::Favorites));
     }
 
     #[tokio::test]
@@ -6812,6 +6866,46 @@ mod tests {
             .expect_err("missing account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["account"], "missing-account");
+    }
+
+    #[tokio::test]
+    async fn favorite_track_endpoints_validate_account_and_user_identity_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let current_error = provider
+            .favorite_tracks(&tuneweave_core::PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing-account".to_owned()),
+            })
+            .await
+            .expect_err("missing current account");
+        assert_eq!(current_error.code, ErrorCode::AuthenticationRequired);
+
+        let invalid_user = provider
+            .user_favorite_tracks(
+                "\r\n",
+                &tuneweave_core::PageRequest {
+                    limit: 30,
+                    offset: 0,
+                    account: None,
+                },
+            )
+            .await
+            .expect_err("invalid encrypted UIN");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
+
+        let account_error = provider
+            .user_favorite_tracks(
+                "public-encrypted-uin",
+                &tuneweave_core::PageRequest {
+                    limit: 30,
+                    offset: 0,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing viewer account");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]
