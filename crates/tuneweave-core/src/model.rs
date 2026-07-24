@@ -2894,6 +2894,30 @@ pub struct DimensionChartTrackSnapshot {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackIdentifierKind {
+    #[default]
+    Auto,
+    NumericId,
+    Mid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackDetailRequestItem {
+    #[serde(rename = "ref")]
+    pub track_ref: ResourceRef,
+    #[serde(default)]
+    pub identifier_kind: TrackIdentifierKind,
+    pub song_type: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackDetailBatchRequest {
+    pub items: Vec<TrackDetailRequestItem>,
+    pub account: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     #[serde(rename = "ref")]
@@ -3623,6 +3647,31 @@ mod tests {
         assert_eq!(track.resource_ref, reference);
         assert_eq!(track.platform, Platform::Netease);
         assert_eq!(track.id, "123");
+    }
+
+    #[test]
+    fn typed_track_detail_requests_keep_identifier_kind_and_song_type_explicit() {
+        let request = TrackDetailBatchRequest {
+            items: vec![
+                TrackDetailRequestItem {
+                    track_ref: ResourceRef::new(Platform::Qq, "2314161").expect("numeric ref"),
+                    identifier_kind: TrackIdentifierKind::NumericId,
+                    song_type: Some(113),
+                },
+                TrackDetailRequestItem {
+                    track_ref: ResourceRef::new(Platform::Qq, "003w2xz20QlUZt").expect("MID ref"),
+                    identifier_kind: TrackIdentifierKind::Mid,
+                    song_type: Some(1),
+                },
+            ],
+            account: Some("catalog".to_owned()),
+        };
+        let value = serde_json::to_value(&request).expect("serialize typed track request");
+        assert_eq!(value["items"][0]["ref"], "qq:2314161");
+        assert_eq!(value["items"][0]["identifier_kind"], "numeric_id");
+        assert_eq!(value["items"][0]["song_type"], 113);
+        assert_eq!(value["items"][1]["identifier_kind"], "mid");
+        assert_eq!(value["account"], "catalog");
     }
 
     #[test]

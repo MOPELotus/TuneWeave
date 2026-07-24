@@ -14,8 +14,8 @@ use tuneweave_core::{
     PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
     SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamRequest, Track, TrialWindow, TuneWeaveError, User,
-    Video,
+    SearchTrendingRequest, SearchVariant, StreamRequest, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -484,6 +484,13 @@ enum QqTrackIdentifier {
     Mid(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedQqTrackQuery {
+    input_index: usize,
+    identifier: QqTrackIdentifier,
+    song_type: i64,
+}
+
 const TRACK_SEARCH: TypedSearchSpec = TypedSearchSpec {
     code: 0,
     item_pointer: "/body/item_song",
@@ -718,16 +725,68 @@ impl MusicProvider for QqProvider {
     }
 
     async fn tracks(&self, ids: &[String], account: Option<&str>) -> Result<Vec<Track>> {
-        self.validate_public_account(account)?;
-        let (request, identifiers) = query_song_request(ids)?;
-        let response = self
-            .client
-            .request_android(&[request])
-            .await?
+        self.tracks_with_options(&TrackDetailBatchRequest {
+            items: ids
+                .iter()
+                .map(|id| {
+                    ResourceRef::new(Platform::Qq, id).map(|track_ref| TrackDetailRequestItem {
+                        track_ref,
+                        identifier_kind: TrackIdentifierKind::Auto,
+                        song_type: None,
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| TuneWeaveError::invalid_request(error.to_string()))?,
+            account: account.map(str::to_owned),
+        })
+        .await
+    }
+
+    async fn tracks_with_options(&self, request: &TrackDetailBatchRequest) -> Result<Vec<Track>> {
+        self.validate_public_account(request.account.as_deref())?;
+        let groups = query_song_requests(request)?;
+        let api_requests = groups
+            .iter()
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
+        let responses = self.client.request_android(&api_requests).await?;
+        if responses.len() != groups.len() {
+            return Err(qq_data_error(format!(
+                "QQ track query returned {} responses for {} identifier groups",
+                responses.len(),
+                groups.len()
+            )));
+        }
+        let mut tracks = vec![None; request.items.len()];
+        for ((_, prepared), response) in groups.into_iter().zip(responses) {
+            let identifiers = prepared
+                .iter()
+                .map(|item| item.identifier.clone())
+                .collect::<Vec<_>>();
+            let mapped = map_query_song_response(&identifiers, response)?;
+            if mapped.len() != prepared.len() {
+                return Err(qq_data_error(
+                    "QQ track query mapping did not preserve group cardinality",
+                ));
+            }
+            for (item, mut track) in prepared.into_iter().zip(mapped) {
+                track
+                    .extensions
+                    .insert("requested_song_type".to_owned(), json!(item.song_type));
+                tracks[item.input_index] = Some(track);
+            }
+        }
+        tracks
             .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ track query returned no response"))?;
-        map_query_song_response(&identifiers, response)
+            .enumerate()
+            .map(|(index, track)| {
+                track.ok_or_else(|| {
+                    qq_data_error(format!(
+                        "QQ track query did not populate input position {index}"
+                    ))
+                })
+            })
+            .collect()
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -1602,55 +1661,90 @@ fn hotkey_request(search_id: &str) -> QqApiRequest {
     )
 }
 
-fn query_song_request(ids: &[String]) -> Result<(QqApiRequest, Vec<QqTrackIdentifier>)> {
-    if ids.is_empty() {
+fn query_song_requests(
+    request: &TrackDetailBatchRequest,
+) -> Result<Vec<(QqApiRequest, Vec<PreparedQqTrackQuery>)>> {
+    if request.items.is_empty() {
         return Err(TuneWeaveError::invalid_request(
             "QQ track query must contain at least one ID or MID",
         )
         .with_platform(Platform::Qq));
     }
-    let values = ids
+    let prepared = request
+        .items
         .iter()
-        .map(|value| parse_qq_track_identifier(value))
-        .collect::<Result<Vec<_>>>()?;
-    let numeric = values
-        .iter()
-        .filter_map(|value| match value {
-            QqTrackIdentifier::Numeric(value) => Some(*value),
-            QqTrackIdentifier::Mid(_) => None,
+        .enumerate()
+        .map(|(input_index, item)| {
+            if item.track_ref.platform() != Platform::Qq {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ track query contains a non-QQ reference",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "track_ref": item.track_ref })));
+            }
+            let identifier = match item.identifier_kind {
+                TrackIdentifierKind::Auto => parse_qq_track_identifier(item.track_ref.id())?,
+                TrackIdentifierKind::NumericId => item
+                    .track_ref
+                    .id()
+                    .parse::<u64>()
+                    .map(QqTrackIdentifier::Numeric)
+                    .map_err(|_| {
+                        TuneWeaveError::invalid_request(
+                            "QQ numeric track ID must be an unsigned integer",
+                        )
+                        .with_platform(Platform::Qq)
+                        .with_details(json!({ "id": item.track_ref.id() }))
+                    })?,
+                TrackIdentifierKind::Mid => {
+                    validate_qq_media_id(item.track_ref.id(), "song MID")?;
+                    QqTrackIdentifier::Mid(item.track_ref.id().to_owned())
+                }
+            };
+            Ok(PreparedQqTrackQuery {
+                input_index,
+                identifier,
+                song_type: item.song_type.unwrap_or(0),
+            })
         })
+        .collect::<Result<Vec<_>>>()?;
+    let numeric = prepared
+        .iter()
+        .filter(|item| matches!(item.identifier, QqTrackIdentifier::Numeric(_)))
+        .cloned()
         .collect::<Vec<_>>();
-    if !numeric.is_empty() && numeric.len() != values.len() {
-        return Err(TuneWeaveError::invalid_request(
-            "QQ track query cannot mix numeric IDs and MIDs",
-        )
-        .with_platform(Platform::Qq)
-        .with_details(json!({ "ids": ids })));
-    }
-    let mut param = json!({
-        "types": vec![0; values.len()],
-        "modify_stamp": vec![0; values.len()],
-        "ctx": 0,
-        "client": 1
-    });
-    if numeric.len() == values.len() {
-        param["ids"] = json!(numeric);
-    } else {
-        param["mids"] = json!(
-            values
-                .iter()
-                .map(|value| match value {
-                    QqTrackIdentifier::Mid(value) => value.clone(),
-                    QqTrackIdentifier::Numeric(_) =>
-                        unreachable!("mixed identifiers were rejected"),
-                })
-                .collect::<Vec<_>>()
-        );
-    }
-    Ok((
-        QqApiRequest::new(QUERY_SONG_MODULE, QUERY_SONG_METHOD, param),
-        values,
-    ))
+    let mids = prepared
+        .iter()
+        .filter(|item| matches!(item.identifier, QqTrackIdentifier::Mid(_)))
+        .cloned()
+        .collect::<Vec<_>>();
+    [
+        (!numeric.is_empty()).then_some(("ids", numeric)),
+        (!mids.is_empty()).then_some(("mids", mids)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(field, group)| {
+        let identifiers = group
+            .iter()
+            .map(|item| match &item.identifier {
+                QqTrackIdentifier::Numeric(id) => json!(id),
+                QqTrackIdentifier::Mid(mid) => json!(mid),
+            })
+            .collect::<Vec<_>>();
+        let mut param = json!({
+            "types": group.iter().map(|item| item.song_type).collect::<Vec<_>>(),
+            "modify_stamp": vec![0; group.len()],
+            "ctx": 0,
+            "client": 1
+        });
+        param[field] = Value::Array(identifiers);
+        Ok((
+            QqApiRequest::new(QUERY_SONG_MODULE, QUERY_SONG_METHOD, param),
+            group,
+        ))
+    })
+    .collect()
 }
 
 fn song_detail_request(id: &str) -> Result<(QqApiRequest, QqTrackIdentifier)> {
@@ -4259,36 +4353,69 @@ mod tests {
     }
 
     #[test]
-    fn query_song_request_keeps_numeric_and_mid_batches_distinct() {
-        let numeric_ids = vec!["100".to_owned(), "97773".to_owned()];
-        let (request, identifiers) = query_song_request(&numeric_ids).expect("numeric request");
-        assert_eq!(request.module, QUERY_SONG_MODULE);
-        assert_eq!(request.method, QUERY_SONG_METHOD);
-        assert_eq!(request.param["ids"], json!([100, 97773]));
-        assert!(request.param.get("mids").is_none());
-        assert_eq!(request.param["types"], json!([0, 0]));
-        assert_eq!(request.param["modify_stamp"], json!([0, 0]));
-        assert_eq!(request.param["ctx"], 0);
-        assert_eq!(request.param["client"], 1);
+    fn query_song_requests_split_mixed_identifiers_and_realign_song_types() {
+        let request = TrackDetailBatchRequest {
+            items: vec![
+                TrackDetailRequestItem {
+                    track_ref: qq_ref("003w2xz20QlUZt", "track").expect("MID ref"),
+                    identifier_kind: TrackIdentifierKind::Mid,
+                    song_type: Some(1),
+                },
+                TrackDetailRequestItem {
+                    track_ref: qq_ref("2314161", "track").expect("numeric ref"),
+                    identifier_kind: TrackIdentifierKind::NumericId,
+                    song_type: Some(113),
+                },
+                TrackDetailRequestItem {
+                    track_ref: qq_ref("100", "track").expect("numeric ref"),
+                    identifier_kind: TrackIdentifierKind::Auto,
+                    song_type: None,
+                },
+                TrackDetailRequestItem {
+                    track_ref: qq_ref("0039MnYb0qxYhV", "track").expect("MID ref"),
+                    identifier_kind: TrackIdentifierKind::Auto,
+                    song_type: Some(7),
+                },
+            ],
+            account: None,
+        };
+        let groups = query_song_requests(&request).expect("split mixed request");
+        assert_eq!(groups.len(), 2);
+        let (numeric, numeric_items) = &groups[0];
+        assert_eq!(numeric.module, QUERY_SONG_MODULE);
+        assert_eq!(numeric.method, QUERY_SONG_METHOD);
+        assert_eq!(numeric.param["ids"], json!([2314161, 100]));
+        assert!(numeric.param.get("mids").is_none());
+        assert_eq!(numeric.param["types"], json!([113, 0]));
+        assert_eq!(numeric.param["modify_stamp"], json!([0, 0]));
+        assert_eq!(numeric.param["ctx"], 0);
+        assert_eq!(numeric.param["client"], 1);
         assert_eq!(
-            identifiers,
-            [
-                QqTrackIdentifier::Numeric(100),
-                QqTrackIdentifier::Numeric(97_773)
-            ]
+            numeric_items
+                .iter()
+                .map(|item| item.input_index)
+                .collect::<Vec<_>>(),
+            [1, 2]
         );
 
-        let mids = vec!["003w2xz20QlUZt".to_owned(), "0039MnYb0qxYhV".to_owned()];
-        let (request, identifiers) = query_song_request(&mids).expect("MID request");
-        assert_eq!(request.param["mids"], json!(mids));
-        assert!(request.param.get("ids").is_none());
+        let (mids, mid_items) = &groups[1];
         assert_eq!(
-            identifiers,
-            [
-                QqTrackIdentifier::Mid("003w2xz20QlUZt".to_owned()),
-                QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned())
-            ]
+            mids.param["mids"],
+            json!(["003w2xz20QlUZt", "0039MnYb0qxYhV"])
         );
+        assert!(mids.param.get("ids").is_none());
+        assert_eq!(mids.param["types"], json!([1, 7]));
+        assert_eq!(
+            mid_items
+                .iter()
+                .map(|item| item.input_index)
+                .collect::<Vec<_>>(),
+            [0, 3]
+        );
+
+        let mut invalid = request;
+        invalid.items[0].identifier_kind = TrackIdentifierKind::NumericId;
+        assert!(query_song_requests(&invalid).is_err());
     }
 
     #[test]
@@ -5693,11 +5820,11 @@ mod tests {
             .expect_err("empty track batch");
         assert_eq!(empty.code, ErrorCode::InvalidRequest);
 
-        let mixed = provider
-            .tracks(&["100".to_owned(), "003w2xz20QlUZt".to_owned()], None)
+        let out_of_range = provider
+            .tracks(&["18446744073709551616".to_owned()], None)
             .await
-            .expect_err("mixed numeric and MID batch");
-        assert_eq!(mixed.code, ErrorCode::InvalidRequest);
+            .expect_err("out-of-range numeric track ID");
+        assert_eq!(out_of_range.code, ErrorCode::InvalidRequest);
 
         let account = provider
             .track("100", Some("green-diamond"))
@@ -5855,6 +5982,43 @@ mod tests {
         assert_eq!(mids[0].resource_ref.to_string(), "qq:003w2xz20QlUZt");
         assert!(mids[0].extensions["media_mid"].as_str().is_some());
         assert!(mids[0].extensions.contains_key("song_type"));
+
+        let typed = provider
+            .tracks_with_options(&TrackDetailBatchRequest {
+                items: vec![
+                    TrackDetailRequestItem {
+                        track_ref: qq_ref("003w2xz20QlUZt", "track").expect("MID ref"),
+                        identifier_kind: TrackIdentifierKind::Mid,
+                        song_type: Some(1),
+                    },
+                    TrackDetailRequestItem {
+                        track_ref: qq_ref("2314161", "track").expect("special numeric ref"),
+                        identifier_kind: TrackIdentifierKind::NumericId,
+                        song_type: Some(113),
+                    },
+                    TrackDetailRequestItem {
+                        track_ref: qq_ref("107479170", "track").expect("normal numeric ref"),
+                        identifier_kind: TrackIdentifierKind::NumericId,
+                        song_type: Some(1),
+                    },
+                    TrackDetailRequestItem {
+                        track_ref: qq_ref("003w2xz20QlUZt", "track").expect("duplicate MID ref"),
+                        identifier_kind: TrackIdentifierKind::Mid,
+                        song_type: Some(7),
+                    },
+                ],
+                account: None,
+            })
+            .await
+            .expect("typed mixed batch");
+        assert_eq!(typed.len(), 4);
+        assert_eq!(typed[0].resource_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(typed[1].resource_ref.to_string(), "qq:003Hx1mg4SlZVM");
+        assert_eq!(typed[2].resource_ref.to_string(), "qq:0017ahqa0NvuNU");
+        assert_eq!(typed[3].resource_ref, typed[0].resource_ref);
+        assert_eq!(typed[0].extensions["requested_song_type"], 1);
+        assert_eq!(typed[1].extensions["requested_song_type"], 113);
+        assert_eq!(typed[3].extensions["requested_song_type"], 7);
     }
 
     #[tokio::test]

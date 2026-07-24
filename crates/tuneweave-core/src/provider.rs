@@ -44,8 +44,8 @@ use crate::{
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
     StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
     VideoTaxonomyRequest,
 };
@@ -489,6 +489,32 @@ pub trait MusicProvider: Send + Sync {
             tracks.push(self.track(id, account).await?);
         }
         Ok(tracks)
+    }
+
+    async fn tracks_with_options(&self, request: &TrackDetailBatchRequest) -> Result<Vec<Track>> {
+        if request
+            .items
+            .iter()
+            .any(|item| item.track_ref.platform() != self.platform())
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "track detail request contains a foreign platform reference",
+            )
+            .with_platform(self.platform()));
+        }
+        if request.items.iter().any(|item| item.song_type.is_some()) {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "{} track detail does not support song_type",
+                self.platform()
+            ))
+            .with_platform(self.platform()));
+        }
+        let ids = request
+            .items
+            .iter()
+            .map(|item| item.track_ref.id().to_owned())
+            .collect::<Vec<_>>();
+        self.tracks(&ids, request.account.as_deref()).await
     }
 
     async fn track_availability(

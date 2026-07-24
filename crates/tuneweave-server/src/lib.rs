@@ -74,16 +74,17 @@ use tuneweave_core::{
     SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
     StreamResolver, StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TuneWeaveError, UniPlaylist,
-    UniPlaylistCreateRequest, UniPlaylistImportRequest, UniPlaylistImportResult,
-    UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
-    UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
-    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
-    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore,
-    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackEntitlement, TrackIdentifierKind, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
+    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
+    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
+    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
+    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
+    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -1906,6 +1907,8 @@ struct TrackBatchParams {
     ids: Option<String>,
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "type")]
+    song_type: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1913,8 +1916,23 @@ struct TrackBatchParams {
 struct TrackBatchBody {
     refs: Option<StreamReferenceInput>,
     ids: Option<StreamReferenceInput>,
+    #[serde(alias = "query_info")]
+    items: Option<Vec<TrackBatchItemBody>>,
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "type")]
+    song_type: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackBatchItemBody {
+    #[serde(rename = "ref")]
+    resource_ref: Option<ResourceRef>,
+    id: Option<Value>,
+    mid: Option<String>,
+    #[serde(alias = "type")]
+    song_type: Option<i64>,
 }
 
 async fn tracks_get(
@@ -1926,8 +1944,10 @@ async fn tracks_get(
         &state,
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
+        None,
         params.platform.as_deref(),
         params.account,
+        params.song_type,
     )
     .await
 }
@@ -1941,8 +1961,10 @@ async fn tracks_post(
         &state,
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(StreamReferenceInput::into_values),
+        body.items,
         body.platform.as_deref(),
         body.account,
+        body.song_type,
     )
     .await
 }
@@ -1951,38 +1973,163 @@ async fn tracks_response(
     state: &AppState,
     refs: Option<Vec<String>>,
     ids: Option<Vec<String>>,
+    items: Option<Vec<TrackBatchItemBody>>,
     platform: Option<&str>,
     account: Option<String>,
+    song_type: Option<i64>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
-    let references = parse_track_batch_references(refs, ids, platform, state.default_platform)?;
-    let selected_platform = references[0].platform();
-    if references
+    let items = parse_track_detail_request_items(
+        refs,
+        ids,
+        items,
+        platform,
+        song_type,
+        state.default_platform,
+    )?;
+    let selected_platform = items[0].track_ref.platform();
+    if items
         .iter()
-        .any(|reference| reference.platform() != selected_platform)
+        .any(|item| item.track_ref.platform() != selected_platform)
     {
         return Err(
             TuneWeaveError::invalid_request("track detail batches must use one platform")
                 .with_details(json!({
-                    "platforms": references
+                    "platforms": items
                         .iter()
-                        .map(ResourceRef::platform)
+                        .map(|item| item.track_ref.platform())
                         .collect::<BTreeSet<_>>()
                 }))
                 .into(),
         );
     }
-    let ids = references
-        .iter()
-        .map(|reference| reference.id().to_owned())
-        .collect::<Vec<_>>();
     let account = optional_trimmed(account);
     let provider = state.registry.require(selected_platform)?;
-    let tracks = provider.tracks(&ids, account.as_deref()).await?;
+    let tracks = provider
+        .tracks_with_options(&TrackDetailBatchRequest {
+            items,
+            account: account.clone(),
+        })
+        .await?;
     let mut response = ApiResponse::new(tracks).with_platform(selected_platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
     Ok(Json(response))
+}
+
+fn parse_track_detail_request_items(
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    items: Option<Vec<TrackBatchItemBody>>,
+    platform: Option<&str>,
+    song_type: Option<i64>,
+    default_platform: Platform,
+) -> Result<Vec<TrackDetailRequestItem>, TuneWeaveError> {
+    let Some(items) = items else {
+        return parse_track_batch_references(refs, ids, platform, default_platform).map(
+            |references| {
+                references
+                    .into_iter()
+                    .map(|track_ref| TrackDetailRequestItem {
+                        track_ref,
+                        identifier_kind: TrackIdentifierKind::Auto,
+                        song_type,
+                    })
+                    .collect()
+            },
+        );
+    };
+    if refs.is_some() || ids.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "items/query_info cannot be combined with refs or ids",
+        )
+        .with_details(json!({ "conflicts": ["items", "refs", "ids"] })));
+    }
+    if song_type.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "top-level song_type cannot be combined with items/query_info",
+        )
+        .with_details(json!({ "conflicts": ["song_type", "items"] })));
+    }
+    if items.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "items/query_info must contain at least one track",
+        ));
+    }
+    let explicit_platform = platform.map(parse_platform_parameter).transpose()?;
+    let reference_platforms = items
+        .iter()
+        .filter_map(|item| item.resource_ref.as_ref().map(ResourceRef::platform))
+        .collect::<BTreeSet<_>>();
+    if reference_platforms.len() > 1 {
+        return Err(TuneWeaveError::invalid_request(
+            "track detail item references must use one platform",
+        )
+        .with_details(json!({ "platforms": reference_platforms })));
+    }
+    let reference_platform = reference_platforms.iter().next().copied();
+    if explicit_platform
+        .zip(reference_platform)
+        .is_some_and(|(explicit, reference)| explicit != reference)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "platform conflicts with the track detail item references",
+        ));
+    }
+    let selected_platform = explicit_platform
+        .or(reference_platform)
+        .unwrap_or(default_platform);
+    items
+        .into_iter()
+        .map(|item| {
+            let mid = optional_trimmed(item.mid);
+            let id = item
+                .id
+                .as_ref()
+                .map(|value| required_string_or_number("id", value))
+                .transpose()?;
+            let provided = usize::from(item.resource_ref.is_some())
+                + usize::from(id.is_some())
+                + usize::from(mid.is_some());
+            if provided != 1 {
+                return Err(TuneWeaveError::invalid_request(
+                    "each track detail item requires exactly one of ref, id, or mid",
+                ));
+            }
+            let (track_ref, identifier_kind) = if let Some(reference) = item.resource_ref {
+                if reference.platform() != selected_platform {
+                    return Err(TuneWeaveError::invalid_request(
+                        "track detail item reference conflicts with the request platform",
+                    ));
+                }
+                (reference, TrackIdentifierKind::Auto)
+            } else if let Some(id) = id {
+                id.parse::<u64>().map_err(|_| {
+                    TuneWeaveError::invalid_request(
+                        "track detail item id must be an unsigned integer",
+                    )
+                    .with_details(json!({ "id": id }))
+                })?;
+                (
+                    ResourceRef::new(selected_platform, id)
+                        .map_err(|error| TuneWeaveError::invalid_request(error.to_string()))?,
+                    TrackIdentifierKind::NumericId,
+                )
+            } else {
+                let mid = mid.expect("exactly one identifier was checked");
+                (
+                    ResourceRef::new(selected_platform, mid)
+                        .map_err(|error| TuneWeaveError::invalid_request(error.to_string()))?,
+                    TrackIdentifierKind::Mid,
+                )
+            };
+            Ok(TrackDetailRequestItem {
+                track_ref,
+                identifier_kind,
+                song_type: item.song_type,
+            })
+        })
+        .collect()
 }
 
 fn parse_track_batch_references(
@@ -12701,6 +12848,29 @@ mod tests {
             Ok(track)
         }
 
+        async fn tracks_with_options(
+            &self,
+            request: &TrackDetailBatchRequest,
+        ) -> Result<Vec<Track>> {
+            Ok(request
+                .items
+                .iter()
+                .map(|item| {
+                    let mut track = sample_track(item.track_ref.id());
+                    track
+                        .extensions
+                        .insert("identifier_kind".to_owned(), json!(item.identifier_kind));
+                    track
+                        .extensions
+                        .insert("song_type".to_owned(), json!(item.song_type));
+                    track
+                        .extensions
+                        .insert("account".to_owned(), json!(request.account));
+                    track
+                })
+                .collect())
+        }
+
         async fn track_availability(
             &self,
             id: &str,
@@ -17808,6 +17978,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_batches_accept_typed_query_items_and_shared_get_song_type() {
+        let (status, get) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks?ids=1,2&platform=netease&type=113&account=typed",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(get["data"].as_array().map(Vec::len), Some(2));
+        assert_eq!(get["data"][0]["extensions"]["song_type"], 113);
+        assert_eq!(get["data"][1]["extensions"]["song_type"], 113);
+        assert_eq!(get["data"][0]["extensions"]["identifier_kind"], "auto");
+        assert_eq!(get["meta"]["account"], "typed");
+
+        let (status, post) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/tracks",
+            Some(json!({
+                "platform": "netease",
+                "account": "mixed",
+                "query_info": [
+                    { "mid": "mid-first", "type": 1 },
+                    { "id": 2314161, "song_type": 113 },
+                    { "ref": "netease:tail" },
+                    { "mid": "mid-first", "type": 7 }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            post["data"]
+                .as_array()
+                .expect("typed track batch")
+                .iter()
+                .map(|track| track["ref"].as_str().expect("track ref"))
+                .collect::<Vec<_>>(),
+            [
+                "netease:mid-first",
+                "netease:2314161",
+                "netease:tail",
+                "netease:mid-first"
+            ]
+        );
+        assert_eq!(post["data"][0]["extensions"]["identifier_kind"], "mid");
+        assert_eq!(
+            post["data"][1]["extensions"]["identifier_kind"],
+            "numeric_id"
+        );
+        assert_eq!(post["data"][2]["extensions"]["identifier_kind"], "auto");
+        assert_eq!(post["data"][0]["extensions"]["song_type"], 1);
+        assert_eq!(post["data"][1]["extensions"]["song_type"], 113);
+        assert_eq!(post["data"][2]["extensions"]["song_type"], Value::Null);
+        assert_eq!(post["data"][3]["extensions"]["song_type"], 7);
+        assert_eq!(post["meta"]["account"], "mixed");
+    }
+
+    #[tokio::test]
     async fn track_batches_reject_ambiguous_empty_and_cross_platform_inputs() {
         for (method, path, body) in [
             (Method::GET, "/v1/tracks", None),
@@ -17832,6 +18060,39 @@ mod tests {
                 Method::POST,
                 "/v1/tracks",
                 Some(json!({"ids": ["1"], "unknown": true})),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"refs": ["netease:1"], "items": [{"id": 1}]})),
+            ),
+            (Method::POST, "/v1/tracks", Some(json!({"items": []}))),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"items": [{"id": 1, "mid": "mid"}]})),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"items": [{"id": "not-numeric"}]})),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({
+                    "items": [{"ref": "netease:1"}, {"ref": "qq:mid"}]
+                })),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"items": [{"id": 1}], "song_type": 1})),
+            ),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"items": [{"id": 1, "unknown": true}]})),
             ),
         ] {
             let (status, json) =
