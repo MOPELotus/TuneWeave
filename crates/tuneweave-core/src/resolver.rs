@@ -122,6 +122,7 @@ impl StreamResolver {
                     account: account.clone(),
                     search_id: None,
                     highlight: false,
+                    selectors: Vec::new(),
                 };
                 let page = match provider.search(&search).await {
                     Ok(page) => page,

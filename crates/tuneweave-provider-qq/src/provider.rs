@@ -12,7 +12,7 @@ use tuneweave_core::{
     Capability, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
     MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
     PodcastEpisode, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
     SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, StreamRequest, Track, TrackDetailBatchRequest,
     TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
@@ -476,6 +476,7 @@ struct TypedSearchBatch {
     responses: Vec<QqApiResponse>,
     search_id: String,
     highlight: bool,
+    selectors: Vec<SearchSelector>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -540,6 +541,13 @@ const USER_SEARCH: TypedSearchSpec = TypedSearchSpec {
     upstream_page_size: 10,
     sparse: false,
 };
+const RINGTONE_SEARCH: TypedSearchSpec = TypedSearchSpec {
+    code: 10,
+    item_pointer: "/body/item_song",
+    context: "QQ ringtone search",
+    upstream_page_size: 60,
+    sparse: false,
+};
 const PODCAST_SEARCH: TypedSearchSpec = TypedSearchSpec {
     code: 15,
     item_pointer: "/body/item_audio",
@@ -599,6 +607,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchUsers,
             Capability::SearchPodcasts,
             Capability::SearchVoices,
+            Capability::SearchRingtones,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::TrackDetail,
@@ -620,7 +629,12 @@ impl MusicProvider for QqProvider {
         let batch = self.typed_search(query, TRACK_SEARCH).await?;
         let page =
             map_track_search_response(query.offset, batch.limit, batch.skip, batch.responses)?;
-        Ok(with_search_context(page, batch.search_id, batch.highlight))
+        Ok(with_search_context(
+            page,
+            batch.search_id,
+            batch.highlight,
+            &batch.selectors,
+        ))
     }
 
     async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
@@ -640,6 +654,7 @@ impl MusicProvider for QqProvider {
             SearchKind::User => (USER_SEARCH, map_user_search_item),
             SearchKind::Podcast => (PODCAST_SEARCH, map_podcast_search_item),
             SearchKind::Voice => (VOICE_SEARCH, map_voice_search_item),
+            SearchKind::Ringtone => (RINGTONE_SEARCH, map_ringtone_search_item),
             kind => {
                 return Err(TuneWeaveError::unsupported(
                     Platform::Qq,
@@ -656,7 +671,12 @@ impl MusicProvider for QqProvider {
             spec,
             mapper,
         )?;
-        Ok(with_search_context(page, batch.search_id, batch.highlight))
+        Ok(with_search_context(
+            page,
+            batch.search_id,
+            batch.highlight,
+            &batch.selectors,
+        ))
     }
 
     async fn search_suggestions(
@@ -1181,6 +1201,7 @@ impl QqProvider {
     ) -> Result<TypedSearchBatch> {
         self.validate_public_account(query.account.as_deref())?;
         let keyword = validate_search_query(query)?;
+        validate_search_selectors(&query.selectors)?;
         let limit = query.limit.clamp(1, 100);
         let search_id = query
             .search_id
@@ -1201,6 +1222,7 @@ impl QqProvider {
                     first_page.saturating_add(page_offset),
                     spec.upstream_page_size,
                     query.highlight,
+                    &query.selectors,
                 )
             })
             .collect::<Vec<_>>();
@@ -1211,6 +1233,7 @@ impl QqProvider {
             responses,
             search_id,
             highlight: query.highlight,
+            selectors: query.selectors.clone(),
         })
     }
 }
@@ -1233,6 +1256,20 @@ fn validate_search_query(query: &SearchQuery) -> Result<&str> {
     Ok(keyword)
 }
 
+fn validate_search_selectors(selectors: &[SearchSelector]) -> Result<()> {
+    let mut types = BTreeSet::new();
+    for selector in selectors {
+        if !types.insert(selector.selector_type) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ search selectors must use unique types",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "type": selector.selector_type })));
+        }
+    }
+    Ok(())
+}
+
 fn typed_search_request(
     keyword: &str,
     search_id: &str,
@@ -1240,7 +1277,22 @@ fn typed_search_request(
     page: u32,
     page_size: u32,
     highlight: bool,
+    selectors: &[SearchSelector],
 ) -> QqApiRequest {
+    let selector_map = selectors
+        .iter()
+        .map(|selector| (selector.selector_type.to_string(), selector.id.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let selector_items = selectors
+        .iter()
+        .map(|selector| {
+            json!({
+                "type": selector.selector_type,
+                "name": selector.name,
+                "id": selector.id
+            })
+        })
+        .collect::<Vec<_>>();
     QqApiRequest::new(
         SEARCH_MODULE,
         SEARCH_METHOD,
@@ -1251,18 +1303,28 @@ fn typed_search_request(
             "num_per_page": page_size,
             "page_num": page,
             "highlight": highlight,
-            "grp": true
+            "grp": true,
+            "selectors": selector_map,
+            "vec_selectors": selector_items
         }),
     )
 }
 
-fn with_search_context<T>(mut page: Page<T>, search_id: String, highlight: bool) -> Page<T> {
+fn with_search_context<T>(
+    mut page: Page<T>,
+    search_id: String,
+    highlight: bool,
+    selectors: &[SearchSelector],
+) -> Page<T> {
     page.pagination
         .extensions
         .insert("search_id".to_owned(), Value::String(search_id));
     page.pagination
         .extensions
         .insert("highlight".to_owned(), Value::Bool(highlight));
+    page.pagination
+        .extensions
+        .insert("selected_filters".to_owned(), json!(selectors));
     page
 }
 
@@ -1612,7 +1674,7 @@ fn map_quick_search_resource(
     let mut adapted = raw.clone();
     let singer = nonempty_string(raw.get("singer"));
     match kind {
-        SearchKind::Track | SearchKind::Lyric => {
+        SearchKind::Track | SearchKind::Lyric | SearchKind::Ringtone => {
             if let Some(singer) = singer {
                 adapted["singer"] = json!([{ "name": singer }]);
             }
@@ -2657,8 +2719,20 @@ fn collect_search_items(
     let mut available = Vec::new();
     let mut upstream_item_counts = Vec::with_capacity(responses.len());
     let mut omitted_slots = 0_u64;
+    let mut selector_groups = Vec::new();
     for (index, response) in responses.iter().enumerate() {
         ensure_data_success(&response.data, spec.context)?;
+        let response_selector_groups = map_search_selector_groups(&response.data, spec.context)?;
+        if !response_selector_groups.is_empty() {
+            if selector_groups.is_empty() {
+                selector_groups = response_selector_groups;
+            } else if selector_groups != response_selector_groups {
+                return Err(qq_data_error(format!(
+                    "{} returned inconsistent selector catalogs",
+                    spec.context
+                )));
+            }
+        }
         let response_total = response
             .data
             .pointer("/meta/sum")
@@ -2732,6 +2806,7 @@ fn collect_search_items(
         "upstream_item_counts".to_owned(),
         json!(upstream_item_counts),
     );
+    extensions.insert("selectors".to_owned(), json!(selector_groups));
     extensions.insert(
         "upstream_responses".to_owned(),
         Value::Array(responses.into_iter().map(|response| response.raw).collect()),
@@ -2747,6 +2822,82 @@ fn collect_search_items(
             extensions,
         },
     ))
+}
+
+fn map_search_selector_groups(data: &Value, context: &str) -> Result<Vec<Vec<SearchSelector>>> {
+    let Some(extern_info) = data.pointer("/body/multi_extern_info") else {
+        return Ok(Vec::new());
+    };
+    if extern_info.is_null() {
+        return Ok(Vec::new());
+    }
+    let extern_info = extern_info.as_object().ok_or_else(|| {
+        qq_data_error(format!(
+            "{context} response multi_extern_info is not an object"
+        ))
+    })?;
+    let Some(selectors) = extern_info.get("selectors") else {
+        return Ok(Vec::new());
+    };
+    if selectors.is_null() {
+        return Ok(Vec::new());
+    }
+    selectors
+        .as_array()
+        .ok_or_else(|| qq_data_error(format!("{context} response selectors is not an array")))?
+        .iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            group
+                .as_array()
+                .ok_or_else(|| {
+                    qq_data_error(format!(
+                        "{context} response selector group {group_index} is not an array"
+                    ))
+                })?
+                .iter()
+                .enumerate()
+                .map(|(item_index, item)| {
+                    let object = item.as_object().ok_or_else(|| {
+                        qq_data_error(format!(
+                            "{context} response selector {group_index}:{item_index} is not an object"
+                        ))
+                    })?;
+                    let id = object.get("id").and_then(json_i64).ok_or_else(|| {
+                        qq_data_error(format!(
+                            "{context} response selector {group_index}:{item_index} has an invalid id"
+                        ))
+                    })?;
+                    let name = object
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            qq_data_error(format!(
+                                "{context} response selector {group_index}:{item_index} has an invalid name"
+                            ))
+                        })?;
+                    let selector_type =
+                        object.get("type").and_then(json_i64).ok_or_else(|| {
+                            qq_data_error(format!(
+                                "{context} response selector {group_index}:{item_index} has an invalid type"
+                            ))
+                        })?;
+                    let extensions = object
+                        .iter()
+                        .filter(|(key, _)| !matches!(key.as_str(), "id" | "name" | "type"))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    Ok(SearchSelector {
+                        id,
+                        name,
+                        selector_type,
+                        extensions,
+                    })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn map_track(raw: Value) -> Result<Track> {
@@ -3113,6 +3264,14 @@ fn map_lyric_search_item(raw: Value) -> Result<SearchItem> {
     map_track(raw).map(SearchItem::Track)
 }
 
+fn map_ringtone_search_item(raw: Value) -> Result<SearchItem> {
+    let mut track = map_track(raw)?;
+    track
+        .extensions
+        .insert("search_category".to_owned(), json!("ringtone"));
+    Ok(SearchItem::Track(track))
+}
+
 fn map_user_search_item(raw: Value) -> Result<SearchItem> {
     let encrypted_id = [
         "encrypt_uin",
@@ -3130,7 +3289,7 @@ fn map_user_search_item(raw: Value) -> Result<SearchItem> {
         .clone()
         .or_else(|| numeric_id.clone())
         .ok_or_else(|| qq_data_error("QQ user search item is missing its account ID"))?;
-    let name = ["nick", "nickname", "name", "Name", "NickName"]
+    let name = ["nick", "nickname", "name", "Name", "NickName", "title"]
         .into_iter()
         .find_map(|field| nonempty_string(raw.get(field)))
         .ok_or_else(|| qq_data_error("QQ user search item is missing its name"))?;
@@ -3145,10 +3304,17 @@ fn map_user_search_item(raw: Value) -> Result<SearchItem> {
         platform: Platform::Qq,
         id,
         name,
-        avatar_url: ["avatar", "avatar_url", "Avatar", "AvatarUrl", "pic"]
-            .into_iter()
-            .find_map(|field| nonempty_string(raw.get(field))),
-        signature: ["signature", "Signature", "desc"]
+        avatar_url: [
+            "avatar",
+            "avatar_url",
+            "Avatar",
+            "AvatarUrl",
+            "pic",
+            "iconurl",
+        ]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field))),
+        signature: ["signature", "Signature", "desc", "subtitle"]
             .into_iter()
             .find_map(|field| nonempty_string(raw.get(field))),
         followed: ["isFollow", "followed", "is_follow"]
@@ -4048,6 +4214,7 @@ const fn capability_for_search(kind: SearchKind) -> Capability {
         SearchKind::Video => Capability::SearchVideos,
         SearchKind::Mixed => Capability::SearchMixed,
         SearchKind::Voice => Capability::SearchVoices,
+        SearchKind::Ringtone => Capability::SearchRingtones,
     }
 }
 
@@ -4128,6 +4295,7 @@ mod tests {
             account: None,
             search_id: None,
             highlight: false,
+            selectors: Vec::new(),
         }
     }
 
@@ -5276,6 +5444,28 @@ mod tests {
         assert_eq!(user.followed, Some(true));
         assert_eq!(user.mutual, Some(false));
         assert_eq!(user.extensions["search_item"]["identity"], 2);
+
+        let current = map_user_search_item(json!({
+            "docid": "oKEA7i4kowv57n**",
+            "encrypt_uin": "oKEA7i4kowv57n**",
+            "uin": "1927552414",
+            "title": "周杰伦",
+            "subtitle": "2.2万人关注  歌单达人、播客达人",
+            "iconurl": "https://example.test/icon.png"
+        }))
+        .expect("map current user response");
+        let SearchItem::User(current) = current else {
+            panic!("expected current user");
+        };
+        assert_eq!(current.name, "周杰伦");
+        assert_eq!(
+            current.signature.as_deref(),
+            Some("2.2万人关注  歌单达人、播客达人")
+        );
+        assert_eq!(
+            current.avatar_url.as_deref(),
+            Some("https://example.test/icon.png")
+        );
     }
 
     #[test]
@@ -5373,6 +5563,7 @@ mod tests {
         assert_eq!(MV_SEARCH.upstream_page_size, 60);
         assert_eq!(LYRIC_SEARCH.upstream_page_size, 60);
         assert_eq!(USER_SEARCH.upstream_page_size, 10);
+        assert_eq!(RINGTONE_SEARCH.upstream_page_size, 60);
         assert_eq!(PODCAST_SEARCH.upstream_page_size, 10);
         assert_eq!(VOICE_SEARCH.upstream_page_size, 10);
         let first = (0..30)
@@ -5413,7 +5604,13 @@ mod tests {
 
     #[test]
     fn typed_search_preserves_the_upstream_session_and_highlight_controls() {
-        let request = typed_search_request("周杰伦", "session-42", 8, 3, 10, true);
+        let selectors = vec![SearchSelector {
+            id: 4558,
+            name: "默认".to_owned(),
+            selector_type: 0,
+            extensions: Extensions::new(),
+        }];
+        let request = typed_search_request("周杰伦", "session-42", 8, 3, 10, true, &selectors);
         assert_eq!(request.module, SEARCH_MODULE);
         assert_eq!(request.method, SEARCH_METHOD);
         assert_eq!(request.param["searchid"], "session-42");
@@ -5421,6 +5618,11 @@ mod tests {
         assert_eq!(request.param["page_num"], 3);
         assert_eq!(request.param["num_per_page"], 10);
         assert_eq!(request.param["highlight"], true);
+        assert_eq!(request.param["selectors"], json!({"0": "4558"}));
+        assert_eq!(
+            request.param["vec_selectors"],
+            json!([{"type": 0, "name": "默认", "id": 4558}])
+        );
 
         let page = with_search_context(
             Page {
@@ -5436,9 +5638,98 @@ mod tests {
             },
             "session-42".to_owned(),
             true,
+            &selectors,
         );
         assert_eq!(page.pagination.extensions["search_id"], "session-42");
         assert_eq!(page.pagination.extensions["highlight"], true);
+        assert_eq!(
+            page.pagination.extensions["selected_filters"][0]["id"],
+            4558
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_search_rejects_duplicate_selector_types_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let mut query = search_query(SearchKind::Track, 5, 0);
+        query.selectors = vec![
+            SearchSelector {
+                id: 1,
+                name: "一".to_owned(),
+                selector_type: 7,
+                extensions: Extensions::new(),
+            },
+            SearchSelector {
+                id: 2,
+                name: "二".to_owned(),
+                selector_type: 7,
+                extensions: Extensions::new(),
+            },
+        ];
+        let error = provider
+            .search(&query)
+            .await
+            .expect_err("duplicate selector types");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.details["type"], 7);
+    }
+
+    #[test]
+    fn selector_mapping_preserves_two_dimensional_catalogs_and_extra_fields() {
+        let page = map_track_search_response(
+            0,
+            10,
+            0,
+            vec![response(json!({
+                "code": 0,
+                "meta": {"sum": 0},
+                "body": {
+                    "item_song": [],
+                    "multi_extern_info": {
+                        "selectors": [
+                            [
+                                {"id": 1, "name": "华语", "type": 10},
+                                {"id": "2", "name": "欧美", "type": "10", "badge": "new"}
+                            ],
+                            [{"id": 3, "name": "现场", "type": 11}]
+                        ]
+                    }
+                }
+            }))],
+        )
+        .expect("map selector catalog");
+        let selectors = &page.pagination.extensions["selectors"];
+        assert_eq!(selectors[0][0]["id"], 1);
+        assert_eq!(selectors[0][1]["type"], 10);
+        assert_eq!(selectors[0][1]["extensions"]["badge"], "new");
+        assert_eq!(selectors[1][0]["name"], "现场");
+
+        let error = map_track_search_response(
+            0,
+            10,
+            0,
+            vec![response(json!({
+                "code": 0,
+                "meta": {"sum": 0},
+                "body": {
+                    "item_song": [],
+                    "multi_extern_info": {"selectors": [{"id": 1}]}
+                }
+            }))],
+        )
+        .expect_err("selector group must be an array");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn ringtone_search_items_remain_playable_tracks() {
+        let item = map_ringtone_search_item(sample_track(361947418, "003w2xz20QlUZt", "作品"))
+            .expect("map ringtone track");
+        let SearchItem::Track(track) = item else {
+            panic!("ringtone search must return a track");
+        };
+        assert_eq!(track.resource_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(track.extensions["search_category"], "ringtone");
     }
 
     #[test]
@@ -6333,6 +6624,7 @@ mod tests {
                     1,
                     spec.upstream_page_size,
                     false,
+                    &[],
                 )
             })
             .collect::<Vec<_>>();
@@ -6374,6 +6666,7 @@ mod tests {
             SearchKind::User,
             SearchKind::Podcast,
             SearchKind::Voice,
+            SearchKind::Ringtone,
         ] {
             let page = provider
                 .search_catalog(&search_query(kind, 2, 0))
@@ -6399,9 +6692,57 @@ mod tests {
                     (SearchKind::Voice, SearchItem::PodcastEpisode(episode)) => {
                         !episode.name.is_empty() && episode.audio.is_some()
                     }
+                    (SearchKind::Ringtone, SearchItem::Track(track)) => {
+                        !track.name.is_empty() && track.extensions["search_category"] == "ringtone"
+                    }
                     _ => false,
                 }
             }));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_typed_search_submits_selector_map_and_vector_forms() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let mut query = search_query(SearchKind::Track, 2, 0);
+        query.selectors = vec![SearchSelector {
+            id: 4558,
+            name: "默认".to_owned(),
+            selector_type: 0,
+            extensions: Extensions::new(),
+        }];
+        let page = provider.search(&query).await.expect("live selector search");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(
+            page.pagination.extensions["selected_filters"][0]["id"],
+            4558
+        );
+        assert!(page.pagination.extensions["selectors"].is_array());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_ringtone_search_returns_typed_tracks_and_real_pagination() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let page = provider
+            .search_catalog(&search_query(SearchKind::Ringtone, 2, 0))
+            .await
+            .expect("live ringtone search");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.pagination.total.is_some_and(|total| total > 0));
+        assert!(page.items.iter().all(|item| matches!(
+            item,
+            SearchItem::Track(track)
+                if !track.name.is_empty() && track.extensions["search_category"] == "ringtone"
+        )));
     }
 }

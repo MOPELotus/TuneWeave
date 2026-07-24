@@ -16,6 +16,7 @@ pub enum Capability {
     SearchVideos,
     SearchMixed,
     SearchVoices,
+    SearchRingtones,
     SearchDefault,
     SearchTrending,
     SearchSuggestions,

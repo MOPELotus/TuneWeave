@@ -70,21 +70,21 @@ use tuneweave_core::{
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
     ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome, StreamRequest,
-    StreamResolver, StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackEntitlement, TrackIdentifierKind, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
-    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
-    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
-    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
-    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
-    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome,
+    StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
+    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
+    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
+    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
+    UniPlaylistItemStream, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -678,6 +678,16 @@ struct SearchParams {
     #[serde(alias = "searchid")]
     search_id: Option<String>,
     highlight: Option<String>,
+    selectors: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchSelectorInput {
+    id: i64,
+    name: String,
+    #[serde(rename = "type")]
+    selector_type: i64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -973,6 +983,7 @@ async fn search(
         account: account.clone(),
         search_id,
         highlight: parse_bool_parameter("highlight", params.highlight.as_deref(), false)?,
+        selectors: parse_search_selectors(params.selectors.as_deref())?,
     };
     let page = provider.search_catalog(&query).await?;
     let mut response = ApiResponse::new(page.items)
@@ -11277,17 +11288,46 @@ fn parse_search_kind(value: Option<&str>) -> Result<SearchKind, TuneWeaveError> 
         "video" | "1014" => Ok(SearchKind::Video),
         "mixed" | "complex" | "1018" => Ok(SearchKind::Mixed),
         "voice" | "2000" => Ok(SearchKind::Voice),
+        "ringtone" | "ring" => Ok(SearchKind::Ringtone),
         value => Err(
             TuneWeaveError::invalid_request(format!("unsupported search type: {value}"))
                 .with_details(json!({
                     "allowed": [
                         "track", "album", "artist", "playlist", "user", "mv", "lyric",
-                        "radio_station", "podcast", "video", "mixed", "voice", 1, 10, 100,
-                        1000, 1002, 1004, 1006, 1009, 1014, 1018, 2000
+                        "radio_station", "podcast", "video", "mixed", "voice", "ringtone",
+                        1, 10, 100, 1000, 1002, 1004, 1006, 1009, 1014, 1018, 2000
                     ]
                 })),
         ),
     }
+}
+
+fn parse_search_selectors(value: Option<&str>) -> Result<Vec<SearchSelector>, TuneWeaveError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let inputs = serde_json::from_str::<Vec<SearchSelectorInput>>(value).map_err(|error| {
+        TuneWeaveError::invalid_request("selectors must be a JSON array of {id,name,type}")
+            .with_details(json!({ "error": error.to_string() }))
+    })?;
+    let mut types = BTreeSet::new();
+    inputs
+        .into_iter()
+        .map(|input| {
+            if !types.insert(input.selector_type) {
+                return Err(TuneWeaveError::invalid_request(
+                    "search selectors must use unique types",
+                )
+                .with_details(json!({ "type": input.selector_type })));
+            }
+            Ok(SearchSelector {
+                id: input.id,
+                name: input.name,
+                selector_type: input.selector_type,
+                extensions: Extensions::new(),
+            })
+        })
+        .collect()
 }
 
 fn parse_search_variant(value: Option<&str>) -> Result<SearchVariant, TuneWeaveError> {
@@ -11757,7 +11797,9 @@ mod tests {
 
         async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
             let item = match query.kind {
-                SearchKind::Track | SearchKind::Lyric => SearchItem::Track(sample_track("123")),
+                SearchKind::Track | SearchKind::Lyric | SearchKind::Ringtone => {
+                    SearchItem::Track(sample_track("123"))
+                }
                 SearchKind::Album => SearchItem::Album(sample_album("18915")),
                 SearchKind::Artist => SearchItem::Artist(sample_artist("6452")),
                 SearchKind::Playlist => SearchItem::Playlist(sample_playlist("3778678")),
@@ -11786,6 +11828,7 @@ mod tests {
             extensions.insert("account".to_owned(), json!(query.account));
             extensions.insert("search_id".to_owned(), json!(query.search_id));
             extensions.insert("highlight".to_owned(), json!(query.highlight));
+            extensions.insert("selectors".to_owned(), json!(query.selectors));
             Ok(Page {
                 items: vec![item],
                 pagination: PageMeta {
@@ -15484,6 +15527,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_accepts_ringtone_kind_and_typed_selector_json() {
+        let path = "/v1/search?q=clock&kind=ringtone&selectors=%5B%7B%22id%22%3A4558%2C%22name%22%3A%22default%22%2C%22type%22%3A0%7D%5D&searchid=ring-session";
+        let (status, json) = json_response_from(test_app_with_provider(), path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"][0]["type"], "track");
+        assert_eq!(json["meta"]["pagination"]["extensions"]["kind"], "ringtone");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["selectors"][0],
+            json!({"id": 4558, "name": "default", "type": 0})
+        );
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["search_id"],
+            "ring-session"
+        );
+    }
+
+    #[tokio::test]
     async fn search_exposes_legacy_and_cloud_variants_on_the_same_endpoint() {
         for (input, expected) in [
             ("legacy", "legacy"),
@@ -15895,6 +15955,7 @@ mod tests {
             ("video", SearchKind::Video),
             ("complex", SearchKind::Mixed),
             ("voice", SearchKind::Voice),
+            ("ringtone", SearchKind::Ringtone),
         ] {
             assert_eq!(parse_search_kind(Some(value)).expect(value), expected);
         }
@@ -19068,6 +19129,9 @@ mod tests {
             "/v1/search?q=clock&type=book",
             "/v1/search?type=1",
             "/v1/search?q=clock&highlight=sometimes",
+            "/v1/search?q=clock&selectors=not-json",
+            "/v1/search?q=clock&selectors=%5B%7B%22id%22%3A1%2C%22name%22%3A%22a%22%2C%22type%22%3A7%7D%2C%7B%22id%22%3A2%2C%22name%22%3A%22b%22%2C%22type%22%3A7%7D%5D",
+            "/v1/search?q=clock&selectors=%5B%7B%22id%22%3A1%2C%22name%22%3A%22a%22%2C%22type%22%3A7%2C%22unknown%22%3Atrue%7D%5D",
             "/v1/search?q=clock&unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;

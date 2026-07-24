@@ -23,6 +23,7 @@ pub enum SearchKind {
     Video,
     Mixed,
     Voice,
+    Ringtone,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -64,6 +65,8 @@ pub struct SearchQuery {
     pub search_id: Option<String>,
     #[serde(default)]
     pub highlight: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selectors: Vec<SearchSelector>,
 }
 
 impl SearchQuery {
@@ -77,8 +80,19 @@ impl SearchQuery {
             account: None,
             search_id: None,
             highlight: false,
+            selectors: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchSelector {
+    pub id: i64,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub selector_type: i64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -5382,7 +5396,7 @@ mod tests {
     }
 
     #[test]
-    fn search_kinds_cover_every_reference_cloudsearch_branch() {
+    fn search_kinds_cover_unified_and_platform_specific_branches() {
         let kinds = [
             SearchKind::Track,
             SearchKind::Album,
@@ -5396,6 +5410,7 @@ mod tests {
             SearchKind::Video,
             SearchKind::Mixed,
             SearchKind::Voice,
+            SearchKind::Ringtone,
         ];
         let values = kinds
             .into_iter()
@@ -5416,7 +5431,23 @@ mod tests {
                 "video",
                 "mixed",
                 "voice",
+                "ringtone",
             ]
+        );
+    }
+
+    #[test]
+    fn search_selectors_keep_protocol_type_name_and_id_typed() {
+        let selector = SearchSelector {
+            id: 4558,
+            name: "默认".to_owned(),
+            selector_type: 0,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(selector).expect("serialize search selector");
+        assert_eq!(
+            value,
+            serde_json::json!({"id": 4558, "name": "默认", "type": 0})
         );
     }
 

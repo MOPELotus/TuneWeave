@@ -713,6 +713,12 @@ impl MusicProvider for NeteaseProvider {
                 capability_for_search(query.kind),
             ));
         }
+        if !query.selectors.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase search does not support QQ selector filters",
+            )
+            .with_platform(Platform::Netease));
+        }
         let keyword = query.query.trim();
         if keyword.is_empty() {
             return Err(TuneWeaveError::invalid_request(
@@ -765,15 +771,21 @@ impl MusicProvider for NeteaseProvider {
                     .with_platform(Platform::Netease),
             );
         }
-        if query.kind == SearchKind::RadioStation {
+        if matches!(query.kind, SearchKind::RadioStation | SearchKind::Ringtone) {
             return Err(TuneWeaveError::unsupported(
                 Platform::Netease,
-                Capability::SearchRadioStations,
+                capability_for_search(query.kind),
             ));
+        }
+        if !query.selectors.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase search does not support QQ selector filters",
+            )
+            .with_platform(Platform::Netease));
         }
         let limit = query.limit.clamp(1, 100);
         let client = self.client_for(query.account.as_deref())?;
-        let (path, payload, variant) = netease_catalog_search_request(query, keyword, limit);
+        let (path, payload, variant) = netease_catalog_search_request(query, keyword, limit)?;
         let response = client.request_eapi(path, payload).await?;
         ensure_success(&response.body)?;
         let mut page = map_cloud_search_response(query.kind, limit, query.offset, response.body)?;
@@ -852,7 +864,7 @@ impl MusicProvider for NeteaseProvider {
             ));
         }
         let client = self.client_for(request.account.as_deref())?;
-        let (path, payload) = netease_search_multi_match_request(request.kind, query);
+        let (path, payload) = netease_search_multi_match_request(request.kind, query)?;
         let response = client.request_weapi(path, payload).await?;
         ensure_success(&response.body)?;
         map_netease_search_multi_match(query, request.kind, response.body)
@@ -14238,8 +14250,8 @@ fn validated_video_resolution(resolution: u32) -> Result<u32> {
     )
 }
 
-const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
-    match kind {
+fn netease_cloud_search_type(kind: SearchKind) -> Result<u32> {
+    Ok(match kind {
         SearchKind::Track => 1,
         SearchKind::Album => 10,
         SearchKind::Artist => 100,
@@ -14252,7 +14264,13 @@ const fn netease_cloud_search_type(kind: SearchKind) -> u32 {
         SearchKind::Video => 1_014,
         SearchKind::Mixed => 1_018,
         SearchKind::Voice => 2_000,
-    }
+        SearchKind::Ringtone => {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Netease,
+                Capability::SearchRingtones,
+            ));
+        }
+    })
 }
 
 fn netease_default_search_keyword_request() -> (&'static str, Value) {
@@ -14648,14 +14666,17 @@ fn search_item_keyword(item: &SearchItem) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-fn netease_search_multi_match_request(kind: SearchKind, query: &str) -> (&'static str, Value) {
-    (
+fn netease_search_multi_match_request(
+    kind: SearchKind,
+    query: &str,
+) -> Result<(&'static str, Value)> {
+    Ok((
         "/api/search/suggest/multimatch",
         json!({
-            "type": netease_cloud_search_type(kind),
+            "type": netease_cloud_search_type(kind)?,
             "s": query
         }),
-    )
+    ))
 }
 
 fn map_netease_search_multi_match(
@@ -14753,7 +14774,7 @@ fn map_netease_search_multi_match(
         extensions: Extensions::from([
             (
                 "platform_type".to_owned(),
-                json!(netease_cloud_search_type(requested_kind)),
+                json!(netease_cloud_search_type(requested_kind)?),
             ),
             ("response".to_owned(), response),
         ]),
@@ -15455,9 +15476,9 @@ fn netease_catalog_search_request(
     query: &SearchQuery,
     keyword: &str,
     limit: u32,
-) -> (&'static str, Value, SearchVariant) {
+) -> Result<(&'static str, Value, SearchVariant)> {
     if query.kind == SearchKind::Podcast && query.variant == SearchVariant::Default {
-        return (
+        return Ok((
             "/api/search/voicelist/get",
             json!({
                 "keyword": keyword,
@@ -15467,13 +15488,13 @@ fn netease_catalog_search_request(
                 "e_r": true
             }),
             SearchVariant::Default,
-        );
+        ));
     }
     let variant = match query.variant {
         SearchVariant::Default => SearchVariant::Cloud,
         variant => variant,
     };
-    match (variant, query.kind) {
+    Ok(match (variant, query.kind) {
         (SearchVariant::Legacy, SearchKind::Voice) => (
             "/api/search/voice/get",
             json!({
@@ -15488,7 +15509,7 @@ fn netease_catalog_search_request(
             "/api/search/get",
             json!({
                 "s": keyword,
-                "type": netease_cloud_search_type(query.kind),
+                "type": netease_cloud_search_type(query.kind)?,
                 "limit": limit,
                 "offset": query.offset
             }),
@@ -15498,7 +15519,7 @@ fn netease_catalog_search_request(
             "/api/cloudsearch/pc",
             json!({
                 "s": keyword,
-                "type": netease_cloud_search_type(query.kind),
+                "type": netease_cloud_search_type(query.kind)?,
                 "limit": limit,
                 "offset": query.offset,
                 "total": true
@@ -15506,7 +15527,7 @@ fn netease_catalog_search_request(
             variant,
         ),
         (SearchVariant::Default, _) => unreachable!("default search variant is resolved above"),
-    }
+    })
 }
 
 fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&'static str]) {
@@ -15525,6 +15546,9 @@ fn cloud_search_shape(kind: SearchKind) -> (&'static [&'static str], &'static [&
             &["voices", "resources"],
             &["voiceCount", "resourceCount", "totalCount"],
         ),
+        SearchKind::Ringtone => {
+            unreachable!("NetEase ringtone search is rejected before response mapping")
+        }
     }
 }
 
@@ -15555,6 +15579,7 @@ fn map_cloud_search_response(
     offset: u32,
     body: Value,
 ) -> Result<Page<SearchItem>> {
+    let platform_type = netease_cloud_search_type(kind)?;
     let (item_keys, count_keys) = cloud_search_shape(kind);
     let result = preferred_cloud_search_result(kind, &body, item_keys)
         .cloned()
@@ -15593,10 +15618,7 @@ fn map_cloud_search_response(
     };
     let mut extensions = Extensions::new();
     extensions.insert("kind".to_owned(), json!(kind));
-    extensions.insert(
-        "platform_type".to_owned(),
-        json!(netease_cloud_search_type(kind)),
-    );
+    extensions.insert("platform_type".to_owned(), json!(platform_type));
     extensions.insert("returned_count".to_owned(), json!(raw_items.len()));
     extensions.insert(
         "limit_applied".to_owned(),
@@ -15669,6 +15691,9 @@ fn map_cloud_search_item(kind: SearchKind, raw: Value) -> SearchItem {
         SearchKind::Video => map_cloud_search_video(raw.clone()).map(SearchItem::Video),
         SearchKind::Mixed | SearchKind::Voice => {
             return opaque_cloud_search_item(kind, raw, None);
+        }
+        SearchKind::Ringtone => {
+            unreachable!("NetEase ringtone search is rejected before item mapping")
         }
     };
     mapped.unwrap_or_else(|error| opaque_cloud_search_item(kind, raw, Some(error.message)))
@@ -15867,6 +15892,7 @@ fn capability_for_search(kind: SearchKind) -> Capability {
         SearchKind::Video => Capability::SearchVideos,
         SearchKind::Mixed => Capability::SearchMixed,
         SearchKind::Voice => Capability::SearchVoices,
+        SearchKind::Ringtone => Capability::SearchRingtones,
     }
 }
 
@@ -16522,7 +16548,8 @@ mod tests {
 
     #[test]
     fn multi_match_search_matches_reference_protocol_and_preserves_ordered_types() {
-        let (path, payload) = netease_search_multi_match_request(SearchKind::Track, "海阔天空");
+        let (path, payload) = netease_search_multi_match_request(SearchKind::Track, "海阔天空")
+            .expect("build multi-match request");
         assert_eq!(path, "/api/search/suggest/multimatch");
         assert_eq!(payload, json!({"type": 1, "s": "海阔天空"}));
 
@@ -17346,10 +17373,15 @@ mod tests {
             SearchKind::Mixed,
         ] {
             query.kind = kind;
-            let (path, payload, variant) = netease_catalog_search_request(&query, "周杰伦", 2);
+            let (path, payload, variant) =
+                netease_catalog_search_request(&query, "周杰伦", 2).expect("catalog request");
             assert_eq!(path, "/api/search/get", "{kind:?}");
             assert_eq!(payload["s"], "周杰伦", "{kind:?}");
-            assert_eq!(payload["type"], netease_cloud_search_type(kind), "{kind:?}");
+            assert_eq!(
+                payload["type"],
+                netease_cloud_search_type(kind).expect("supported search type"),
+                "{kind:?}"
+            );
             assert_eq!(payload["limit"], 2, "{kind:?}");
             assert_eq!(payload["offset"], 3, "{kind:?}");
             assert!(payload.get("total").is_none(), "{kind:?}");
@@ -17357,7 +17389,8 @@ mod tests {
         }
 
         query.kind = SearchKind::Voice;
-        let (path, payload, variant) = netease_catalog_search_request(&query, "周杰伦", 2);
+        let (path, payload, variant) =
+            netease_catalog_search_request(&query, "周杰伦", 2).expect("catalog request");
         assert_eq!(path, "/api/search/voice/get");
         assert_eq!(payload["keyword"], "周杰伦");
         assert_eq!(payload["scene"], "normal");
@@ -17369,7 +17402,8 @@ mod tests {
 
         query.kind = SearchKind::Podcast;
         query.variant = SearchVariant::Default;
-        let (path, payload, variant) = netease_catalog_search_request(&query, "故事", 2);
+        let (path, payload, variant) =
+            netease_catalog_search_request(&query, "故事", 2).expect("catalog request");
         assert_eq!(path, "/api/search/voicelist/get");
         assert_eq!(payload["keyword"], "故事");
         assert_eq!(payload["scene"], "normal");
@@ -17381,7 +17415,8 @@ mod tests {
         assert_eq!(variant, SearchVariant::Default);
 
         query.variant = SearchVariant::Cloud;
-        let (path, payload, variant) = netease_catalog_search_request(&query, "故事", 2);
+        let (path, payload, variant) =
+            netease_catalog_search_request(&query, "故事", 2).expect("catalog request");
         assert_eq!(path, "/api/cloudsearch/pc");
         assert_eq!(payload["s"], "故事");
         assert_eq!(payload["type"], 1_009);
@@ -17392,7 +17427,7 @@ mod tests {
         for requested_variant in [SearchVariant::Default, SearchVariant::Cloud] {
             query.variant = requested_variant;
             let (path, payload, resolved_variant) =
-                netease_catalog_search_request(&query, "周杰伦", 2);
+                netease_catalog_search_request(&query, "周杰伦", 2).expect("catalog request");
             assert_eq!(path, "/api/cloudsearch/pc");
             assert_eq!(payload["s"], "周杰伦");
             assert_eq!(payload["type"], 2_000);
@@ -17415,6 +17450,7 @@ mod tests {
                 account: None,
                 search_id: None,
                 highlight: false,
+                selectors: Vec::new(),
             },
         )
         .await
@@ -17422,6 +17458,37 @@ mod tests {
         assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
         assert_eq!(error.platform, Some(Platform::Netease));
         assert_eq!(error.details["capability"], "search_radio_stations");
+
+        let error = MusicProvider::search_catalog(
+            &provider,
+            &SearchQuery {
+                query: "故事".to_owned(),
+                kind: SearchKind::Ringtone,
+                variant: SearchVariant::Default,
+                limit: 10,
+                offset: 0,
+                account: None,
+                search_id: None,
+                highlight: false,
+                selectors: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("NetEase has no ringtone search endpoint");
+        assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(error.details["capability"], "search_ringtones");
+
+        let mut selector_query = SearchQuery::tracks("故事", 10, 0);
+        selector_query.selectors = vec![tuneweave_core::SearchSelector {
+            id: 4558,
+            name: "默认".to_owned(),
+            selector_type: 0,
+            extensions: Extensions::new(),
+        }];
+        let error = MusicProvider::search_catalog(&provider, &selector_query)
+            .await
+            .expect_err("NetEase must not ignore QQ selector filters");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
 
         let error = MusicProvider::search_multi_match(
             &provider,
@@ -17584,7 +17651,7 @@ mod tests {
             assert!(page.pagination.has_more, "{kind:?}");
             assert_eq!(
                 page.pagination.extensions["platform_type"],
-                netease_cloud_search_type(kind),
+                netease_cloud_search_type(kind).expect("supported search type"),
                 "{kind:?}"
             );
             assert_eq!(page.pagination.extensions["response"]["code"], 200);
@@ -17806,7 +17873,10 @@ mod tests {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let capabilities = provider.capabilities();
         for (kind, platform_type, capability) in cases {
-            assert_eq!(netease_cloud_search_type(kind), platform_type);
+            assert_eq!(
+                netease_cloud_search_type(kind).expect("supported search type"),
+                platform_type
+            );
             assert_eq!(capability_for_search(kind), capability);
             if kind == SearchKind::RadioStation {
                 assert!(!capabilities.contains(&capability), "{capability:?}");
@@ -29037,6 +29107,7 @@ mod tests {
                 account: None,
                 search_id: None,
                 highlight: false,
+                selectors: Vec::new(),
             },
         )
         .await
@@ -29298,6 +29369,7 @@ mod tests {
                     account: None,
                     search_id: None,
                     highlight: false,
+                    selectors: Vec::new(),
                 },
             )
             .await
@@ -29305,7 +29377,7 @@ mod tests {
             assert_eq!(page.pagination.extensions["response"]["code"], 200);
             assert_eq!(
                 page.pagination.extensions["platform_type"],
-                netease_cloud_search_type(kind)
+                netease_cloud_search_type(kind).expect("supported search type")
             );
             if !matches!(
                 kind,
@@ -29344,6 +29416,7 @@ mod tests {
                     account: None,
                     search_id: None,
                     highlight: false,
+                    selectors: Vec::new(),
                 },
             )
             .await
