@@ -394,6 +394,30 @@ pub(crate) async fn login_with_phone_authcode(
     parse_login_credential(response.data)
 }
 
+pub(crate) async fn refresh_qq_credential(
+    client: &QqClient,
+    credential: &QqCredential,
+) -> Result<QqCredential> {
+    let response = client
+        .request_android_business_with_credential(
+            QqApiRequest::new(
+                "music.login.LoginServer",
+                "Login",
+                refresh_credential_param(credential),
+            ),
+            &[("tmeLoginType", json!(credential.login_type))],
+            Some(credential),
+        )
+        .await?;
+    if response.code != 0 {
+        return Err(qq_login_business_error(
+            response.code,
+            "QQ failed to refresh the account credential",
+        ));
+    }
+    parse_login_credential(response.data)
+}
+
 async fn poll_qq_qr(
     client: &QqClient,
     transaction: &mut QqQrTransaction,
@@ -1167,6 +1191,42 @@ fn phone_authcode_login_param(principal: &str, code: &str) -> Result<serde_json:
     Ok(serde_json::Value::Object(param))
 }
 
+fn refresh_credential_param(credential: &QqCredential) -> serde_json::Value {
+    match credential.login_type {
+        1 => json!({
+            "openid": credential.openid,
+            "refresh_token": credential.refresh_token,
+            "str_musicid": credential.str_music_id,
+            "musickey": credential.musickey,
+            "unionid": credential.unionid,
+            "refresh_key": credential.refresh_key,
+            "loginMode": 2
+        }),
+        2 => json!({
+            "openid": credential.openid,
+            "access_token": credential.access_token,
+            "refresh_token": credential.refresh_token,
+            "expired_in": credential.expired_at,
+            "musicid": credential.music_id,
+            "musickey": credential.musickey,
+            "refresh_key": credential.refresh_key,
+            "loginMode": 2
+        }),
+        _ => json!({
+            "openid": credential.openid,
+            "access_token": credential.access_token,
+            "refresh_token": credential.refresh_token,
+            "expired_in": credential.expired_at,
+            "str_musicid": credential.str_music_id,
+            "musicid": credential.music_id,
+            "musickey": credential.musickey,
+            "unionid": credential.unionid,
+            "refresh_key": credential.refresh_key,
+            "loginMode": 2
+        }),
+    }
+}
+
 fn insert_phone_principal(
     param: &mut serde_json::Map<String, serde_json::Value>,
     principal: QqPhonePrincipal,
@@ -1620,6 +1680,81 @@ mod tests {
         let limited = qq_login_business_error(104_604, "login");
         assert_eq!(limited.code, ErrorCode::RateLimited);
         assert!(limited.retryable);
+    }
+
+    #[test]
+    fn credential_refresh_preserves_every_login_type_parameter_branch() {
+        let credential = QqCredential {
+            openid: "open-id".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            access_token: "access-token".to_owned(),
+            expired_at: 123,
+            music_id: 456,
+            musickey: "Q_H_L_private".to_owned(),
+            unionid: "union-id".to_owned(),
+            str_music_id: "456".to_owned(),
+            refresh_key: "refresh-key".to_owned(),
+            ..serde_json::from_value(json!({})).expect("empty credential")
+        };
+
+        let wechat = refresh_credential_param(&QqCredential {
+            login_type: 1,
+            ..credential.clone()
+        });
+        assert_eq!(
+            wechat,
+            json!({
+                "openid": "open-id",
+                "refresh_token": "refresh-token",
+                "str_musicid": "456",
+                "musickey": "Q_H_L_private",
+                "unionid": "union-id",
+                "refresh_key": "refresh-key",
+                "loginMode": 2
+            })
+        );
+        assert!(wechat.get("access_token").is_none());
+        assert!(wechat.get("musicid").is_none());
+
+        let qq = refresh_credential_param(&QqCredential {
+            login_type: 2,
+            ..credential.clone()
+        });
+        assert_eq!(
+            qq,
+            json!({
+                "openid": "open-id",
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expired_in": 123,
+                "musicid": 456,
+                "musickey": "Q_H_L_private",
+                "refresh_key": "refresh-key",
+                "loginMode": 2
+            })
+        );
+        assert!(qq.get("str_musicid").is_none());
+        assert!(qq.get("unionid").is_none());
+
+        let mobile = refresh_credential_param(&QqCredential {
+            login_type: 6,
+            ..credential
+        });
+        assert_eq!(
+            mobile,
+            json!({
+                "openid": "open-id",
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expired_in": 123,
+                "str_musicid": "456",
+                "musicid": 456,
+                "musickey": "Q_H_L_private",
+                "unionid": "union-id",
+                "refresh_key": "refresh-key",
+                "loginMode": 2
+            })
+        );
     }
 
     #[tokio::test]

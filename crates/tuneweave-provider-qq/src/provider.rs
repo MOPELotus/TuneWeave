@@ -24,7 +24,7 @@ use tuneweave_core::{
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
 use crate::login::{
     QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
-    qq_login_business_error, send_phone_authcode,
+    qq_login_business_error, refresh_qq_credential, send_phone_authcode,
 };
 use crate::qrc::decrypt_qrc;
 
@@ -1115,6 +1115,22 @@ impl MusicProvider for QqProvider {
         profile.extensions.insert(
             "credential_locally_expired".to_owned(),
             json!(credential.is_locally_expired()?),
+        );
+        Ok(profile)
+    }
+
+    async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let refreshed = refresh_qq_credential(&self.client, &credential).await?;
+        let mut profile = self.persist_qq_credential(account, &refreshed)?;
+        profile
+            .extensions
+            .insert("refreshed".to_owned(), json!(true));
+        profile.extensions.insert(
+            "credential_expires_at_epoch".to_owned(),
+            json!(refreshed.expires_at_epoch()),
         );
         Ok(profile)
     }
@@ -5609,6 +5625,17 @@ mod tests {
         assert_eq!(profile.account, "missing-account");
         assert!(!profile.authenticated);
         assert_eq!(profile.extensions["credential_state"], "missing");
+    }
+
+    #[tokio::test]
+    async fn missing_refresh_alias_fails_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let error = provider
+            .refresh_session("missing-account")
+            .await
+            .expect_err("missing account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "missing-account");
     }
 
     #[test]
