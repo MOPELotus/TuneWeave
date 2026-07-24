@@ -24,7 +24,7 @@ use tuneweave_core::{
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
 use crate::login::{
     QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
-    send_phone_authcode,
+    qq_login_business_error, send_phone_authcode,
 };
 use crate::qrc::decrypt_qrc;
 
@@ -1066,6 +1066,57 @@ impl MusicProvider for QqProvider {
             }
         };
         self.persist_qq_credential(&request.account, &credential)
+    }
+
+    async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+        let credential = match self.qq_credential(Some(account)) {
+            Ok(Some(credential)) => credential,
+            Ok(None) => return Ok(unauthenticated_qq_profile(account)),
+            Err(error) if error.code == ErrorCode::AuthenticationRequired => {
+                return Ok(unauthenticated_qq_profile(account));
+            }
+            Err(error) => return Err(error),
+        };
+        let response = self
+            .client
+            .request_android_business_with_credential(
+                QqApiRequest::new(
+                    "music.UserInfo.userInfoServer",
+                    "GetLoginUserInfo",
+                    json!({}),
+                ),
+                &[],
+                Some(&credential),
+            )
+            .await?;
+        let authenticated = match response.code {
+            0 => true,
+            1000 | 104_400 | 104_401 => false,
+            code => {
+                return Err(qq_login_business_error(
+                    code,
+                    "QQ failed to check the account credential",
+                ));
+            }
+        };
+        let mut profile = AccountProfile::authenticated(Platform::Qq, account);
+        profile.user_id = Some(credential.string_music_id().to_owned());
+        profile.authenticated = authenticated;
+        profile
+            .extensions
+            .insert("platform_code".to_owned(), json!(response.code));
+        profile
+            .extensions
+            .insert("login_type".to_owned(), json!(credential.login_type));
+        profile.extensions.insert(
+            "credential_expires_at_epoch".to_owned(),
+            json!(credential.expires_at_epoch()),
+        );
+        profile.extensions.insert(
+            "credential_locally_expired".to_owned(),
+            json!(credential.is_locally_expired()?),
+        );
+        Ok(profile)
     }
 }
 
@@ -4382,6 +4433,15 @@ const fn capability_for_search(kind: SearchKind) -> Capability {
     }
 }
 
+fn unauthenticated_qq_profile(account: &str) -> AccountProfile {
+    let mut profile = AccountProfile::authenticated(Platform::Qq, account);
+    profile.authenticated = false;
+    profile
+        .extensions
+        .insert("credential_state".to_owned(), json!("missing"));
+    profile
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5536,6 +5596,19 @@ mod tests {
             .await
             .expect_err("invalid verification code");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn missing_session_alias_returns_an_unauthenticated_profile_without_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let profile = provider
+            .session_profile("missing-account")
+            .await
+            .expect("missing session profile");
+        assert_eq!(profile.platform, Platform::Qq);
+        assert_eq!(profile.account, "missing-account");
+        assert!(!profile.authenticated);
+        assert_eq!(profile.extensions["credential_state"], "missing");
     }
 
     #[test]

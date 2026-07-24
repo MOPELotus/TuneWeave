@@ -135,6 +135,19 @@ impl QqCredential {
         &self.str_music_id
     }
 
+    pub(crate) fn expires_at_epoch(&self) -> Option<u64> {
+        (self.musickey_create_time > 0 && self.key_expires_in > 0).then(|| {
+            self.musickey_create_time
+                .saturating_add(self.key_expires_in)
+        })
+    }
+
+    pub(crate) fn is_locally_expired(&self) -> Result<Option<bool>> {
+        self.expires_at_epoch()
+            .map(|expires_at| unix_seconds_now().map(|now| now >= expires_at))
+            .transpose()
+    }
+
     fn cookie_header(&self) -> String {
         format!(
             "uin={0}; qqmusic_uin={0}; qm_keyst={1}; qqmusic_key={1}",
@@ -302,9 +315,23 @@ impl QqClient {
         request: QqApiRequest,
         comm_fields: &[(&str, Value)],
     ) -> Result<QqBusinessResponse> {
+        self.request_android_business_with_credential(request, comm_fields, None)
+            .await
+    }
+
+    pub(crate) async fn request_android_business_with_credential(
+        &self,
+        request: QqApiRequest,
+        comm_fields: &[(&str, Value)],
+        credential: Option<&QqCredential>,
+    ) -> Result<QqBusinessResponse> {
         self.ensure_android_session().await?;
         let response = self
-            .post_android_with_comm_fields_allowing_business_errors(&request, comm_fields)
+            .post_android_with_comm_fields_allowing_business_errors(
+                &request,
+                comm_fields,
+                credential,
+            )
             .await?;
         let code = response
             .raw
@@ -343,9 +370,10 @@ impl QqClient {
         &self,
         request: &QqApiRequest,
         comm_fields: &[(&str, Value)],
+        credential: Option<&QqCredential>,
     ) -> Result<QqApiResponse> {
         let device = self.lock_device()?.device().clone();
-        let mut comm = android_comm(&device, None);
+        let mut comm = android_comm(&device, credential);
         {
             let fields = comm
                 .as_object_mut()
@@ -354,7 +382,7 @@ impl QqClient {
                 fields.insert((*name).to_owned(), value.clone());
             }
         }
-        self.post_api_allowing_business_errors(&comm, std::slice::from_ref(request), None)
+        self.post_api_allowing_business_errors(&comm, std::slice::from_ref(request), credential)
             .await?
             .into_iter()
             .next()
@@ -858,6 +886,29 @@ mod tests {
             assert_eq!(error.code, ErrorCode::InternalError);
             assert!(!error.message.contains("secret; injected=true"));
         }
+    }
+
+    #[test]
+    fn credential_expiration_is_unknown_without_both_server_timestamps() {
+        let unknown = QqCredential {
+            music_id: 123456,
+            str_music_id: "123456".to_owned(),
+            musickey: "Q_H_L_private".to_owned(),
+            ..serde_json::from_value(json!({})).expect("empty credential")
+        };
+        assert_eq!(unknown.expires_at_epoch(), None);
+        assert_eq!(unknown.is_locally_expired().expect("local status"), None);
+
+        let known = QqCredential {
+            musickey_create_time: 100,
+            key_expires_in: 50,
+            ..unknown
+        };
+        assert_eq!(known.expires_at_epoch(), Some(150));
+        assert_eq!(
+            known.is_locally_expired().expect("local status"),
+            Some(true)
+        );
     }
 
     #[test]

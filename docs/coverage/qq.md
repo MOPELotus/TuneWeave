@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=90`、`partial=0`、`implemented=5`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=89`、`partial=0`、`implemented=6`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -61,7 +61,7 @@
 | Q040 | 播放与权益 | `SongApi.get_cdn_dispatch` | 是 | `verified` | `GET /v1/media/cdn?platform=qq` 精确调用 Android `music.audioCdnDispatch.cdnDispatch/GetCdnDispatch`，每次生成独立 32 位小写十六进制 GUID，并完整提交参考参数 `uid="0"/use_new_domain=1/use_ipv6=1`。统一 `AudioCdnDispatch` 保留 CDN 根地址的上游顺序与重复项、QUIC 节点参数、相对探活文件及过期/刷新/缓存秒数；只接受无凭据的 HTTP(S) 根地址，畸形目录、绝对探活 URL、非零 `retcode`、空根目录和非正计时不会伪装为成功。节点原项、完整响应及本次 GUID 保存在扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 10 个根地址、9 个节点和 1 个重复根，HTTP/HTTPS 均存在，`expiration/cacheTime=86400`、`refreshTime=1800`、顶层及业务码均为 0 |
 | Q041 | 播放与权益 | `SongApi.get_song_urls` | 是 | `implemented` | `GET /v1/tracks/{qq-ref}/files` 与 `POST /v1/media/files` 完整保留 1–100 项批量、顶层默认规格、逐项规格/MID/`song_type`/`media_mid`、顺序和重复项；参考实现未执行其声明的 100 项上限，TuneWeave 修正为明确边界。2026-07-25 同步上游后规格扩展为普通 17、加密 13、特殊 15、彩铃 3，共 48 种；整数 `0..47` 稳定映射，`44=trial_ogg_640`、`45..47=ring_128/ring_96/ring_48`。普通/加密模块选择、文件名双 MID/单媒体 MID、独立 GUID、匿名或 `(qq, account)` 凭据注入、MID/文件名/数量严格对齐、相对 PURL、VKey/EKey、过期秒数、权限业务码和单次匿名会话刷新均完整保留。统一 `AudioStream/AudioDownload` 只选择无需额外解密的可播放规格：`auto` 从常用 320k 向下回退，明确高阶音质不被自动误选，六档精确码率不猜测，试听窗口、实际音质、文件大小、最短有效期、HTTPS 首选 CDN 和保序备用地址均返回；下载不把试听冒充完整文件，`/download/redirect` 仅在真实 URL 存在时 302。QQ 已成为原始播放平台及跨平台 resolver 目标，2026-07-22 release HTTP 真实验证统一试听流、无损下载、302，并以网易云“青花瓷”严格匹配到 QQ 成功播放。已知文件/版本/试听元数据在解析前进入内部强类型结构，冲突或畸形字段拒绝。2026-07-22 全部旧 45 种规格真实覆盖；2026-07-25 新增 3 种彩铃离线差分通过，但全新匿名设备真实请求当前被 QQ 以 `code=1000` 拒绝。仍缺登录/VIP 账户和新增彩铃成功态真实验收，故保持 `implemented` |
 | Q042 | 播放与权益 | `MvApi.get_mv_urls` | 是 | `pending` | MV 多清晰度播放地址 |
-| Q043 | 登录与账户 | `LoginApi.check_expired` | 是 | `pending` | 凭据有效性和账户状态 |
+| Q043 | 登录与账户 | `LoginApi.check_expired` | 是 | `implemented` | `GET /v1/auth/session?platform=qq&account=...` 精确加载 `(qq, account)` 的 `qq_credential_v1`，以凭据同时注入 Android `comm` 和 Cookie 后调用 `music.UserInfo.userInfoServer/GetLoginUserInfo`；业务码 `0` 映射已认证，`1000/104400/104401` 映射凭据失效而不是 HTTP 失败，其余登录/限流码保持统一错误类。不存在的账户别名直接返回 `authenticated=false`，不会回退默认账户或访问网络。账户资料保留 music ID、登录类型、平台码，以及仅在两个时间字段都存在时计算的本地到期时间/状态；本地时钟只作扩展信息，不覆盖服务端有效性。缺失账户、时间语义、错误映射和请求形状已离线验收，真实已登录状态待账户验收后升为 `verified` |
 | Q044 | 登录与账户 | `LoginApi.refresh_credential` | 是 | `pending` | 凭据刷新并原子替换账户代际 |
 | Q045 | 登录与账户 | `LoginApi.logout` | 是 | `pending` | 上游退出并删除本地对应账户 |
 | Q046 | 登录与账户 | `LoginApi.get_qrcode` | 是 | `verified` | `POST /v1/auth/qr` 完整接入 `login_type=qq/default`、`wx/wechat/weixin` 与 `mobile/app`：固定 QQ 互联/微信开放平台端点分别取得 `qrsig` 或 `uuid`，Android `music.login.LoginServer/CreateQRCode` 使用参考 `param.ct=11/cv=14090008` 和 `comm.ct=23/cv=0` 取得移动端二维码 ID；三类图片均在本地校验并返回 Base64 PNG/JPEG。上游 Cookie 和标识符只存于 10 分钟进程内私有事务，外部仅返回随机 `tw-auth-*`。2026-07-25 provider 与统一 HTTP 三类真实图片及未扫码等待态全部通过 |

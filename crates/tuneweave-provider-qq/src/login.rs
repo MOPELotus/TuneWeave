@@ -1192,7 +1192,7 @@ fn validate_country_code(value: &str) -> Result<&str> {
     Ok(value)
 }
 
-fn qq_login_business_error(code: i64, message: &str) -> TuneWeaveError {
+pub(crate) fn qq_login_business_error(code: i64, message: &str) -> TuneWeaveError {
     let error_code = match code {
         1000 | 104_400 | 104_401 => ErrorCode::AuthenticationRequired,
         20_261 => ErrorCode::InvalidRequest,
