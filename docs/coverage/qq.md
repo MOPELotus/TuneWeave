@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=85`、`partial=2`、`implemented=8`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=83`、`partial=3`、`implemented=9`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -55,7 +55,7 @@
 | Q034 | 内容展示 | `SingerApi.get_songs_list` | 是 | `pending` | 歌手歌曲分页 |
 | Q035 | 内容展示 | `SingerApi.get_album_list` | 是 | `pending` | 歌手专辑分页 |
 | Q036 | 内容展示 | `SingerApi.get_mv_list` | 是 | `pending` | 歌手 MV 分页 |
-| Q037 | 内容展示 | `SonglistApi.get_detail` | 是 | `pending` | 歌单详情、标签、用户和完整歌曲分页 |
+| Q037 | 内容展示 | `SonglistApi.get_detail` | 是 | `implemented` | `GET /v1/playlists/{qq-ref}` 与 `/tracks` 精确调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss`。公开 `qq:<playlist-id>` 映射 `disstid`；`qq:dir:<dirid>` 映射 `disstid=0/dirid` 并以所选账户 `encryptUin` 提交 `enc_host_uin`。详情分支固定 `tag/userinfo=true`、`onlysonglist=false`，歌曲分页固定 `tag/userinfo=false`、`onlysonglist=true`，两者都保留 `orderlist=true` 和精确 `song_begin/song_num`；强类型解析 `dirinfo/creator/songlist_size/songlist/total_song_num/hasmore`，业务码、ID 冲突和分页矛盾均拒绝为假成功，歌曲复用完整 QQ Track 映射。2026-07-25 provider 与 release 统一 HTTP 真实验证公开歌单 `7039749142`：详情非空、首个 2 曲分页总数 99、首曲 `0039MnYb0qxYhV`；账户特殊目录代码和参数已离线验收，真实账户待联合验收，故保持 `implemented` |
 | Q038 | 内容展示 | `MvApi.get_detail` | 是 | `pending` | 批量 MV 详情 |
 | Q039 | 内容展示 | `MvApi.get_mv_list` | 是 | `pending` | 地区、版本、排序 MV 目录 |
 | Q040 | 播放与权益 | `SongApi.get_cdn_dispatch` | 是 | `verified` | `GET /v1/media/cdn?platform=qq` 精确调用 Android `music.audioCdnDispatch.cdnDispatch/GetCdnDispatch`，每次生成独立 32 位小写十六进制 GUID，并完整提交参考参数 `uid="0"/use_new_domain=1/use_ipv6=1`。统一 `AudioCdnDispatch` 保留 CDN 根地址的上游顺序与重复项、QUIC 节点参数、相对探活文件及过期/刷新/缓存秒数；只接受无凭据的 HTTP(S) 根地址，畸形目录、绝对探活 URL、非零 `retcode`、空根目录和非正计时不会伪装为成功。节点原项、完整响应及本次 GUID 保存在扩展。2026-07-22 provider 与 release 统一 HTTP 真实返回 10 个根地址、9 个节点和 1 个重复根，HTTP/HTTPS 均存在，`expiration/cacheTime=86400`、`refreshTime=1800`、顶层及业务码均为 0 |
@@ -81,7 +81,7 @@
 | Q060 | 个人音乐库 | `UserApi.get_vip_info` | 是 | `pending` | VIP 等级、有效期和权益 |
 | Q061 | 个人音乐库 | `UserApi.get_follow_singers` | 是 | `pending` | 关注歌手目录 |
 | Q062 | 个人音乐库 | `UserApi.get_created_songlist` | 是 | `partial` | `GET /v1/account/playlists?platform=qq&account=...` 已用精确账户 music ID 调用 Android `music.musicasset.PlaylistBaseRead/GetPlaylistByUin`，强类型解析 `v_playlist/v_delTid/bFinish/total`，创建歌单固定排在统一账户目录前部；`id=0` 的特殊目录以 `qq:dir:<dirid>` 保持稳定身份，普通目录保留 playlist ID 与 dir ID。创建与收藏目录跨边界分页无重复/漏项，缺失账户或加密 UIN 在联网前失败。仍缺上游允许的任意用户 UIN 查询、Uni 集合导入和真实账户验收，故未升为 `implemented` |
-| Q063 | 个人音乐库 | `UserApi.get_fav_song` | 是 | `pending` | 喜欢歌曲列表，可供 Uni Playlist 导入 |
+| Q063 | 个人音乐库 | `UserApi.get_fav_song` | 是 | `partial` | 当前账户目录中的 `id=0, dirid>0` 以稳定 `qq:dir:<dirid>` 暴露，`GET /v1/playlists/{ref}/tracks?account=...` 已精确提交 `disstid=0/dirid/enc_host_uin`、`orderlist=true` 和完整 offset/limit，使用同一强类型歌单歌曲响应及 Track 映射。仍缺上游允许的任意用户 `euin` 查询、`/v1/account/favorites/tracks` 直达映射、Uni 导入和真实账户验收，故保持 `partial` |
 | Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `partial` | 同一账户歌单端点已用所选凭据的 `encryptUin` 调用 Android `music.musicasset.PlaylistFavRead/CgiGetPlaylistFavInfo`，精确保留 `offset/size`、`number/total/hasmore/hide`、删除/失败 ID 和完整响应，并与创建目录组成连续全局分页；收藏项标记 `subscribed=true`，不会使用参考项目的占位凭据。仍缺任意用户加密 UIN 查询、Uni 集合导入和真实账户验收，故保持 `partial` |
 | Q065 | 个人音乐库 | `UserApi.fav_songlist` | 是 | `pending` | 收藏歌单 |
 | Q066 | 个人音乐库 | `UserApi.unfav_songlist` | 是 | `pending` | 取消收藏歌单 |

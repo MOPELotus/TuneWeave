@@ -678,6 +678,118 @@ struct QqAccountPlaylistPageInput {
     favorite_raw: Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqPlaylistLocator {
+    playlist_id: u64,
+    directory_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqPlaylistDetailOptions {
+    offset: u32,
+    limit: u32,
+    only_songs: bool,
+    include_tags: bool,
+    include_user: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqPlaylistCreatorRecord {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    musicid: u64,
+    #[serde(default)]
+    nick: String,
+    #[serde(default)]
+    headurl: String,
+    #[serde(default)]
+    encrypt_uin: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistInfoRecord {
+    #[serde(
+        default,
+        alias = "tid",
+        alias = "dissid",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    id: u64,
+    #[serde(
+        default,
+        rename = "dirid",
+        alias = "dirId",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    dir_id: u64,
+    #[serde(default, alias = "dissname", alias = "name", alias = "dirName")]
+    title: String,
+    #[serde(default, alias = "cover", alias = "logo", alias = "picUrl")]
+    picurl: String,
+    #[serde(default, alias = "description")]
+    desc: String,
+    #[serde(
+        default,
+        alias = "songNum",
+        alias = "song_cnt",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    songnum: u64,
+    #[serde(
+        default,
+        alias = "playCnt",
+        alias = "play_cnt",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    listennum: u64,
+    #[serde(default)]
+    creator: QqPlaylistCreatorRecord,
+    #[serde(
+        default,
+        rename = "createTime",
+        alias = "createtime",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    create_time: u64,
+    #[serde(
+        default,
+        rename = "updateTime",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    update_time: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqPlaylistDetailResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    subcode: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default, rename = "dirinfo")]
+    info: Option<QqPlaylistInfoRecord>,
+    #[serde(
+        default,
+        rename = "songlist_size",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    size: u64,
+    #[serde(default, rename = "songlist")]
+    songs: Vec<Value>,
+    #[serde(
+        default,
+        rename = "total_song_num",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    total: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_bool")]
+    hasmore: bool,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -734,6 +846,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioDownload,
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
+            Capability::PlaylistRead,
             Capability::QrLogin,
             Capability::PhoneLogin,
             Capability::SessionManagement,
@@ -1139,6 +1252,69 @@ impl MusicProvider for QqProvider {
             created_raw: created_response.raw,
             favorite_raw: favorite_response.raw,
         })
+    }
+
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        let locator = parse_qq_playlist_locator(id)?;
+        let credential = self.qq_credential(account)?;
+        let encrypted_uin = qq_playlist_encrypted_uin(locator, credential.as_ref())?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_playlist_detail_request(
+                    locator,
+                    QqPlaylistDetailOptions {
+                        offset: 0,
+                        limit: 1,
+                        only_songs: false,
+                        include_tags: true,
+                        include_user: true,
+                    },
+                    encrypted_uin,
+                )],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ playlist detail request returned no response"))?;
+        let parsed = parse_qq_playlist_detail(response.data)?;
+        validate_qq_playlist_detail_page(&parsed, 0, 1)?;
+        map_qq_playlist(locator, parsed, response.raw)
+    }
+
+    async fn playlist_tracks(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Track>> {
+        let locator = parse_qq_playlist_locator(id)?;
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let encrypted_uin = qq_playlist_encrypted_uin(locator, credential.as_ref())?;
+        let limit = request.limit.clamp(1, 100);
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_playlist_detail_request(
+                    locator,
+                    QqPlaylistDetailOptions {
+                        offset: request.offset,
+                        limit,
+                        only_songs: true,
+                        include_tags: false,
+                        include_user: false,
+                    },
+                    encrypted_uin,
+                )],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ playlist track request returned no response"))?;
+        let parsed = parse_qq_playlist_detail(response.data)?;
+        validate_qq_playlist_detail_page(&parsed, request.offset, limit)?;
+        map_qq_playlist_tracks(request.offset, limit, parsed, response.raw)
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -3768,12 +3944,286 @@ fn map_account_playlist(
     })
 }
 
+fn parse_qq_playlist_locator(id: &str) -> Result<QqPlaylistLocator> {
+    let id = id.trim();
+    if let Some(directory_id) = id.strip_prefix("dir:") {
+        let directory_id = parse_qq_playlist_number(directory_id, "directory ID")?;
+        return Ok(QqPlaylistLocator {
+            playlist_id: 0,
+            directory_id,
+        });
+    }
+    Ok(QqPlaylistLocator {
+        playlist_id: parse_qq_playlist_number(id, "playlist ID")?,
+        directory_id: 0,
+    })
+}
+
+fn parse_qq_playlist_number(value: &str, context: &str) -> Result<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ {context} must be a positive unsigned integer"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            TuneWeaveError::invalid_request(format!(
+                "QQ {context} must be a positive unsigned integer"
+            ))
+            .with_platform(Platform::Qq)
+        })
+}
+
+fn qq_playlist_encrypted_uin(
+    locator: QqPlaylistLocator,
+    credential: Option<&QqCredential>,
+) -> Result<Option<&str>> {
+    if locator.playlist_id > 0 {
+        return Ok(None);
+    }
+    let credential = credential.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::AuthenticationRequired,
+            "QQ personal directory playback requires a selected account",
+        )
+        .with_platform(Platform::Qq)
+    })?;
+    qq_encrypted_uin(credential).map(Some)
+}
+
+fn qq_playlist_detail_request(
+    locator: QqPlaylistLocator,
+    options: QqPlaylistDetailOptions,
+    encrypted_uin: Option<&str>,
+) -> QqApiRequest {
+    let mut param = serde_json::Map::from_iter([
+        ("disstid".to_owned(), json!(locator.playlist_id)),
+        ("dirid".to_owned(), json!(locator.directory_id)),
+        ("tag".to_owned(), json!(options.include_tags)),
+        ("song_begin".to_owned(), json!(options.offset)),
+        ("song_num".to_owned(), json!(options.limit)),
+        ("userinfo".to_owned(), json!(options.include_user)),
+        ("orderlist".to_owned(), json!(true)),
+        ("onlysonglist".to_owned(), json!(options.only_songs)),
+    ]);
+    if let Some(encrypted_uin) = encrypted_uin {
+        param.insert("enc_host_uin".to_owned(), json!(encrypted_uin));
+    }
+    QqApiRequest::new(
+        "music.srfDissInfo.DissInfo",
+        "CgiGetDiss",
+        Value::Object(param),
+    )
+}
+
+fn parse_qq_playlist_detail(value: Value) -> Result<QqPlaylistDetailResponse> {
+    let response = serde_json::from_value::<QqPlaylistDetailResponse>(value)
+        .map_err(|_| qq_data_error("QQ playlist detail response is malformed"))?;
+    if response.code != 0 || response.subcode != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ playlist detail returned a business error",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "platform_subcode": response.subcode
+        })));
+    }
+    Ok(response)
+}
+
+fn validate_qq_playlist_detail_page(
+    response: &QqPlaylistDetailResponse,
+    offset: u32,
+    limit: u32,
+) -> Result<()> {
+    let returned = u64::try_from(response.songs.len()).unwrap_or(u64::MAX);
+    let next = u64::from(offset).saturating_add(returned);
+    let expected_has_more = next < response.total;
+    if response.size != returned
+        || returned > u64::from(limit)
+        || next > response.total
+        || response.hasmore != expected_has_more
+    {
+        return Err(qq_data_error(
+            "QQ playlist detail response has inconsistent pagination",
+        ));
+    }
+    Ok(())
+}
+
+fn map_qq_playlist(
+    locator: QqPlaylistLocator,
+    response: QqPlaylistDetailResponse,
+    raw_response: Value,
+) -> Result<Playlist> {
+    let info = response
+        .info
+        .ok_or_else(|| qq_data_error("QQ playlist detail is missing dirinfo"))?;
+    if locator.playlist_id > 0 && info.id > 0 && locator.playlist_id != info.id {
+        return Err(qq_data_error(
+            "QQ playlist detail returned a different playlist ID",
+        ));
+    }
+    if locator.directory_id > 0 && info.dir_id > 0 && locator.directory_id != info.dir_id {
+        return Err(qq_data_error(
+            "QQ playlist detail returned a different directory ID",
+        ));
+    }
+    let id = if locator.playlist_id > 0 {
+        locator.playlist_id.to_string()
+    } else {
+        format!("dir:{}", locator.directory_id)
+    };
+    let name = info.title.trim();
+    if name.is_empty() {
+        return Err(qq_data_error("QQ playlist detail is missing its name"));
+    }
+    let creator_name = info.creator.nick.trim();
+    let creator = (!creator_name.is_empty()).then(|| {
+        Ok(ArtistSummary {
+            resource_ref: (info.creator.musicid > 0)
+                .then(|| qq_ref(&info.creator.musicid.to_string(), "playlist creator"))
+                .transpose()?,
+            name: creator_name.to_owned(),
+        })
+    });
+    let tags = qq_playlist_tags(&info.extra)?;
+    let raw_info = serde_json::to_value(&info)
+        .map_err(|_| qq_data_error("QQ playlist detail could not preserve dirinfo"))?;
+    let mut extensions = Extensions::new();
+    extensions.insert("numeric_id".to_owned(), json!(info.id));
+    extensions.insert("dir_id".to_owned(), json!(info.dir_id));
+    extensions.insert("listen_count".to_owned(), json!(info.listennum));
+    extensions.insert("reported_track_count".to_owned(), json!(info.songnum));
+    extensions.insert("platform_code".to_owned(), json!(response.code));
+    extensions.insert("platform_subcode".to_owned(), json!(response.subcode));
+    extensions.insert("platform_message".to_owned(), json!(response.msg));
+    extensions.insert("creator_avatar".to_owned(), json!(info.creator.headurl));
+    extensions.insert(
+        "creator_encrypted_uin".to_owned(),
+        json!(info.creator.encrypt_uin),
+    );
+    extensions.insert("dirinfo".to_owned(), raw_info);
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(Playlist {
+        resource_ref: qq_ref(&id, "playlist")?,
+        platform: Platform::Qq,
+        id,
+        name: name.to_owned(),
+        description: info.desc.trim().to_owned(),
+        cover_url: (!info.picurl.trim().is_empty()).then(|| info.picurl.trim().to_owned()),
+        creator: creator.transpose()?,
+        track_count: Some(response.total),
+        tags,
+        subscribed: info
+            .extra
+            .get("isfav")
+            .or_else(|| info.extra.get("isFav"))
+            .and_then(qq_value_bool),
+        created_at: (info.create_time > 0)
+            .then(|| qq_unix_rfc3339(info.create_time))
+            .flatten(),
+        updated_at: (info.update_time > 0)
+            .then(|| qq_unix_rfc3339(info.update_time))
+            .flatten(),
+        extensions,
+    })
+}
+
+fn map_qq_playlist_tracks(
+    offset: u32,
+    limit: u32,
+    response: QqPlaylistDetailResponse,
+    raw_response: Value,
+) -> Result<Page<Track>> {
+    let items = response
+        .songs
+        .iter()
+        .cloned()
+        .map(map_track)
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.checked_add(consumed).ok_or_else(|| {
+        qq_data_error("QQ playlist pagination exceeded the supported offset range")
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("platform_code".to_owned(), json!(response.code));
+    extensions.insert("platform_subcode".to_owned(), json!(response.subcode));
+    extensions.insert("platform_message".to_owned(), json!(response.msg));
+    extensions.insert("reported_page_size".to_owned(), json!(response.size));
+    extensions.insert("response".to_owned(), raw_response);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(response.total),
+            next_offset: response.hasmore.then_some(next_offset),
+            has_more: response.hasmore,
+            extensions,
+        },
+    })
+}
+
+fn qq_playlist_tags(extra: &BTreeMap<String, Value>) -> Result<Vec<String>> {
+    let Some(tags) = ["tags", "taglist", "tag_list"]
+        .into_iter()
+        .find_map(|field| extra.get(field))
+    else {
+        return Ok(Vec::new());
+    };
+    let tags = tags
+        .as_array()
+        .ok_or_else(|| qq_data_error("QQ playlist tags are not an array"))?;
+    Ok(tags
+        .iter()
+        .filter_map(|tag| match tag {
+            Value::String(value) => Some(value.as_str()),
+            Value::Object(value) => value
+                .get("name")
+                .or_else(|| value.get("title"))
+                .and_then(Value::as_str),
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn qq_value_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => value.as_i64().map(|value| value != 0),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Some(true),
+            "0" | "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn deserialize_qq_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
     json_u64(&value).ok_or_else(|| D::Error::custom("expected a QQ unsigned integer"))
+}
+
+fn deserialize_qq_i64<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    json_i64(&value).ok_or_else(|| D::Error::custom("expected a QQ integer"))
 }
 
 fn deserialize_qq_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
@@ -6129,6 +6579,126 @@ mod tests {
     }
 
     #[test]
+    fn playlist_locators_and_requests_keep_public_and_personal_directory_shapes_distinct() {
+        let public = parse_qq_playlist_locator("12345").expect("public locator");
+        assert_eq!(
+            public,
+            QqPlaylistLocator {
+                playlist_id: 12345,
+                directory_id: 0
+            }
+        );
+        let personal = parse_qq_playlist_locator("dir:201").expect("personal locator");
+        assert_eq!(
+            personal,
+            QqPlaylistLocator {
+                playlist_id: 0,
+                directory_id: 201
+            }
+        );
+        assert!(parse_qq_playlist_locator("dir:0").is_err());
+        assert!(parse_qq_playlist_locator("playlist-1").is_err());
+
+        let public_request = qq_playlist_detail_request(
+            public,
+            QqPlaylistDetailOptions {
+                offset: 30,
+                limit: 20,
+                only_songs: false,
+                include_tags: true,
+                include_user: true,
+            },
+            None,
+        );
+        assert_eq!(public_request.module, "music.srfDissInfo.DissInfo");
+        assert_eq!(public_request.method, "CgiGetDiss");
+        assert_eq!(public_request.param["disstid"], 12345);
+        assert_eq!(public_request.param["dirid"], 0);
+        assert_eq!(public_request.param["song_begin"], 30);
+        assert_eq!(public_request.param["song_num"], 20);
+        assert_eq!(public_request.param["tag"], true);
+        assert_eq!(public_request.param["userinfo"], true);
+        assert_eq!(public_request.param["onlysonglist"], false);
+        assert!(public_request.param.get("enc_host_uin").is_none());
+
+        let personal_request = qq_playlist_detail_request(
+            personal,
+            QqPlaylistDetailOptions {
+                offset: 0,
+                limit: 100,
+                only_songs: true,
+                include_tags: false,
+                include_user: false,
+            },
+            Some("encrypted-uin"),
+        );
+        assert_eq!(personal_request.param["disstid"], 0);
+        assert_eq!(personal_request.param["dirid"], 201);
+        assert_eq!(personal_request.param["enc_host_uin"], "encrypted-uin");
+        assert_eq!(personal_request.param["tag"], false);
+        assert_eq!(personal_request.param["userinfo"], false);
+        assert_eq!(personal_request.param["onlysonglist"], true);
+        let error = qq_playlist_encrypted_uin(personal, None)
+            .expect_err("personal directory requires account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn playlist_detail_and_tracks_share_strict_metadata_and_pagination_mapping() {
+        let raw = json!({
+            "code": 0,
+            "subcode": 0,
+            "msg": "",
+            "dirinfo": {
+                "tid": 12345,
+                "dirId": 101,
+                "title": "通勤",
+                "picurl": "https://example.test/playlist.jpg",
+                "desc": "上下班",
+                "songnum": 2,
+                "listennum": 456,
+                "creator": {
+                    "musicid": 123456,
+                    "nick": "Lotus",
+                    "headurl": "https://example.test/avatar.jpg",
+                    "encrypt_uin": "creator-encrypted"
+                },
+                "tags": ["流行", {"name": "通勤"}],
+                "isfav": 1,
+                "createTime": 1700000000,
+                "updateTime": 1700000100
+            },
+            "songlist_size": 1,
+            "songlist": [sample_track(97_773, "0039MnYb0qxYhV", "晴天")],
+            "total_song_num": 2,
+            "hasmore": 1
+        });
+        let locator = parse_qq_playlist_locator("12345").expect("locator");
+        let detail = parse_qq_playlist_detail(raw.clone()).expect("detail response");
+        validate_qq_playlist_detail_page(&detail, 0, 1).expect("detail pagination");
+        let playlist = map_qq_playlist(locator, detail.clone(), raw.clone()).expect("playlist");
+        assert_eq!(playlist.resource_ref.to_string(), "qq:12345");
+        assert_eq!(playlist.name, "通勤");
+        assert_eq!(playlist.track_count, Some(2));
+        assert_eq!(playlist.tags, vec!["流行", "通勤"]);
+        assert_eq!(playlist.subscribed, Some(true));
+        assert_eq!(
+            playlist.creator.expect("creator").resource_ref,
+            Some(qq_ref("123456", "creator").expect("creator ref"))
+        );
+
+        let tracks = map_qq_playlist_tracks(0, 1, detail, raw).expect("tracks");
+        assert_eq!(tracks.items.len(), 1);
+        assert_eq!(
+            tracks.items[0].resource_ref.to_string(),
+            "qq:0039MnYb0qxYhV"
+        );
+        assert_eq!(tracks.pagination.total, Some(2));
+        assert_eq!(tracks.pagination.next_offset, Some(1));
+        assert!(tracks.pagination.has_more);
+    }
+
+    #[test]
     fn confirmed_login_persists_one_exact_account_without_exposing_the_key() {
         let store = Arc::new(RecordingCredentialStore::default());
         let provider = QqProvider::new(QqConfig {
@@ -7265,6 +7835,38 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_public_playlist_returns_metadata_and_a_real_track_page() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let playlist = provider
+            .playlist("7039749142", None)
+            .await
+            .expect("live playlist detail");
+        assert_eq!(playlist.resource_ref.to_string(), "qq:7039749142");
+        assert!(!playlist.name.is_empty());
+        assert!(playlist.track_count.is_some_and(|count| count > 0));
+
+        let tracks = provider
+            .playlist_tracks(
+                "7039749142",
+                &tuneweave_core::PageRequest {
+                    limit: 2,
+                    offset: 0,
+                    account: None,
+                },
+            )
+            .await
+            .expect("live playlist tracks");
+        assert_eq!(tracks.items.len(), 2);
+        assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
+        assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
     }
 
     #[tokio::test]
