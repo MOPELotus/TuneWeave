@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=92`、`partial=0`、`implemented=3`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=90`、`partial=0`、`implemented=5`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -67,8 +67,8 @@
 | Q046 | 登录与账户 | `LoginApi.get_qrcode` | 是 | `verified` | `POST /v1/auth/qr` 完整接入 `login_type=qq/default`、`wx/wechat/weixin` 与 `mobile/app`：固定 QQ 互联/微信开放平台端点分别取得 `qrsig` 或 `uuid`，Android `music.login.LoginServer/CreateQRCode` 使用参考 `param.ct=11/cv=14090008` 和 `comm.ct=23/cv=0` 取得移动端二维码 ID；三类图片均在本地校验并返回 Base64 PNG/JPEG。上游 Cookie 和标识符只存于 10 分钟进程内私有事务，外部仅返回随机 `tw-auth-*`。2026-07-25 provider 与统一 HTTP 三类真实图片及未扫码等待态全部通过 |
 | Q047 | 登录与账户 | `LoginApi.check_qrcode` | 是 | `implemented` | QQ `ptqrlogin` 的 `66/67/65/68/0` 与微信长轮询 `408/404/402/403/405` 已映射为统一等待、已扫码、过期、失败和确认；QQ 成功态继续完成 `check_sig`、OAuth code、`QQConnectLogin.LoginServer/QQLogin`，微信成功态调用 `music.login.LoginServer/Login`，凭据只在确认后按 `(qq, account)` 以 `qq_credential_v1` 原子持久化并返回脱敏账户资料。Cookie jar、并发重复轮询和终态缓存均隔离在短期事务内，网络错误不回显 qrsig、ptsigx、OAuth code 或 Cookie。2026-07-25 两种统一 HTTP 未扫码等待态真实通过，回调解析、终态隔离和凭据持久化已有离线单元覆盖，待真实扫码验收后升为 `verified` |
 | Q048 | 登录与账户 | `LoginApi.checking_mobile_qrcode` | 是 | `implemented` | 移动端二维码创建后、响应图片前即通过固定 `wss://mu.y.qq.com:443/ws/handshake` 建立 MQTT 5 会话，WebSocket 握手复用 QQ 服务端代理/TLS 配置并校验 Upgrade、子协议和 accept key；CONNECT 保留 `AuthenticationMethod=pass` 与五项业务 User Property，完整处理 CONNACK 成功、`0x9C/0x9D` 节点重定向、上限和 server reference 校验。订阅 `management.qrcode_login/{qrcodeID}` 时提交 `authorization=tmelogin/pubsub=unicast`，持久后台监听并发送 PINGREQ，避免两次 HTTP 轮询间丢失事件；`scanned/canceled/timeout/loginFailed/cookies` 分别映射统一状态，cookies 仅提取强类型 music ID/token 后调用 `music.login.LoginServer/Login`、`tmeLoginType=6` 并沿用 Q047 原子账户持久化。10 分钟硬截止会主动终止任务，连接/解析错误不回显二维码 ID 或 token。2026-07-25 真实 `CreateQRCode → WebSocket → MQTT CONNECT/SUBACK → waiting` 在 provider 与统一 HTTP 均通过；扫码确认态待真实账户验收后升为 `verified` |
-| Q049 | 登录与账户 | `LoginApi.send_authcode` | 是 | `pending` | 手机验证码发送；同一挑战上下文贯穿验证链 |
-| Q050 | 登录与账户 | `LoginApi.phone_authorize` | 是 | `pending` | 手机验证码登录及多账户持久化 |
+| Q049 | 登录与账户 | `LoginApi.send_authcode` | 是 | `implemented` | `POST /v1/auth/challenges` 以 Android `music.login.LoginServer/SendPhoneAuthCode` 单次发送，固定 `tmeAppid=qqmusic`、`areaCode` 和 `comm.tmeLoginMethod=3`；普通号码保持字符串 `phoneNo`，显式 `encrypted:` 前缀才映射 `encryptedPhoneNo`，避免参考实现把所有字符串误判为密文。成功才创建 10 分钟外层挑战事务，`20276` 作为安全验证错误返回平台 `security_url`，`100001/104604/2001` 稳定映射限流，其余业务码保留；不自动重试、不记录或回显手机号。参数、分支、错误类和统一 provider 已离线验收，真实发送按用户风控要求暂不触发 |
+| Q050 | 登录与账户 | `LoginApi.phone_authorize` | 是 | `implemented` | 挑战验证复用服务端保存的同一 `principal/account`，调用 `music.login.LoginServer/Login`，提交 `code/loginMode=1`、普通或加密手机号分支以及 `comm.tmeLoginMethod=3/tmeLoginType=0`；空白、控制字符和超长验证码在网络前拒绝。成功凭据复用二维码链路的强类型解析、`qq_credential_v1` 原子写入和脱敏 `AccountProfile`，验证码错误、绑定异常、账户限制、设备上限及限流码分别映射统一错误，不会把一次性验证码或密钥写入日志/响应。完整参数与持久化分支已离线验收，真实成功态待用户主动提供验证码后升为 `verified` |
 | Q051 | 个人音乐库 | `AlbumApi.fav_album` | 是 | `pending` | 收藏专辑 |
 | Q052 | 个人音乐库 | `AlbumApi.del_fav_album` | 是 | `pending` | 取消收藏专辑 |
 | Q053 | 个人音乐库 | `SonglistApi.create` | 是 | `pending` | 创建歌单 |

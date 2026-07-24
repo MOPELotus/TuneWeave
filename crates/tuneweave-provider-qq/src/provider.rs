@@ -10,19 +10,22 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumSummary, Artist, ArtistSummary,
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AuthState, Capability, CreatorSummary, ErrorCode, Extensions,
-    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
-    PageMeta, Platform, Playlist, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart,
-    Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery,
-    SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamRequest, Track,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
-    TuneWeaveError, User, Video,
+    AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
+    CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
+    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
+    PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem,
+    SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamRequest, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
-use crate::login::{QqQrLoginKind, QqQrPollOutcome, QqQrTransactions};
+use crate::login::{
+    QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
+    send_phone_authcode,
+};
 use crate::qrc::decrypt_qrc;
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
@@ -624,6 +627,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
             Capability::QrLogin,
+            Capability::PhoneLogin,
         ])
     }
 
@@ -1036,6 +1040,32 @@ impl MusicProvider for QqProvider {
                 })
             }
         }
+    }
+
+    async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
+        match request.method {
+            ChallengeMethod::Sms => {
+                send_phone_authcode(
+                    &self.client,
+                    &request.principal,
+                    request.country_code.as_deref().unwrap_or("86"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn verify_auth_challenge(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+    ) -> Result<AccountProfile> {
+        let credential = match request.method {
+            ChallengeMethod::Sms => {
+                login_with_phone_authcode(&self.client, &request.principal, code).await?
+            }
+        };
+        self.persist_qq_credential(&request.account, &credential)
     }
 }
 
@@ -5479,6 +5509,33 @@ mod tests {
         assert!(stored[0].secret().contains("Q_H_L_private"));
         assert!(!format!("{:?}", stored[0]).contains("Q_H_L_private"));
         assert!(provider.capabilities().contains(&Capability::QrLogin));
+        assert!(provider.capabilities().contains(&Capability::PhoneLogin));
+    }
+
+    #[tokio::test]
+    async fn phone_login_rejects_invalid_principals_and_codes_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let request = AuthChallengeRequest {
+            account: "phone-account".to_owned(),
+            method: ChallengeMethod::Sms,
+            principal: "+8613800138000".to_owned(),
+            country_code: Some("86".to_owned()),
+        };
+        let error = provider
+            .start_auth_challenge(&request)
+            .await
+            .expect_err("ambiguous phone input");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let request = AuthChallengeRequest {
+            principal: "13800138000".to_owned(),
+            ..request
+        };
+        let error = provider
+            .verify_auth_challenge(&request, "\r\n")
+            .await
+            .expect_err("invalid verification code");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]

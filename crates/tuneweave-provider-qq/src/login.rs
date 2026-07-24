@@ -95,6 +95,11 @@ struct CreatedQr {
     cookies: BTreeMap<String, String>,
 }
 
+enum QqPhonePrincipal {
+    Plain(String),
+    Encrypted(String),
+}
+
 impl QqQrTransactions {
     pub(crate) async fn start(&self, client: &QqClient, kind: QqQrLoginKind) -> Result<QqQrStart> {
         let created = match kind {
@@ -320,6 +325,73 @@ async fn create_mobile_qr(client: &QqClient) -> Result<CreatedQr> {
         image,
         cookies: BTreeMap::new(),
     })
+}
+
+pub(crate) async fn send_phone_authcode(
+    client: &QqClient,
+    principal: &str,
+    country_code: &str,
+) -> Result<()> {
+    let response = client
+        .request_android_business(
+            QqApiRequest::new(
+                "music.login.LoginServer",
+                "SendPhoneAuthCode",
+                phone_authcode_send_param(principal, country_code)?,
+            ),
+            &[("tmeLoginMethod", json!(3))],
+        )
+        .await?;
+    match response.code {
+        0 => Ok(()),
+        20_276 => {
+            let security_url = response
+                .data
+                .get("securityURL")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            Err(TuneWeaveError::new(
+                ErrorCode::PermissionDenied,
+                "QQ phone login requires security verification",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({
+                "platform_code": response.code,
+                "security_url": security_url
+            })))
+        }
+        100_001 | 104_604 | 2001 => Err(TuneWeaveError::new(
+            ErrorCode::RateLimited,
+            "QQ phone verification code requests are rate limited",
+        )
+        .with_platform(Platform::Qq)
+        .retryable(true)
+        .with_details(json!({ "platform_code": response.code }))),
+        code => Err(qq_login_business_error(
+            code,
+            "QQ failed to send the phone verification code",
+        )),
+    }
+}
+
+pub(crate) async fn login_with_phone_authcode(
+    client: &QqClient,
+    principal: &str,
+    code: &str,
+) -> Result<QqCredential> {
+    let response = client
+        .request_android_login(
+            QqApiRequest::new(
+                "music.login.LoginServer",
+                "Login",
+                phone_authcode_login_param(principal, code)?,
+            ),
+            0,
+            Some(3),
+        )
+        .await?;
+    parse_login_credential(response.data)
 }
 
 async fn poll_qq_qr(
@@ -1044,6 +1116,97 @@ fn value_as_nonempty_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn parse_phone_principal(value: &str) -> Result<QqPhonePrincipal> {
+    let value = value.trim();
+    if let Some(encrypted) = value.strip_prefix("encrypted:") {
+        if encrypted.is_empty()
+            || encrypted.len() > 512
+            || encrypted.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(
+                TuneWeaveError::invalid_request("QQ encrypted phone principal is invalid")
+                    .with_platform(Platform::Qq),
+            );
+        }
+        return Ok(QqPhonePrincipal::Encrypted(encrypted.to_owned()));
+    }
+    if !(5..=32).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ phone principal must contain 5 to 32 digits",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqPhonePrincipal::Plain(value.to_owned()))
+}
+
+fn phone_authcode_send_param(principal: &str, country_code: &str) -> Result<serde_json::Value> {
+    let principal = parse_phone_principal(principal)?;
+    let country_code = validate_country_code(country_code)?;
+    let mut param = serde_json::Map::from_iter([
+        ("tmeAppid".to_owned(), json!("qqmusic")),
+        ("areaCode".to_owned(), json!(country_code)),
+    ]);
+    insert_phone_principal(&mut param, principal);
+    Ok(serde_json::Value::Object(param))
+}
+
+fn phone_authcode_login_param(principal: &str, code: &str) -> Result<serde_json::Value> {
+    let principal = parse_phone_principal(principal)?;
+    let code = code.trim();
+    if code.is_empty() || code.len() > 32 || code.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(
+            TuneWeaveError::invalid_request("QQ phone verification code is invalid")
+                .with_platform(Platform::Qq),
+        );
+    }
+    let mut param = serde_json::Map::from_iter([
+        ("code".to_owned(), json!(code)),
+        ("loginMode".to_owned(), json!(1)),
+    ]);
+    insert_phone_principal(&mut param, principal);
+    Ok(serde_json::Value::Object(param))
+}
+
+fn insert_phone_principal(
+    param: &mut serde_json::Map<String, serde_json::Value>,
+    principal: QqPhonePrincipal,
+) {
+    match principal {
+        QqPhonePrincipal::Plain(phone) => {
+            param.insert("phoneNo".to_owned(), json!(phone));
+        }
+        QqPhonePrincipal::Encrypted(phone) => {
+            param.insert("encryptedPhoneNo".to_owned(), json!(phone));
+        }
+    }
+}
+
+fn validate_country_code(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 6 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ phone country code must contain 1 to 6 digits",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(value)
+}
+
+fn qq_login_business_error(code: i64, message: &str) -> TuneWeaveError {
+    let error_code = match code {
+        1000 | 104_400 | 104_401 => ErrorCode::AuthenticationRequired,
+        20_261 => ErrorCode::InvalidRequest,
+        20_271 | 20_277 | 20_278 | 20_450 => ErrorCode::PermissionDenied,
+        20_272 | 20_274 | 20_279 => ErrorCode::Conflict,
+        100_001 | 104_604 | 2001 => ErrorCode::RateLimited,
+        _ => ErrorCode::UpstreamError,
+    };
+    TuneWeaveError::new(error_code, format!("{message} (code {code})"))
+        .with_platform(Platform::Qq)
+        .retryable(matches!(code, 100_001 | 104_604 | 2001))
+        .with_details(json!({ "platform_code": code }))
+}
+
 fn parse_qq_status_arguments(body: &str) -> Result<Vec<String>> {
     let start = body
         .find("ptuiCB(")
@@ -1419,6 +1582,44 @@ mod tests {
         };
         assert_eq!(music_id, 123456);
         assert_eq!(token, "mobile-key");
+    }
+
+    #[test]
+    fn phone_authcode_parameters_preserve_plain_and_encrypted_branches() {
+        assert_eq!(
+            phone_authcode_send_param("13800138000", "86").expect("plain send"),
+            json!({
+                "tmeAppid": "qqmusic",
+                "areaCode": "86",
+                "phoneNo": "13800138000"
+            })
+        );
+        assert_eq!(
+            phone_authcode_login_param("encrypted:cipher-phone", "123456")
+                .expect("encrypted login"),
+            json!({
+                "code": "123456",
+                "loginMode": 1,
+                "encryptedPhoneNo": "cipher-phone"
+            })
+        );
+        assert!(phone_authcode_send_param("+8613800138000", "86").is_err());
+        assert!(phone_authcode_login_param("13800138000", "\r\n").is_err());
+    }
+
+    #[test]
+    fn phone_login_business_codes_keep_stable_error_classes() {
+        assert_eq!(
+            qq_login_business_error(20_271, "login").code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            qq_login_business_error(20_279, "login").code,
+            ErrorCode::Conflict
+        );
+        let limited = qq_login_business_error(104_604, "login");
+        assert_eq!(limited.code, ErrorCode::RateLimited);
+        assert!(limited.retryable);
     }
 
     #[tokio::test]

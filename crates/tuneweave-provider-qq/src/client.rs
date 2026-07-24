@@ -173,6 +173,11 @@ pub(crate) struct QqApiResponse {
     pub raw: Value,
 }
 
+pub(crate) struct QqBusinessResponse {
+    pub code: i64,
+    pub data: Value,
+}
+
 #[derive(Clone)]
 pub struct QqClient {
     http: Client,
@@ -292,6 +297,26 @@ impl QqClient {
         response
     }
 
+    pub(crate) async fn request_android_business(
+        &self,
+        request: QqApiRequest,
+        comm_fields: &[(&str, Value)],
+    ) -> Result<QqBusinessResponse> {
+        self.ensure_android_session().await?;
+        let response = self
+            .post_android_with_comm_fields_allowing_business_errors(&request, comm_fields)
+            .await?;
+        let code = response
+            .raw
+            .get("code")
+            .and_then(platform_code)
+            .ok_or_else(|| qq_data_error("QQ business response is missing a valid code"))?;
+        Ok(QqBusinessResponse {
+            code,
+            data: response.data,
+        })
+    }
+
     async fn post_android_with_comm_fields(
         &self,
         request: &QqApiRequest,
@@ -312,6 +337,28 @@ impl QqClient {
             .into_iter()
             .next()
             .ok_or_else(|| qq_data_error("QQ login service returned no response"))
+    }
+
+    async fn post_android_with_comm_fields_allowing_business_errors(
+        &self,
+        request: &QqApiRequest,
+        comm_fields: &[(&str, Value)],
+    ) -> Result<QqApiResponse> {
+        let device = self.lock_device()?.device().clone();
+        let mut comm = android_comm(&device, None);
+        {
+            let fields = comm
+                .as_object_mut()
+                .expect("QQ Android comm is always an object");
+            for (name, value) in comm_fields {
+                fields.insert((*name).to_owned(), value.clone());
+            }
+        }
+        self.post_api_allowing_business_errors(&comm, std::slice::from_ref(request), None)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ business service returned no response"))
     }
 
     pub(crate) fn login_http(&self) -> &Client {
@@ -452,12 +499,34 @@ impl QqClient {
             .await
     }
 
+    async fn post_api_allowing_business_errors(
+        &self,
+        comm: &Value,
+        requests: &[QqApiRequest],
+        credential: Option<&QqCredential>,
+    ) -> Result<Vec<QqApiResponse>> {
+        self.post_api_with_user_agent_options(comm, requests, None, credential, true)
+            .await
+    }
+
     async fn post_api_with_user_agent(
         &self,
         comm: &Value,
         requests: &[QqApiRequest],
         user_agent: Option<&str>,
         credential: Option<&QqCredential>,
+    ) -> Result<Vec<QqApiResponse>> {
+        self.post_api_with_user_agent_options(comm, requests, user_agent, credential, false)
+            .await
+    }
+
+    async fn post_api_with_user_agent_options(
+        &self,
+        comm: &Value,
+        requests: &[QqApiRequest],
+        user_agent: Option<&str>,
+        credential: Option<&QqCredential>,
+        allow_business_errors: bool,
     ) -> Result<Vec<QqApiResponse>> {
         let mut payload = Map::new();
         payload.insert("comm".to_owned(), comm.clone());
@@ -500,13 +569,25 @@ impl QqClient {
                 let response = raw
                     .get(&key)
                     .ok_or_else(|| qq_data_error(format!("QQ API response is missing {key}")))?;
-                ensure_zero_code(
-                    response,
-                    &format!("QQ API {}.{}", request.module, request.method),
-                )?;
-                let data = response.get("data").cloned().ok_or_else(|| {
-                    qq_data_error(format!("QQ API response {key} is missing data"))
-                })?;
+                let code = response
+                    .get("code")
+                    .and_then(platform_code)
+                    .ok_or_else(|| qq_data_error(format!("QQ API response {key} has no code")))?;
+                if !allow_business_errors || code == 0 {
+                    ensure_zero_code(
+                        response,
+                        &format!("QQ API {}.{}", request.module, request.method),
+                    )?;
+                }
+                let data = match response.get("data").cloned() {
+                    Some(data) => data,
+                    None if allow_business_errors => json!({}),
+                    None => {
+                        return Err(qq_data_error(format!(
+                            "QQ API response {key} is missing data"
+                        )));
+                    }
+                };
                 Ok(QqApiResponse {
                     data,
                     raw: response.clone(),
@@ -651,13 +732,16 @@ fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
     }
     let error_code = match code {
         1000 | 104_400 | 104_401 => ErrorCode::AuthenticationRequired,
-        2001 => ErrorCode::RateLimited,
+        20_261 => ErrorCode::InvalidRequest,
+        20_271 | 20_277 | 20_278 | 20_450 => ErrorCode::PermissionDenied,
+        20_272 | 20_274 | 20_279 => ErrorCode::Conflict,
+        100_001 | 104_604 | 2001 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
     Err(
         TuneWeaveError::new(error_code, format!("{context} failed with code {code}"))
             .with_platform(Platform::Qq)
-            .retryable(code == 2001)
+            .retryable(matches!(code, 100_001 | 104_604 | 2001))
             .with_details(json!({ "platform_code": code })),
     )
 }
@@ -817,6 +901,18 @@ mod tests {
         assert_eq!(limited.code, ErrorCode::RateLimited);
         assert!(limited.retryable);
         assert!(!is_anonymous_session_rejection(&limited));
+        assert_eq!(
+            ensure_zero_code(&json!({"code": 20_271}), "login")
+                .expect_err("verification code failure")
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            ensure_zero_code(&json!({"code": 20_279}), "login")
+                .expect_err("device limit failure")
+                .code,
+            ErrorCode::Conflict
+        );
     }
 
     #[test]
