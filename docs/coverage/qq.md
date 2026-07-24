@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=87`、`partial=0`、`implemented=8`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=85`、`partial=2`、`implemented=8`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -80,9 +80,9 @@
 | Q059 | 个人音乐库 | `UserApi.get_homepage` | 是 | `pending` | 用户/账户主页资料 |
 | Q060 | 个人音乐库 | `UserApi.get_vip_info` | 是 | `pending` | VIP 等级、有效期和权益 |
 | Q061 | 个人音乐库 | `UserApi.get_follow_singers` | 是 | `pending` | 关注歌手目录 |
-| Q062 | 个人音乐库 | `UserApi.get_created_songlist` | 是 | `pending` | 用户创建歌单，可供 Uni Playlist 导入 |
+| Q062 | 个人音乐库 | `UserApi.get_created_songlist` | 是 | `partial` | `GET /v1/account/playlists?platform=qq&account=...` 已用精确账户 music ID 调用 Android `music.musicasset.PlaylistBaseRead/GetPlaylistByUin`，强类型解析 `v_playlist/v_delTid/bFinish/total`，创建歌单固定排在统一账户目录前部；`id=0` 的特殊目录以 `qq:dir:<dirid>` 保持稳定身份，普通目录保留 playlist ID 与 dir ID。创建与收藏目录跨边界分页无重复/漏项，缺失账户或加密 UIN 在联网前失败。仍缺上游允许的任意用户 UIN 查询、Uni 集合导入和真实账户验收，故未升为 `implemented` |
 | Q063 | 个人音乐库 | `UserApi.get_fav_song` | 是 | `pending` | 喜欢歌曲列表，可供 Uni Playlist 导入 |
-| Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `pending` | 收藏歌单列表，可供 Uni Playlist 导入 |
+| Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `partial` | 同一账户歌单端点已用所选凭据的 `encryptUin` 调用 Android `music.musicasset.PlaylistFavRead/CgiGetPlaylistFavInfo`，精确保留 `offset/size`、`number/total/hasmore/hide`、删除/失败 ID 和完整响应，并与创建目录组成连续全局分页；收藏项标记 `subscribed=true`，不会使用参考项目的占位凭据。仍缺任意用户加密 UIN 查询、Uni 集合导入和真实账户验收，故保持 `partial` |
 | Q065 | 个人音乐库 | `UserApi.fav_songlist` | 是 | `pending` | 收藏歌单 |
 | Q066 | 个人音乐库 | `UserApi.unfav_songlist` | 是 | `pending` | 取消收藏歌单 |
 | Q067 | 个人音乐库 | `UserApi.get_fav_album` | 是 | `pending` | 收藏专辑列表 |

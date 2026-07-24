@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumSummary, Artist, ArtistSummary,
@@ -570,6 +571,113 @@ const VOICE_SEARCH: TypedSearchSpec = TypedSearchSpec {
     sparse: false,
 };
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAccountPlaylistRecord {
+    #[serde(
+        default,
+        alias = "tid",
+        alias = "dissid",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    id: u64,
+    #[serde(
+        default,
+        rename = "dirid",
+        alias = "dirId",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    dir_id: u64,
+    #[serde(default, alias = "dissname", alias = "name", alias = "dirName")]
+    title: String,
+    #[serde(default, alias = "cover", alias = "logo", alias = "picUrl")]
+    picurl: String,
+    #[serde(default, alias = "description")]
+    desc: String,
+    #[serde(
+        default,
+        alias = "songNum",
+        alias = "song_cnt",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    songnum: u64,
+    #[serde(
+        default,
+        alias = "playCnt",
+        alias = "play_cnt",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    listennum: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_string")]
+    uin: String,
+    #[serde(default, rename = "nick", alias = "nickname")]
+    creator_name: String,
+    #[serde(
+        default,
+        rename = "createTime",
+        alias = "createtime",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    create_time: u64,
+    #[serde(
+        default,
+        rename = "updateTime",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    update_time: u64,
+    #[serde(default, rename = "bigpicUrl")]
+    big_picture_url: String,
+    #[serde(default, rename = "albumPicUrl")]
+    album_picture_url: String,
+    #[serde(default)]
+    avatar: String,
+    #[serde(default, rename = "layerUrl")]
+    layer_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqCreatedPlaylistsResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(default, rename = "v_playlist")]
+    playlists: Vec<QqAccountPlaylistRecord>,
+    #[serde(default, rename = "v_delTid")]
+    deleted_ids: Vec<u64>,
+    #[serde(default, rename = "bFinish", deserialize_with = "deserialize_qq_bool")]
+    finished: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqFavoritePlaylistsResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    number: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_bool")]
+    hasmore: bool,
+    #[serde(default, deserialize_with = "deserialize_qq_bool")]
+    hide: bool,
+    #[serde(default, rename = "v_list")]
+    playlists: Vec<QqAccountPlaylistRecord>,
+    #[serde(default, rename = "v_delTids")]
+    deleted_ids: Vec<u64>,
+    #[serde(default, rename = "v_failTids")]
+    failed_ids: Vec<u64>,
+}
+
+struct QqAccountPlaylistPageInput {
+    offset: u32,
+    limit: u32,
+    created_start: u32,
+    created_take: u32,
+    created: QqCreatedPlaylistsResponse,
+    favorite: QqFavoritePlaylistsResponse,
+    favorite_take: u32,
+    created_raw: Value,
+    favorite_raw: Value,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -629,6 +737,7 @@ impl MusicProvider for QqProvider {
             Capability::QrLogin,
             Capability::PhoneLogin,
             Capability::SessionManagement,
+            Capability::AccountPlaylists,
         ])
     }
 
@@ -968,6 +1077,67 @@ impl MusicProvider for QqProvider {
             fee: None,
             message: (!available).then(|| "QQ did not return a downloadable file".to_owned()),
             extensions,
+        })
+    }
+
+    async fn account_playlists(
+        &self,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Playlist>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_encrypted_uin(&credential)?;
+        let limit = request.limit.clamp(1, 100);
+        let created_response = self
+            .client
+            .request_android_with_credential(
+                &[qq_created_playlists_request(&credential)],
+                Some(&credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ created playlist request returned no response"))?;
+        let created = parse_created_playlists(created_response.data.clone())?;
+        validate_created_playlists(&created)?;
+        let created_count = u32::try_from(created.playlists.len()).map_err(|_| {
+            qq_data_error("QQ created playlist count exceeds the supported pagination range")
+        })?;
+        let created_start = request.offset.min(created_count);
+        let created_available = created_count.saturating_sub(created_start);
+        let created_take = limit.min(created_available);
+        let remaining = limit.saturating_sub(created_take);
+        let favorite_offset = request.offset.saturating_sub(created_count);
+        let favorite_size = remaining.max(1);
+        let favorite_response = self
+            .client
+            .request_android_with_credential(
+                &[qq_favorite_playlists_request(
+                    encrypted_uin,
+                    favorite_offset,
+                    favorite_size,
+                )],
+                Some(&credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ favorite playlist request returned no response"))?;
+        let favorite = parse_favorite_playlists(favorite_response.data.clone())?;
+        validate_favorite_playlists(&favorite, favorite_offset, favorite_size)?;
+
+        map_account_playlist_page(QqAccountPlaylistPageInput {
+            offset: request.offset,
+            limit,
+            created_start,
+            created_take,
+            created,
+            favorite,
+            favorite_take: remaining,
+            created_raw: created_response.raw,
+            favorite_raw: favorite_response.raw,
         })
     }
 
@@ -3384,6 +3554,256 @@ fn map_album_search_item(raw: Value) -> Result<SearchItem> {
     }))
 }
 
+fn qq_created_playlists_request(credential: &QqCredential) -> QqApiRequest {
+    QqApiRequest::new(
+        "music.musicasset.PlaylistBaseRead",
+        "GetPlaylistByUin",
+        json!({ "uin": credential.string_music_id() }),
+    )
+}
+
+fn qq_favorite_playlists_request(encrypted_uin: &str, offset: u32, size: u32) -> QqApiRequest {
+    QqApiRequest::new(
+        "music.musicasset.PlaylistFavRead",
+        "CgiGetPlaylistFavInfo",
+        json!({
+            "uin": encrypted_uin,
+            "offset": offset,
+            "size": size
+        }),
+    )
+}
+
+fn qq_encrypted_uin(credential: &QqCredential) -> Result<&str> {
+    let encrypted_uin = credential.encrypt_uin.trim();
+    if encrypted_uin.is_empty()
+        || encrypted_uin.len() > 512
+        || encrypted_uin.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::AuthenticationRequired,
+            "QQ account credential is missing the encrypted UIN required for personal playlists",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(encrypted_uin)
+}
+
+fn parse_created_playlists(value: Value) -> Result<QqCreatedPlaylistsResponse> {
+    serde_json::from_value(value)
+        .map_err(|_| qq_data_error("QQ created playlist response is malformed"))
+}
+
+fn parse_favorite_playlists(value: Value) -> Result<QqFavoritePlaylistsResponse> {
+    serde_json::from_value(value)
+        .map_err(|_| qq_data_error("QQ favorite playlist response is malformed"))
+}
+
+fn validate_created_playlists(response: &QqCreatedPlaylistsResponse) -> Result<()> {
+    let returned = u64::try_from(response.playlists.len()).unwrap_or(u64::MAX);
+    if !response.finished || response.total != returned {
+        return Err(qq_data_error(
+            "QQ created playlist response is incomplete or has an inconsistent total",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_favorite_playlists(
+    response: &QqFavoritePlaylistsResponse,
+    offset: u32,
+    size: u32,
+) -> Result<()> {
+    let returned = u64::try_from(response.playlists.len()).unwrap_or(u64::MAX);
+    if returned > u64::from(size)
+        || u64::from(offset).saturating_add(returned) > response.total
+        || (response.hasmore && returned == 0)
+    {
+        return Err(qq_data_error(
+            "QQ favorite playlist response has inconsistent pagination",
+        ));
+    }
+    if response.hide && response.total > 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "QQ personal favorite playlists are hidden",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
+fn map_account_playlist_page(input: QqAccountPlaylistPageInput) -> Result<Page<Playlist>> {
+    let QqAccountPlaylistPageInput {
+        offset,
+        limit,
+        created_start,
+        created_take,
+        created,
+        favorite,
+        favorite_take,
+        created_raw,
+        favorite_raw,
+    } = input;
+    let created_total = created.total;
+    let favorite_total = favorite.total;
+    let total = created_total
+        .checked_add(favorite_total)
+        .ok_or_else(|| qq_data_error("QQ account playlist total overflowed"))?;
+    let created_from = usize::try_from(created_start).unwrap_or(usize::MAX);
+    let created_to = created_from
+        .saturating_add(usize::try_from(created_take).unwrap_or(usize::MAX))
+        .min(created.playlists.len());
+    let mut items = created.playlists[created_from..created_to]
+        .iter()
+        .cloned()
+        .map(|playlist| map_account_playlist(playlist, false, "created"))
+        .collect::<Result<Vec<_>>>()?;
+    items.extend(
+        favorite
+            .playlists
+            .iter()
+            .take(usize::try_from(favorite_take).unwrap_or(usize::MAX))
+            .cloned()
+            .map(|playlist| map_account_playlist(playlist, true, "favorite"))
+            .collect::<Result<Vec<_>>>()?,
+    );
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = u64::from(next_offset) < total && consumed > 0;
+    let mut extensions = Extensions::new();
+    extensions.insert("created_total".to_owned(), json!(created_total));
+    extensions.insert("favorite_total".to_owned(), json!(favorite_total));
+    extensions.insert("created_deleted_ids".to_owned(), json!(created.deleted_ids));
+    extensions.insert("created_finished".to_owned(), json!(created.finished));
+    extensions.insert("favorite_number".to_owned(), json!(favorite.number));
+    extensions.insert("favorite_has_more".to_owned(), json!(favorite.hasmore));
+    extensions.insert("favorite_hidden".to_owned(), json!(favorite.hide));
+    extensions.insert(
+        "favorite_deleted_ids".to_owned(),
+        json!(favorite.deleted_ids),
+    );
+    extensions.insert("favorite_failed_ids".to_owned(), json!(favorite.failed_ids));
+    extensions.insert("created_response".to_owned(), created_raw);
+    extensions.insert("favorite_response".to_owned(), favorite_raw);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_account_playlist(
+    record: QqAccountPlaylistRecord,
+    subscribed: bool,
+    source: &'static str,
+) -> Result<Playlist> {
+    let id = if record.id > 0 {
+        record.id.to_string()
+    } else if record.dir_id > 0 {
+        format!("dir:{}", record.dir_id)
+    } else {
+        return Err(qq_data_error(
+            "QQ account playlist is missing both playlist and directory IDs",
+        ));
+    };
+    let name = record.title.trim();
+    if name.is_empty() {
+        return Err(qq_data_error("QQ account playlist is missing its name"));
+    }
+    let creator_name = record.creator_name.trim();
+    let creator_uin = record.uin.trim();
+    let creator = (!creator_name.is_empty()).then(|| {
+        Ok(ArtistSummary {
+            resource_ref: (!creator_uin.is_empty())
+                .then(|| qq_ref(creator_uin, "playlist creator"))
+                .transpose()?,
+            name: creator_name.to_owned(),
+        })
+    });
+    let cover_url = [
+        record.picurl.as_str(),
+        record.big_picture_url.as_str(),
+        record.album_picture_url.as_str(),
+        record.layer_url.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .map(str::to_owned);
+    let raw_item = serde_json::to_value(&record)
+        .map_err(|_| qq_data_error("QQ account playlist could not preserve its source fields"))?;
+    let mut extensions = Extensions::new();
+    extensions.insert("source".to_owned(), json!(source));
+    extensions.insert("numeric_id".to_owned(), json!(record.id));
+    extensions.insert("dir_id".to_owned(), json!(record.dir_id));
+    extensions.insert("creator_uin".to_owned(), json!(record.uin));
+    extensions.insert("listen_count".to_owned(), json!(record.listennum));
+    extensions.insert("avatar".to_owned(), json!(record.avatar));
+    extensions.insert("playlist_item".to_owned(), raw_item);
+    Ok(Playlist {
+        resource_ref: qq_ref(&id, "account playlist")?,
+        platform: Platform::Qq,
+        id,
+        name: name.to_owned(),
+        description: record.desc.trim().to_owned(),
+        cover_url,
+        creator: creator.transpose()?,
+        track_count: Some(record.songnum),
+        tags: Vec::new(),
+        subscribed: Some(subscribed),
+        created_at: (record.create_time > 0)
+            .then(|| qq_unix_rfc3339(record.create_time))
+            .flatten(),
+        updated_at: (record.update_time > 0)
+            .then(|| qq_unix_rfc3339(record.update_time))
+            .flatten(),
+        extensions,
+    })
+}
+
+fn deserialize_qq_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    json_u64(&value).ok_or_else(|| D::Error::custom("expected a QQ unsigned integer"))
+}
+
+fn deserialize_qq_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    value_as_string(Some(&value)).ok_or_else(|| D::Error::custom("expected a QQ scalar string"))
+}
+
+fn deserialize_qq_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Bool(value) => Ok(value),
+        Value::Number(value) => value
+            .as_i64()
+            .map(|value| value != 0)
+            .ok_or_else(|| D::Error::custom("expected a QQ boolean flag")),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => Err(D::Error::custom("expected a QQ boolean flag")),
+        },
+        _ => Err(D::Error::custom("expected a QQ boolean flag")),
+    }
+}
+
 fn map_playlist_search_item(raw: Value) -> Result<SearchItem> {
     let id = ["id", "dissid", "tid"]
         .into_iter()
@@ -5589,6 +6009,126 @@ mod tests {
     }
 
     #[test]
+    fn personal_playlist_requests_keep_account_identity_and_offset_branches_exact() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "encryptUin": "encrypted-uin",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let created = qq_created_playlists_request(&credential);
+        assert_eq!(created.module, "music.musicasset.PlaylistBaseRead");
+        assert_eq!(created.method, "GetPlaylistByUin");
+        assert_eq!(created.param, json!({ "uin": "123456" }));
+
+        let favorite = qq_favorite_playlists_request(
+            qq_encrypted_uin(&credential).expect("encrypted UIN"),
+            30,
+            20,
+        );
+        assert_eq!(favorite.module, "music.musicasset.PlaylistFavRead");
+        assert_eq!(favorite.method, "CgiGetPlaylistFavInfo");
+        assert_eq!(
+            favorite.param,
+            json!({ "uin": "encrypted-uin", "offset": 30, "size": 20 })
+        );
+    }
+
+    #[test]
+    fn personal_playlist_page_spans_created_and_favorite_collections_without_gaps() {
+        let created_raw = json!({
+            "total": "2",
+            "v_playlist": [
+                {
+                    "tid": "11",
+                    "dirId": "101",
+                    "title": "我喜欢",
+                    "songNum": "20",
+                    "uin": 123456,
+                    "nick": "Lotus",
+                    "createTime": "1700000000",
+                    "updateTime": 1700000010
+                },
+                {
+                    "tid": 12,
+                    "dirid": 102,
+                    "title": "通勤",
+                    "songnum": 30,
+                    "uin": "123456",
+                    "nick": "Lotus",
+                    "picurl": "https://example.test/created.jpg"
+                }
+            ],
+            "v_delTid": [],
+            "bFinish": 1
+        });
+        let favorite_raw = json!({
+            "number": 1,
+            "total": 2,
+            "hasmore": 1,
+            "hide": 0,
+            "v_list": [{
+                "dissid": 21,
+                "dirid": 0,
+                "dissname": "收藏歌单",
+                "songnum": 40,
+                "uin": "654321",
+                "nickname": "Creator",
+                "createtime": 1690000000,
+                "updateTime": 1690000010,
+                "albumPicUrl": "https://example.test/favorite.jpg"
+            }],
+            "v_delTids": [99],
+            "v_failTids": []
+        });
+        let created = parse_created_playlists(created_raw.clone()).expect("created playlists");
+        validate_created_playlists(&created).expect("complete created playlists");
+        let favorite = parse_favorite_playlists(favorite_raw.clone()).expect("favorite playlists");
+        validate_favorite_playlists(&favorite, 0, 1).expect("favorite pagination");
+        let page = map_account_playlist_page(QqAccountPlaylistPageInput {
+            offset: 1,
+            limit: 2,
+            created_start: 1,
+            created_take: 1,
+            created,
+            favorite,
+            favorite_take: 1,
+            created_raw,
+            favorite_raw,
+        })
+        .expect("account playlist page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:12");
+        assert_eq!(page.items[0].subscribed, Some(false));
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:21");
+        assert_eq!(page.items[1].subscribed, Some(true));
+        assert_eq!(page.pagination.total, Some(4));
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["favorite_deleted_ids"][0], 99);
+    }
+
+    #[test]
+    fn account_playlist_uses_directory_identity_when_the_playlist_id_is_zero() {
+        let record = serde_json::from_value::<QqAccountPlaylistRecord>(json!({
+            "id": 0,
+            "dirid": 201,
+            "title": "我喜欢",
+            "songnum": 18,
+            "uin": "123456",
+            "nick": "Lotus"
+        }))
+        .expect("directory playlist");
+        let playlist = map_account_playlist(record, false, "created").expect("playlist");
+        assert_eq!(playlist.resource_ref.to_string(), "qq:dir:201");
+        assert_eq!(playlist.extensions["dir_id"], 201);
+    }
+
+    #[test]
     fn confirmed_login_persists_one_exact_account_without_exposing_the_key() {
         let store = Arc::new(RecordingCredentialStore::default());
         let provider = QqProvider::new(QqConfig {
@@ -5625,6 +6165,11 @@ mod tests {
             provider
                 .capabilities()
                 .contains(&Capability::SessionManagement)
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::AccountPlaylists)
         );
     }
 
@@ -5682,6 +6227,21 @@ mod tests {
     async fn missing_logout_alias_is_idempotent_without_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(!provider.logout("missing-account").await.expect("logout"));
+    }
+
+    #[tokio::test]
+    async fn personal_playlists_require_the_selected_account_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let error = provider
+            .account_playlists(&tuneweave_core::PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("missing-account".to_owned()),
+            })
+            .await
+            .expect_err("missing account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "missing-account");
     }
 
     #[test]
