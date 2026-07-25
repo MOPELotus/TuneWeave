@@ -14,13 +14,14 @@ use tuneweave_core::{
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
     CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
     MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist,
-    PlaylistPlayableItem, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamRequest, SubscriptionResult, Track,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
-    TuneWeaveError, User, Video,
+    PlaylistCreateRequest, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
+    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
+    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamRequest,
+    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -708,6 +709,28 @@ struct QqPlaylistWriteResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistMutationRecord {
+    #[serde(rename = "tid", deserialize_with = "deserialize_qq_u64")]
+    playlist_id: u64,
+    #[serde(rename = "dirId", deserialize_with = "deserialize_qq_u64")]
+    directory_id: u64,
+    #[serde(rename = "dirName")]
+    name: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistMutationResponse {
+    #[serde(rename = "retCode", deserialize_with = "deserialize_qq_i64")]
+    ret_code: i64,
+    #[serde(default)]
+    result: Option<QqPlaylistMutationRecord>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct QqPlaylistCreatorRecord {
     #[serde(default, deserialize_with = "deserialize_qq_u64")]
@@ -863,6 +886,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
             Capability::PlaylistRead,
+            Capability::PlaylistWrite,
             Capability::Favorites,
             Capability::QrLogin,
             Capability::PhoneLogin,
@@ -1425,6 +1449,25 @@ impl MusicProvider for QqProvider {
         let parsed = parse_favorite_playlists(response.data)?;
         validate_favorite_playlists(&parsed, request.offset, limit)?;
         map_favorite_playlist_page(parsed, request.offset, limit, response.raw, encrypted_uin)
+    }
+
+    async fn create_playlist(
+        &self,
+        request: &PlaylistCreateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        let (name, api_request) = qq_playlist_create_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let response = self
+            .client
+            .request_android_with_credential(&[api_request], Some(&credential))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ playlist creation request returned no response"))?;
+        map_qq_playlist_creation(name, response)
     }
 
     async fn playlist_source(
@@ -4394,6 +4437,103 @@ fn map_qq_track_subscription(
     })
 }
 
+fn qq_playlist_create_request(request: &PlaylistCreateRequest) -> Result<(String, QqApiRequest)> {
+    if request.visibility != PlaylistVisibility::Public {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ playlist creation only supports public visibility",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "visibility": request.visibility })));
+    }
+    if request.kind != PlaylistKind::Normal {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ playlist creation only supports normal playlists",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "kind": request.kind })));
+    }
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ playlist name cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    Ok((
+        name.to_owned(),
+        QqApiRequest::new(
+            "music.musicasset.PlaylistBaseWrite",
+            "AddPlaylist",
+            json!({ "dirName": name }),
+        ),
+    ))
+}
+
+fn map_qq_playlist_creation(
+    requested_name: String,
+    response: QqApiResponse,
+) -> Result<PlaylistMutationResult> {
+    let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ playlist creation response is malformed"))?;
+    if parsed.ret_code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ playlist creation was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_code": parsed.ret_code })));
+    }
+    let result = parsed
+        .result
+        .as_ref()
+        .ok_or_else(|| qq_data_error("QQ playlist creation response is missing its result"))?;
+    if result.playlist_id == 0 || result.directory_id == 0 {
+        return Err(qq_data_error(
+            "QQ playlist creation response contains an invalid playlist identity",
+        ));
+    }
+    let name = result.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ playlist creation response is missing its name",
+        ));
+    }
+    let id = result.playlist_id.to_string();
+    let playlist_ref = qq_ref(&id, "created playlist")?;
+    let data = serde_json::to_value(&parsed)
+        .map_err(|_| qq_data_error("QQ playlist creation response could not be preserved"))?;
+    let extensions = Extensions::from([
+        ("directory_id".to_owned(), json!(result.directory_id)),
+        ("requested_name".to_owned(), json!(requested_name)),
+        ("ret_code".to_owned(), json!(parsed.ret_code)),
+        ("data".to_owned(), data.clone()),
+        ("response".to_owned(), response.raw.clone()),
+    ]);
+    Ok(PlaylistMutationResult {
+        playlist_ref: playlist_ref.clone(),
+        action: PlaylistMutationAction::Create,
+        playlist: Some(Playlist {
+            resource_ref: playlist_ref,
+            platform: Platform::Qq,
+            id,
+            name: name.to_owned(),
+            description: String::new(),
+            cover_url: None,
+            creator: None,
+            track_count: Some(0),
+            tags: Vec::new(),
+            subscribed: Some(false),
+            created_at: None,
+            updated_at: None,
+            extensions: Extensions::from([
+                ("directory_id".to_owned(), json!(result.directory_id)),
+                ("data".to_owned(), data),
+            ]),
+        }),
+        extensions,
+    })
+}
+
 fn qq_playlist_detail_request(
     locator: QqPlaylistLocator,
     options: QqPlaylistDetailOptions,
@@ -7266,6 +7406,91 @@ mod tests {
     }
 
     #[test]
+    fn playlist_creation_keeps_qq_supported_shape_and_returned_identity() {
+        let request = PlaylistCreateRequest {
+            name: "  通勤  ".to_owned(),
+            visibility: PlaylistVisibility::Public,
+            kind: PlaylistKind::Normal,
+            account: Some("collector".to_owned()),
+        };
+        let (name, api_request) =
+            qq_playlist_create_request(&request).expect("playlist creation request");
+        assert_eq!(name, "通勤");
+        assert_eq!(api_request.module, "music.musicasset.PlaylistBaseWrite");
+        assert_eq!(api_request.method, "AddPlaylist");
+        assert_eq!(api_request.param, json!({"dirName": "通勤"}));
+
+        let result = map_qq_playlist_creation(
+            name,
+            QqApiResponse {
+                data: json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": "7039749142",
+                        "dirId": 301,
+                        "dirName": "通勤_20260726",
+                        "future": true
+                    }
+                }),
+                raw: json!({"code": 0, "data": {"retCode": 0}}),
+            },
+        )
+        .expect("playlist creation result");
+        assert_eq!(result.playlist_ref.to_string(), "qq:7039749142");
+        assert_eq!(result.action, PlaylistMutationAction::Create);
+        let playlist = result.playlist.expect("created playlist");
+        assert_eq!(playlist.name, "通勤_20260726");
+        assert_eq!(playlist.track_count, Some(0));
+        assert_eq!(playlist.extensions["directory_id"], 301);
+        assert_eq!(playlist.extensions["data"]["result"]["future"], true);
+        assert_eq!(result.extensions["requested_name"], "通勤");
+    }
+
+    #[test]
+    fn playlist_creation_rejects_unsupported_variants_and_malformed_success() {
+        for request in [
+            PlaylistCreateRequest {
+                name: "私密".to_owned(),
+                visibility: PlaylistVisibility::Private,
+                kind: PlaylistKind::Normal,
+                account: None,
+            },
+            PlaylistCreateRequest {
+                name: "视频".to_owned(),
+                visibility: PlaylistVisibility::Public,
+                kind: PlaylistKind::Video,
+                account: None,
+            },
+            PlaylistCreateRequest::new("  "),
+        ] {
+            let error = match qq_playlist_create_request(&request) {
+                Ok(_) => panic!("unsupported playlist creation"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        for data in [
+            json!({"retCode": 0}),
+            json!({"retCode": 0, "result": {"tid": 0, "dirId": 301, "dirName": "通勤"}}),
+            json!({"retCode": 0, "result": {"tid": 1, "dirId": 301, "dirName": " "}}),
+        ] {
+            assert_eq!(
+                map_qq_playlist_creation(
+                    "通勤".to_owned(),
+                    QqApiResponse {
+                        data,
+                        raw: json!({"code": 0})
+                    }
+                )
+                .expect_err("malformed playlist creation")
+                .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
     fn playlist_detail_and_tracks_share_strict_metadata_and_pagination_mapping() {
         let raw = json!({
             "code": 0,
@@ -7364,6 +7589,7 @@ mod tests {
                 .contains(&Capability::AccountPlaylists)
         );
         assert!(provider.capabilities().contains(&Capability::Favorites));
+        assert!(provider.capabilities().contains(&Capability::PlaylistWrite));
         assert!(
             provider
                 .capabilities()
@@ -7440,6 +7666,18 @@ mod tests {
             .expect_err("missing account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["account"], "missing-account");
+
+        let create_error = provider
+            .create_playlist(&PlaylistCreateRequest {
+                name: "通勤".to_owned(),
+                visibility: PlaylistVisibility::Public,
+                kind: PlaylistKind::Normal,
+                account: Some("missing-account".to_owned()),
+            })
+            .await
+            .expect_err("missing creation account");
+        assert_eq!(create_error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(create_error.details["account"], "missing-account");
     }
 
     #[tokio::test]

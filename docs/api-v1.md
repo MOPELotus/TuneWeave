@@ -1405,6 +1405,8 @@ QQ Uni 来源支持两种稳定形态：`type=playlist` 导入一个已选择的
 
 创建歌单时 `visibility=public|private` 与参考 `privacy=0|10` 等价，`kind=normal|video|shared` 与参考 `type=NORMAL|VIDEO|SHARED` 等价；同一语义的统一字段和参考字段不得同时提交。元数据更新的 `variant=default|batch|individual` 分别表示自动选择、参考批量模块和独立字段模块；批量分支必须同时包含名称、描述和标签。标签既可用字符串数组，也可用参考分号字符串，空数组或空字符串表示清除。
 
+QQ 的创建协议目前只接受 `visibility=public` 和 `kind=normal`，其他统一变体会在联网前返回 `invalid_request`，不会伪装成 QQ 已支持。成功响应中的 `tid` 是统一 `qq:<id>` 歌单引用，`dirId` 保存在扩展中；当同名歌单已存在时，QQ 可能返回自动调整后的 `dirName`，因此 `playlist.name` 使用服务端实际名称，原始请求名保存在 `extensions.requested_name`。创建操作必须指定或使用默认 QQ 账户，且只读取精确 `(qq, account)` 凭据。
+
 歌单写入的 `refs` 是完整 `platform:id`，`ids` 是由路径或显式 `platform` 绑定的平台 ID；两者均接受单值、数组和逗号分隔字符串，但不能同时出现，输入顺序和重复项原样保留。批量删除和账户歌单排序不能混合平台。`/tracks` 只操作普通歌曲；`/videos` 只操作视频项目；`/items` 以 `kind=track|video` 选择，兼容参考 `type=0|3`。网易云创建结果会跳过零 ID，项目写入与排序结果会跳过空快照 ID，再采用后续有效兼容字段；`playlist_track_add/delete` 实际是 VIDEO 歌单的 `type=3` 项目接口，不会被错误复用为普通歌曲增删。
 
 当前直接写入平台歌单要求资源已经能被目标 provider 接受；网易云因此要求项目引用属于网易云。Uni Playlist 与后续跨平台导入层在目标平台和歌曲来源平台不同时，必须先执行严格匹配；低于阈值时返回 `match_rejected`，不得把同名但不同版本的歌曲写入目标歌单。

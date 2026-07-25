@@ -15017,6 +15017,7 @@ mod tests {
         fn capabilities(&self) -> BTreeSet<Capability> {
             BTreeSet::from([
                 Capability::PlaylistRead,
+                Capability::PlaylistWrite,
                 Capability::SearchTracks,
                 Capability::AudioStream,
                 Capability::TrackSubscriptionWrite,
@@ -15063,6 +15064,41 @@ mod tests {
                 resource_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
                 subscribed,
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn create_playlist(
+            &self,
+            request: &PlaylistCreateRequest,
+        ) -> Result<PlaylistMutationResult> {
+            let playlist_ref =
+                ResourceRef::new(Platform::Qq, "7001").expect("valid QQ playlist reference");
+            let playlist = Playlist {
+                resource_ref: playlist_ref.clone(),
+                platform: Platform::Qq,
+                id: "7001".to_owned(),
+                name: format!("{}_20260726", request.name),
+                description: String::new(),
+                cover_url: None,
+                creator: None,
+                track_count: Some(0),
+                tags: Vec::new(),
+                subscribed: Some(false),
+                created_at: None,
+                updated_at: None,
+                extensions: Extensions::from([("directory_id".to_owned(), json!(301))]),
+            };
+            Ok(PlaylistMutationResult {
+                playlist_ref,
+                action: tuneweave_core::PlaylistMutationAction::Create,
+                playlist: Some(playlist),
+                extensions: Extensions::from([
+                    ("requested_name".to_owned(), json!(request.name)),
+                    ("visibility".to_owned(), json!(request.visibility)),
+                    ("kind".to_owned(), json!(request.kind)),
+                    ("account".to_owned(), json!(request.account)),
+                    ("directory_id".to_owned(), json!(301)),
+                ]),
             })
         }
 
@@ -18981,6 +19017,37 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn qq_playlist_creation_uses_selected_account_and_returned_identity() {
+        let (status, created) = json_request_from(
+            test_app_with_import_providers(),
+            Method::POST,
+            "/v1/playlists",
+            Some(json!({
+                "platform": "qq",
+                "account": "creator",
+                "name": "通勤",
+                "visibility": "public",
+                "kind": "normal"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["data"]["playlist_ref"], "qq:7001");
+        assert_eq!(created["data"]["action"], "create");
+        assert_eq!(created["data"]["playlist"]["name"], "通勤_20260726");
+        assert_eq!(
+            created["data"]["playlist"]["extensions"]["directory_id"],
+            301
+        );
+        assert_eq!(created["data"]["extensions"]["requested_name"], "通勤");
+        assert_eq!(created["data"]["extensions"]["visibility"], "public");
+        assert_eq!(created["data"]["extensions"]["kind"], "normal");
+        assert_eq!(created["data"]["extensions"]["account"], "creator");
+        assert_eq!(created["meta"]["platform"], "qq");
+        assert_eq!(created["meta"]["account"], "creator");
     }
 
     #[tokio::test]
