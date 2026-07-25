@@ -15102,6 +15102,31 @@ mod tests {
             })
         }
 
+        async fn delete_playlists(
+            &self,
+            request: &PlaylistDeleteRequest,
+        ) -> Result<PlaylistDeleteResult> {
+            Ok(PlaylistDeleteResult {
+                playlist_refs: request.playlist_refs.clone(),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    (
+                        "results".to_owned(),
+                        json!(
+                            request
+                                .playlist_refs
+                                .iter()
+                                .map(|playlist_ref| json!({
+                                    "playlist_ref": playlist_ref,
+                                    "deleted": true
+                                }))
+                                .collect::<Vec<_>>()
+                        ),
+                    ),
+                ]),
+            })
+        }
+
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             Ok(MediaStream {
                 url: format!("https://example.test/qq/{}.m4a", track.id),
@@ -19048,6 +19073,27 @@ mod tests {
         assert_eq!(created["data"]["extensions"]["account"], "creator");
         assert_eq!(created["meta"]["platform"], "qq");
         assert_eq!(created["meta"]["account"], "creator");
+    }
+
+    #[tokio::test]
+    async fn qq_playlist_deletion_uses_explicit_directory_identity() {
+        let (status, deleted) = json_request_from(
+            test_app_with_import_providers(),
+            Method::DELETE,
+            "/v1/playlists/qq:dir:301?account=creator",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["data"]["playlist_refs"], json!(["qq:dir:301"]));
+        assert_eq!(deleted["data"]["extensions"]["account"], "creator");
+        assert_eq!(
+            deleted["data"]["extensions"]["results"][0]["playlist_ref"],
+            "qq:dir:301"
+        );
+        assert_eq!(deleted["data"]["extensions"]["results"][0]["deleted"], true);
+        assert_eq!(deleted["meta"]["platform"], "qq");
+        assert_eq!(deleted["meta"]["account"], "creator");
     }
 
     #[tokio::test]

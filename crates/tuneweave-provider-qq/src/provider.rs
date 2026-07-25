@@ -14,14 +14,14 @@ use tuneweave_core::{
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
     CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
     MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
-    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
-    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamRequest,
-    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistKind,
+    PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility,
+    Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result,
+    SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -729,6 +729,18 @@ struct QqPlaylistMutationResponse {
     result: Option<QqPlaylistMutationRecord>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct QqPlaylistDeleteOutcome {
+    playlist_ref: ResourceRef,
+    directory_id: u64,
+    returned_playlist_id: u64,
+    returned_directory_id: u64,
+    returned_name: String,
+    deleted: bool,
+    data: QqPlaylistMutationResponse,
+    response: Value,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1468,6 +1480,26 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ playlist creation request returned no response"))?;
         map_qq_playlist_creation(name, response)
+    }
+
+    async fn delete_playlists(
+        &self,
+        request: &PlaylistDeleteRequest,
+    ) -> Result<PlaylistDeleteResult> {
+        let targets = qq_playlist_delete_requests(&request.playlist_refs)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let api_requests = targets
+            .iter()
+            .map(|(_, _, api_request)| api_request.clone())
+            .collect::<Vec<_>>();
+        let responses = self
+            .client
+            .request_android_with_credential(&api_requests, Some(&credential))
+            .await?;
+        map_qq_playlist_deletions(targets, responses)
     }
 
     async fn playlist_source(
@@ -4281,6 +4313,15 @@ fn map_account_playlist(
     extensions.insert("source".to_owned(), json!(source));
     extensions.insert("numeric_id".to_owned(), json!(record.id));
     extensions.insert("dir_id".to_owned(), json!(record.dir_id));
+    if record.dir_id > 0 {
+        extensions.insert(
+            "directory_ref".to_owned(),
+            json!(qq_ref(
+                &format!("dir:{}", record.dir_id),
+                "account playlist directory"
+            )?),
+        );
+    }
     extensions.insert("creator_uin".to_owned(), json!(record.uin));
     extensions.insert("listen_count".to_owned(), json!(record.listennum));
     extensions.insert("avatar".to_owned(), json!(record.avatar));
@@ -4500,10 +4541,15 @@ fn map_qq_playlist_creation(
     }
     let id = result.playlist_id.to_string();
     let playlist_ref = qq_ref(&id, "created playlist")?;
+    let directory_ref = qq_ref(
+        &format!("dir:{}", result.directory_id),
+        "created playlist directory",
+    )?;
     let data = serde_json::to_value(&parsed)
         .map_err(|_| qq_data_error("QQ playlist creation response could not be preserved"))?;
     let extensions = Extensions::from([
         ("directory_id".to_owned(), json!(result.directory_id)),
+        ("directory_ref".to_owned(), json!(directory_ref)),
         ("requested_name".to_owned(), json!(requested_name)),
         ("ret_code".to_owned(), json!(parsed.ret_code)),
         ("data".to_owned(), data.clone()),
@@ -4527,10 +4573,124 @@ fn map_qq_playlist_creation(
             updated_at: None,
             extensions: Extensions::from([
                 ("directory_id".to_owned(), json!(result.directory_id)),
+                ("directory_ref".to_owned(), json!(directory_ref)),
                 ("data".to_owned(), data),
             ]),
         }),
         extensions,
+    })
+}
+
+fn qq_playlist_delete_requests(
+    playlist_refs: &[ResourceRef],
+) -> Result<Vec<(ResourceRef, u64, QqApiRequest)>> {
+    if playlist_refs.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ playlist deletion requires at least one reference",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if playlist_refs.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ playlist deletion accepts at most 100 references per request",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "count": playlist_refs.len(), "max": 100 })));
+    }
+    playlist_refs
+        .iter()
+        .map(|playlist_ref| {
+            if playlist_ref.platform() != Platform::Qq {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ playlist deletion cannot contain another platform",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "playlist_ref": playlist_ref })));
+            }
+            let directory_id = playlist_ref
+                .id()
+                .strip_prefix("dir:")
+                .ok_or_else(|| {
+                    TuneWeaveError::invalid_request(
+                        "QQ playlist deletion requires a qq:dir:<directory-id> reference",
+                    )
+                    .with_platform(Platform::Qq)
+                    .with_details(json!({
+                        "playlist_ref": playlist_ref,
+                        "required_identity": "directory"
+                    }))
+                })
+                .and_then(|value| parse_qq_playlist_number(value, "directory ID"))?;
+            Ok((
+                playlist_ref.clone(),
+                directory_id,
+                QqApiRequest::new(
+                    "music.musicasset.PlaylistBaseWrite",
+                    "DelPlaylist",
+                    json!({ "dirId": directory_id }),
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn map_qq_playlist_deletions(
+    targets: Vec<(ResourceRef, u64, QqApiRequest)>,
+    responses: Vec<QqApiResponse>,
+) -> Result<PlaylistDeleteResult> {
+    if responses.len() != targets.len() {
+        return Err(qq_data_error(
+            "QQ playlist deletion response count does not match the request",
+        ));
+    }
+    let mut outcomes = Vec::with_capacity(targets.len());
+    for ((playlist_ref, directory_id, _), response) in targets.into_iter().zip(responses) {
+        let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
+            .map_err(|_| qq_data_error("QQ playlist deletion response is malformed"))?;
+        if parsed.ret_code != 0 {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "QQ playlist deletion was rejected",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({
+                "playlist_ref": playlist_ref,
+                "directory_id": directory_id,
+                "platform_code": parsed.ret_code,
+                "completed": outcomes
+            })));
+        }
+        let result = parsed
+            .result
+            .as_ref()
+            .ok_or_else(|| qq_data_error("QQ playlist deletion response is missing its result"))?;
+        if result.directory_id != 0 && result.directory_id != directory_id {
+            return Err(qq_data_error(
+                "QQ playlist deletion returned a conflicting directory ID",
+            ));
+        }
+        outcomes.push(QqPlaylistDeleteOutcome {
+            playlist_ref,
+            directory_id,
+            returned_playlist_id: result.playlist_id,
+            returned_directory_id: result.directory_id,
+            returned_name: result.name.clone(),
+            deleted: result.directory_id != 0,
+            data: parsed,
+            response: response.raw,
+        });
+    }
+    let all_deleted = outcomes.iter().all(|outcome| outcome.deleted);
+    let playlist_refs = outcomes
+        .iter()
+        .map(|outcome| outcome.playlist_ref.clone())
+        .collect();
+    Ok(PlaylistDeleteResult {
+        playlist_refs,
+        extensions: Extensions::from([
+            ("all_deleted".to_owned(), json!(all_deleted)),
+            ("results".to_owned(), json!(outcomes)),
+        ]),
     })
 }
 
@@ -7442,8 +7602,10 @@ mod tests {
         assert_eq!(playlist.name, "通勤_20260726");
         assert_eq!(playlist.track_count, Some(0));
         assert_eq!(playlist.extensions["directory_id"], 301);
+        assert_eq!(playlist.extensions["directory_ref"], "qq:dir:301");
         assert_eq!(playlist.extensions["data"]["result"]["future"], true);
         assert_eq!(result.extensions["requested_name"], "通勤");
+        assert_eq!(result.extensions["directory_ref"], "qq:dir:301");
     }
 
     #[test]
@@ -7484,6 +7646,108 @@ mod tests {
                     }
                 )
                 .expect_err("malformed playlist creation")
+                .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn playlist_deletion_uses_directory_identity_and_preserves_missing_results() {
+        let playlist_refs = vec![
+            ResourceRef::new(Platform::Qq, "dir:301").expect("first directory reference"),
+            ResourceRef::new(Platform::Qq, "dir:302").expect("second directory reference"),
+        ];
+        let targets =
+            qq_playlist_delete_requests(&playlist_refs).expect("playlist deletion requests");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].1, 301);
+        assert_eq!(targets[0].2.module, "music.musicasset.PlaylistBaseWrite");
+        assert_eq!(targets[0].2.method, "DelPlaylist");
+        assert_eq!(targets[0].2.param, json!({"dirId": 301}));
+
+        let result = map_qq_playlist_deletions(
+            targets,
+            vec![
+                QqApiResponse {
+                    data: json!({
+                        "retCode": 0,
+                        "result": {"tid": 7001, "dirId": 301, "dirName": "通勤"}
+                    }),
+                    raw: json!({"code": 0, "data": {"retCode": 0}}),
+                },
+                QqApiResponse {
+                    data: json!({
+                        "retCode": 0,
+                        "result": {"tid": 0, "dirId": 0, "dirName": ""}
+                    }),
+                    raw: json!({"code": 0, "data": {"retCode": 0}}),
+                },
+            ],
+        )
+        .expect("playlist deletion result");
+        assert_eq!(result.playlist_refs, playlist_refs);
+        assert_eq!(result.extensions["all_deleted"], false);
+        assert_eq!(result.extensions["results"][0]["directory_id"], 301);
+        assert_eq!(result.extensions["results"][0]["deleted"], true);
+        assert_eq!(result.extensions["results"][1]["directory_id"], 302);
+        assert_eq!(result.extensions["results"][1]["returned_directory_id"], 0);
+        assert_eq!(result.extensions["results"][1]["deleted"], false);
+    }
+
+    #[test]
+    fn playlist_deletion_rejects_ambiguous_inputs_and_conflicting_results() {
+        for playlist_refs in [
+            Vec::new(),
+            vec![ResourceRef::new(Platform::Qq, "7001").expect("playlist reference")],
+            vec![ResourceRef::new(Platform::Qq, "dir:0").expect("zero directory reference")],
+            vec![
+                ResourceRef::new(Platform::Netease, "301")
+                    .expect("cross-platform playlist reference"),
+            ],
+            (1..=101)
+                .map(|id| {
+                    ResourceRef::new(Platform::Qq, format!("dir:{id}"))
+                        .expect("directory reference")
+                })
+                .collect(),
+        ] {
+            let error = match qq_playlist_delete_requests(&playlist_refs) {
+                Ok(_) => panic!("invalid playlist deletion"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let target = || {
+            qq_playlist_delete_requests(&[
+                ResourceRef::new(Platform::Qq, "dir:301").expect("directory reference")
+            ])
+            .expect("playlist deletion request")
+        };
+        assert_eq!(
+            map_qq_playlist_deletions(target(), Vec::new())
+                .expect_err("missing deletion response")
+                .code,
+            ErrorCode::UpstreamError
+        );
+        for data in [
+            json!({"retCode": 9, "result": {"tid": 0, "dirId": 0, "dirName": ""}}),
+            json!({"retCode": 0}),
+            json!({
+                "retCode": 0,
+                "result": {"tid": 7001, "dirId": 999, "dirName": "通勤"}
+            }),
+        ] {
+            assert_eq!(
+                map_qq_playlist_deletions(
+                    target(),
+                    vec![QqApiResponse {
+                        data,
+                        raw: json!({"code": 0})
+                    }]
+                )
+                .expect_err("invalid deletion response")
                 .code,
                 ErrorCode::UpstreamError
             );
@@ -7678,6 +7942,19 @@ mod tests {
             .expect_err("missing creation account");
         assert_eq!(create_error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(create_error.details["account"], "missing-account");
+
+        let delete_error = provider
+            .delete_playlists(&PlaylistDeleteRequest {
+                playlist_refs: vec![
+                    ResourceRef::new(Platform::Qq, "dir:301")
+                        .expect("playlist directory reference"),
+                ],
+                account: Some("missing-account".to_owned()),
+            })
+            .await
+            .expect_err("missing deletion account");
+        assert_eq!(delete_error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(delete_error.details["account"], "missing-account");
     }
 
     #[tokio::test]
