@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=83`、`partial=2`、`implemented=10`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=83`、`partial=0`、`implemented=12`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -80,9 +80,9 @@
 | Q059 | 个人音乐库 | `UserApi.get_homepage` | 是 | `pending` | 用户/账户主页资料 |
 | Q060 | 个人音乐库 | `UserApi.get_vip_info` | 是 | `pending` | VIP 等级、有效期和权益 |
 | Q061 | 个人音乐库 | `UserApi.get_follow_singers` | 是 | `pending` | 关注歌手目录 |
-| Q062 | 个人音乐库 | `UserApi.get_created_songlist` | 是 | `partial` | `GET /v1/account/playlists?platform=qq&account=...` 已用精确账户 music ID 调用 Android `music.musicasset.PlaylistBaseRead/GetPlaylistByUin`；`GET /v1/users/qq:<numeric-uin>/playlists/created` 则保留上游任意用户正整数 UIN 分支和可选查看者账户。两端强类型解析 `v_playlist/v_delTid/bFinish/total`，创建歌单固定排在统一账户目录前部；`id=0` 的特殊目录以 `qq:dir:<dirid>` 保持稳定身份，普通目录保留 playlist ID 与 dir ID。2026-07-26 从公开歌单创建者动态取得 UIN 后 provider 与 release HTTP 匿名真实返回 6137 个目录；仍缺带账户查看、Uni 集合导入和真实个人账户验收，故保持 `partial` |
-| Q063 | 个人音乐库 | `UserApi.get_fav_song` | 是 | `implemented` | `GET /v1/account/favorites/tracks?platform=qq&account=...` 与 `GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 均精确调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss` 的 `disstid=0/dirid=201/enc_host_uin` 分支；前者从精确账户凭据取加密 UIN，后者保留上游任意用户 `euin` 能力并允许真正可选的查看者账户，省略时不再错误改写为 `default`。两端复用 `orderlist=true/onlysonglist=true/tag=false/userinfo=false`、完整 offset/limit、强类型分页和 Track 映射；输入与账户错误均在联网前拒绝，不使用占位凭据。代码与离线分支已验收，真实账户及已知公开加密 UIN 成功态待联合验收后升为 `verified` |
-| Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `partial` | 当前账户目录已用所选凭据的 `encryptUin` 调用 Android `music.musicasset.PlaylistFavRead/CgiGetPlaylistFavInfo`；新增 `GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 保留任意用户加密 UIN、可选查看者账户及原生 offset/size。两端精确保留 `number/total/hasmore/hide`、删除/失败 ID 和完整响应；收藏项标记 `subscribed=true`，不会使用参考项目的占位凭据。2026-07-26 从公开歌单创建者动态取得加密 UIN 后 provider 与 release HTTP 匿名真实返回合法空目录；仍缺带账户查看、Uni 集合导入和真实个人账户验收，故保持 `partial` |
+| Q062 | 个人音乐库 | `UserApi.get_created_songlist` | 是 | `implemented` | `GET /v1/account/playlists?platform=qq&account=...` 已用精确账户 music ID 调用 Android `music.musicasset.PlaylistBaseRead/GetPlaylistByUin`；`GET /v1/users/qq:<numeric-uin>/playlists/created` 则保留上游任意用户正整数 UIN 分支和可选查看者账户。两端强类型解析 `v_playlist/v_delTid/bFinish/total`，创建歌单固定排在统一账户目录前部；`id=0` 的特殊目录以 `qq:dir:<dirid>` 保持稳定身份，普通目录保留 playlist ID 与 dir ID。目录返回的具体歌单可直接作为 Uni `type=playlist` 来源，单次选择至多 100 个并跨平台合并，不无界展开 6137 项目录。2026-07-26 provider 与 release HTTP 匿名真实返回 6137 个目录；代码分支完整，待真实个人账户联合验收 |
+| Q063 | 个人音乐库 | `UserApi.get_fav_song` | 是 | `implemented` | `GET /v1/account/favorites/tracks?platform=qq&account=...` 与 `GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 均精确调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss` 的 `disstid=0/dirid=201/enc_host_uin` 分支；前者从精确账户凭据取加密 UIN，后者保留上游任意用户 `euin` 能力并允许真正可选的查看者账户，省略时不再错误改写为 `default`。Uni 导入新增 `{platform:"qq",type:"favorite_tracks",id:"<encrypted-uin>",account?}`，复用同一严格分页并保留来源摘要。该用户分支按参考协议发送 `orderlist=true/tag=true/userinfo=true` 且不发送普通歌单精简字段 `onlysonglist`；完整 offset/limit、强类型分页、零进度保护和 Track 映射均保留。输入与账户错误在联网前拒绝，不使用占位凭据。2026-07-26 公开非空用户 provider 链以 Uni 页宽 100 真实成功，release HTTP 又完整导入并持久化 1/1 项且服务端无错误输出；真实账户成功态待联合验收后升为 `verified` |
+| Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `implemented` | 当前账户目录已用所选凭据的 `encryptUin` 调用 Android `music.musicasset.PlaylistFavRead/CgiGetPlaylistFavInfo`；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 保留任意用户加密 UIN、可选查看者账户及原生 offset/size。两端精确保留 `number/total/hasmore/hide`、删除/失败 ID 和完整响应；收藏项标记 `subscribed=true`，不会使用参考项目的占位凭据。目录中的具体外部歌单可直接作为 Uni `type=playlist` 来源。2026-07-26 provider 与 release HTTP 匿名真实返回合法空目录；代码分支完整，待真实个人账户联合验收 |
 | Q065 | 个人音乐库 | `UserApi.fav_songlist` | 是 | `pending` | 收藏歌单 |
 | Q066 | 个人音乐库 | `UserApi.unfav_songlist` | 是 | `pending` | 取消收藏歌单 |
 | Q067 | 个人音乐库 | `UserApi.get_fav_album` | 是 | `pending` | 收藏专辑列表 |

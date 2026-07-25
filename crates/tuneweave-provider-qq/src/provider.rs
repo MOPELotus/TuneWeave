@@ -13,13 +13,13 @@ use tuneweave_core::{
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
     CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist, Podcast,
-    PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem,
-    SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamRequest, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist,
+    PlaylistPlayableItem, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamRequest, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -688,7 +688,7 @@ struct QqPlaylistLocator {
 struct QqPlaylistDetailOptions {
     offset: u32,
     limit: u32,
-    only_songs: bool,
+    only_songs: Option<bool>,
     include_tags: bool,
     include_user: bool,
 }
@@ -1267,7 +1267,7 @@ impl MusicProvider for QqProvider {
                     QqPlaylistDetailOptions {
                         offset: 0,
                         limit: 1,
-                        only_songs: false,
+                        only_songs: Some(false),
                         include_tags: true,
                         include_user: true,
                     },
@@ -1384,6 +1384,48 @@ impl MusicProvider for QqProvider {
         let parsed = parse_favorite_playlists(response.data)?;
         validate_favorite_playlists(&parsed, request.offset, limit)?;
         map_favorite_playlist_page(parsed, request.offset, limit, response.raw, encrypted_uin)
+    }
+
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        match source_type {
+            "playlist" => self.playlist(id, account).await,
+            "favorite_tracks" => {
+                let request = tuneweave_core::PageRequest {
+                    limit: 1,
+                    offset: 0,
+                    account: account.map(str::to_owned),
+                };
+                let page = self.user_favorite_tracks(id, &request).await?;
+                map_favorite_tracks_source(id, &page)
+            }
+            _ => Err(unsupported_qq_playlist_source_type(source_type)),
+        }
+    }
+
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        let page = match source_type {
+            "playlist" => self.playlist_tracks(id, request).await?,
+            "favorite_tracks" => self.user_favorite_tracks(id, request).await?,
+            _ => return Err(unsupported_qq_playlist_source_type(source_type)),
+        };
+        Ok(Page {
+            items: page
+                .items
+                .into_iter()
+                .map(PlaylistPlayableItem::Track)
+                .collect(),
+            pagination: page.pagination,
+        })
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -1686,13 +1728,7 @@ impl QqProvider {
             .request_android_with_credential(
                 &[qq_playlist_detail_request(
                     locator,
-                    QqPlaylistDetailOptions {
-                        offset: request.offset,
-                        limit,
-                        only_songs: true,
-                        include_tags: false,
-                        include_user: false,
-                    },
+                    qq_playlist_track_options(locator, request.offset, limit),
                     encrypted_uin,
                 )],
                 credential,
@@ -4078,6 +4114,45 @@ fn map_favorite_playlist_page(
     })
 }
 
+fn map_favorite_tracks_source(user_id: &str, page: &Page<Track>) -> Result<Playlist> {
+    let user_id = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+    let track_count = page.pagination.total.ok_or_else(|| {
+        qq_data_error("QQ favorite track source did not return a total item count")
+    })?;
+    let mut extensions = Extensions::new();
+    extensions.insert("source_type".to_owned(), json!("favorite_tracks"));
+    extensions.insert("user_encrypted_uin".to_owned(), json!(user_id));
+    extensions.insert(
+        "source_pagination".to_owned(),
+        serde_json::to_value(&page.pagination)
+            .map_err(|_| qq_data_error("QQ favorite track source metadata is malformed"))?,
+    );
+    Ok(Playlist {
+        resource_ref: qq_ref(user_id, "favorite track source")?,
+        platform: Platform::Qq,
+        id: user_id.to_owned(),
+        name: "QQ 用户喜欢歌曲".to_owned(),
+        description: "QQ 音乐公开用户喜欢歌曲列表".to_owned(),
+        cover_url: None,
+        creator: None,
+        track_count: Some(track_count),
+        tags: Vec::new(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    })
+}
+
+fn unsupported_qq_playlist_source_type(source_type: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::CapabilityNotSupported,
+        format!("qq does not support playlist source type {source_type}"),
+    )
+    .with_platform(Platform::Qq)
+    .with_details(json!({ "source_type": source_type }))
+}
+
 fn map_account_playlist(
     record: QqAccountPlaylistRecord,
     subscribed: bool,
@@ -4211,8 +4286,10 @@ fn qq_playlist_detail_request(
         ("song_num".to_owned(), json!(options.limit)),
         ("userinfo".to_owned(), json!(options.include_user)),
         ("orderlist".to_owned(), json!(true)),
-        ("onlysonglist".to_owned(), json!(options.only_songs)),
     ]);
+    if let Some(only_songs) = options.only_songs {
+        param.insert("onlysonglist".to_owned(), json!(only_songs));
+    }
     if let Some(encrypted_uin) = encrypted_uin {
         param.insert("enc_host_uin".to_owned(), json!(encrypted_uin));
     }
@@ -4221,6 +4298,29 @@ fn qq_playlist_detail_request(
         "CgiGetDiss",
         Value::Object(param),
     )
+}
+
+fn qq_playlist_track_options(
+    locator: QqPlaylistLocator,
+    offset: u32,
+    limit: u32,
+) -> QqPlaylistDetailOptions {
+    if locator.playlist_id == 0 && locator.directory_id == 201 {
+        return QqPlaylistDetailOptions {
+            offset,
+            limit,
+            only_songs: None,
+            include_tags: true,
+            include_user: true,
+        };
+    }
+    QqPlaylistDetailOptions {
+        offset,
+        limit,
+        only_songs: Some(true),
+        include_tags: false,
+        include_user: false,
+    }
 }
 
 fn parse_qq_playlist_detail(value: Value) -> Result<QqPlaylistDetailResponse> {
@@ -4252,10 +4352,21 @@ fn validate_qq_playlist_detail_page(
         || returned > u64::from(limit)
         || next > response.total
         || response.hasmore != expected_has_more
+        || (response.hasmore && returned == 0)
     {
-        return Err(qq_data_error(
-            "QQ playlist detail response has inconsistent pagination",
-        ));
+        return Err(
+            qq_data_error("QQ playlist detail response has inconsistent pagination").with_details(
+                json!({
+                    "offset": offset,
+                    "limit": limit,
+                    "reported_size": response.size,
+                    "returned": returned,
+                    "total": response.total,
+                    "reported_has_more": response.hasmore,
+                    "expected_has_more": expected_has_more
+                }),
+            ),
+        );
     }
     Ok(())
 }
@@ -6757,6 +6868,37 @@ mod tests {
     }
 
     #[test]
+    fn favorite_track_import_source_keeps_user_identity_and_total() {
+        let page = Page {
+            items: vec![Track::new(
+                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("track reference"),
+                "晴天",
+            )],
+            pagination: PageMeta {
+                limit: 1,
+                offset: 0,
+                total: Some(88),
+                next_offset: Some(1),
+                has_more: true,
+                extensions: Extensions::from([("library_scope".to_owned(), json!("user"))]),
+            },
+        };
+        let source =
+            map_favorite_tracks_source("encrypted-uin", &page).expect("favorite track source");
+        assert_eq!(source.resource_ref.to_string(), "qq:encrypted-uin");
+        assert_eq!(source.track_count, Some(88));
+        assert_eq!(source.extensions["source_type"], "favorite_tracks");
+        assert_eq!(
+            source.extensions["source_pagination"]["extensions"]["library_scope"],
+            "user"
+        );
+
+        let error = unsupported_qq_playlist_source_type("created_playlists");
+        assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(error.details["source_type"], "created_playlists");
+    }
+
+    #[test]
     fn personal_playlist_page_spans_created_and_favorite_collections_without_gaps() {
         let created_raw = json!({
             "total": "2",
@@ -6872,7 +7014,7 @@ mod tests {
             QqPlaylistDetailOptions {
                 offset: 30,
                 limit: 20,
-                only_songs: false,
+                only_songs: Some(false),
                 include_tags: true,
                 include_user: true,
             },
@@ -6891,21 +7033,15 @@ mod tests {
 
         let personal_request = qq_playlist_detail_request(
             personal,
-            QqPlaylistDetailOptions {
-                offset: 0,
-                limit: 100,
-                only_songs: true,
-                include_tags: false,
-                include_user: false,
-            },
+            qq_playlist_track_options(personal, 0, 100),
             Some("encrypted-uin"),
         );
         assert_eq!(personal_request.param["disstid"], 0);
         assert_eq!(personal_request.param["dirid"], 201);
         assert_eq!(personal_request.param["enc_host_uin"], "encrypted-uin");
-        assert_eq!(personal_request.param["tag"], false);
-        assert_eq!(personal_request.param["userinfo"], false);
-        assert_eq!(personal_request.param["onlysonglist"], true);
+        assert_eq!(personal_request.param["tag"], true);
+        assert_eq!(personal_request.param["userinfo"], true);
+        assert!(personal_request.param.get("onlysonglist").is_none());
         let error = qq_playlist_encrypted_uin(personal, None)
             .expect_err("personal directory requires account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
@@ -8220,6 +8356,79 @@ mod tests {
             .expect("live user favorite playlists");
         assert!(favorite.pagination.total.is_some());
         assert!(favorite.items.iter().all(|item| !item.name.is_empty()));
+
+        let source = provider
+            .playlist_source(encrypted_uin, "favorite_tracks", None)
+            .await
+            .expect("live favorite track source");
+        assert_eq!(source.resource_ref.id(), encrypted_uin);
+        assert_eq!(source.extensions["source_type"], "favorite_tracks");
+        let source_items = provider
+            .playlist_source_items(encrypted_uin, "favorite_tracks", &request)
+            .await
+            .expect("live favorite track source items");
+        assert_eq!(
+            source.track_count, source_items.pagination.total,
+            "source metadata and item paging must report the same total"
+        );
+        assert!(
+            source_items
+                .items
+                .iter()
+                .all(|item| matches!(item, PlaylistPlayableItem::Track(_)))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_nonempty_public_favorite_tracks_support_full_import_pages() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let users = provider
+            .search_catalog(&search_query(SearchKind::User, 10, 0))
+            .await
+            .expect("live user search");
+        let mut selected = None;
+        for item in users.items {
+            let SearchItem::User(user) = item else {
+                continue;
+            };
+            let reference = user.resource_ref;
+            let request = tuneweave_core::PageRequest {
+                limit: 1,
+                offset: 0,
+                account: None,
+            };
+            let Ok(page) = provider
+                .user_favorite_tracks(reference.id(), &request)
+                .await
+            else {
+                continue;
+            };
+            if page
+                .pagination
+                .total
+                .is_some_and(|total| (1..=500).contains(&total))
+            {
+                selected = Some(reference.id().to_owned());
+                break;
+            }
+        }
+        let selected = selected.expect("a public user with a bounded nonempty favorite list");
+        let request = tuneweave_core::PageRequest {
+            limit: 100,
+            offset: 0,
+            account: None,
+        };
+        let page = provider
+            .playlist_source_items(&selected, "favorite_tracks", &request)
+            .await
+            .expect("full-size live favorite track page");
+        assert!(!page.items.is_empty());
+        assert!(page.pagination.total.is_some_and(|total| total > 0));
     }
 
     #[tokio::test]

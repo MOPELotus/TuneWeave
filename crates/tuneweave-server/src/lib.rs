@@ -15085,6 +15085,69 @@ mod tests {
                 },
             })
         }
+
+        async fn playlist_source(
+            &self,
+            id: &str,
+            source_type: &str,
+            account: Option<&str>,
+        ) -> Result<Playlist> {
+            if source_type == "playlist" {
+                return self.playlist(id, account).await;
+            }
+            if source_type != "favorite_tracks" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::CapabilityNotSupported,
+                    format!("qq does not support playlist source type {source_type}"),
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "source_type": source_type })));
+            }
+            Ok(Playlist {
+                resource_ref: ResourceRef::new(Platform::Qq, id)
+                    .expect("valid QQ favorite track source"),
+                platform: Platform::Qq,
+                id: id.to_owned(),
+                name: "QQ 用户喜欢歌曲".to_owned(),
+                description: "可播放用户列表".to_owned(),
+                cover_url: None,
+                creator: None,
+                track_count: Some(3),
+                tags: Vec::new(),
+                subscribed: None,
+                created_at: None,
+                updated_at: None,
+                extensions: Extensions::from([(
+                    "source_type".to_owned(),
+                    json!("favorite_tracks"),
+                )]),
+            })
+        }
+
+        async fn playlist_source_items(
+            &self,
+            id: &str,
+            source_type: &str,
+            request: &PageRequest,
+        ) -> Result<Page<PlaylistPlayableItem>> {
+            if source_type != "playlist" && source_type != "favorite_tracks" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::CapabilityNotSupported,
+                    format!("qq does not support playlist source type {source_type}"),
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "source_type": source_type })));
+            }
+            let page = self.playlist_tracks(id, request).await?;
+            Ok(Page {
+                items: page
+                    .items
+                    .into_iter()
+                    .map(PlaylistPlayableItem::Track)
+                    .collect(),
+                pagination: page.pagination,
+            })
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -19397,6 +19460,51 @@ mod tests {
         assert_eq!(merged_again["data"]["sources"][0]["platform"], "uni");
         assert_eq!(merged_again["data"]["sources"][0]["item_count"], 4);
         assert_eq!(merged_again["data"]["sources"][1]["item_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_import_accepts_a_playable_user_favorite_track_source() {
+        let app = test_app_with_import_providers();
+        let (status, imported) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/imports",
+            Some(json!({
+                "name": "QQ 用户喜欢歌曲备份",
+                "sources": [{
+                    "platform": "qq",
+                    "type": "favorite_tracks",
+                    "id": "encrypted-user"
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["data"]["playlist"]["item_count"], 3);
+        assert_eq!(imported["data"]["sources"][0]["ref"], "qq:encrypted-user");
+        assert_eq!(imported["data"]["sources"][0]["type"], "favorite_tracks");
+        assert_eq!(imported["data"]["sources"][0]["item_count"], 3);
+        assert_eq!(imported["data"]["extensions"]["complete_pagination"], true);
+
+        let reference = imported["data"]["playlist"]["ref"]
+            .as_str()
+            .expect("imported Uni Playlist reference");
+        let (status, items) = json_response_from(
+            app,
+            &format!("/v1/uni/playlists/{reference}/items?limit=100&offset=0"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(items["data"].as_array().map(Vec::len), Some(3));
+        assert!(
+            items["data"]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item["kind"] == "track"))
+        );
+        assert_eq!(
+            items["data"][0]["extensions"]["import_source_type"],
+            "favorite_tracks"
+        );
     }
 
     #[tokio::test]
