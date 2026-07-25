@@ -1,6 +1,6 @@
 # QQ 音乐 API 全量覆盖账本
 
-上游快照：`L-1124/QQMusicApi@261326eec051e7f444296b5c461e7412c4b25bb9`
+上游快照：`L-1124/QQMusicApi@873255f2774361ac97366bd89a14b8ed9d230aae`
 
 本表逐项登记该快照 14 个公开 API 类的 104 个公开方法。QQMusicApi 是异步 Python SDK，不是 HTTP 服务；方法名用于固定验收分母，TuneWeave 将独立实现观察到的 QQ 音乐协议，不复制、翻译、链接或打包上游源码。内部辅助函数、会话封装、分页器和模型不重复计入业务方法分母，但 Basic 所需的平台协议单独列入 [`qq-basic.md`](qq-basic.md) 验收。
 

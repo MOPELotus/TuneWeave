@@ -1,20 +1,21 @@
 # 网易云 API 全量覆盖账本
 
-上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@41bd6d82ce3b494d6375a784f5af391340ed9c1b`
+上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@63d89aa906f78c286a7f838258fa29220d7f41dd`
 
-本表由该快照的 `module/*.js` 文件生成，共 416 项。它是完成度验收清单，不是功能推荐列表；实际实施优先级见 [`docs/implementation-plan.md`](../implementation-plan.md)，网易云 Basic 的独立聚合进度见 [`netease-basic.md`](netease-basic.md)。状态含义：
+本表由该快照的 `module/*.js` 文件生成，共 431 项。它是完成度验收清单，不是功能推荐列表；实际实施优先级见 [`docs/implementation-plan.md`](../implementation-plan.md)，网易云 Basic 的独立聚合进度见 [`netease-basic.md`](netease-basic.md)。状态含义：
 
 - `pending`：尚未完成统一映射或平台扩展端点。
 - `partial`：已有一部分统一能力，但仍缺输入、输出、分支或真实验证。
 - `implemented`：代码和离线测试已完成，仍需要带真实前置条件的联网验证。
 - `verified`：统一端点、测试和对应真实网络路径均已验证。
 
-当前统计：`pending=218`、`partial=2`、`implemented=66`、`verified=130`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
+当前统计：`pending=228`、`partial=8`、`implemented=65`、`verified=130`。只有所有条目都达到 `verified`，或以证据明确标为上游已失效，网易云阶段才算完成。
 
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
 | `activate_init_profile` | `/activate/init/profile` | `pending` | — |
 | `ad_get` | `/ad/get` | `implemented` | `GET /v1/listening-rights/ads`（以独立 `ListeningRightsAds` 能力和稳定 `ListeningRightsAdCatalog` 表达广告换听目录；`type_ids` 缺省 `400002_0`，兼容逗号列表、`typeIds` 与参考 JSON 字符串数组，保留顺序/重复项并限制 1–100 个非空值；固定调用带自动实时 checkToken 的 XEAPI `/api/ad/get`，精确把类型数组序列化为 `type_ids` JSON 字符串；兼容对象/数组/空广告包装，逐项解析字符串或对象 `extJson.contextInfo.req_id`，空/畸形前项不遮蔽后续有效请求 ID，原广告、可解析 extJson、类型和完整响应均保留；核心类型、能力、默认/多类型协议、空/非空/数组包装、无效 extJson、消息优先级、畸形容器、类型边界、账户选择、统一/参考查询和未知字段均有测试；2026-07-18 匿名真实 XEAPI 请求自动注册 checkToken 并返回上游 `code=200` 的合法空投放，待持久化账户验证非空广告及真实 `req_id`） |
+| `ad_listening_rights` | `/ad/listening/rights` | `pending` | 2026-07-26 上游新增；免费听市场状态与剩余时长，固定 `entrance=FREE_LISTEN_RN`，XEAPI `/api/ad/homepage/free/tab/extend/v2` |
 | `ad_listening_rights_gain` | `/ad/listening/rights/gain` | `implemented` | `GET/POST /v1/listening-rights/gains`（独立 `ListeningRightsGain` 能力和稳定请求/结果模型；GET 完整兼容参考 `reqUid/creativeType/exposureTime/clickTime/rightsGainMethod`、四个可选时长/方式、`source/rightsExtJson/appInfo/installed/type_ids`，POST 提供 snake_case JSON 并接受 camelCase 别名；缺省创意类型/领取方式均为 2，缺省曝光/点击时间取同一当前毫秒值，参考 GET 的显式时间字符串保持字符串，所有可选整数、应用 JSON 和扩展文本进入精确 `reqParam` JSON 字符串；未给 `reqUid` 时先以同账户和类型调用广告目录，目录失败或无投放按参考行为继续提交空 ID，不伪造请求 ID；固定以 v3 checkToken 调用 XEAPI `/api/ad/listening/rights/gain`，只把明确布尔或 0/1 `gainFlag` 映射为可空 `granted`，其他值不猜测，完整请求/响应及 ID 来源保留；核心契约、完整/缺省载荷、字符串/数字时间、自动 ID 来源、未知 flag、边界、账户、GET/POST 和输入拒绝均有测试；2026-07-18 匿名真实自动广告 + v3 XEAPI 链返回上游登录边界 `code=2001` 并稳定映射 401，待持久化真实账户验证成功领取） |
 | `aidj_content_rcmd` | `/aidj/content/rcmd` | `pending` | — |
 | `album` | `/album` | `verified` | `GET /v1/albums/{ref}`、`GET /v1/albums/{ref}/tracks`（2026-07-16 HTTP 实测 `netease:18915` 返回《范特西》及 10 首曲目） |
@@ -57,7 +58,9 @@
 | `broadcast_channel_list` | `/broadcast/channel/list` | `verified` | `GET /v1/radio/stations`（完整支持 `categoryId/regionId/limit/lastId/score` 及 snake_case 别名；分类、地区和电台 ID 保持字符串，`lastId+score` 统一为成对游标并在分页扩展返回 `next_cursor`，两字段独立出现时分别补参考默认 `0/-1`；参考类型公开但实现忽略的 `offset` 仍被接收，并明确返回 `requested_offset` 与 `offset_applied=false`；首屏推荐插入导致返回数大于 `limit` 时不截断，完整频道和响应原文保留；2026-07-16 provider 与统一 HTTP 均联网实测：音乐分类 `categoryId=1` 首/二页各 20 项、总数 105、两页零重复，首屏下一游标 `{id:965,score:1139}`；网络台 `regionId=407` 返回 4/4 项且全部地区为“网络台”、`has_more=false`；`offset=100` 实测不改变上游首屏并正确标记未应用，上游均为 `code=200`） |
 | `broadcast_sub` | `/broadcast/sub` | `implemented` | `PUT/DELETE /v1/account/library/radio-stations/{ref}`（参考 `t=1` 的收藏分支完整映射为 `contentType=BROADCAST`、`cancelCollect=false`，其余 `t` 值的取消分支映射为 `cancelCollect=true`；统一端点以 HTTP 方法明确表达两种语义，电台 ID 在网络前校验，`account` 选择隔离登录态，统一返回 `SubscriptionResult` 并保留完整上游响应；离线请求构造、成功响应映射、非法 ID、缺失账户别名、PUT/DELETE 路由与响应契约均已测试；2026-07-16 provider 和统一 HTTP 对收藏/取消两条匿名路径均联网实测为 401 `authentication_required` 与上游码 301，待真实账户验证成功写入） |
 | `calendar` | `/calendar` | `implemented` | `GET /v1/extensions/netease/calendar`（固定使用 WeAPI 调用 `/api/mcalendar/detail`；完整支持参考 `startTime/endTime`、统一 `start_time/end_time`、任一或全部时间参数缺省时取当前 Unix 毫秒，以及 `account` 登录态别名；显式值归一化为无符号整数，非法或负数在上游请求前返回标准 400；完整上游 JSON 保留在统一包络中；离线测试已覆盖参考/统一参数名、账户隔离、协议与路径、双缺省和非法值；2026-07-16 匿名统一 HTTP 实测正确映射为 401 `authentication_required` 与上游码 301，待真实账户验证成功内容态） |
+| `captcha_safe_sent` | `/captcha/safe/sent` | `partial` | 统一验证码挑战端点已存在，但尚未提供只提交 `ctcode` 的安全验证码 EAPI 分支；不得退化为普通短信发送 |
 | `captcha_sent` | `/captcha/sent` | `implemented` | `POST /v1/auth/challenges`（为避免误发短信不做自动联网测试） |
+| `captcha_sent_v1` | `/captcha/sent/v1` | `partial` | 统一验证码挑战端点已存在，但尚未提供固定 `secrete=music_middleuser_pclogin/scene=0` 的中间层 EAPI 分支 |
 | `captcha_verify` | `/captcha/verify` | `implemented` | `POST /v1/auth/challenges/validate`（与验证码登录事务明确分离，仅校验而不登录或保存 Cookie；统一支持 `platform/account/method/principal/code/country_code`，并完整兼容参考 `phone/captcha/ctcode`，手机号和区号接受数字或字符串，`method` 默认 SMS、区号缺省或空值默认 `86`；统一返回 `valid/platform_code/message` 并在 `extensions.response` 保留完整上游响应，空白 `message` 会回退有效 `msg`，错误验证码作为 HTTP 200 的 `valid=false` 正常结果，手机号和验证码不回显；core、适配器冲突映射、参考/统一输入、默认值、非法值及敏感数据边界均有离线测试；2026-07-16 provider 与统一 HTTP 以假验证码真实联网验证成功，返回 `valid=false`、平台码 503 和“验证码错误”，待真实验证码验证 `valid=true` 分支） |
 | `cellphone_existence_check` | `/cellphone/existence/check` | `verified` | `POST /v1/auth/principals/status`（统一为不创建会话的 `AuthPrincipalStatus`，网易云限定 `principal_type=phone` 并默认该类型；完整支持统一 `platform/account/principal_type/principal/country_code`、参考 `phone/countrycode`、camelCase `countryCode`，手机号和区号接受数字或字符串，区号缺省或空值默认 `86`；固定 EAPI 调用 `/api/cellphone/existence/check`，严格把已实测 `exist=1/-1` 映射为 `exists=true/false`，统一保留 `has_password/display_name/avatar_url/platform_code` 及 `extensions.response`，不把未知 `exist` 值猜成布尔值，输入请求和 Debug 均脱敏；core、适配器两分支、能力声明、参考/统一输入、默认值、非手机号与非标量拒绝、敏感数据边界均有测试；2026-07-16 provider 与统一 HTTP 真实联网验证已注册 `13800138000` 返回 `exists=true`、`has_password=true`、上游 `exist=1`，未注册输入 `1` 返回 `exists=false`、`has_password=false`、上游 `exist=-1`，两者平台码均 200 且手机号保持上游脱敏） |
 | `chart_detail` | `/chart/detail` | `verified` | `GET /v1/charts/dimensions/{chart_code}`（完整支持必填 `target_id/target_type`、参考 `targetId/targetType` 别名及 `platform/account`；统一为 `DimensionChart`，映射榜单引用、维度、名称、说明、封面、更新时间、计数和评论支持态，完整响应保留在扩展；2026-07-16 provider 与匿名 HTTP 均真实联网验证 `CITY_SONG_CHART + 110000 + CITY` 成功，返回 `netease:CITY_SONG_CHART#110000@CITY#`“北京榜”、上游 `code=200`） |
@@ -71,7 +74,9 @@
 | `cloud_upload_token` | `/cloud/upload/token` | `implemented` | `POST /v1/account/cloud/uploads/ticket`（统一接收 `md5/file_size/filename/bitrate/content_type` 并兼容 `fileSize/contentType`；依次执行 EAPI `/api/cloud/upload/check`、WeAPI `/api/nos/token/alloc` 与真实 LBS 服务发现，完整返回 `needUpload/songId/resourceId` 对应字段、受限 NOS 上传 URL、方法及所需请求头；对象键按路径段编码，上传目标严格限制为无凭据、无自定义端口的 `http(s)://*.127.net` 和精确 `offset=0&complete=true&version=1.0` 参数，拒绝外域、重复参数与目标注入；NOS token 只存在于直传所需响应头映射，Debug 和扩展原文均不泄漏；协议构造、文件/MD5/码率边界、域名白名单、token 脱敏、统一 HTTP 字段及错误包络均有离线测试；2026-07-16 匿名真实 HTTP 验证在申请 token 前稳定返回 401 `authentication_required`，待真实账户验证票据与原始音频直传成功态） |
 | `cloudsearch` | `/cloudsearch` | `verified` | `GET /v1/search?variant=cloud`（统一接受 `q/keywords`、平台、账户与分页；完整支持参考项目全部 11 种搜索类型及数字值：歌曲 1、专辑 10、歌手 100、歌单 1000、用户 1002、MV 1004、歌词 1006、播客 1009、视频 1014、综合 1018、声音 2000，缺省为歌曲；固定 EAPI `/api/cloudsearch/pc` 并传递 `s/type/limit/offset/total=true`；网易云 `djRadios` 是按需播客而非直播广播，统一结果因此映射为 `Podcast`，直播 `RadioStation` 搜索能力不被错误声明；其余已知结构映射为 `Track/Album/Artist/Playlist/User/Video`，歌词命中仍为歌曲并保留歌词原文，综合/声音及不可稳定映射项用不丢失原文的 `opaque` 表达；声音响应优先专用 `voices/voiceCount`，空数组或空 `result` 不会遮住后续非空兼容结构；视频包装同时含多层资源时按可用 ID、标题、完整创作者及媒体元数据选择最丰富层，空/零视频或创作者 ID 与零时长会继续回退有效字段，完整响应与分页应用状态保留在扩展；类型映射、全部分支、混合已知/未知条目、冲突字段、分页、能力声明、参数别名和 HTTP 错误均有离线测试；2026-07-16 手动运行 11 个显式忽略的 provider 联网测试全部通过，随后匿名真实 HTTP 以 `keywords=周杰伦&limit=2` 验证 11 个类型均返回 200：1/10/100/1000/1002/1004/1006 分别返回 2 项，1009 按上游真实行为返回 10 项并标记 `limit_applied=false`，1014/1018/2000 返回合法空结果） |
 | `comment` | `/comment` | `implemented` | 2026-07-18 已按新上游把评论写入从 WeAPI 迁移为 EAPI + v2 checkToken；统一语义、模型和端点保持不变，待真实账户回归成功写入及删除后升级 verified。`POST /v1/resources/{type}/{ref}/comments`、`POST /v1/resources/{type}/{ref}/comments/{comment_id}/replies`、`DELETE /v1/resources/{type}/{ref}/comments/{comment_id}`（统一以资源引用决定内容平台、`account` 选择隔离登录态，并以 `CommentMutationResult` 表达目标、`create/reply/delete` 动作及不透明评论 ID；完整支持参考 `t=1/2/0` 三分支和 `type=0..7` 全部资源类型，固定映射歌曲 `R_SO_4_`、MV `R_MV_5_`、歌单 `A_PL_0_`、专辑 `R_AL_3_`、电台节目 `A_DJ_1_`、视频 `R_VI_62_`、动态完整 `A_EV_2_...` thread ID、电台 `A_DR_14_`，分别以 EAPI + v2 checkToken 调用 `/api/resource/comments/add|reply|delete`；内容仅以 trim 判空而不改写合法空格，事件 thread、视频和评论 ID 均保持不透明，评论/回复/用户映射会跳过空值及零 ID 后继续采用有效别名，完整响应保留在扩展；核心序列化、8 种资源×3 动作协议、结果 ID、冲突别名、字段/平台边界、能力声明、统一名称与数字别名、JSON 拒绝及 HTTP 包络均有离线测试；2026-07-16 无 Cookie 真实二进制 HTTP 分别验证创建、回复、删除三条路径均在上游写请求前返回 401 `authentication_required`，待真实账户验证成功创建、回复和删除回滚） |
+| `comment_add` | `/comment/add` | `partial` | 统一评论创建已实现，但 2026-07-26 上游新增独立 XEAPI + v3 checkToken `/api/resource/comments/add` 分支，并固定 `resourceType=0/expressionPicId=-1/bubbleId=-1`；待差分后接入 |
 | `comment_album` | `/comment/album` | `verified` | `GET /v1/resources/album/{ref}/comments`（统一 `Comment[]` 目录；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:32311` 返回上游 `code=200`、普通评论及 `mode=legacy`，请求 `limit=1` 被实际应用） |
+| `comment_delete` | `/comment/delete` | `partial` | 统一评论删除已实现，但 2026-07-26 上游新增独立 XEAPI `/api/resource/comments/delete` 分支；待差分后接入 |
 | `comment_dj` | `/comment/dj` | `verified` | `GET /v1/resources/radio_episode/{ref}/comments`（电台节目 ID 保持不透明；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:794062371` 返回上游 `code=200`、普通评论及 `mode=legacy`） |
 | `comment_event` | `/comment/event` | `verified` | `GET /v1/resources/event/{ref}/comments`（要求完整 `A_EV_2_...` thread ID，不重复拼接前缀；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:A_EV_2_6559519868_32953014` 返回上游 `code=200`、普通及热门评论） |
 | `comment_floor` | `/comment/floor` | `verified` | `GET /v1/resources/{type}/{ref}/comments?view=replies&parent_comment_id=...`（完整支持 `limit/before_time_ms`，也兼容 `parentCommentId/time`；父评论 ID 保持不透明，当前父评论与楼层回复分开映射；2026-07-16 provider 与真实二进制 HTTP 实测歌曲评论楼层返回上游 `code=200`、`mode=floor`，空楼层被如实表达为成功空目录） |
@@ -84,6 +89,7 @@
 | `comment_new` | `/comment/new` | `verified` | `GET /v1/resources/{type}/{ref}/comments?sort=recommended|hot|time`（完整支持现代目录三种排序、`page/cursor/include_replies` 及参考 `sortType/pageNo/pageSize/showInner`；2026-07-16 provider 与真实二进制 HTTP 对 `netease:185809` 三种排序均实测上游 `code=200`、`mode=modern`；热门及时间排序请求 2 条均返回 2 条，推荐排序上游固定返回 10 条并正确标记 `limit_applied=false`） |
 | `comment_playlist` | `/comment/playlist` | `verified` | `GET /v1/resources/playlist/{ref}/comments`（2026-07-16 provider 与真实二进制 HTTP 实测 `netease:705123491` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `comment_report` | `/comment/report` | `implemented` | `POST /v1/resources/track/{ref}/comments/{comment_id}/reports`（统一由资源引用决定内容平台、`account` 选择同平台隔离登录态，JSON `{reason}` 表达参考必填举报理由，稳定返回目标、评论 ID、原样理由和 `submitted=true`；严格保持参考模块的歌曲专用边界，只接受 `type=track`，固定构造 `threadId=R_SO_4_{id}`，以默认 EAPI 调用 `/api/report/reportcomment` 并精确提交 `threadId/commentId/reason`，不虚构其他七类资源支持；空白理由、非歌曲目标、跨平台引用、未知 JSON/query 字段均在上游请求前以统一 400 拒绝，未登录态在网络前以 401 拒绝，完整成功响应保留在扩展；核心序列化、协议字段、歌曲限定、输入拒绝、能力发现、认证前置与统一 HTTP 包络均有离线测试；2026-07-16 无 Cookie 真实二进制 HTTP 验证合法歌曲举报返回 `authentication_required`，歌单目标与空白理由分别返回预期 400，待真实账户验证成功举报） |
+| `comment_reply` | `/comment/reply` | `partial` | 统一评论回复已实现，但 2026-07-26 上游新增独立 XEAPI + v3 checkToken `/api/v1/resource/comments/reply` 分支，并固定 `resourceType=0`；待差分后接入 |
 | `comment_video` | `/comment/video` | `verified` | `GET /v1/resources/video/{ref}/comments`（视频 ID 保持不透明字符串；2026-07-16 provider 与真实二进制 HTTP 实测 `netease:89ADDE33C0AAE8EC14B99F6750DB954D` 返回上游 `code=200`、普通及热门评论、`mode=legacy`） |
 | `countries_code_list` | `/countries/code/list` | `verified` | `GET /v1/auth/country-codes`（统一以 `platform/account` 选择平台与隔离会话，省略时使用默认平台和 `default` 账户；固定 EAPI `/api/lbs/countries/v1` 空负载，映射 `data[{label,countryList[{code,locale,zh,en}]}]` 为有序 `CountryCallingCodeGroup[]`，稳定字段分别表达电话区号、地区代码、中英文名称，组/条目原文和目录状态不丢失；缺失分组数组、`countryList` 或任一必需字段均返回稳定 `upstream_error`，未知平台/query 在发网前拒绝；核心序列化、成功映射、畸形响应、能力发现、平台/账户/default 选择和 HTTP 错误包络均有测试；2026-07-17 显式 provider 联网测试及真实二进制统一 HTTP 均返回上游 `code=200`，完整获得 22 组、189 个地区且地区代码无重复，首项为 `86/CN/中国/China`） |
 | `creator_authinfo_get` | `/creator/authinfo/get` | `pending` | — |
@@ -93,6 +99,8 @@
 | `digitalAlbum_ordering` | `/digitalAlbum/ordering` | `pending` | — |
 | `digitalAlbum_purchased` | `/digitalAlbum/purchased` | `pending` | — |
 | `digitalAlbum_sales` | `/digitalAlbum/sales` | `pending` | — |
+| `device_kickoff` | `/device/kickoff` | `pending` | 2026-07-26 上游新增；以 `deviceKey` 和可选安全验证码强制指定登录设备下线 |
+| `device_list` | `/device/list` | `pending` | 2026-07-26 上游新增；登录设备目录，固定 `excStatus=9` |
 | `dj_banner` | `/dj/banner` | `implemented` | `GET /v1/banners?catalog=podcast`（与音乐推广横幅共用统一 `Banner` 模型，但固定使用 WeAPI `/api/djradio/banner/get`，不伪造该接口不存在的客户端分支；目标类型 `60001` 稳定映射为 `podcast_episode`，节目引用、标题、封面、Orpheus 跳转、独家标志及完整平台原文均保留；省略 `catalog` 仍严格保持既有音乐横幅行为，播客目录显式拒绝非 PC 的客户端选择；2026-07-18 底层原始 API 匿名实测 `code=200`、返回 3 项，首项目标 `netease:3723949603`、标题“脱口秀”，协议选择、映射、非法组合和统一 HTTP 离线测试已完成，provider 与真实二进制统一端点按 Basic 收口集中验收） |
 | `dj_category_excludehot` | `/dj/category/excludehot` | `verified` | `GET /v1/podcasts/categories?kind=non_hot`（也接受 `exclude_hot` 及连字符别名；固定空负载 WeAPI `/api/djradio/category/excludehot`，从顶层 `data` 映射稳定 `PodcastTaxonomy`，数字/字符串 ID、名称、网页/尺寸/客户端图标及完整单项和响应原文均不丢失，且以 `extensions.kind=non_hot` 区分完整分类目录；协议、映射、畸形结构、查询别名和统一 HTTP 均有测试；2026-07-22 provider 显式联网与真实二进制统一 HTTP 均返回上游 `code=200`、13 个有效分类，首项为 `11`“知识”） |
 | `dj_category_recommend` | `/dj/category/recommend` | `verified` | `GET /v1/podcasts/category-recommendations`（独立 `PodcastCategoryRecommendations` 能力；固定空负载 WeAPI `/api/djradio/home/category/recommend`，不把上游分组错误压平为普通目录：每项稳定分离 `PodcastCategory` 与完整 `Podcast[]`，保留算法、推荐文案、原始分组和顶层响应；缺失分组数组、分类 ID/名称或播客数组均稳定拒绝；协议、映射、异常边界、账户选择及统一 HTTP 均有测试；2026-07-22 provider 显式联网与真实二进制统一 HTTP 均返回上游 `code=200`、12 个分组，首组分类 `3`“情感”含 3 个播客，首项 `netease:526564706`“伴听FM”） |
@@ -161,7 +169,7 @@
 | `listentogether_sync_list_command` | `/listentogether/sync/list/command` | `pending` | — |
 | `listentogether_sync_playlist_get` | `/listentogether/sync/playlist/get` | `pending` | — |
 | `login` | `/login` | `implemented` | `POST /v1/auth/password`（邮箱，待真实账户验证） |
-| `login_cellphone` | `/login/cellphone` | `implemented` | `POST /v1/auth/password` / challenge verify（待真实账户验证） |
+| `login_cellphone` | `/login/cellphone` | `partial` | `POST /v1/auth/password` / challenge verify 已实现；2026-07-26 上游新增可选 `sca→secureCaptcha` 安全验证码字段，TuneWeave 尚未在强类型登录请求中暴露该分支，补齐前降为 `partial` |
 | `login_qr_check` | `/login/qr/check` | `partial` | `GET /v1/auth/qr/{transaction_id}`（waiting 已验证，确认态待账户实测） |
 | `login_qr_create` | `/login/qr/create` | `verified` | `POST /v1/auth/qr`（二维码 key 与业务码会跳过空或不可解析的顶层别名并读取嵌套有效值；2026-07-17 真实 HTTP 创建返回可扫码 URL 及自包含 SVG data URL；二维码图片不依赖外部渲染服务） |
 | `login_qr_key` | `/login/qr/key` | `verified` | `POST /v1/auth/qr`（2026-07-17 真实 HTTP 验证上游 key 创建成功；响应只暴露 TuneWeave 随机事务 ID，不泄露上游 key） |
@@ -170,6 +178,8 @@
 | `logout` | `/logout` | `implemented` | `DELETE /v1/auth/session`（待真实账户验证） |
 | `lyric` | `/lyric` | `partial` | `GET /v1/tracks/{ref}/lyrics`（由新版歌词覆盖；逐字格式优先且全部文本并存保留，无效旧贡献者 ID 不遮住有效 `userId`） |
 | `lyric_new` | `/lyric/new` | `verified` | `GET /v1/tracks/{ref}/lyrics`（普通、翻译、罗马音、逐字及逐字翻译/罗马音均保留；YRC 与 LRC 并存时稳定标记 `format=yrc`，2026-07-18 以公开曲目 `185809` 真实验证两者同时存在且逐字能力不会再被逐行格式覆盖） |
+| `middle_play_do_lottery` | `/middle/play/do/lottery` | `pending` | 2026-07-26 上游新增；云小编每日抽奖，`activityId` 默认 `6501202`、`drawCount` 默认 `1`，EAPI + v3 checkToken |
+| `middle_play_lottery_remain_chance` | `/middle/play/lottery/remain/chance` | `pending` | 2026-07-26 上游新增；查询云小编抽奖剩余次数，`activityId` 默认 `6501202` |
 | `mlog_music_rcmd` | `/mlog/music/rcmd` | `pending` | — |
 | `mlog_to_video` | `/mlog/to/video` | `pending` | — |
 | `mlog_url` | `/mlog/url` | `pending` | — |
@@ -258,6 +268,11 @@
 | `relay_play_state_submit` | `/relay/play/state/submit` | `pending` | — |
 | `rep_ugc_activity_collect` | `/rep/ugc/activity/collect` | `pending` | 2026-07-17 上游新增；云小编领取活动积分，缺省 `activityId=5001` |
 | `rep_ugc_activity_get` | `/rep/ugc/activity/get` | `pending` | 2026-07-17 上游新增；云小编活动信息 |
+| `rep_ugc_exam_info_get` | `/rep/ugc/exam/info/get` | `pending` | 2026-07-26 上游新增；按 `examType` 查询云小编考试状态 |
+| `rep_ugc_exam_question_single_get` | `/rep/ugc/exam/question/single/get` | `pending` | 2026-07-26 上游新增；按 `examType/taskId` 取得单题 |
+| `rep_ugc_exam_result_get` | `/rep/ugc/exam/result/get` | `pending` | 2026-07-26 上游新增；按 `examType/taskId` 查询考试结果 |
+| `rep_ugc_exam_start` | `/rep/ugc/exam/start` | `pending` | 2026-07-26 上游新增；按 `examType` 开始云小编考试并取得任务 |
+| `rep_ugc_exam_submit` | `/rep/ugc/exam/submit` | `pending` | 2026-07-26 上游新增；提交 `examType/taskId/questionId/answer`，答案为 `A/B` |
 | `rep_ugc_user_collect-vip` | `/rep/ugc/user/collect-vip` | `pending` | 2026-07-17 上游新增；云小编领取一日会员，缺省 `activityId=5001` |
 | `rep_ugc_user_get` | `/rep/ugc/user/get` | `pending` | 2026-07-17 上游新增；云小编账户详情 |
 | `rep_ugc_user_sign` | `/rep/ugc/user/sign` | `pending` | 2026-07-17 上游新增；云小编每日签到 |

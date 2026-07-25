@@ -1,6 +1,6 @@
 # QQ 音乐 Basic 覆盖账本
 
-上游快照：`L-1124/QQMusicApi@261326eec051e7f444296b5c461e7412c4b25bb9`
+上游快照：`L-1124/QQMusicApi@873255f2774361ac97366bd89a14b8ed9d230aae`
 
 QQ Basic 覆盖全量账本中 Q001–Q073 及 2026-07-25 新增的 Q101–Q104，共 77 个公开业务方法，并额外验收 7 个使这些业务方法能够真实运行的平台基础单元。当前业务方法进度：`pending=56`、`partial=2`、`implemented=10`、`verified=9`，完成度 `19/77 = 24.68%`。基础单元进度：`pending=3`、`partial=3`、`implemented=0`、`verified=1`。上游扩展使旧实现缺失新分支时会降低完成度，不为维持百分比保留过期状态。
 

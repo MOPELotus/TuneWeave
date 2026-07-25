@@ -7,7 +7,7 @@ future ports can be audited precisely.
 ## NeteaseCloudMusicApiEnhanced/api-enhanced
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
-- Reviewed commit: `41bd6d82ce3b494d6375a784f5af391340ed9c1b`
+- Reviewed commit: `63d89aa906f78c286a7f838258fa29220d7f41dd`
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.
@@ -26,7 +26,7 @@ future ports can be audited precisely.
 ## L-1124/QQMusicApi
 
 - Source: https://github.com/L-1124/QQMusicApi
-- Reviewed commit: `261326eec051e7f444296b5c461e7412c4b25bb9`
+- Reviewed commit: `873255f2774361ac97366bd89a14b8ed9d230aae`
 - License: GNU General Public License v3.0 or later
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.
@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `14c55ffbbbd1a90afe5e6ac45425f7b7988730bd`
+- Reviewed commit: `3d1e82dfb763fb28d53353f845605be16bed8a0d`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.

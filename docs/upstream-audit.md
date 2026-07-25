@@ -1,6 +1,6 @@
 # 上游源码审计与平台能力边界
 
-审计日期：2026-07-25
+审计日期：2026-07-26
 
 本文件记录 TuneWeave 首轮源码级审阅结论。参考仓库仅浅克隆到被 Git 忽略的 `.reference/repos/`，不会作为子模块或运行时依赖进入 TuneWeave。
 
@@ -8,11 +8,11 @@
 
 | 平台 | 参考项目 | 审阅提交 | 最近提交时间 | 许可证 |
 | --- | --- | --- | --- | --- |
-| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `41bd6d82ce3b494d6375a784f5af391340ed9c1b` | 2026-07-19 | MIT |
+| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `63d89aa906f78c286a7f838258fa29220d7f41dd` | 2026-07-24 | MIT |
 | 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `004bbff438bc811f0f28a9ddf4181e8b77a510ba` | 2026-07-22 | Lotus-ReFactor Source-Available Proprietary License |
-| QQ 音乐 | `L-1124/QQMusicApi` | `261326eec051e7f444296b5c461e7412c4b25bb9` | 2026-07-25 | GPL-3.0-or-later |
+| QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | 2026-07-25 | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | 2026-06-30 | MIT |
-| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `14c55ffbbbd1a90afe5e6ac45425f7b7988730bd` | 2026-07-21 | Apache-2.0 |
+| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `3d1e82dfb763fb28d53353f845605be16bed8a0d` | 2026-07-25 | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | 2023-07-26 | Apache-2.0；README 未声明替代许可证，忽略误写为 ISC 的 `package.json` 元数据 |
 | B 站 | `MOPELotus/BBDown` | `259a5558cee0a349a7ebb60bd31e40c88e5bc1ed` | 2026-01-10 | MIT |
 | B 站 API 文档 | `bilibili-plugins/bilibili-api-collect` | `cfc5fddcc8a94b74d91970bb5b4eaeb349addc47` | 2026-01-23 | CC BY-NC 4.0 |
@@ -60,6 +60,14 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 
 同日重新审查统一音源链：QQ 文件、版本 MID、`song_type`、现代音质数组和试听窗口已先进入内部强类型元数据；192k 与空间/环绕层级错误已修正。2026-07-22 的真实统一播放、无损下载、302 和网易云→QQ 严格匹配成功证据仍有效；2026-07-25 新匿名设备对四个规格族的复验被上游 `code=1000` 拒绝，稳定映射为认证前置错误，未伪造新增彩铃的成功态。
 
+## 2026-07-26 增量同步
+
+完成 QQ 用户创建/收藏歌单目录后按定期规则 fetch 全部 8 个参考仓库。网易云、QQ 和咪咕工作树干净并安全 fast-forward，其余 5 个仓库无新提交：
+
+- 网易云从 `41bd6d8` 更新到 `63d89aa`，`module/*.js` 由 416 增至 431。新增免费听市场状态，普通中间层/安全验证码发送，评论创建/删除/回复的独立 XEAPI 分支，设备目录/强制下线，云小编抽奖与 5 项考试接口。手机号登录新增 `sca→secureCaptcha`，手机号存在性切换为 EAPI，WeAPI 可带 checkToken，EAPI 使用独立域名。431 项账本已补齐全部 15 个新模块；现有手机号存在性已采用 EAPI，无需降级，缺少安全验证码、免费听状态和新评论协议的能力如实退回 `partial`。参考实现的模块加载全局取 token、静默异步重试和可空 token 竞态不会照搬。
+- QQ 从 `261326e` 更新到 `873255f`。上游移除未使用的 JCE/Tars 基础并更新依赖和 Actions 固定提交，没有新增、删除或修改 104 个公开业务方法；TuneWeave 当前使用 JSON CGI，不受移除影响，覆盖分母保持 104/77。
+- 咪咕从 `14c55ff` 更新到 `3d1e82d`（v2.10.0），`src/modules` 由 71 增至 81。新增栏目新碟/新歌/详情、演唱会信息/详情/评论/播放、自建歌单歌曲增删、MV HLS、广播歌曲和短视频用户资料；`playlist_square` 更名为分页模块，排行榜路由并入栏目结构，播放 URL 增加降级查询，配置可自动持久化。咪咕阶段必须按 81 个模块和服务级缓存/配置端点建立逐项账本，不把路由合并误判为能力删除。
+
 后续按 [实施顺序与持续上游同步](implementation-plan.md) 执行：每完成 3 个上游 API 模块检查活跃参考仓库；阶段切换和发布前检查全部参考仓库，并同步固定 SHA、模块数与覆盖状态。
 
 ### 定期检查记录
@@ -74,6 +82,7 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 | 2026-07-22 | Uni Playlist 全部 11 个能力收口并切换 QQ Basic | 全部 8 个参考仓库 | 网易云 `35d1c61→41bd6d8`；Lotus `646400c→004bbff`；QQ 远端强制改写 `9b48d99↔1b0aae0`；咪咕 `ae5581a→14c55ff` | 网易云新增 `sky` 沉浸声类型；QQ 新增歌词 `song_type` 且保留旧快照；咪咕模块 66→71；其余无更新 |
 | 2026-07-22 | 用户要求在 QQ Basic 开发前再次检查 | 全部 8 个参考仓库 | 网易云 `41bd6d8`；Lotus `004bbff`；QQ `1b0aae0`；酷狗 `283f1e9`；咪咕 `14c55ff`；酷我 `e8e720b`；BBDown `259a555`；B 站文档 `cfc5fdd` | 全部无更新；QQ 旧审计副本仍为 1 ahead/2 behind，最新只读快照精确对齐 `origin/main@1b0aae0` |
 | 2026-07-25 | 恢复 QQ 统一播放开发并执行 6–12 小时检查 | `QQMusicApi` | `1b0aae0→261326e` | 100→104 个公开方法；新增彩铃搜索/文件、selectors、逐项歌曲类型、助唱标注及 4 个歌词方法；覆盖账本和状态已重算 |
+| 2026-07-26 | 完成 QQ 用户创建/收藏目录并执行定期检查 | 全部 8 个参考仓库 | 网易云 `41bd6d8→63d89aa`；QQ `261326e→873255f`；咪咕 `14c55ff→3d1e82d` | 网易云 416→431 并补齐新模块账本；QQ 无公开方法变化；咪咕 71→81，后续阶段按新基线建账本；其余无更新 |
 
 ## 完整覆盖验收基线
 
@@ -87,7 +96,7 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 
 逐项账本：
 
-- [网易云 416 个公开模块](coverage/netease.md)
+- [网易云 431 个公开模块](coverage/netease.md)
 - [QQ 音乐 104 个公开方法](coverage/qq.md)
 
 登录也遵循完整覆盖原则。以网易云为例，二维码、邮箱账号密码、手机号密码、手机号验证码、登录状态、刷新和退出都属于账户能力，不以二维码登录代替其余流程。密码、验证码、Cookie 和 token 只能进入请求处理与服务端账户仓库，不写入日志或普通响应。

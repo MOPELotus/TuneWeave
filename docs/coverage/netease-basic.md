@@ -1,18 +1,18 @@
 # 网易云 Basic 阶段验收账本
 
-最后更新：2026-07-22。上游基线与逐模块状态仍以 [`netease.md`](netease.md) 的 416 项全量账本为准；本表只把 Basic 范围聚合成可独立验收的能力单元，不替代或合并掉任何上游 API。
+最后更新：2026-07-26。上游基线与逐模块状态仍以 [`netease.md`](netease.md) 的 431 项全量账本为准；本表只把 Basic 范围聚合成可独立验收的能力单元，不替代或合并掉任何上游 API。
 
 状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=0`、`partial=3`、`implemented=18`、`verified=43`。
+当前共 64 个验收单元：`pending=0`、`partial=6`、`implemented=15`、`verified=43`。
 
-- 完整实现率：`(implemented + verified) / 64 = 61 / 64 = 95.31%`。
+- 完整实现率：`(implemented + verified) / 64 = 58 / 64 = 90.63%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
-- 完整联网验收率：`verified / 64 = 42 / 64 = 65.63%`。
+- 完整联网验收率：`verified / 64 = 43 / 64 = 67.19%`。
 
-这些百分比是 Basic 能力验收口径，不是 416 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
+这些百分比是 Basic 能力验收口径，不是 431 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-当前剩余功能排序以完整播放体验为准：全部 64 个 Basic 单元现已触达，MV 与站内视频的目录、详情、收藏和播放链也已真实验收。下一步依重要度把 C10、C11、P10 三个 `partial` 单元补齐，优先完成声音歌单、常规播客目录和声音播放链；其余账户写入、完整权益及工作台成功态在 Basic 末尾使用现有持久化账户集中验收。只有这三项全部清零后才进入 Uni Playlist。
+当前剩余功能排序以完整播放体验为准：全部 64 个 Basic 单元现已触达，MV 与站内视频的目录、详情、收藏和播放链也已真实验收。2026-07-26 上游新增免费听市场状态、普通/安全验证码发送分支和手机号登录安全验证码，因此 P08、A04、A06 如实退回 `partial`；它们与原 C10、C11、P10 一并纳入网易云反查阶段，不中断当前 QQ Basic 主线。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -45,16 +45,16 @@
 | P05 | 播放与权益 | 严格跨平台匹配、账户选择和失败回退 | `implemented` | 解析器、尝试轨迹和未注册来源回落已验收，待真实 QQ/酷狗等成功取流 |
 | P06 | 播放与权益 | 专辑曲目可播、下载和最高音质权益 | `verified` | `album_privilege` 已验收；192/320 kbps 分别映射 `higher/high`，可用档位固定按能力升序去重，零新版最高码率回退有效兼容值 |
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `implemented` | `vip_info` 已验证；`vip_info_v2` 以显式 `backend=client` 和独立能力接入，保留五类权益包并按服务器时间映射激活态/最长有效期，认证前置及离线成功映射已覆盖，待持久化真实账户成功态 |
-| P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `implemented` | `ad_get` 与 `ad_listening_rights_gain` 已以独立统一能力接入，覆盖完整类型数组、`req_id` 提取、显式/自动请求 ID、完整领取参数、参考 GET/统一 POST、v3 checkToken 和不猜测未知 `gainFlag`；匿名真实目录返回合法空投放，领取链真实返回登录边界 `code=2001` 并映射 401，待持久化真实账户验证非空广告及成功领取 |
+| P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `partial` | `ad_get` 与 `ad_listening_rights_gain` 已以独立统一能力接入，覆盖完整类型数组、`req_id` 提取、显式/自动请求 ID、完整领取参数、参考 GET/统一 POST、v3 checkToken 和不猜测未知 `gainFlag`；匿名真实目录返回合法空投放，领取链真实返回登录边界 `code=2001` 并映射 401。2026-07-26 新增 `ad_listening_rights` 的免费听市场状态/剩余时长尚未接入 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `verified` | MV 四档真实播放地址和 302 已验收；零首选清晰度/有效期不遮蔽兼容字段；2026-07-22 当前有效普通视频真实返回 480p 非空 URL、`available=true/actual_resolution=480`，统一重定向返回 302，空 URL 业务态仍有独立回归 |
 | P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；声音逐词转写已接入且真实验证，工作台详情、声音歌单目录及账户声音查询都会把 `songId/trackId` 稳定映射为独立 `audio.ref`，待登录成功态确认后即可复用现有取流；声音写入后的完整播放事务仍待验收 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收；空白编码与零时长回退有效元数据 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
 | A03 | 账户与身份 | 验证码独立校验 | `implemented` | 错误码真实路径已验收；空白 `message` 不遮蔽有效 `msg`，待有效验证码成功态 |
-| A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `implemented` | 完整代码和认证前置已覆盖，自动测试不主动发送短信 |
+| A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `partial` | 原发送与事务式验证码登录代码和认证前置已覆盖，自动测试不主动发送短信；2026-07-26 新增 `captcha_sent_v1` 中间层登录验证码和 `captcha_safe_sent` 安全验证码两条独立分支尚未接入 |
 | A05 | 账户与身份 | 邮箱/账号密码登录 | `implemented` | `login` 已实现并脱敏，待真实账户成功态 |
-| A06 | 账户与身份 | 手机号密码登录 | `implemented` | `login_cellphone` 密码分支已实现，待真实账户成功态 |
+| A06 | 账户与身份 | 手机号密码登录 | `partial` | `login_cellphone` 密码分支已实现；2026-07-26 新增可选 `sca→secureCaptcha` 安全验证码字段尚未进入强类型请求，补齐后再恢复代码完成状态 |
 | A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 2026-07-17 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；空顶层 key/业务码不遮蔽嵌套有效值，真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
 | A08 | 账户与身份 | 登录状态查询 | `verified` | `login_status` 匿名真实路径已验收；空白/零账户身份不会误报已登录 |
 | A09 | 账户与身份 | 会话刷新及退出 | `implemented` | 2026-07-17 真实账户刷新、凭据代际替换和重启恢复均已验收；退出会删除登录态，留待需要重新扫码时受控验证 |

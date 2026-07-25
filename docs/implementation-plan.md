@@ -31,7 +31,7 @@ Basic 不是按模块文件名字母排序，而是按普通音乐 App 的使用
 
 社交动态、私信、粉丝关系、评论反应写入、一起听等不属于 Basic；它们仍在对应平台全量账本中逐项实现。播放权益相关广告、免费听、VIP、云盘、MV 和播客属于 Basic，不按“边缘功能”延后。
 
-网易云 Basic 的可计算阶段进度见 [`docs/coverage/netease-basic.md`](coverage/netease-basic.md)。该聚合账本只用于阶段验收和排序；416 项逐模块全量状态仍以 [`docs/coverage/netease.md`](coverage/netease.md) 为准。
+网易云 Basic 的可计算阶段进度见 [`docs/coverage/netease-basic.md`](coverage/netease-basic.md)。该聚合账本只用于阶段验收和排序；431 项逐模块全量状态仍以 [`docs/coverage/netease.md`](coverage/netease.md) 为准。
 
 QQ 音乐以 [`docs/coverage/qq.md`](coverage/qq.md) 固定当前上游 104 个公开方法的最终验收分母，其中 77 项属于 [`QQ Basic`](coverage/qq-basic.md)。QQ Basic 内部按可立即形成播放器用户链路的优先级实施：已完成的最小 CGI/客户端协议与直接分类搜索之后，先做登录与多账户，再做个人歌单/喜欢/收藏和 Uni 导入，然后补齐普通/逐字等歌词显示，接着收口播放、下载、VIP 与跨平台回退。榜单、歌手页、专辑页、公开歌单页等目录展示后移，其余个人库、推荐、曲谱和制作人排在更后。2026-07-25 上游新增彩铃搜索/文件、selectors、逐项歌曲类型、助唱标注、多风格翻译和 AI 词典；账本已同步扩容，旧实现缺少新分支时退回 `partial`。底层协议必须随首个真实业务功能一起验收，不建设长期不可用的占位框架。
 
