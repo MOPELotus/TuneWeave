@@ -13,17 +13,17 @@ use tuneweave_core::{
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
     CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
-    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
-    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    MediaDownload, MediaStream, MultiStyleLyricTranslation, MultiStyleLyricTranslations,
+    MusicProvider, Page, PageMeta, Platform, Playlist, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
+    PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
+    ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
+    SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{
@@ -866,6 +866,27 @@ struct QqSingingAnnotationsInfoResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMultiStyleLyricItem {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    style: u64,
+    #[serde(rename = "styleName")]
+    style_name: String,
+    lyric: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    timestamp: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMultiStyleLyricResponse {
+    #[serde(default)]
+    lyrics: Vec<QqMultiStyleLyricItem>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -1190,21 +1211,7 @@ impl MusicProvider for QqProvider {
         id: &str,
         account: Option<&str>,
     ) -> Result<SingingAnnotationsAvailability> {
-        self.validate_public_account(account)?;
-        let identifier = parse_qq_track_identifier(id)?;
-        let song_id = match &identifier {
-            QqTrackIdentifier::Numeric(song_id) if *song_id > 0 => *song_id,
-            QqTrackIdentifier::Numeric(_) => {
-                return Err(TuneWeaveError::invalid_request(
-                    "QQ numeric track ID must be positive",
-                )
-                .with_platform(Platform::Qq));
-            }
-            QqTrackIdentifier::Mid(_) => {
-                let track = self.track(id, None).await?;
-                qq_track_numeric_id(&track)?
-            }
-        };
+        let (identifier, song_id) = self.resolve_lyric_song_id(id, account).await?;
         let response = self
             .client
             .request_android(&[singing_annotations_info_request(song_id)])
@@ -1215,6 +1222,22 @@ impl MusicProvider for QqProvider {
                 qq_data_error("QQ singing annotations info request returned no response")
             })?;
         map_singing_annotations_info(identifier, song_id, response)
+    }
+
+    async fn multi_style_lyric_translations(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<MultiStyleLyricTranslations> {
+        let (identifier, song_id) = self.resolve_lyric_song_id(id, account).await?;
+        let response = self
+            .client
+            .request_android(&[multi_style_lyric_request(song_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ multi-style lyric request returned no response"))?;
+        map_multi_style_lyric_response(identifier, song_id, response)
     }
 
     async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
@@ -1915,6 +1938,29 @@ impl QqProvider {
             return Ok(());
         };
         self.qq_credential(Some(account)).map(|_| ())
+    }
+
+    async fn resolve_lyric_song_id(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<(QqTrackIdentifier, u64)> {
+        self.validate_public_account(account)?;
+        let identifier = parse_qq_track_identifier(id)?;
+        let song_id = match &identifier {
+            QqTrackIdentifier::Numeric(song_id) if *song_id > 0 => *song_id,
+            QqTrackIdentifier::Numeric(_) => {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ numeric track ID must be positive",
+                )
+                .with_platform(Platform::Qq));
+            }
+            QqTrackIdentifier::Mid(_) => {
+                let track = self.track(id, account).await?;
+                qq_track_numeric_id(&track)?
+            }
+        };
+        Ok((identifier, song_id))
     }
 
     fn qq_credential(&self, account: Option<&str>) -> Result<Option<QqCredential>> {
@@ -2845,6 +2891,14 @@ fn singing_annotations_info_request(song_id: u64) -> QqApiRequest {
     .preserving_booleans()
 }
 
+fn multi_style_lyric_request(song_id: u64) -> QqApiRequest {
+    QqApiRequest::new(
+        LYRIC_MODULE,
+        "BatchGetMultiStyleTransLyric",
+        json!({"songID": song_id}),
+    )
+}
+
 fn cdn_dispatch_request() -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -3088,6 +3142,53 @@ fn map_singing_annotations_info(
         extensions: Extensions::from([
             ("numeric_id".to_owned(), json!(song_id)),
             ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_multi_style_lyric_response(
+    requested: QqTrackIdentifier,
+    song_id: u64,
+    response: QqApiResponse,
+) -> Result<MultiStyleLyricTranslations> {
+    let parsed = serde_json::from_value::<QqMultiStyleLyricResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ multi-style lyric response is malformed"))?;
+    let preserved_data = json!(&parsed);
+    let lyrics = parsed
+        .lyrics
+        .into_iter()
+        .map(|item| {
+            let preserved_item = json!(&item);
+            let lyric = if item.lyric.trim().is_empty() {
+                String::new()
+            } else {
+                decrypt_qrc(item.lyric.trim()).map_err(|error| {
+                    qq_data_error(format!(
+                        "QQ multi-style lyric {} decryption failed: {error}",
+                        item.style
+                    ))
+                })?
+            };
+            Ok(MultiStyleLyricTranslation {
+                style: item.style,
+                style_name: item.style_name,
+                lyric,
+                timestamp: item.timestamp,
+                extensions: Extensions::from([("response".to_owned(), preserved_item)]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let track_id = match requested {
+        QqTrackIdentifier::Numeric(_) => song_id.to_string(),
+        QqTrackIdentifier::Mid(mid) => mid,
+    };
+    Ok(MultiStyleLyricTranslations {
+        track_ref: qq_ref(&track_id, "multi-style lyric translations")?,
+        lyrics,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("data".to_owned(), preserved_data),
             ("response".to_owned(), response.raw),
         ]),
     })
@@ -7161,6 +7262,97 @@ mod tests {
             .await
             .expect_err("zero numeric track ID");
         assert_eq!(identity_error.code, ErrorCode::InvalidRequest);
+
+        let account_error = provider
+            .multi_style_lyric_translations("496097762", Some("missing-account"))
+            .await
+            .expect_err("multi-style missing named account");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+
+        let identity_error = provider
+            .multi_style_lyric_translations("0", None)
+            .await
+            .expect_err("multi-style zero numeric track ID");
+        assert_eq!(identity_error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn multi_style_lyric_request_and_mapping_preserve_order_and_decrypt_each_item() {
+        let request = multi_style_lyric_request(496_097_762);
+        assert_eq!(request.module, LYRIC_MODULE);
+        assert_eq!(request.method, "BatchGetMultiStyleTransLyric");
+        assert_eq!(request.param, json!({"songID": 496_097_762_u64}));
+
+        let encrypted =
+            "32DABB4C5E9846FA00500DAD626F835FEAF8FC836D78403DAE4DC6ACD55A35D4C56A9C418E42B35F";
+        let mapped = map_multi_style_lyric_response(
+            QqTrackIdentifier::Mid("003exampleMid".to_owned()),
+            496_097_762,
+            response(json!({
+                "lyrics": [
+                    {
+                        "style": 0,
+                        "styleName": "诗意",
+                        "lyric": encrypted,
+                        "timestamp": 1764397510,
+                        "futureItemField": "first"
+                    },
+                    {
+                        "style": "1",
+                        "styleName": "粤语",
+                        "lyric": encrypted,
+                        "timestamp": "1764397511"
+                    }
+                ],
+                "futureTopField": true
+            })),
+        )
+        .expect("map multi-style translations");
+        assert_eq!(mapped.track_ref.to_string(), "qq:003exampleMid");
+        assert_eq!(mapped.lyrics.len(), 2);
+        assert_eq!(mapped.lyrics[0].style, 0);
+        assert_eq!(mapped.lyrics[0].style_name, "诗意");
+        assert_eq!(mapped.lyrics[0].lyric, "[00:01.00]TuneWeave QRC 测试\n");
+        assert_eq!(mapped.lyrics[0].timestamp, 1_764_397_510);
+        assert_eq!(
+            mapped.lyrics[0].extensions["response"]["futureItemField"],
+            "first"
+        );
+        assert_eq!(mapped.lyrics[1].style, 1);
+        assert_eq!(mapped.lyrics[1].style_name, "粤语");
+        assert_eq!(mapped.lyrics[1].timestamp, 1_764_397_511);
+        assert_eq!(mapped.extensions["numeric_id"], 496_097_762_u64);
+        assert_eq!(mapped.extensions["data"]["futureTopField"], true);
+        assert_eq!(mapped.extensions["response"]["code"], 0);
+
+        let empty = map_multi_style_lyric_response(
+            QqTrackIdentifier::Numeric(496_097_762),
+            496_097_762,
+            response(json!({})),
+        )
+        .expect("missing list follows upstream empty default");
+        assert_eq!(empty.track_ref.to_string(), "qq:496097762");
+        assert!(empty.lyrics.is_empty());
+    }
+
+    #[test]
+    fn multi_style_lyric_mapping_rejects_malformed_items_and_ciphertext() {
+        for malformed in [
+            json!({"lyrics": {}}),
+            json!({"lyrics": [{"styleName": "诗意", "lyric": "00"}]}),
+            json!({"lyrics": [{"style": -1, "styleName": "诗意", "lyric": "00"}]}),
+            json!({"lyrics": [{"style": 0, "lyric": "00"}]}),
+            json!({"lyrics": [{"style": 0, "styleName": "诗意", "lyric": []}]}),
+            json!({"lyrics": [{"style": 0, "styleName": "诗意", "lyric": "00"}]}),
+        ] {
+            let error = map_multi_style_lyric_response(
+                QqTrackIdentifier::Numeric(496_097_762),
+                496_097_762,
+                response(malformed),
+            )
+            .expect_err("malformed multi-style lyric response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
     }
 
     #[test]
@@ -10125,6 +10317,49 @@ mod tests {
         assert_eq!(mid.track_ref.to_string(), "qq:0039MnYb0qxYhV");
         assert_eq!(mid.extensions["numeric_id"], 97_773);
         assert!(mid.available);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_multi_style_lyric_translations_accept_numeric_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let numeric = provider
+            .multi_style_lyric_translations("496097762", None)
+            .await
+            .expect("numeric multi-style translations");
+        assert_eq!(numeric.track_ref.to_string(), "qq:496097762");
+        assert!(!numeric.lyrics.is_empty());
+        assert!(numeric.lyrics.iter().all(|item| {
+            !item.style_name.is_empty() && !item.lyric.is_empty() && item.timestamp > 0
+        }));
+        assert_eq!(numeric.extensions["response"]["code"], 0);
+
+        let track = provider
+            .track("496097762", None)
+            .await
+            .expect("resolve multi-style track MID");
+        let by_mid = provider
+            .multi_style_lyric_translations(&track.id, None)
+            .await
+            .expect("MID multi-style translations");
+        assert_eq!(by_mid.track_ref, track.resource_ref);
+        assert_eq!(by_mid.extensions["numeric_id"], 496_097_762_u64);
+        assert_eq!(
+            by_mid
+                .lyrics
+                .iter()
+                .map(|item| (&item.style, &item.style_name, &item.lyric, &item.timestamp))
+                .collect::<Vec<_>>(),
+            numeric
+                .lyrics
+                .iter()
+                .map(|item| (&item.style, &item.style_name, &item.lyric, &item.timestamp))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

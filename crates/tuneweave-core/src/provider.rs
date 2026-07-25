@@ -22,18 +22,18 @@ use crate::{
     DimensionChartTrackSnapshot, ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult,
     ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
     ListeningRightsGainResult, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics,
-    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MusicVideoListRequest, Page,
-    PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast,
-    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartRequest,
-    PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeOrderRequest,
-    PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslations,
+    MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform,
+    PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
+    PlaylistPlayableItem, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, Podcast, PodcastCategoryRecommendations, PodcastChartEntry,
+    PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest,
+    PodcastEpisodeDeleteResult, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
     PodcastEpisodeRecommendationRequest, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
     PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
     PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor, ProviderQrPoll, ProviderQrStart,
@@ -1181,6 +1181,17 @@ pub trait MusicProvider: Send + Sync {
         _id: &str,
         _account: Option<&str>,
     ) -> Result<SingingAnnotationsAvailability> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Lyrics,
+        ))
+    }
+
+    async fn multi_style_lyric_translations(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<MultiStyleLyricTranslations> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Lyrics,

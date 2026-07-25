@@ -45,16 +45,16 @@ use tuneweave_core::{
     ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
     ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
     LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
-    MemoryUniPlaylistStore, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
-    MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest,
-    PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest,
-    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableEntry,
-    PlaylistPlayableItem, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
+    MemoryUniPlaylistStore, MultiStyleLyricTranslations, MusicVideoArea, MusicVideoCatalog,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
+    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
@@ -348,6 +348,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/tracks/{reference}/lyrics/singing-annotations/availability",
             get(track_singing_annotations_availability),
+        )
+        .route(
+            "/tracks/{reference}/lyrics/translations/styles",
+            get(track_multi_style_lyric_translations),
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
@@ -1936,7 +1940,7 @@ struct LyricsParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SingingAnnotationsAvailabilityParams {
+struct LyricResourceParams {
     account: Option<String>,
 }
 
@@ -2960,7 +2964,7 @@ async fn track_lyrics(
 async fn track_singing_annotations_availability(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    params: Result<Query<SingingAnnotationsAvailabilityParams>, QueryRejection>,
+    params: Result<Query<LyricResourceParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SingingAnnotationsAvailability>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -2975,6 +2979,30 @@ async fn track_singing_annotations_availability(
         .singing_annotations_availability(reference.id(), account)
         .await?;
     let mut response = ApiResponse::new(availability).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_multi_style_lyric_translations(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<LyricResourceParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<MultiStyleLyricTranslations>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let translations = provider
+        .multi_style_lyric_translations(reference.id(), account)
+        .await?;
+    let mut response = ApiResponse::new(translations).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -11819,9 +11847,10 @@ mod tests {
         ArtistBiographySection, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
         AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup, ChartTrackPreview,
         CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
-        DimensionChartTrackEntry, MusicProvider, Page, PageMeta, PodcastCategory,
-        PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption, RadioPlaybackItem,
-        RadioStyle, RadioStyleSource, Result, SearchQuery, StreamRequest, VideoResolution,
+        DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
+        PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
+        RadioPlaybackItem, RadioStyle, RadioStyleSource, Result, SearchQuery, StreamRequest,
+        VideoResolution,
     };
 
     use super::*;
@@ -15180,6 +15209,36 @@ mod tests {
                 available: true,
                 extensions: Extensions::from([
                     ("numeric_id".to_owned(), json!(97_773)),
+                    ("account".to_owned(), json!(account)),
+                ]),
+            })
+        }
+
+        async fn multi_style_lyric_translations(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<MultiStyleLyricTranslations> {
+            Ok(MultiStyleLyricTranslations {
+                track_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
+                lyrics: vec![
+                    MultiStyleLyricTranslation {
+                        style: 0,
+                        style_name: "诗意".to_owned(),
+                        lyric: "[00:00.00]诗意翻译".to_owned(),
+                        timestamp: 1_764_397_510,
+                        extensions: Extensions::new(),
+                    },
+                    MultiStyleLyricTranslation {
+                        style: 1,
+                        style_name: "粤语".to_owned(),
+                        lyric: "[00:00.00]粤语翻译".to_owned(),
+                        timestamp: 1_764_397_511,
+                        extensions: Extensions::new(),
+                    },
+                ],
+                extensions: Extensions::from([
+                    ("numeric_id".to_owned(), json!(496_097_762)),
                     ("account".to_owned(), json!(account)),
                 ]),
             })
@@ -21064,6 +21123,33 @@ mod tests {
         let (status, json) = json_response_from(
             test_app_with_import_providers(),
             "/v1/tracks/qq:97773/lyrics/singing-annotations/availability?unknown=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn multi_style_lyric_translations_preserve_order_and_reference_platform() {
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:496097762/lyrics/translations/styles?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "qq:496097762");
+        assert_eq!(json["data"]["lyrics"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["data"]["lyrics"][0]["style"], 0);
+        assert_eq!(json["data"]["lyrics"][0]["style_name"], "诗意");
+        assert_eq!(json["data"]["lyrics"][1]["style"], 1);
+        assert_eq!(json["data"]["lyrics"][1]["timestamp"], 1_764_397_511_u64);
+        assert_eq!(json["data"]["extensions"]["account"], "collector");
+        assert_eq!(json["meta"]["platform"], "qq");
+        assert_eq!(json["meta"]["account"], "collector");
+
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:496097762/lyrics/translations/styles?unknown=true",
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

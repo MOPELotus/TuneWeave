@@ -3432,6 +3432,22 @@ pub struct SingingAnnotationsAvailability {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MultiStyleLyricTranslation {
+    pub style: u64,
+    pub style_name: String,
+    pub lyric: String,
+    pub timestamp: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MultiStyleLyricTranslations {
+    pub track_ref: ResourceRef,
+    pub lyrics: Vec<MultiStyleLyricTranslation>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamVariant {
@@ -3713,6 +3729,39 @@ mod tests {
         assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
         assert_eq!(value["available"], true);
         assert_eq!(value["extensions"]["numeric_id"], 97_773);
+    }
+
+    #[test]
+    fn multi_style_lyric_translations_preserve_order_style_and_timestamp() {
+        let translations = MultiStyleLyricTranslations {
+            track_ref: ResourceRef::new(Platform::Qq, "496097762")
+                .expect("valid QQ track reference"),
+            lyrics: vec![
+                MultiStyleLyricTranslation {
+                    style: 0,
+                    style_name: "诗意".to_owned(),
+                    lyric: "[00:00.00]诗意翻译".to_owned(),
+                    timestamp: 1_764_397_510,
+                    extensions: Extensions::new(),
+                },
+                MultiStyleLyricTranslation {
+                    style: 1,
+                    style_name: "粤语".to_owned(),
+                    lyric: "[00:00.00]粤语翻译".to_owned(),
+                    timestamp: 1_764_397_510,
+                    extensions: Extensions::new(),
+                },
+            ],
+            extensions: Extensions::new(),
+        };
+
+        let value =
+            serde_json::to_value(translations).expect("serialize multi-style lyric translations");
+        assert_eq!(value["track_ref"], "qq:496097762");
+        assert_eq!(value["lyrics"][0]["style"], 0);
+        assert_eq!(value["lyrics"][0]["style_name"], "诗意");
+        assert_eq!(value["lyrics"][1]["style"], 1);
+        assert_eq!(value["lyrics"][1]["timestamp"], 1_764_397_510_u64);
     }
 
     #[test]
