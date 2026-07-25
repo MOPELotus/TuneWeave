@@ -3448,6 +3448,13 @@ pub struct MultiStyleLyricTranslations {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiLyricDictionaryAvailability {
+    pub track_ref: ResourceRef,
+    pub available: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamVariant {
@@ -3762,6 +3769,21 @@ mod tests {
         assert_eq!(value["lyrics"][0]["style_name"], "诗意");
         assert_eq!(value["lyrics"][1]["style"], 1);
         assert_eq!(value["lyrics"][1]["timestamp"], 1_764_397_510_u64);
+    }
+
+    #[test]
+    fn ai_lyric_dictionary_availability_keeps_track_identity_and_boolean_explicit() {
+        let availability = AiLyricDictionaryAvailability {
+            track_ref: ResourceRef::new(Platform::Qq, "7137686").expect("valid QQ track reference"),
+            available: true,
+            extensions: Extensions::from([("numeric_id".to_owned(), serde_json::json!(7_137_686))]),
+        };
+
+        let value =
+            serde_json::to_value(availability).expect("serialize AI lyric dictionary availability");
+        assert_eq!(value["track_ref"], "qq:7137686");
+        assert_eq!(value["available"], true);
+        assert_eq!(value["extensions"]["numeric_id"], 7_137_686);
     }
 
     #[test]

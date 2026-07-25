@@ -3,13 +3,13 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AnonymousSession, AntiCheatToken,
-    AntiCheatTokenVersion, Artist, ArtistChart, ArtistChartRequest, ArtistListRequest,
-    ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch,
-    AudioFileRequest, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
-    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, Banner,
-    BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, CloudImportRequest,
+    AccountProfile, AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats,
+    AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistChart,
+    ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
+    AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioRecognition, AudioRecognitionRequest,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    Banner, BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
     CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
@@ -1192,6 +1192,17 @@ pub trait MusicProvider: Send + Sync {
         _id: &str,
         _account: Option<&str>,
     ) -> Result<MultiStyleLyricTranslations> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Lyrics,
+        ))
+    }
+
+    async fn ai_lyric_dictionary_availability(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<AiLyricDictionaryAvailability> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Lyrics,

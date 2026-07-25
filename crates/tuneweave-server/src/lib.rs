@@ -21,23 +21,23 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary, AnonymousSession,
-    AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCategory, ArtistChart,
-    ArtistChartArea, ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
-    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch,
-    AudioFileRequest, AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest,
-    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
-    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod,
-    ChartCatalog, ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    AccountProfile, AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats,
+    AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea,
+    ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest, ArtistListRequest,
+    ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
+    AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AudioRecognition,
+    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
+    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -352,6 +352,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/tracks/{reference}/lyrics/translations/styles",
             get(track_multi_style_lyric_translations),
+        )
+        .route(
+            "/tracks/{reference}/lyrics/ai-dictionary/availability",
+            get(track_ai_lyric_dictionary_availability),
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
@@ -3003,6 +3007,30 @@ async fn track_multi_style_lyric_translations(
         .multi_style_lyric_translations(reference.id(), account)
         .await?;
     let mut response = ApiResponse::new(translations).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_ai_lyric_dictionary_availability(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<LyricResourceParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<AiLyricDictionaryAvailability>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let availability = provider
+        .ai_lyric_dictionary_availability(reference.id(), account)
+        .await?;
+    let mut response = ApiResponse::new(availability).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -15244,6 +15272,21 @@ mod tests {
             })
         }
 
+        async fn ai_lyric_dictionary_availability(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<AiLyricDictionaryAvailability> {
+            Ok(AiLyricDictionaryAvailability {
+                track_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
+                available: true,
+                extensions: Extensions::from([
+                    ("numeric_id".to_owned(), json!(7_137_686)),
+                    ("account".to_owned(), json!(account)),
+                ]),
+            })
+        }
+
         async fn create_playlist(
             &self,
             request: &PlaylistCreateRequest,
@@ -21150,6 +21193,30 @@ mod tests {
         let (status, json) = json_response_from(
             test_app_with_import_providers(),
             "/v1/tracks/qq:496097762/lyrics/translations/styles?unknown=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn ai_lyric_dictionary_availability_uses_explicit_flag_and_reference_platform() {
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:7137686/lyrics/ai-dictionary/availability?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "qq:7137686");
+        assert_eq!(json["data"]["available"], true);
+        assert_eq!(json["data"]["extensions"]["numeric_id"], 7_137_686);
+        assert_eq!(json["data"]["extensions"]["account"], "collector");
+        assert_eq!(json["meta"]["platform"], "qq");
+        assert_eq!(json["meta"]["account"], "collector");
+
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:7137686/lyrics/ai-dictionary/availability?unknown=true",
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
