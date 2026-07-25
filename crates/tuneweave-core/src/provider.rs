@@ -1033,6 +1033,28 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn user_created_playlists(
+        &self,
+        _user_id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<Playlist>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistRead,
+        ))
+    }
+
+    async fn user_favorite_playlists(
+        &self,
+        _user_id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<Playlist>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistRead,
+        ))
+    }
+
     async fn account_history(
         &self,
         _request: &PlaybackHistoryRequest,

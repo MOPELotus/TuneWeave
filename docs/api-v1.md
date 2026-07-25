@@ -1085,6 +1085,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | POST | `/v1/resources/{type}/{ref}/comments/{comment_id}/reports` | 查询参数 `account?`；JSON `{reason}` | `CommentReportResult`；举报评论 |
 | GET | `/v1/users/{ref}` | `account?`、`backend?=modern|legacy`（也接受 `variant/source`） | 指定用户的完整 `UserProfile`；引用决定平台 |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
+| GET | `/v1/users/{ref}/playlists/created` | 分页、`account?` | 指定用户创建的 `Playlist[]`；平台用户引用的 ID 语义由对应 provider 校验 |
+| GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/membership` | `account?`、`backend=front|client` | 指定用户的 `MembershipSummary`；引用决定平台，客户端后端要求登录 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由和首页包装保存在扩展 |
@@ -1315,6 +1317,8 @@ QQ 退出调用同一 Android 登录服务的 `Logout`，并把精确账户凭�
 QQ 的 `GET /v1/playlists/{ref}` 与 `/tracks` 固定调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss`。公开 `qq:<playlist-id>` 使用 `disstid`，账户特殊目录 `qq:dir:<dirid>` 使用 `disstid=0/dirid/enc_host_uin` 并要求精确 `account`；详情请求保留标签和创建者，歌曲分页使用 `onlysonglist=true` 并关闭不需要的标签/用户包装。`song_begin/song_num` 精确对应统一 offset/limit，当前页数量、总数和 `hasmore` 必须相互一致；歌曲完整复用 QQ 强类型 Track 映射。2026-07-25 使用 release 二进制真实验证公开歌单 `qq:7039749142`：详情成功，首个 2 曲分页总数 99、`has_more=true`，首曲为 `qq:0039MnYb0qxYhV`；账户特殊目录待真实登录态验收。
 
 QQ 喜欢歌曲使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET /v1/account/favorites/tracks?platform=qq&account=...` 从所选凭据读取 `encryptUin`；`GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 直接使用目标用户的加密 UIN，并允许可选 `account` 作为查看者会话。两者共享严格 offset/limit、分页一致性和 Track 映射；加密 UIN 作为不透明平台用户 ID 处理，不接受空白、控制字符或超长值，也不会以参考项目的占位凭据代替缺失账户。
+
+QQ 的公开用户歌单目录保持两种身份边界：`GET /v1/users/qq:<numeric-uin>/playlists/created` 调用 `PlaylistBaseRead/GetPlaylistByUin`，只接受正整数 UIN，并在完整取得上游创建目录后应用统一 offset/limit；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 调用 `PlaylistFavRead/CgiGetPlaylistFavInfo`，把目标加密 UIN、offset 和 size 原样提交。两端的 `account` 都只是可选查看者会话，省略时不会被改写为 `default` 或强制要求本地账户。条目明确标记 created/favorite 与 subscribed 状态，删除/失败 ID、隐藏/完成标记、总数和完整响应均保留。2026-07-26 已从公开歌单 `qq:7039749142` 动态取得其创建者两类标识，并通过 provider 与 release HTTP 真实验证两个匿名目录分支：创建目录总数 6137，收藏目录合法返回空目录。
 
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 

@@ -1207,7 +1207,7 @@ impl MusicProvider for QqProvider {
         let created_response = self
             .client
             .request_android_with_credential(
-                &[qq_created_playlists_request(&credential)],
+                &[qq_created_playlists_request(credential.string_music_id())],
                 Some(&credential),
             )
             .await?
@@ -1329,6 +1329,61 @@ impl MusicProvider for QqProvider {
             .extensions
             .insert("user_encrypted_uin".to_owned(), json!(encrypted_uin));
         Ok(page)
+    }
+
+    async fn user_created_playlists(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Playlist>> {
+        let user_uin = validate_qq_numeric_uin(user_id, "user UIN")?;
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_created_playlists_request(user_uin)],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ created playlist request returned no response"))?;
+        let parsed = parse_created_playlists(response.data)?;
+        validate_created_playlists(&parsed)?;
+        map_created_playlist_page(
+            parsed,
+            request.offset,
+            request.limit.clamp(1, 100),
+            response.raw,
+            user_uin,
+        )
+    }
+
+    async fn user_favorite_playlists(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Playlist>> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let limit = request.limit.clamp(1, 100);
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_favorite_playlists_request(
+                    encrypted_uin,
+                    request.offset,
+                    limit,
+                )],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ favorite playlist request returned no response"))?;
+        let parsed = parse_favorite_playlists(response.data)?;
+        validate_favorite_playlists(&parsed, request.offset, limit)?;
+        map_favorite_playlist_page(parsed, request.offset, limit, response.raw, encrypted_uin)
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -3777,11 +3832,11 @@ fn map_album_search_item(raw: Value) -> Result<SearchItem> {
     }))
 }
 
-fn qq_created_playlists_request(credential: &QqCredential) -> QqApiRequest {
+fn qq_created_playlists_request(uin: &str) -> QqApiRequest {
     QqApiRequest::new(
         "music.musicasset.PlaylistBaseRead",
         "GetPlaylistByUin",
-        json!({ "uin": credential.string_music_id() }),
+        json!({ "uin": uin }),
     )
 }
 
@@ -3805,6 +3860,22 @@ fn qq_encrypted_uin(credential: &QqCredential) -> Result<&str> {
         )
         .with_platform(Platform::Qq)
     })
+}
+
+fn validate_qq_numeric_uin<'a>(value: &'a str, context: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 20
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.bytes().all(|byte| byte == b'0')
+        || value.parse::<u64>().is_err()
+    {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ {context} must be a positive integer"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    Ok(value)
 }
 
 fn validate_qq_encrypted_uin<'a>(value: &'a str, context: &str) -> Result<&'a str> {
@@ -3924,6 +3995,85 @@ fn map_account_playlist_page(input: QqAccountPlaylistPageInput) -> Result<Page<P
             next_offset: has_more.then_some(next_offset),
             has_more,
             extensions,
+        },
+    })
+}
+
+fn map_created_playlist_page(
+    response: QqCreatedPlaylistsResponse,
+    offset: u32,
+    limit: u32,
+    raw: Value,
+    user_uin: &str,
+) -> Result<Page<Playlist>> {
+    let total = response.total;
+    let from = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(response.playlists.len());
+    let to = from
+        .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+        .min(response.playlists.len());
+    let items = response.playlists[from..to]
+        .iter()
+        .cloned()
+        .map(|playlist| map_account_playlist(playlist, false, "created"))
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = u64::from(next_offset) < total && consumed > 0;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("library_scope".to_owned(), json!("user_created")),
+                ("user_uin".to_owned(), json!(user_uin)),
+                ("deleted_ids".to_owned(), json!(response.deleted_ids)),
+                ("finished".to_owned(), json!(response.finished)),
+                ("response".to_owned(), raw),
+            ]),
+        },
+    })
+}
+
+fn map_favorite_playlist_page(
+    response: QqFavoritePlaylistsResponse,
+    offset: u32,
+    limit: u32,
+    raw: Value,
+    encrypted_uin: &str,
+) -> Result<Page<Playlist>> {
+    let total = response.total;
+    let items = response
+        .playlists
+        .iter()
+        .cloned()
+        .map(|playlist| map_account_playlist(playlist, true, "favorite"))
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let next_offset = offset.saturating_add(consumed);
+    let has_more = response.hasmore && consumed > 0;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("library_scope".to_owned(), json!("user_favorite")),
+                ("user_encrypted_uin".to_owned(), json!(encrypted_uin)),
+                ("number".to_owned(), json!(response.number)),
+                ("hidden".to_owned(), json!(response.hide)),
+                ("deleted_ids".to_owned(), json!(response.deleted_ids)),
+                ("failed_ids".to_owned(), json!(response.failed_ids)),
+                ("response".to_owned(), raw),
+            ]),
         },
     })
 }
@@ -6523,7 +6673,7 @@ mod tests {
         .expect("credential")
         .normalize()
         .expect("normalized credential");
-        let created = qq_created_playlists_request(&credential);
+        let created = qq_created_playlists_request(credential.string_music_id());
         assert_eq!(created.module, "music.musicasset.PlaylistBaseRead");
         assert_eq!(created.method, "GetPlaylistByUin");
         assert_eq!(created.param, json!({ "uin": "123456" }));
@@ -6538,6 +6688,71 @@ mod tests {
         assert_eq!(
             favorite.param,
             json!({ "uin": "encrypted-uin", "offset": 30, "size": 20 })
+        );
+    }
+
+    #[test]
+    fn user_playlist_requests_keep_distinct_plain_and_encrypted_identities() {
+        let plain_uin = validate_qq_numeric_uin("654321", "user UIN").expect("numeric UIN");
+        let created = qq_created_playlists_request(plain_uin);
+        assert_eq!(created.param, json!({ "uin": "654321" }));
+        assert!(validate_qq_numeric_uin("encrypted-uin", "user UIN").is_err());
+        assert!(validate_qq_numeric_uin("0", "user UIN").is_err());
+
+        let encrypted_uin = validate_qq_encrypted_uin("encrypted-uin", "user encrypted UIN")
+            .expect("encrypted UIN");
+        let favorite = qq_favorite_playlists_request(encrypted_uin, 20, 10);
+        assert_eq!(
+            favorite.param,
+            json!({ "uin": "encrypted-uin", "offset": 20, "size": 10 })
+        );
+    }
+
+    #[test]
+    fn user_playlist_pages_preserve_directory_kind_and_pagination() {
+        let created_raw = json!({
+            "total": 2,
+            "v_playlist": [
+                { "tid": 11, "dirid": 101, "title": "公开创建一", "songnum": 2 },
+                { "tid": 12, "dirid": 102, "title": "公开创建二", "songnum": 3 }
+            ],
+            "v_delTid": [99],
+            "bFinish": true
+        });
+        let created =
+            parse_created_playlists(created_raw.clone()).expect("created playlist response");
+        validate_created_playlists(&created).expect("complete created playlists");
+        let created_page = map_created_playlist_page(created, 1, 1, created_raw, "654321")
+            .expect("created playlist page");
+        assert_eq!(created_page.items[0].resource_ref.to_string(), "qq:12");
+        assert_eq!(created_page.items[0].subscribed, Some(false));
+        assert_eq!(created_page.pagination.total, Some(2));
+        assert!(!created_page.pagination.has_more);
+        assert_eq!(created_page.pagination.extensions["user_uin"], "654321");
+
+        let favorite_raw = json!({
+            "number": 1,
+            "total": 2,
+            "hasmore": true,
+            "hide": false,
+            "v_list": [
+                { "dissid": 21, "title": "公开收藏", "songnum": 4 }
+            ],
+            "v_delTids": [],
+            "v_failTids": []
+        });
+        let favorite =
+            parse_favorite_playlists(favorite_raw.clone()).expect("favorite playlist response");
+        validate_favorite_playlists(&favorite, 0, 1).expect("favorite playlist pagination");
+        let favorite_page =
+            map_favorite_playlist_page(favorite, 0, 1, favorite_raw, "encrypted-uin")
+                .expect("favorite playlist page");
+        assert_eq!(favorite_page.items[0].resource_ref.to_string(), "qq:21");
+        assert_eq!(favorite_page.items[0].subscribed, Some(true));
+        assert_eq!(favorite_page.pagination.next_offset, Some(1));
+        assert_eq!(
+            favorite_page.pagination.extensions["user_encrypted_uin"],
+            "encrypted-uin"
         );
     }
 
@@ -7961,6 +8176,50 @@ mod tests {
         assert_eq!(tracks.items.len(), 2);
         assert!(tracks.pagination.total.is_some_and(|total| total >= 2));
         assert!(tracks.items.iter().all(|track| !track.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_public_playlist_owner_exposes_created_and_favorite_directories() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let playlist = provider
+            .playlist("7039749142", None)
+            .await
+            .expect("live playlist detail");
+        let creator_uin = playlist
+            .creator
+            .as_ref()
+            .and_then(|creator| creator.resource_ref.as_ref())
+            .map(ResourceRef::id)
+            .expect("public creator UIN");
+        let encrypted_uin = playlist
+            .extensions
+            .get("creator_encrypted_uin")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .expect("public creator encrypted UIN");
+        let request = tuneweave_core::PageRequest {
+            limit: 2,
+            offset: 0,
+            account: None,
+        };
+        let created = provider
+            .user_created_playlists(creator_uin, &request)
+            .await
+            .expect("live user created playlists");
+        assert!(created.pagination.total.is_some());
+        assert!(created.items.iter().all(|item| !item.name.is_empty()));
+
+        let favorite = provider
+            .user_favorite_playlists(encrypted_uin, &request)
+            .await
+            .expect("live user favorite playlists");
+        assert!(favorite.pagination.total.is_some());
+        assert!(favorite.items.iter().all(|item| !item.name.is_empty()));
     }
 
     #[tokio::test]

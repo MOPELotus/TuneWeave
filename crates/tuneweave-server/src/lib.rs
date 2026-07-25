@@ -421,6 +421,14 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/tracks",
             get(user_favorite_tracks),
         )
+        .route(
+            "/users/{reference}/playlists/created",
+            get(user_created_playlists),
+        )
+        .route(
+            "/users/{reference}/favorites/playlists",
+            get(user_favorite_playlists),
+        )
         .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
@@ -7135,7 +7143,7 @@ async fn user_favorite_tracks(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let account = account_alias(params.account.as_deref())?;
+    let account = optional_trimmed(params.account);
     let platform = reference.platform();
     let provider = state.registry.require(platform)?;
     let page = provider
@@ -7144,16 +7152,71 @@ async fn user_favorite_tracks(
             &PageRequest {
                 limit,
                 offset,
-                account: Some(account.clone()),
+                account: account.clone(),
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
-            .with_pagination(page.pagination),
-    ))
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn user_created_playlists(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    user_playlist_directory(state, reference, params, false).await
+}
+
+async fn user_favorite_playlists(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    user_playlist_directory(state, reference, params, true).await
+}
+
+async fn user_playlist_directory(
+    state: AppState,
+    reference: String,
+    params: PageParams,
+    favorites: bool,
+) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let request = PageRequest {
+        limit,
+        offset,
+        account: account.clone(),
+    };
+    let page = if favorites {
+        provider
+            .user_favorite_playlists(reference.id(), &request)
+            .await?
+    } else {
+        provider
+            .user_created_playlists(reference.id(), &request)
+            .await?
+    };
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -13686,6 +13749,50 @@ mod tests {
         ) -> Result<Page<Track>> {
             Ok(Page {
                 items: vec![sample_track(user_id)],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn user_created_playlists(
+            &self,
+            user_id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<Playlist>> {
+            let mut playlist = sample_playlist(user_id);
+            playlist
+                .extensions
+                .insert("directory".to_owned(), json!("created"));
+            Ok(Page {
+                items: vec![playlist],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn user_favorite_playlists(
+            &self,
+            user_id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<Playlist>> {
+            let mut playlist = sample_playlist(user_id);
+            playlist
+                .extensions
+                .insert("directory".to_owned(), json!("favorite"));
+            Ok(Page {
+                items: vec![playlist],
                 pagination: PageMeta {
                     limit: request.limit,
                     offset: request.offset,
@@ -22395,6 +22502,32 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn user_playlist_directories_keep_identity_kind_and_optional_viewer_account() {
+        let app = test_app_with_provider();
+        let (status, created) = json_response_from(
+            app.clone(),
+            "/v1/users/netease:32953014/playlists/created?limit=10&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["data"][0]["ref"], "netease:32953014");
+        assert_eq!(created["data"][0]["extensions"]["directory"], "created");
+        assert_eq!(created["meta"]["platform"], "netease");
+        assert!(created["meta"]["account"].is_null());
+
+        let (status, favorite) = json_response_from(
+            app,
+            "/v1/users/netease:encrypted-user/favorites/playlists?account=viewer&limit=20&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(favorite["data"][0]["ref"], "netease:encrypted-user");
+        assert_eq!(favorite["data"][0]["extensions"]["directory"], "favorite");
+        assert_eq!(favorite["meta"]["account"], "viewer");
+        assert_eq!(favorite["meta"]["pagination"]["limit"], 20);
     }
 
     #[tokio::test]
