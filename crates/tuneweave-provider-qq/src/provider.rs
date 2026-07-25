@@ -14,17 +14,21 @@ use tuneweave_core::{
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
     CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
     MediaDownload, MediaStream, MusicProvider, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistKind,
-    PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility,
-    Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result,
-    SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
+    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamRequest, SubscriptionResult, Track,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
+    TuneWeaveError, User, Video,
 };
 
-use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
+use crate::client::{
+    QqApiRequest, QqApiResponse, QqBusinessResponse, QqClient, QqConfig, QqCredential,
+};
 use crate::login::{
     QqLogoutOutcome, QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
     logout_qq_credential, qq_login_business_error, refresh_qq_credential, send_phone_authcode,
@@ -695,7 +699,7 @@ struct QqPlaylistDetailOptions {
     include_user: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 struct QqPlaylistWriteTrack {
     song_id: u64,
     song_type: i64,
@@ -1111,14 +1115,12 @@ impl MusicProvider for QqProvider {
         let write_track = qq_playlist_write_track(&track)?;
         let response = self
             .client
-            .request_android_with_credential(
-                &[qq_track_subscription_request(write_track, subscribed)],
+            .request_android_business_with_credential(
+                qq_track_subscription_request(write_track, subscribed),
+                &[],
                 Some(&credential),
             )
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ track subscription request returned no response"))?;
+            .await?;
         map_qq_track_subscription(id, write_track, subscribed, response)
     }
 
@@ -1500,6 +1502,63 @@ impl MusicProvider for QqProvider {
             .request_android_with_credential(&api_requests, Some(&credential))
             .await?;
         map_qq_playlist_deletions(targets, responses)
+    }
+
+    async fn mutate_playlist_items(
+        &self,
+        id: &str,
+        action: PlaylistItemMutationAction,
+        request: &PlaylistItemMutationRequest,
+    ) -> Result<PlaylistItemMutationResult> {
+        if request.kind != PlaylistItemKind::Track {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ music playlists only accept track items",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "kind": request.kind })));
+        }
+        if request.item_refs.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ playlist item addition requires at least one track",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request
+            .item_refs
+            .iter()
+            .any(|item_ref| item_ref.platform() != Platform::Qq)
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ playlist item addition cannot contain another platform",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let locator = parse_qq_playlist_locator(id)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let mut resolved = BTreeMap::<String, QqPlaylistWriteTrack>::new();
+        let mut write_tracks = Vec::with_capacity(request.item_refs.len());
+        for item_ref in &request.item_refs {
+            if let Some(track) = resolved.get(item_ref.id()) {
+                write_tracks.push(*track);
+                continue;
+            }
+            let track = self.track(item_ref.id(), None).await?;
+            let write_track = qq_playlist_write_track(&track)?;
+            resolved.insert(item_ref.id().to_owned(), write_track);
+            write_tracks.push(write_track);
+        }
+        let response = self
+            .client
+            .request_android_business_with_credential(
+                qq_playlist_items_mutation_request(locator, &write_tracks, action),
+                &[],
+                Some(&credential),
+            )
+            .await?;
+        map_qq_playlist_items_mutation(id, action, request, locator, write_tracks, response)
     }
 
     async fn playlist_source(
@@ -4441,8 +4500,23 @@ fn map_qq_track_subscription(
     requested_id: &str,
     track: QqPlaylistWriteTrack,
     subscribed: bool,
-    response: QqApiResponse,
+    response: QqBusinessResponse,
 ) -> Result<SubscriptionResult> {
+    if response.code != 0 {
+        return Err(TuneWeaveError::new(
+            if response.code == 80_092 {
+                ErrorCode::Conflict
+            } else {
+                ErrorCode::UpstreamError
+            },
+            "QQ track subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "subscribed": subscribed
+        })));
+    }
     let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone())
         .map_err(|_| qq_data_error("QQ track subscription response is malformed"))?;
     if parsed.ret_code != 0 {
@@ -4471,6 +4545,108 @@ fn map_qq_track_subscription(
             ("directory_id".to_owned(), json!(201)),
             ("numeric_id".to_owned(), json!(track.song_id)),
             ("song_type".to_owned(), json!(track.song_type)),
+            ("platform_code".to_owned(), json!(response.code)),
+            ("ret_code".to_owned(), json!(parsed.ret_code)),
+            ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn qq_playlist_items_mutation_request(
+    locator: QqPlaylistLocator,
+    tracks: &[QqPlaylistWriteTrack],
+    action: PlaylistItemMutationAction,
+) -> QqApiRequest {
+    let request = QqApiRequest::new(
+        "music.musicasset.PlaylistDetailWrite",
+        match action {
+            PlaylistItemMutationAction::Add => "AddSonglist",
+            PlaylistItemMutationAction::Remove => "DelSonglist",
+        },
+        json!({
+            "dirId": locator.directory_id,
+            "tid": locator.playlist_id,
+            "bFmtUtf8": true,
+            "v_songInfo": tracks
+                .iter()
+                .map(|track| json!({
+                    "songId": track.song_id,
+                    "songType": track.song_type
+                }))
+                .collect::<Vec<_>>()
+        }),
+    );
+    if action == PlaylistItemMutationAction::Add {
+        request.preserving_booleans()
+    } else {
+        request
+    }
+}
+
+fn map_qq_playlist_items_mutation(
+    playlist_id: &str,
+    action: PlaylistItemMutationAction,
+    request: &PlaylistItemMutationRequest,
+    locator: QqPlaylistLocator,
+    tracks: Vec<QqPlaylistWriteTrack>,
+    response: QqBusinessResponse,
+) -> Result<PlaylistItemMutationResult> {
+    let operation = match action {
+        PlaylistItemMutationAction::Add => "addition",
+        PlaylistItemMutationAction::Remove => "removal",
+    };
+    if response.code != 0 {
+        return Err(TuneWeaveError::new(
+            if response.code == 80_092 {
+                ErrorCode::Conflict
+            } else {
+                ErrorCode::UpstreamError
+            },
+            format!("QQ playlist track {operation} was rejected"),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "playlist_ref": qq_ref(playlist_id, "playlist track mutation")?,
+            "platform_code": response.code,
+            "action": action
+        })));
+    }
+    let parsed =
+        serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(|_| {
+            qq_data_error(format!(
+                "QQ playlist track {operation} response is malformed"
+            ))
+        })?;
+    if parsed.ret_code != 0 {
+        return Err(TuneWeaveError::new(
+            if parsed.ret_code == 80_092 {
+                ErrorCode::Conflict
+            } else {
+                ErrorCode::UpstreamError
+            },
+            format!("QQ playlist track {operation} was rejected"),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "playlist_ref": qq_ref(playlist_id, "playlist track mutation")?,
+            "platform_code": response.code,
+            "ret_code": parsed.ret_code,
+            "action": action
+        })));
+    }
+    Ok(PlaylistItemMutationResult {
+        playlist_ref: qq_ref(playlist_id, "playlist track mutation")?,
+        item_refs: request.item_refs.clone(),
+        kind: PlaylistItemKind::Track,
+        action,
+        snapshot_id: None,
+        cloud_track_count: None,
+        extensions: Extensions::from([
+            ("playlist_id".to_owned(), json!(locator.playlist_id)),
+            ("directory_id".to_owned(), json!(locator.directory_id)),
+            ("tracks".to_owned(), json!(tracks)),
+            ("platform_code".to_owned(), json!(response.code)),
             ("ret_code".to_owned(), json!(parsed.ret_code)),
             ("data".to_owned(), json!(parsed)),
             ("response".to_owned(), response.raw),
@@ -7502,7 +7678,8 @@ mod tests {
             "0039MnYb0qxYhV",
             identity,
             false,
-            QqApiResponse {
+            QqBusinessResponse {
+                code: 0,
                 data: json!({"retCode": 0}),
                 raw: json!({"code": 0, "data": {"retCode": 0}}),
             },
@@ -7518,7 +7695,8 @@ mod tests {
             "0039MnYb0qxYhV",
             identity,
             true,
-            QqApiResponse {
+            QqBusinessResponse {
+                code: 0,
                 data: json!({"retCode": 80092}),
                 raw: json!({"code": 0, "data": {"retCode": 80092}}),
             },
@@ -7527,11 +7705,26 @@ mod tests {
         assert_eq!(conflict.code, ErrorCode::Conflict);
         assert_eq!(conflict.details["platform_code"], 80_092);
 
+        let wrapper_conflict = map_qq_track_subscription(
+            "0039MnYb0qxYhV",
+            identity,
+            true,
+            QqBusinessResponse {
+                code: 80_092,
+                data: json!({}),
+                raw: json!({"code": 80092}),
+            },
+        )
+        .expect_err("wrapper platform rejection");
+        assert_eq!(wrapper_conflict.code, ErrorCode::Conflict);
+        assert_eq!(wrapper_conflict.details["platform_code"], 80_092);
+
         let malformed = map_qq_track_subscription(
             "0039MnYb0qxYhV",
             identity,
             true,
-            QqApiResponse {
+            QqBusinessResponse {
+                code: 0,
                 data: json!({}),
                 raw: json!({"code": 0, "data": {}}),
             },
@@ -7561,6 +7754,145 @@ mod tests {
             qq_playlist_write_track(&missing_type)
                 .expect_err("missing song type")
                 .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[test]
+    fn playlist_track_mutations_preserve_target_song_identity_order_and_boolean_branch() {
+        let playlist_ref =
+            ResourceRef::new(Platform::Qq, "7039749142").expect("playlist reference");
+        let request = PlaylistItemMutationRequest {
+            item_refs: vec![
+                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("first track reference"),
+                ResourceRef::new(Platform::Qq, "97773").expect("second track reference"),
+                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                    .expect("duplicate track reference"),
+            ],
+            kind: PlaylistItemKind::Track,
+            account: Some("creator".to_owned()),
+        };
+        let tracks = vec![
+            QqPlaylistWriteTrack {
+                song_id: 97_773,
+                song_type: 113,
+            },
+            QqPlaylistWriteTrack {
+                song_id: 97_773,
+                song_type: 113,
+            },
+            QqPlaylistWriteTrack {
+                song_id: 97_773,
+                song_type: 113,
+            },
+        ];
+        let public = parse_qq_playlist_locator(playlist_ref.id()).expect("public playlist locator");
+        let add_request =
+            qq_playlist_items_mutation_request(public, &tracks, PlaylistItemMutationAction::Add);
+        assert_eq!(add_request.module, "music.musicasset.PlaylistDetailWrite");
+        assert_eq!(add_request.method, "AddSonglist");
+        assert_eq!(add_request.param["dirId"], 0);
+        assert_eq!(add_request.param["tid"], 7_039_749_142_u64);
+        assert_eq!(add_request.param["bFmtUtf8"], true);
+        assert_eq!(
+            add_request.param["v_songInfo"].as_array().map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(add_request.param["v_songInfo"][0]["songId"], 97_773);
+        assert_eq!(add_request.param["v_songInfo"][0]["songType"], 113);
+
+        let personal = parse_qq_playlist_locator("dir:301").expect("directory locator");
+        let remove_request = qq_playlist_items_mutation_request(
+            personal,
+            &tracks,
+            PlaylistItemMutationAction::Remove,
+        );
+        assert_eq!(remove_request.method, "DelSonglist");
+        assert_eq!(remove_request.param["dirId"], 301);
+        assert_eq!(remove_request.param["tid"], 0);
+
+        for action in [
+            PlaylistItemMutationAction::Add,
+            PlaylistItemMutationAction::Remove,
+        ] {
+            let result = map_qq_playlist_items_mutation(
+                playlist_ref.id(),
+                action,
+                &request,
+                public,
+                tracks.clone(),
+                QqBusinessResponse {
+                    code: 0,
+                    data: json!({"retCode": 0, "future": true}),
+                    raw: json!({"code": 0, "data": {"retCode": 0}}),
+                },
+            )
+            .expect("playlist track mutation result");
+            assert_eq!(result.playlist_ref, playlist_ref);
+            assert_eq!(result.item_refs, request.item_refs);
+            assert_eq!(result.kind, PlaylistItemKind::Track);
+            assert_eq!(result.action, action);
+            assert_eq!(result.extensions["tracks"][0]["song_id"], 97_773);
+            assert_eq!(result.extensions["tracks"][0]["song_type"], 113);
+            assert_eq!(result.extensions["data"]["future"], true);
+        }
+    }
+
+    #[test]
+    fn playlist_track_mutations_reject_wrapper_inner_and_malformed_failures() {
+        let request = PlaylistItemMutationRequest {
+            item_refs: vec![
+                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("track reference"),
+            ],
+            kind: PlaylistItemKind::Track,
+            account: None,
+        };
+        let locator = parse_qq_playlist_locator("7039749142").expect("playlist locator");
+        let tracks = vec![QqPlaylistWriteTrack {
+            song_id: 97_773,
+            song_type: 113,
+        }];
+        for response in [
+            QqBusinessResponse {
+                code: 80_092,
+                data: json!({}),
+                raw: json!({"code": 80092}),
+            },
+            QqBusinessResponse {
+                code: 0,
+                data: json!({"retCode": 80092}),
+                raw: json!({"code": 0}),
+            },
+        ] {
+            assert_eq!(
+                map_qq_playlist_items_mutation(
+                    "7039749142",
+                    PlaylistItemMutationAction::Add,
+                    &request,
+                    locator,
+                    tracks.clone(),
+                    response,
+                )
+                .expect_err("playlist conflict")
+                .code,
+                ErrorCode::Conflict
+            );
+        }
+        assert_eq!(
+            map_qq_playlist_items_mutation(
+                "7039749142",
+                PlaylistItemMutationAction::Remove,
+                &request,
+                locator,
+                tracks,
+                QqBusinessResponse {
+                    code: 0,
+                    data: json!({}),
+                    raw: json!({"code": 0}),
+                },
+            )
+            .expect_err("malformed playlist mutation")
+            .code,
             ErrorCode::UpstreamError
         );
     }
@@ -7955,6 +8287,60 @@ mod tests {
             .expect_err("missing deletion account");
         assert_eq!(delete_error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(delete_error.details["account"], "missing-account");
+
+        for action in [
+            PlaylistItemMutationAction::Add,
+            PlaylistItemMutationAction::Remove,
+        ] {
+            let mutation_error = provider
+                .mutate_playlist_items(
+                    "7039749142",
+                    action,
+                    &PlaylistItemMutationRequest {
+                        item_refs: vec![
+                            ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                                .expect("track reference"),
+                        ],
+                        kind: PlaylistItemKind::Track,
+                        account: Some("missing-account".to_owned()),
+                    },
+                )
+                .await
+                .expect_err("missing playlist mutation account");
+            assert_eq!(mutation_error.code, ErrorCode::AuthenticationRequired);
+            assert_eq!(mutation_error.details["account"], "missing-account");
+        }
+
+        for request in [
+            PlaylistItemMutationRequest {
+                item_refs: vec![
+                    ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("video item reference"),
+                ],
+                kind: PlaylistItemKind::Video,
+                account: None,
+            },
+            PlaylistItemMutationRequest {
+                item_refs: Vec::new(),
+                kind: PlaylistItemKind::Track,
+                account: None,
+            },
+            PlaylistItemMutationRequest {
+                item_refs: vec![
+                    ResourceRef::new(Platform::Netease, "185809").expect("foreign track reference"),
+                ],
+                kind: PlaylistItemKind::Track,
+                account: None,
+            },
+        ] {
+            assert_eq!(
+                provider
+                    .mutate_playlist_items("7039749142", PlaylistItemMutationAction::Add, &request,)
+                    .await
+                    .expect_err("invalid playlist mutation")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
     }
 
     #[tokio::test]

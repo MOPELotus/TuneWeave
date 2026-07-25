@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=79`、`partial=0`、`implemented=16`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=77`、`partial=0`、`implemented=18`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -73,9 +73,9 @@
 | Q052 | 个人音乐库 | `AlbumApi.del_fav_album` | 是 | `pending` | 取消收藏专辑 |
 | Q053 | 个人音乐库 | `SonglistApi.create` | 是 | `implemented` | `POST /v1/playlists` 以统一 `{platform:"qq", account?, name, visibility, kind}` 接入 Android `music.musicasset.PlaylistBaseWrite/AddPlaylist`，精确提交修剪后的非空 `dirName`。QQ 当前协议只支持公开普通歌单，因此 `private`、`video` 和 `shared` 在联网前明确拒绝，不伪装成平台已支持；请求必须使用精确 `(qq, account)` 凭据。响应以强类型解析 `retCode/result.tid/dirId/dirName`，要求歌单 ID 和目录 ID 均为正数，并以服务端实际 `tid` 建立统一 `qq:<id>` 身份；供删除等目录写操作使用的 `qq:dir:<dirId>` 同时作为 `directory_ref` 返回。重名时 QQ 可能自动调整名称，TuneWeave 同时保留请求名和服务端实际名称。统一 HTTP、请求形状、返回身份、能力声明、账户前置及畸形成功态已有离线测试；因当前没有可用于写操作的 QQ 账户，真实创建待账户联合验收 |
 | Q054 | 个人音乐库 | `SonglistApi.delete` | 是 | `implemented` | `DELETE /v1/playlists/qq:dir:<dirId>?account=...` 与统一批量删除精确调用 Android `music.musicasset.PlaylistBaseWrite/DelPlaylist`，只接受账户目录引用，不把普通 `qq:<tid>` 猜成目录 ID；创建和账户歌单目录均在扩展返回可直接使用的 `directory_ref`。单次最多 100 项，输入顺序和重复项按统一契约保留，每项强类型解析 `retCode/result.tid/dirId/dirName`；返回目录 ID 必须等于请求值或为上游表示“不存在”的 `0`，后者以 `deleted=false` 保留而不虚报实际删除。响应数量、冲突身份、业务错误和部分完成信息均有严格处理；统一 HTTP、账户前置、批量映射与异常分支已有离线测试，真实删除待 QQ 写账户联合验收 |
-| Q055 | 个人音乐库 | `SonglistApi.add_songs` | 是 | `pending` | 歌单添加歌曲，保留歌曲 ID 与类型元组 |
-| Q056 | 个人音乐库 | `SonglistApi.del_songs` | 是 | `pending` | 歌单删除歌曲，保留歌曲 ID 与类型元组 |
-| Q057 | 个人音乐库 | `SonglistApi.like_song` | 是 | `implemented` | `PUT /v1/account/favorites/tracks/{ref}?account=...` 已接统一 `track_subscription_write`，先以公开歌曲详情把 MID 或数值引用解析为正数 `songId` 与完整 `songType`，再用精确 `(qq, account)` 凭据调用 Android `music.musicasset.PlaylistDetailWrite/AddSonglist`。请求固定 `dirId=201/tid=0/bFmtUtf8=true`，保留上游新增分支要求的布尔值而非无条件整数化；响应严格要求 `retCode=0`，`80092` 映射冲突而不虚报成功。输入账户在歌曲查询前校验。2026-07-26 真实公开详情已验证 MID 可解析为完整写入身份，实际账户写成功态待联合验收 |
+| Q055 | 个人音乐库 | `SonglistApi.add_songs` | 是 | `implemented` | `POST /v1/playlists/{qq-ref}/tracks` 接入 Android `music.musicasset.PlaylistDetailWrite/AddSonglist`。目标可用普通 `qq:<tid>` 或账户目录 `qq:dir:<dirId>`；每个歌曲 MID/数字引用先通过已真实验证的 Web 富详情解析为正数 `songId` 与完整 `songType`，同一请求中的重复引用只查询一次，再按原顺序和重复项构造 `v_songInfo`。这避免数字特殊歌曲被默认 `songType=0` 错查，也不会猜测类型或混入其他平台。添加分支精确保留 `bFmtUtf8=true` 布尔值，响应同时检查 CGI 顶层业务码与内层 `retCode`，两处 `80092` 均映射冲突。统一 HTTP、双目标身份、批量顺序、重复项、账户前置及错误分支已离线验收；真实歌曲身份链已由 Q014 验证，实际账户写成功态待联合验收 |
+| Q056 | 个人音乐库 | `SonglistApi.del_songs` | 是 | `implemented` | `DELETE /v1/playlists/{qq-ref}/tracks` 复用 Q055 的完整目标与歌曲身份解析，调用 `PlaylistDetailWrite/DelSonglist` 并保留歌曲元组顺序和重复项。按参考协议，删除分支让 `bFmtUtf8` 经普通 Android CGI 参数规范化，不错误沿用添加分支的布尔保留开关；顶层业务码、内层 `retCode`、畸形响应及 `80092` 冲突均独立处理。结果保留实际 `tid/dirId`、解析后的歌曲身份、完整强类型数据和原始子响应；实际账户写成功态待联合验收 |
+| Q057 | 个人音乐库 | `SonglistApi.like_song` | 是 | `implemented` | `PUT /v1/account/favorites/tracks/{ref}?account=...` 已接统一 `track_subscription_write`，先以公开歌曲详情把 MID 或数值引用解析为正数 `songId` 与完整 `songType`，再用精确 `(qq, account)` 凭据调用 Android `music.musicasset.PlaylistDetailWrite/AddSonglist`。请求固定 `dirId=201/tid=0/bFmtUtf8=true`，保留上游新增分支要求的布尔值而非无条件整数化；响应同时检查 CGI 顶层业务码与内层 `retCode`，两处 `80092` 均映射冲突而不虚报成功。输入账户在歌曲查询前校验。2026-07-26 真实公开详情已验证 MID 可解析为完整写入身份，实际账户写成功态待联合验收 |
 | Q058 | 个人音乐库 | `SonglistApi.unlike_song` | 是 | `implemented` | `DELETE /v1/account/favorites/tracks/{ref}?account=...` 复用同一强类型写入身份和账户隔离，调用 `PlaylistDetailWrite/DelSonglist`；按参考协议让 `bFmtUtf8` 经普通 Android CGI 参数规范化而不沿用添加分支的布尔保留选项。结果保留动作、目录、数值歌曲 ID、歌曲类型、平台码和完整响应，非零 `retCode` 不会被包装成成功。统一 HTTP PUT/DELETE、缺省与命名账户、未知字段拒绝和错误前置均有测试，实际账户写成功态待联合验收 |
 | Q059 | 个人音乐库 | `UserApi.get_homepage` | 是 | `pending` | 用户/账户主页资料 |
 | Q060 | 个人音乐库 | `UserApi.get_vip_info` | 是 | `pending` | VIP 等级、有效期和权益 |

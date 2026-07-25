@@ -189,6 +189,7 @@ pub(crate) struct QqApiResponse {
 pub(crate) struct QqBusinessResponse {
     pub code: i64,
     pub data: Value,
+    pub raw: Value,
 }
 
 #[derive(Clone)]
@@ -341,6 +342,7 @@ impl QqClient {
         Ok(QqBusinessResponse {
             code,
             data: response.data,
+            raw: response.raw,
         })
     }
 

@@ -1411,6 +1411,8 @@ QQ 删除协议只接受目录 ID，因此单个和批量删除都必须使用�
 
 歌单写入的 `refs` 是完整 `platform:id`，`ids` 是由路径或显式 `platform` 绑定的平台 ID；两者均接受单值、数组和逗号分隔字符串，但不能同时出现，输入顺序和重复项原样保留。批量删除和账户歌单排序不能混合平台。`/tracks` 只操作普通歌曲；`/videos` 只操作视频项目；`/items` 以 `kind=track|video` 选择，兼容参考 `type=0|3`。网易云创建结果会跳过零 ID，项目写入与排序结果会跳过空快照 ID，再采用后续有效兼容字段；`playlist_track_add/delete` 实际是 VIDEO 歌单的 `type=3` 项目接口，不会被错误复用为普通歌曲增删。
 
+QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用 `qq:dir:<dirId>`；项目仅接受 QQ 歌曲引用。TuneWeave 会先用 Web 富详情把 MID 或数字 ID 解析为平台实际要求的 `songId + songType` 元组；同一请求内的重复引用只查询一次，但写入仍保留原顺序和重复项。这里不使用默认 `songType=0` 的数字歌曲批查，以免特殊类型歌曲被错误解析。添加分支保留 JSON 布尔 `bFmtUtf8=true`，删除分支按参考客户端的普通参数规范化发送；CGI 顶层业务码和内层 `retCode` 都会检查，任一层的 `80092` 都返回 `conflict`，不会被通用 CGI 错误提前覆盖。
+
 当前直接写入平台歌单要求资源已经能被目标 provider 接受；网易云因此要求项目引用属于网易云。Uni Playlist 与后续跨平台导入层在目标平台和歌曲来源平台不同时，必须先执行严格匹配；低于阈值时返回 `match_rejected`，不得把同名但不同版本的歌曲写入目标歌单。
 
 歌曲喜欢写入由路径中的完整引用选择 provider，`account` 缺省为 `default`，未知查询字段会被拒绝。QQ 接入固定的“我喜欢”目录 `201`：TuneWeave 先查询歌曲详情，将 MID 或数值引用解析为平台要求的正数 `songId` 与 `songType`，再以所选 `(qq, account)` 凭据调用 `PlaylistDetailWrite/AddSonglist|DelSonglist`；不会把 MID 当数字、猜测歌曲类型或在缺失账户时访问歌曲服务。添加分支按参考协议保留 `bFmtUtf8=true`，删除分支使用普通 Android 参数规范化；两者均要求内层 `retCode=0`，平台拒绝不会虚报为已喜欢或已取消。

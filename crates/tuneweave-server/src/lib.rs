@@ -15127,6 +15127,28 @@ mod tests {
             })
         }
 
+        async fn mutate_playlist_items(
+            &self,
+            id: &str,
+            action: PlaylistItemMutationAction,
+            request: &PlaylistItemMutationRequest,
+        ) -> Result<PlaylistItemMutationResult> {
+            Ok(PlaylistItemMutationResult {
+                playlist_ref: ResourceRef::new(Platform::Qq, id)
+                    .expect("valid QQ playlist reference"),
+                item_refs: request.item_refs.clone(),
+                kind: request.kind,
+                action,
+                snapshot_id: None,
+                cloud_track_count: None,
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("resolved_song_ids".to_owned(), json!([97_773, 97_773])),
+                    ("resolved_song_types".to_owned(), json!([113, 113])),
+                ]),
+            })
+        }
+
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             Ok(MediaStream {
                 url: format!("https://example.test/qq/{}.m4a", track.id),
@@ -19094,6 +19116,37 @@ mod tests {
         assert_eq!(deleted["data"]["extensions"]["results"][0]["deleted"], true);
         assert_eq!(deleted["meta"]["platform"], "qq");
         assert_eq!(deleted["meta"]["account"], "creator");
+    }
+
+    #[tokio::test]
+    async fn qq_playlist_track_mutations_preserve_action_order_duplicates_and_account() {
+        for (method, expected_action) in [(Method::POST, "add"), (Method::DELETE, "remove")] {
+            let (status, result) = json_request_from(
+                test_app_with_import_providers(),
+                method,
+                "/v1/playlists/qq:7039749142/tracks",
+                Some(json!({
+                    "refs": ["qq:0039MnYb0qxYhV", "qq:0039MnYb0qxYhV"],
+                    "account": "creator"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(result["data"]["playlist_ref"], "qq:7039749142");
+            assert_eq!(
+                result["data"]["item_refs"],
+                json!(["qq:0039MnYb0qxYhV", "qq:0039MnYb0qxYhV"])
+            );
+            assert_eq!(result["data"]["kind"], "track");
+            assert_eq!(result["data"]["action"], expected_action);
+            assert_eq!(result["data"]["extensions"]["account"], "creator");
+            assert_eq!(
+                result["data"]["extensions"]["resolved_song_ids"],
+                json!([97_773, 97_773])
+            );
+            assert_eq!(result["meta"]["platform"], "qq");
+            assert_eq!(result["meta"]["account"], "creator");
+        }
     }
 
     #[tokio::test]
