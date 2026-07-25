@@ -58,6 +58,7 @@ pub enum Capability {
     PodcastEpisodeStream,
     PodcastEpisodeLyrics,
     TrackDetail,
+    TrackSubscriptionWrite,
     TrackAvailability,
     AlbumDetail,
     AlbumList,
@@ -262,6 +263,11 @@ mod tests {
             serde_json::to_value(Capability::AudioFileAccess)
                 .expect("serialize audio file access capability"),
             serde_json::json!("audio_file_access")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::TrackSubscriptionWrite)
+                .expect("serialize track subscription capability"),
+            serde_json::json!("track_subscription_write")
         );
         assert_eq!(
             serde_json::to_value(Capability::ChartCatalog)

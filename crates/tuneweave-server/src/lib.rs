@@ -274,6 +274,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks", get(tracks_get).post(tracks_post))
         .route("/tracks/{reference}", get(track))
+        .route(
+            "/account/favorites/tracks/{reference}",
+            put(track_subscribe).delete(track_unsubscribe),
+        )
         .route("/tracks/{reference}/files", get(track_files))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route(
@@ -2649,6 +2653,48 @@ async fn set_album_subscription(
     let provider = state.registry.require(platform)?;
     let result = provider
         .set_album_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn track_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_track_subscription(state, reference, query_params(params)?, true).await
+}
+
+async fn track_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_track_subscription(state, reference, query_params(params)?, false).await
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackSubscriptionParams {
+    account: Option<String>,
+}
+
+async fn set_track_subscription(
+    state: AppState,
+    reference: String,
+    params: TrackSubscriptionParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_track_subscription(reference.id(), subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -14973,6 +15019,7 @@ mod tests {
                 Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::AudioStream,
+                Capability::TrackSubscriptionWrite,
             ])
         }
 
@@ -15003,6 +15050,19 @@ mod tests {
                     has_more: false,
                     extensions: Extensions::from([("account".to_owned(), json!(query.account))]),
                 },
+            })
+        }
+
+        async fn set_track_subscription(
+            &self,
+            id: &str,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
+                subscribed,
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
 
@@ -18882,6 +18942,45 @@ mod tests {
         assert_eq!(entitlements["data"][0]["available_qualities"][3], "hires");
         assert_eq!(entitlements["meta"]["pagination"]["total"], 10);
         assert_eq!(entitlements["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn track_favorites_put_and_delete_select_reference_platform_and_account() {
+        let (status, subscribed) = json_request_from(
+            test_app_with_import_providers(),
+            Method::PUT,
+            "/v1/account/favorites/tracks/qq:0039MnYb0qxYhV?account=green-diamond",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(subscribed["data"]["resource_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(subscribed["data"]["subscribed"], true);
+        assert_eq!(subscribed["data"]["extensions"]["account"], "green-diamond");
+        assert_eq!(subscribed["meta"]["platform"], "qq");
+        assert_eq!(subscribed["meta"]["account"], "green-diamond");
+
+        let (status, unsubscribed) = json_request_from(
+            test_app_with_import_providers(),
+            Method::DELETE,
+            "/v1/account/favorites/tracks/qq:0039MnYb0qxYhV",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unsubscribed["data"]["subscribed"], false);
+        assert_eq!(unsubscribed["data"]["extensions"]["account"], "default");
+        assert_eq!(unsubscribed["meta"]["account"], "default");
+
+        let (status, invalid) = json_request_from(
+            test_app_with_import_providers(),
+            Method::PUT,
+            "/v1/account/favorites/tracks/qq:0039MnYb0qxYhV?unknown=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

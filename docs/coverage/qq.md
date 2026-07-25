@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=83`、`partial=0`、`implemented=12`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=81`、`partial=0`、`implemented=14`、`verified=9`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -75,8 +75,8 @@
 | Q054 | 个人音乐库 | `SonglistApi.delete` | 是 | `pending` | 删除歌单 |
 | Q055 | 个人音乐库 | `SonglistApi.add_songs` | 是 | `pending` | 歌单添加歌曲，保留歌曲 ID 与类型元组 |
 | Q056 | 个人音乐库 | `SonglistApi.del_songs` | 是 | `pending` | 歌单删除歌曲，保留歌曲 ID 与类型元组 |
-| Q057 | 个人音乐库 | `SonglistApi.like_song` | 是 | `pending` | 喜欢歌曲 |
-| Q058 | 个人音乐库 | `SonglistApi.unlike_song` | 是 | `pending` | 取消喜欢歌曲 |
+| Q057 | 个人音乐库 | `SonglistApi.like_song` | 是 | `implemented` | `PUT /v1/account/favorites/tracks/{ref}?account=...` 已接统一 `track_subscription_write`，先以公开歌曲详情把 MID 或数值引用解析为正数 `songId` 与完整 `songType`，再用精确 `(qq, account)` 凭据调用 Android `music.musicasset.PlaylistDetailWrite/AddSonglist`。请求固定 `dirId=201/tid=0/bFmtUtf8=true`，保留上游新增分支要求的布尔值而非无条件整数化；响应严格要求 `retCode=0`，`80092` 映射冲突而不虚报成功。输入账户在歌曲查询前校验。2026-07-26 真实公开详情已验证 MID 可解析为完整写入身份，实际账户写成功态待联合验收 |
+| Q058 | 个人音乐库 | `SonglistApi.unlike_song` | 是 | `implemented` | `DELETE /v1/account/favorites/tracks/{ref}?account=...` 复用同一强类型写入身份和账户隔离，调用 `PlaylistDetailWrite/DelSonglist`；按参考协议让 `bFmtUtf8` 经普通 Android CGI 参数规范化而不沿用添加分支的布尔保留选项。结果保留动作、目录、数值歌曲 ID、歌曲类型、平台码和完整响应，非零 `retCode` 不会被包装成成功。统一 HTTP PUT/DELETE、缺省与命名账户、未知字段拒绝和错误前置均有测试，实际账户写成功态待联合验收 |
 | Q059 | 个人音乐库 | `UserApi.get_homepage` | 是 | `pending` | 用户/账户主页资料 |
 | Q060 | 个人音乐库 | `UserApi.get_vip_info` | 是 | `pending` | VIP 等级、有效期和权益 |
 | Q061 | 个人音乐库 | `UserApi.get_follow_singers` | 是 | `pending` | 关注歌手目录 |

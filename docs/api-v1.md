@@ -1400,14 +1400,16 @@ QQ Uni 来源支持两种稳定形态：`type=playlist` 导入一个已选择的
 | POST | `/v1/account/cloud/imports` | 查询参数 `platform?`、`account?`；JSON `{md5, source_track_id?, bitrate, file_size, file_type, song_name, artist?, album?}` | `CloudImportResult`，免上传导入结果及云盘曲目引用 |
 | POST | `/v1/account/cloud/matches` | 查询参数 `platform?`、`account?`；JSON `{user_id, cloud_track_id, target_track_id?}` | `CloudMatchResult`；目标为 `0` 或省略时取消匹配 |
 | DELETE | `/v1/account/cloud/tracks` | JSON `{refs?|ids?, platform?, account?}` | 删除选定平台账户中的云盘曲目 |
-| PUT | `/v1/account/favorites/tracks/{ref}` | `platform`、`account?` | 收藏结果 |
-| DELETE | `/v1/account/favorites/tracks/{ref}` | `platform`、`account?` | 取消收藏结果 |
+| PUT | `/v1/account/favorites/tracks/{ref}` | 完整歌曲引用、`account?` | 收藏结果 |
+| DELETE | `/v1/account/favorites/tracks/{ref}` | 完整歌曲引用、`account?` | 取消收藏结果 |
 
 创建歌单时 `visibility=public|private` 与参考 `privacy=0|10` 等价，`kind=normal|video|shared` 与参考 `type=NORMAL|VIDEO|SHARED` 等价；同一语义的统一字段和参考字段不得同时提交。元数据更新的 `variant=default|batch|individual` 分别表示自动选择、参考批量模块和独立字段模块；批量分支必须同时包含名称、描述和标签。标签既可用字符串数组，也可用参考分号字符串，空数组或空字符串表示清除。
 
 歌单写入的 `refs` 是完整 `platform:id`，`ids` 是由路径或显式 `platform` 绑定的平台 ID；两者均接受单值、数组和逗号分隔字符串，但不能同时出现，输入顺序和重复项原样保留。批量删除和账户歌单排序不能混合平台。`/tracks` 只操作普通歌曲；`/videos` 只操作视频项目；`/items` 以 `kind=track|video` 选择，兼容参考 `type=0|3`。网易云创建结果会跳过零 ID，项目写入与排序结果会跳过空快照 ID，再采用后续有效兼容字段；`playlist_track_add/delete` 实际是 VIDEO 歌单的 `type=3` 项目接口，不会被错误复用为普通歌曲增删。
 
 当前直接写入平台歌单要求资源已经能被目标 provider 接受；网易云因此要求项目引用属于网易云。Uni Playlist 与后续跨平台导入层在目标平台和歌曲来源平台不同时，必须先执行严格匹配；低于阈值时返回 `match_rejected`，不得把同名但不同版本的歌曲写入目标歌单。
+
+歌曲喜欢写入由路径中的完整引用选择 provider，`account` 缺省为 `default`，未知查询字段会被拒绝。QQ 接入固定的“我喜欢”目录 `201`：TuneWeave 先查询歌曲详情，将 MID 或数值引用解析为平台要求的正数 `songId` 与 `songType`，再以所选 `(qq, account)` 凭据调用 `PlaylistDetailWrite/AddSonglist|DelSonglist`；不会把 MID 当数字、猜测歌曲类型或在缺失账户时访问歌曲服务。添加分支按参考协议保留 `bFmtUtf8=true`，删除分支使用普通 Android 参数规范化；两者均要求内层 `retCode=0`，平台拒绝不会虚报为已喜欢或已取消。
 
 评论目标类型接受统一名称 `track/mv/playlist/album/radio_episode/video/event/radio_station`，也兼容网易云参考数字 `0..7`；`song/music`、`dj/program`、连字符形式分别是对应统一类型的输入别名。`ref` 决定评论所属平台，`account` 只选择该平台的隔离登录态，评论 ID 始终按不透明字符串处理。事件评论的网易引用 ID 必须是从动态接口取得的完整 `A_EV_2_...` thread ID。创建、回复和删除使用同一评论写结果结构，明确返回目标、`create/reply/delete` 动作、可用的新评论 ID 和平台扩展；空白内容会被拒绝，但合法内容的首尾空格不会被静默改写。网易云三种写操作固定使用 EAPI `/api/resource/comments/add|reply|delete`，并由服务端取得 v2 checkToken 后注入请求头；客户端不能提交或覆盖 token。反应启用与停用则使用独立的 `CommentReactionMutationResult`，避免混淆评论本体动作和评论反应状态。
 

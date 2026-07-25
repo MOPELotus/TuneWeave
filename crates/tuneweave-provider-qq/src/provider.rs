@@ -18,8 +18,9 @@ use tuneweave_core::{
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamRequest, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    SearchVariant, StoredAccountCredential, StreamRequest, SubscriptionResult, Track,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
+    TuneWeaveError, User, Video,
 };
 
 use crate::client::{QqApiRequest, QqApiResponse, QqClient, QqConfig, QqCredential};
@@ -693,6 +694,20 @@ struct QqPlaylistDetailOptions {
     include_user: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqPlaylistWriteTrack {
+    song_id: u64,
+    song_type: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistWriteResponse {
+    #[serde(rename = "retCode", deserialize_with = "deserialize_qq_i64")]
+    ret_code: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct QqPlaylistCreatorRecord {
     #[serde(default, deserialize_with = "deserialize_qq_u64")]
@@ -841,6 +856,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::TrackDetail,
+            Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
             Capability::AudioStream,
             Capability::AudioDownload,
@@ -1043,6 +1059,31 @@ impl MusicProvider for QqProvider {
                 })
             })
             .collect()
+    }
+
+    async fn set_track_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let account = account.unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let track = self.track(id, None).await?;
+        let write_track = qq_playlist_write_track(&track)?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_track_subscription_request(write_track, subscribed)],
+                Some(&credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ track subscription request returned no response"))?;
+        map_qq_track_subscription(id, write_track, subscribed, response)
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -4273,6 +4314,86 @@ fn qq_playlist_encrypted_uin(
     qq_encrypted_uin(credential).map(Some)
 }
 
+fn qq_playlist_write_track(track: &Track) -> Result<QqPlaylistWriteTrack> {
+    let song_id = track
+        .extensions
+        .get("numeric_id")
+        .and_then(json_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| qq_data_error("QQ track detail is missing a positive numeric song ID"))?;
+    let song_type = qq_track_audio_metadata(track)?
+        .song_type
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| qq_data_error("QQ track detail is missing a valid song type"))?;
+    Ok(QqPlaylistWriteTrack { song_id, song_type })
+}
+
+fn qq_track_subscription_request(track: QqPlaylistWriteTrack, subscribed: bool) -> QqApiRequest {
+    let request = QqApiRequest::new(
+        "music.musicasset.PlaylistDetailWrite",
+        if subscribed {
+            "AddSonglist"
+        } else {
+            "DelSonglist"
+        },
+        json!({
+            "dirId": 201,
+            "tid": 0,
+            "bFmtUtf8": true,
+            "v_songInfo": [{
+                "songId": track.song_id,
+                "songType": track.song_type
+            }]
+        }),
+    );
+    if subscribed {
+        request.preserving_booleans()
+    } else {
+        request
+    }
+}
+
+fn map_qq_track_subscription(
+    requested_id: &str,
+    track: QqPlaylistWriteTrack,
+    subscribed: bool,
+    response: QqApiResponse,
+) -> Result<SubscriptionResult> {
+    let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ track subscription response is malformed"))?;
+    if parsed.ret_code != 0 {
+        return Err(TuneWeaveError::new(
+            if parsed.ret_code == 80_092 {
+                ErrorCode::Conflict
+            } else {
+                ErrorCode::UpstreamError
+            },
+            "QQ track subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": parsed.ret_code,
+            "subscribed": subscribed
+        })));
+    }
+    Ok(SubscriptionResult {
+        resource_ref: qq_ref(requested_id, "track subscription")?,
+        subscribed,
+        extensions: Extensions::from([
+            (
+                "action".to_owned(),
+                json!(if subscribed { "like" } else { "unlike" }),
+            ),
+            ("directory_id".to_owned(), json!(201)),
+            ("numeric_id".to_owned(), json!(track.song_id)),
+            ("song_type".to_owned(), json!(track.song_type)),
+            ("ret_code".to_owned(), json!(parsed.ret_code)),
+            ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
 fn qq_playlist_detail_request(
     locator: QqPlaylistLocator,
     options: QqPlaylistDetailOptions,
@@ -7048,6 +7169,103 @@ mod tests {
     }
 
     #[test]
+    fn track_subscription_uses_numeric_identity_song_type_and_liked_directory() {
+        let mut track = Track::new(
+            ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("track reference"),
+            "晴天",
+        );
+        track
+            .extensions
+            .insert("numeric_id".to_owned(), json!("97773"));
+        track.extensions.insert("song_type".to_owned(), json!(113));
+        let identity = qq_playlist_write_track(&track).expect("playlist write identity");
+        assert_eq!(
+            identity,
+            QqPlaylistWriteTrack {
+                song_id: 97_773,
+                song_type: 113
+            }
+        );
+
+        let liked = qq_track_subscription_request(identity, true);
+        assert_eq!(liked.module, "music.musicasset.PlaylistDetailWrite");
+        assert_eq!(liked.method, "AddSonglist");
+        assert_eq!(liked.param["dirId"], 201);
+        assert_eq!(liked.param["tid"], 0);
+        assert_eq!(liked.param["bFmtUtf8"], true);
+        assert_eq!(liked.param["v_songInfo"][0]["songId"], 97_773);
+        assert_eq!(liked.param["v_songInfo"][0]["songType"], 113);
+
+        let unliked = qq_track_subscription_request(identity, false);
+        assert_eq!(unliked.method, "DelSonglist");
+        let result = map_qq_track_subscription(
+            "0039MnYb0qxYhV",
+            identity,
+            false,
+            QqApiResponse {
+                data: json!({"retCode": 0}),
+                raw: json!({"code": 0, "data": {"retCode": 0}}),
+            },
+        )
+        .expect("track unsubscription result");
+        assert_eq!(result.resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert!(!result.subscribed);
+        assert_eq!(result.extensions["action"], "unlike");
+        assert_eq!(result.extensions["numeric_id"], 97_773);
+        assert_eq!(result.extensions["song_type"], 113);
+
+        let conflict = map_qq_track_subscription(
+            "0039MnYb0qxYhV",
+            identity,
+            true,
+            QqApiResponse {
+                data: json!({"retCode": 80092}),
+                raw: json!({"code": 0, "data": {"retCode": 80092}}),
+            },
+        )
+        .expect_err("platform rejection");
+        assert_eq!(conflict.code, ErrorCode::Conflict);
+        assert_eq!(conflict.details["platform_code"], 80_092);
+
+        let malformed = map_qq_track_subscription(
+            "0039MnYb0qxYhV",
+            identity,
+            true,
+            QqApiResponse {
+                data: json!({}),
+                raw: json!({"code": 0, "data": {}}),
+            },
+        )
+        .expect_err("missing retCode");
+        assert_eq!(malformed.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn track_subscription_rejects_incomplete_write_identity() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("track reference"),
+            "晴天",
+        );
+        assert_eq!(
+            qq_playlist_write_track(&track)
+                .expect_err("missing numeric identity")
+                .code,
+            ErrorCode::UpstreamError
+        );
+
+        let mut missing_type = track;
+        missing_type
+            .extensions
+            .insert("numeric_id".to_owned(), json!(97_773));
+        assert_eq!(
+            qq_playlist_write_track(&missing_type)
+                .expect_err("missing song type")
+                .code,
+            ErrorCode::UpstreamError
+        );
+    }
+
+    #[test]
     fn playlist_detail_and_tracks_share_strict_metadata_and_pagination_mapping() {
         let raw = json!({
             "code": 0,
@@ -7146,6 +7364,11 @@ mod tests {
                 .contains(&Capability::AccountPlaylists)
         );
         assert!(provider.capabilities().contains(&Capability::Favorites));
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::TrackSubscriptionWrite)
+        );
     }
 
     #[tokio::test]
@@ -7217,6 +7440,19 @@ mod tests {
             .expect_err("missing account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["account"], "missing-account");
+    }
+
+    #[tokio::test]
+    async fn track_subscription_requires_the_selected_account_before_track_lookup() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        for subscribed in [true, false] {
+            let error = provider
+                .set_track_subscription("0039MnYb0qxYhV", subscribed, Some("missing-account"))
+                .await
+                .expect_err("missing account");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+            assert_eq!(error.details["account"], "missing-account");
+        }
     }
 
     #[tokio::test]
@@ -8455,6 +8691,10 @@ mod tests {
         assert_eq!(mids[0].resource_ref.to_string(), "qq:003w2xz20QlUZt");
         assert!(mids[0].extensions["media_mid"].as_str().is_some());
         assert!(mids[0].extensions.contains_key("song_type"));
+        let write_identity =
+            qq_playlist_write_track(&mids[0]).expect("live playlist write identity");
+        assert!(write_identity.song_id > 0);
+        assert!(write_identity.song_type >= 0);
 
         let typed = provider
             .tracks_with_options(&TrackDetailBatchRequest {

@@ -528,6 +528,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn set_track_subscription(
+        &self,
+        _id: &str,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::TrackSubscriptionWrite,
+        ))
+    }
+
     async fn album(&self, _id: &str, _account: Option<&str>) -> Result<Album> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
