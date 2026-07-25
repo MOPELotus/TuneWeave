@@ -84,6 +84,7 @@ pub enum Capability {
     UniPlaylistRead,
     UniPlaylistWrite,
     PlaylistRead,
+    PlaylistSubscriptionWrite,
     Lyrics,
     AudioStream,
     AudioStreamBatch,
@@ -160,6 +161,11 @@ mod tests {
             serde_json::to_value(Capability::UniPlaylistWrite)
                 .expect("serialize Uni Playlist write capability"),
             serde_json::json!("uni_playlist_write")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PlaylistSubscriptionWrite)
+                .expect("serialize playlist subscription write capability"),
+            serde_json::json!("playlist_subscription_write")
         );
     }
 

@@ -278,6 +278,10 @@ pub fn build_router(state: AppState) -> Router {
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
         )
+        .route(
+            "/account/favorites/playlists/{reference}",
+            put(playlist_subscribe).delete(playlist_unsubscribe),
+        )
         .route("/tracks/{reference}/files", get(track_files))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route(
@@ -2695,6 +2699,48 @@ async fn set_track_subscription(
     let provider = state.registry.require(platform)?;
     let result = provider
         .set_track_subscription(reference.id(), subscribed, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn playlist_subscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_playlist_subscription(state, reference, query_params(params)?, true).await
+}
+
+async fn playlist_unsubscribe(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    set_playlist_subscription(state, reference, query_params(params)?, false).await
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistSubscriptionParams {
+    account: Option<String>,
+}
+
+async fn set_playlist_subscription(
+    state: AppState,
+    reference: String,
+    params: PlaylistSubscriptionParams,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .set_playlist_subscription(reference.id(), subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -15018,6 +15064,7 @@ mod tests {
             BTreeSet::from([
                 Capability::PlaylistRead,
                 Capability::PlaylistWrite,
+                Capability::PlaylistSubscriptionWrite,
                 Capability::SearchTracks,
                 Capability::AudioStream,
                 Capability::TrackSubscriptionWrite,
@@ -15064,6 +15111,26 @@ mod tests {
                 resource_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
                 subscribed,
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn set_playlist_subscription(
+            &self,
+            id: &str,
+            subscribed: bool,
+            account: Option<&str>,
+        ) -> Result<SubscriptionResult> {
+            Ok(SubscriptionResult {
+                resource_ref: ResourceRef::new(Platform::Qq, id)
+                    .expect("valid QQ playlist reference"),
+                subscribed,
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    (
+                        "action".to_owned(),
+                        json!(if subscribed { "favorite" } else { "unfavorite" }),
+                    ),
+                ]),
             })
         }
 
@@ -19059,6 +19126,39 @@ mod tests {
             test_app_with_import_providers(),
             Method::PUT,
             "/v1/account/favorites/tracks/qq:0039MnYb0qxYhV?unknown=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn playlist_favorites_put_and_delete_select_reference_platform_and_account() {
+        for (method, subscribed, action) in [
+            (Method::PUT, true, "favorite"),
+            (Method::DELETE, false, "unfavorite"),
+        ] {
+            let (status, result) = json_request_from(
+                test_app_with_import_providers(),
+                method,
+                "/v1/account/favorites/playlists/qq:7039749142?account=collector",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(result["data"]["resource_ref"], "qq:7039749142");
+            assert_eq!(result["data"]["subscribed"], subscribed);
+            assert_eq!(result["data"]["extensions"]["action"], action);
+            assert_eq!(result["data"]["extensions"]["account"], "collector");
+            assert_eq!(result["meta"]["platform"], "qq");
+            assert_eq!(result["meta"]["account"], "collector");
+        }
+
+        let (status, invalid) = json_request_from(
+            test_app_with_import_providers(),
+            Method::PUT,
+            "/v1/account/favorites/playlists/qq:7039749142?unexpected=true",
             None,
         )
         .await;

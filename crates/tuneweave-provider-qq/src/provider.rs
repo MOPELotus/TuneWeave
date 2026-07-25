@@ -714,6 +714,16 @@ struct QqPlaylistWriteResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistSubscriptionResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    result: i64,
+    #[serde(default, rename = "v_failedPlaylistId")]
+    failed_playlist_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqPlaylistMutationRecord {
     #[serde(rename = "tid", deserialize_with = "deserialize_qq_u64")]
     playlist_id: u64,
@@ -903,6 +913,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioFileAccess,
             Capability::PlaylistRead,
             Capability::PlaylistWrite,
+            Capability::PlaylistSubscriptionWrite,
             Capability::Favorites,
             Capability::QrLogin,
             Capability::PhoneLogin,
@@ -1122,6 +1133,29 @@ impl MusicProvider for QqProvider {
             )
             .await?;
         map_qq_track_subscription(id, write_track, subscribed, response)
+    }
+
+    async fn set_playlist_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let playlist_id = parse_qq_playlist_number(id.trim(), "playlist ID")?;
+        let account = account.unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_encrypted_uin(&credential)?;
+        let response = self
+            .client
+            .request_android_business_with_credential(
+                qq_playlist_subscription_request(playlist_id, encrypted_uin, subscribed),
+                &[],
+                Some(&credential),
+            )
+            .await?;
+        map_qq_playlist_subscription(playlist_id, subscribed, response)
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
@@ -4553,6 +4587,90 @@ fn map_qq_track_subscription(
     })
 }
 
+fn qq_playlist_subscription_request(
+    playlist_id: u64,
+    encrypted_uin: &str,
+    subscribed: bool,
+) -> QqApiRequest {
+    QqApiRequest::new(
+        "music.musicasset.PlaylistFavWrite",
+        if subscribed {
+            "FavPlaylist"
+        } else {
+            "CancelFavPlaylist"
+        },
+        json!({
+            "uin": encrypted_uin,
+            "v_playlistId": [playlist_id]
+        }),
+    )
+}
+
+fn map_qq_playlist_subscription(
+    playlist_id: u64,
+    subscribed: bool,
+    response: QqBusinessResponse,
+) -> Result<SubscriptionResult> {
+    if response.code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ playlist subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "subscribed": subscribed
+        })));
+    }
+    let parsed = serde_json::from_value::<QqPlaylistSubscriptionResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ playlist subscription response is malformed"))?;
+    if parsed.result != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ playlist subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "result": parsed.result,
+            "subscribed": subscribed,
+            "failed_playlist_ids": parsed.failed_playlist_ids
+        })));
+    }
+    if parsed.failed_playlist_ids.contains(&playlist_id) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::Conflict,
+            "QQ playlist subscription did not change",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "result": parsed.result,
+            "subscribed": subscribed,
+            "playlist_id": playlist_id,
+            "failed_playlist_ids": parsed.failed_playlist_ids
+        })));
+    }
+    Ok(SubscriptionResult {
+        resource_ref: qq_ref(&playlist_id.to_string(), "playlist subscription")?,
+        subscribed,
+        extensions: Extensions::from([
+            (
+                "action".to_owned(),
+                json!(if subscribed { "favorite" } else { "unfavorite" }),
+            ),
+            ("platform_code".to_owned(), json!(response.code)),
+            ("result".to_owned(), json!(parsed.result)),
+            (
+                "failed_playlist_ids".to_owned(),
+                json!(parsed.failed_playlist_ids),
+            ),
+            ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
 fn qq_playlist_items_mutation_request(
     locator: QqPlaylistLocator,
     tracks: &[QqPlaylistWriteTrack],
@@ -7898,6 +8016,94 @@ mod tests {
     }
 
     #[test]
+    fn playlist_subscription_uses_public_playlist_identity_and_failed_id_semantics() {
+        let favored = qq_playlist_subscription_request(7_039_749_142, "encrypted-uin", true);
+        assert_eq!(favored.module, "music.musicasset.PlaylistFavWrite");
+        assert_eq!(favored.method, "FavPlaylist");
+        assert_eq!(favored.param["uin"], "encrypted-uin");
+        assert_eq!(favored.param["v_playlistId"], json!([7_039_749_142_u64]));
+        let unfavored = qq_playlist_subscription_request(7_039_749_142, "encrypted-uin", false);
+        assert_eq!(unfavored.method, "CancelFavPlaylist");
+
+        for subscribed in [true, false] {
+            let result = map_qq_playlist_subscription(
+                7_039_749_142,
+                subscribed,
+                QqBusinessResponse {
+                    code: 0,
+                    data: json!({
+                        "result": 0,
+                        "v_failedPlaylistId": [],
+                        "future": true
+                    }),
+                    raw: json!({"code": 0}),
+                },
+            )
+            .expect("playlist subscription result");
+            assert_eq!(result.resource_ref.to_string(), "qq:7039749142");
+            assert_eq!(result.subscribed, subscribed);
+            assert_eq!(
+                result.extensions["action"],
+                if subscribed { "favorite" } else { "unfavorite" }
+            );
+            assert_eq!(result.extensions["data"]["future"], true);
+        }
+
+        let conflict = map_qq_playlist_subscription(
+            7_039_749_142,
+            true,
+            QqBusinessResponse {
+                code: 0,
+                data: json!({
+                    "result": 0,
+                    "v_failedPlaylistId": [7_039_749_142_u64]
+                }),
+                raw: json!({"code": 0}),
+            },
+        )
+        .expect_err("failed playlist ID");
+        assert_eq!(conflict.code, ErrorCode::Conflict);
+        assert_eq!(conflict.details["playlist_id"], 7_039_749_142_u64);
+    }
+
+    #[test]
+    fn playlist_subscription_rejects_wrapper_inner_and_malformed_failures() {
+        for (response, expected) in [
+            (
+                QqBusinessResponse {
+                    code: 1000,
+                    data: json!({}),
+                    raw: json!({"code": 1000}),
+                },
+                ErrorCode::UpstreamError,
+            ),
+            (
+                QqBusinessResponse {
+                    code: 0,
+                    data: json!({"result": 9, "v_failedPlaylistId": []}),
+                    raw: json!({"code": 0}),
+                },
+                ErrorCode::UpstreamError,
+            ),
+            (
+                QqBusinessResponse {
+                    code: 0,
+                    data: json!({}),
+                    raw: json!({"code": 0}),
+                },
+                ErrorCode::UpstreamError,
+            ),
+        ] {
+            assert_eq!(
+                map_qq_playlist_subscription(7_039_749_142, true, response)
+                    .expect_err("playlist subscription failure")
+                    .code,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn playlist_creation_keeps_qq_supported_shape_and_returned_identity() {
         let request = PlaylistCreateRequest {
             name: "  通勤  ".to_owned(),
@@ -8189,6 +8395,11 @@ mod tests {
         assert!(
             provider
                 .capabilities()
+                .contains(&Capability::PlaylistSubscriptionWrite)
+        );
+        assert!(
+            provider
+                .capabilities()
                 .contains(&Capability::TrackSubscriptionWrite)
         );
     }
@@ -8354,6 +8565,20 @@ mod tests {
             assert_eq!(error.code, ErrorCode::AuthenticationRequired);
             assert_eq!(error.details["account"], "missing-account");
         }
+
+        for subscribed in [true, false] {
+            let error = provider
+                .set_playlist_subscription("7039749142", subscribed, Some("missing-account"))
+                .await
+                .expect_err("missing playlist account");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+            assert_eq!(error.details["account"], "missing-account");
+        }
+        let invalid = provider
+            .set_playlist_subscription("dir:301", true, Some("missing-account"))
+            .await
+            .expect_err("directory is not a public playlist ID");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
     }
 
     #[tokio::test]

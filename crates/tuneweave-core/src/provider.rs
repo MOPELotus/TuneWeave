@@ -853,6 +853,18 @@ pub trait MusicProvider: Send + Sync {
         .with_details(serde_json::json!({ "source_type": source_type })))
     }
 
+    async fn set_playlist_subscription(
+        &self,
+        _id: &str,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistSubscriptionWrite,
+        ))
+    }
+
     async fn create_playlist(
         &self,
         _request: &PlaylistCreateRequest,
