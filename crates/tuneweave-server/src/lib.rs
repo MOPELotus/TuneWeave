@@ -72,19 +72,20 @@ use tuneweave_core::{
     ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector,
     SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, StreamBatch, StreamOutcome,
-    StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
-    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
-    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
-    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
-    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
-    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
-    UniPlaylistItemStream, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
+    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement,
+    TrackIdentifierKind, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
+    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
+    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
+    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
+    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
+    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -343,6 +344,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/library/podcasts/{reference}",
             put(podcast_subscribe).delete(podcast_unsubscribe),
+        )
+        .route(
+            "/tracks/{reference}/lyrics/singing-annotations/availability",
+            get(track_singing_annotations_availability),
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
@@ -1931,6 +1936,12 @@ struct LyricsParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SingingAnnotationsAvailabilityParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrackBatchParams {
     refs: Option<String>,
     ids: Option<String>,
@@ -2943,6 +2954,30 @@ async fn track_lyrics(
         response = response.with_account(account);
     }
 
+    Ok(Json(response))
+}
+
+async fn track_singing_annotations_availability(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<SingingAnnotationsAvailabilityParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SingingAnnotationsAvailability>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = params
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let availability = provider
+        .singing_annotations_availability(reference.id(), account)
+        .await?;
+    let mut response = ApiResponse::new(availability).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
     Ok(Json(response))
 }
 
@@ -15068,6 +15103,7 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::AudioStream,
                 Capability::TrackSubscriptionWrite,
+                Capability::Lyrics,
             ])
         }
 
@@ -15130,6 +15166,21 @@ mod tests {
                         "action".to_owned(),
                         json!(if subscribed { "favorite" } else { "unfavorite" }),
                     ),
+                ]),
+            })
+        }
+
+        async fn singing_annotations_availability(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<SingingAnnotationsAvailability> {
+            Ok(SingingAnnotationsAvailability {
+                track_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ track reference"),
+                available: true,
+                extensions: Extensions::from([
+                    ("numeric_id".to_owned(), json!(97_773)),
+                    ("account".to_owned(), json!(account)),
                 ]),
             })
         }
@@ -20993,6 +21044,30 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
             assert_eq!(json["error"]["code"], "invalid_request", "{query}");
         }
+    }
+
+    #[tokio::test]
+    async fn singing_annotations_availability_uses_reference_platform_and_optional_account() {
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/lyrics/singing-annotations/availability?account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(json["data"]["available"], true);
+        assert_eq!(json["data"]["extensions"]["numeric_id"], 97_773);
+        assert_eq!(json["data"]["extensions"]["account"], "collector");
+        assert_eq!(json["meta"]["platform"], "qq");
+        assert_eq!(json["meta"]["account"], "collector");
+
+        let (status, json) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/tracks/qq:97773/lyrics/singing-annotations/availability?unknown=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

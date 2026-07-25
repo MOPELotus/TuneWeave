@@ -42,8 +42,9 @@ use crate::{
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
     ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, StreamBatch, StreamOutcome,
-    StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement, TuneWeaveError, User,
     UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
@@ -1173,6 +1174,17 @@ pub trait MusicProvider: Send + Sync {
 
     async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
         self.lyrics(id, request.account.as_deref()).await
+    }
+
+    async fn singing_annotations_availability(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<SingingAnnotationsAvailability> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Lyrics,
+        ))
     }
 
     async fn audio_cdn_dispatch(&self, _account: Option<&str>) -> Result<AudioCdnDispatch> {

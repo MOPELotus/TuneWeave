@@ -3425,6 +3425,13 @@ pub struct Lyrics {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SingingAnnotationsAvailability {
+    pub track_ref: ResourceRef,
+    pub available: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamVariant {
@@ -3690,6 +3697,22 @@ mod tests {
         assert_eq!(value["items"][0]["song_type"], 113);
         assert_eq!(value["items"][1]["identifier_kind"], "mid");
         assert_eq!(value["account"], "catalog");
+    }
+
+    #[test]
+    fn singing_annotations_availability_keeps_track_identity_and_boolean_explicit() {
+        let availability = SingingAnnotationsAvailability {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid QQ track reference"),
+            available: true,
+            extensions: Extensions::from([("numeric_id".to_owned(), serde_json::json!(97_773))]),
+        };
+
+        let value =
+            serde_json::to_value(availability).expect("serialize singing annotations availability");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["available"], true);
+        assert_eq!(value["extensions"]["numeric_id"], 97_773);
     }
 
     #[test]

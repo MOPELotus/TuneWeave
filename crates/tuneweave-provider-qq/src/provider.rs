@@ -21,9 +21,9 @@ use tuneweave_core::{
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamRequest, SubscriptionResult, Track,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
-    TuneWeaveError, User, Video,
+    SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
+    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{
@@ -854,6 +854,18 @@ struct QqPlaylistDetailResponse {
     hasmore: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingingAnnotationsInfoResponse {
+    #[serde(
+        default,
+        rename = "hasSingingAnnotationsLyric",
+        deserialize_with = "deserialize_qq_bool"
+    )]
+    available: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -1171,6 +1183,38 @@ impl MusicProvider for QqProvider {
 
     async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
         self.qq_lyrics(id, request).await
+    }
+
+    async fn singing_annotations_availability(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<SingingAnnotationsAvailability> {
+        self.validate_public_account(account)?;
+        let identifier = parse_qq_track_identifier(id)?;
+        let song_id = match &identifier {
+            QqTrackIdentifier::Numeric(song_id) if *song_id > 0 => *song_id,
+            QqTrackIdentifier::Numeric(_) => {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ numeric track ID must be positive",
+                )
+                .with_platform(Platform::Qq));
+            }
+            QqTrackIdentifier::Mid(_) => {
+                let track = self.track(id, None).await?;
+                qq_track_numeric_id(&track)?
+            }
+        };
+        let response = self
+            .client
+            .request_android(&[singing_annotations_info_request(song_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                qq_data_error("QQ singing annotations info request returned no response")
+            })?;
+        map_singing_annotations_info(identifier, song_id, response)
     }
 
     async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
@@ -2789,6 +2833,18 @@ fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqT
     ))
 }
 
+fn singing_annotations_info_request(song_id: u64) -> QqApiRequest {
+    QqApiRequest::new(
+        LYRIC_MODULE,
+        "GetSingingAnnotationsInfo",
+        json!({
+            "songID": song_id,
+            "needNum": false
+        }),
+    )
+    .preserving_booleans()
+}
+
 fn cdn_dispatch_request() -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -3013,6 +3069,28 @@ fn map_song_detail_response(
         .extensions
         .insert("detail_response".to_owned(), response.raw);
     Ok(track)
+}
+
+fn map_singing_annotations_info(
+    requested: QqTrackIdentifier,
+    song_id: u64,
+    response: QqApiResponse,
+) -> Result<SingingAnnotationsAvailability> {
+    let parsed = serde_json::from_value::<QqSingingAnnotationsInfoResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ singing annotations info response is malformed"))?;
+    let track_id = match requested {
+        QqTrackIdentifier::Numeric(_) => song_id.to_string(),
+        QqTrackIdentifier::Mid(mid) => mid,
+    };
+    Ok(SingingAnnotationsAvailability {
+        track_ref: qq_ref(&track_id, "singing annotations availability")?,
+        available: parsed.available,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
 }
 
 fn map_lyric_response(
@@ -4492,17 +4570,21 @@ fn qq_playlist_encrypted_uin(
 }
 
 fn qq_playlist_write_track(track: &Track) -> Result<QqPlaylistWriteTrack> {
-    let song_id = track
-        .extensions
-        .get("numeric_id")
-        .and_then(json_u64)
-        .filter(|value| *value > 0)
-        .ok_or_else(|| qq_data_error("QQ track detail is missing a positive numeric song ID"))?;
+    let song_id = qq_track_numeric_id(track)?;
     let song_type = qq_track_audio_metadata(track)?
         .song_type
         .filter(|value| *value >= 0)
         .ok_or_else(|| qq_data_error("QQ track detail is missing a valid song type"))?;
     Ok(QqPlaylistWriteTrack { song_id, song_type })
+}
+
+fn qq_track_numeric_id(track: &Track) -> Result<u64> {
+    track
+        .extensions
+        .get("numeric_id")
+        .and_then(json_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| qq_data_error("QQ track detail is missing a positive numeric song ID"))
 }
 
 fn qq_track_subscription_request(track: QqPlaylistWriteTrack, subscribed: bool) -> QqApiRequest {
@@ -7006,6 +7088,82 @@ mod tests {
     }
 
     #[test]
+    fn singing_annotations_info_request_and_mapping_preserve_boolean_semantics() {
+        let request = singing_annotations_info_request(97_773);
+        assert_eq!(request.module, LYRIC_MODULE);
+        assert_eq!(request.method, "GetSingingAnnotationsInfo");
+        assert_eq!(
+            request.param,
+            json!({
+                "songID": 97_773,
+                "needNum": false
+            })
+        );
+
+        for (value, expected) in [
+            (json!(true), true),
+            (json!(1), true),
+            (json!("true"), true),
+            (json!(false), false),
+            (json!(0), false),
+            (json!("0"), false),
+        ] {
+            let mapped = map_singing_annotations_info(
+                QqTrackIdentifier::Numeric(97_773),
+                97_773,
+                response(json!({
+                    "hasSingingAnnotationsLyric": value,
+                    "annotationCount": 3
+                })),
+            )
+            .expect("map singing annotations availability");
+            assert_eq!(mapped.track_ref.to_string(), "qq:97773");
+            assert_eq!(mapped.available, expected);
+            assert_eq!(mapped.extensions["numeric_id"], 97_773);
+            assert_eq!(mapped.extensions["data"]["annotationCount"], 3);
+            assert_eq!(mapped.extensions["response"]["code"], 0);
+        }
+
+        let missing = map_singing_annotations_info(
+            QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+            97_773,
+            response(json!({"futureField": "preserved"})),
+        )
+        .expect("missing availability defaults to false");
+        assert_eq!(missing.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert!(!missing.available);
+        assert_eq!(missing.extensions["data"]["futureField"], "preserved");
+
+        for malformed in [json!("yes"), json!([]), json!({}), Value::Null] {
+            let error = map_singing_annotations_info(
+                QqTrackIdentifier::Numeric(97_773),
+                97_773,
+                response(json!({"hasSingingAnnotationsLyric": malformed})),
+            )
+            .expect_err("malformed availability flag");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn singing_annotations_availability_rejects_invalid_identity_and_account_before_network()
+    {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let account_error = provider
+            .singing_annotations_availability("97773", Some("missing-account"))
+            .await
+            .expect_err("missing named account");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(account_error.details["account"], "missing-account");
+
+        let identity_error = provider
+            .singing_annotations_availability("0", None)
+            .await
+            .expect_err("zero numeric track ID");
+        assert_eq!(identity_error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn lyric_mapping_never_lets_line_sync_override_word_sync() {
         let requested = QqTrackIdentifier::Numeric(100);
         let options = LyricsRequest::default();
@@ -7868,6 +8026,10 @@ mod tests {
         missing_type
             .extensions
             .insert("numeric_id".to_owned(), json!(97_773));
+        assert_eq!(
+            qq_track_numeric_id(&missing_type).expect("numeric ID without write metadata"),
+            97_773
+        );
         assert_eq!(
             qq_playlist_write_track(&missing_type)
                 .expect_err("missing song type")
@@ -9936,6 +10098,33 @@ mod tests {
                 .is_some_and(|value| value.contains("<QrcInfos>"))
         );
         assert!(annotated.singing_annotations_timestamp.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singing_annotations_availability_accepts_numeric_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+
+        let numeric = provider
+            .singing_annotations_availability("97773", None)
+            .await
+            .expect("numeric singing annotations availability");
+        assert_eq!(numeric.track_ref.to_string(), "qq:97773");
+        assert!(numeric.available);
+        assert_eq!(numeric.extensions["numeric_id"], 97_773);
+        assert_eq!(numeric.extensions["response"]["code"], 0);
+
+        let mid = provider
+            .singing_annotations_availability("0039MnYb0qxYhV", None)
+            .await
+            .expect("MID singing annotations availability");
+        assert_eq!(mid.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(mid.extensions["numeric_id"], 97_773);
+        assert!(mid.available);
     }
 
     #[tokio::test]
