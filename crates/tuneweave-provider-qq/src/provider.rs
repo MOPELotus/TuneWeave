@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
-    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistBiographySection,
+    AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistBiographySection,
     ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
     ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistSummary, ArtistTrackListRequest,
     ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
@@ -65,6 +65,8 @@ const ALBUM_DETAIL_MODULE: &str = "music.musichallAlbum.AlbumInfoServer";
 const ALBUM_DETAIL_METHOD: &str = "GetAlbumDetail";
 const ALBUM_SONG_MODULE: &str = "music.musichallAlbum.AlbumSongList";
 const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
+const NEW_ALBUM_MODULE: &str = "newalbum.NewAlbumServer";
+const NEW_ALBUM_METHOD: &str = "get_new_album_info";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -1159,6 +1161,8 @@ struct QqAlbumSinger {
     mid: String,
     #[serde(default, alias = "singerName", alias = "singer_name")]
     name: String,
+    #[serde(default, alias = "foreignName")]
+    foreign_name: String,
     #[serde(default)]
     title: String,
     #[serde(
@@ -1217,6 +1221,161 @@ struct QqAlbumSongResponse {
     total: u64,
     #[serde(default, rename = "songList")]
     songs: Vec<QqAlbumSongEntry>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QqNewAlbumArea {
+    MainlandChina,
+    HongKongTaiwan,
+    Western,
+    Korea,
+    Japan,
+    Other,
+}
+
+impl QqNewAlbumArea {
+    const fn id(self) -> u8 {
+        match self {
+            Self::MainlandChina => 1,
+            Self::HongKongTaiwan => 2,
+            Self::Western => 3,
+            Self::Korea => 4,
+            Self::Japan => 5,
+            Self::Other => 6,
+        }
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::MainlandChina => "mainland_china",
+            Self::HongKongTaiwan => "hong_kong_taiwan",
+            Self::Western => "western",
+            Self::Korea => "korea",
+            Self::Japan => "japan",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqNewAlbumSelection {
+    area: QqNewAlbumArea,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumCompanyExtra {
+    #[serde(default)]
+    desc: String,
+    #[serde(
+        default,
+        rename = "company_photo",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    company_photo: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumCompany {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    ex: QqNewAlbumCompanyExtra,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumPhoto {
+    #[serde(default, rename = "pic_mid")]
+    pic_mid: String,
+    #[serde(default, rename = "src_w", deserialize_with = "deserialize_qq_u64")]
+    width: u64,
+    #[serde(default, rename = "src_h", deserialize_with = "deserialize_qq_u64")]
+    height: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumExtra {
+    #[serde(default)]
+    desc: String,
+    #[serde(
+        default,
+        rename = "track_nums",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    track_count: u64,
+    #[serde(
+        default,
+        rename = "playable_track_nums",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    playable_track_count: u64,
+    #[serde(
+        default,
+        rename = "long_audio_nums",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    long_audio_count: u64,
+    #[serde(default, rename = "recommend_reason")]
+    recommendation: String,
+    #[serde(default, rename = "short_recommend_reason")]
+    short_recommendation: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumItem {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default)]
+    mid: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "trans_name")]
+    translated_name: String,
+    #[serde(default, rename = "album_ori_name")]
+    original_name: String,
+    #[serde(default, rename = "other_name")]
+    other_name: String,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singers: Vec<QqAlbumSinger>,
+    #[serde(default, rename = "release_time")]
+    released_at: String,
+    #[serde(default, rename = "type", deserialize_with = "deserialize_qq_i64")]
+    album_type: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    area: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    genre: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    language: i64,
+    #[serde(default)]
+    company: QqNewAlbumCompany,
+    #[serde(default)]
+    photo: QqNewAlbumPhoto,
+    #[serde(default)]
+    ex: QqNewAlbumExtra,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqNewAlbumResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    albums: Vec<QqNewAlbumItem>,
+    #[serde(default, rename = "ret_msg")]
+    message: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2118,6 +2277,7 @@ impl MusicProvider for QqProvider {
             Capability::ChartCatalog,
             Capability::ChartTracks,
             Capability::UserMembership,
+            Capability::AlbumList,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
             Capability::ArtistHomepageTabs,
@@ -2597,6 +2757,19 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ album song request returned no response"))?;
         map_qq_album_songs(&identifier, request.limit, request.offset, response)
+    }
+
+    async fn albums(&self, request: &AlbumListRequest) -> Result<Page<Album>> {
+        self.validate_public_account(request.account.as_deref())?;
+        let (api_request, selection) = qq_new_albums_request(request)?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ new album request returned no response"))?;
+        map_qq_new_albums(request.limit, request.offset, selection, response)
     }
 
     async fn set_track_subscription(
@@ -4574,6 +4747,78 @@ fn qq_album_songs_request(
         QqApiRequest::new(ALBUM_SONG_MODULE, ALBUM_SONG_METHOD, param),
         identifier,
     ))
+}
+
+fn qq_new_albums_request(
+    request: &AlbumListRequest,
+) -> Result<(QqApiRequest, QqNewAlbumSelection)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ new album page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let catalog = request
+        .catalog
+        .as_deref()
+        .map(str::trim)
+        .filter(|catalog| !catalog.is_empty())
+        .unwrap_or("new");
+    if !catalog.eq_ignore_ascii_case("new") {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ only exposes the new album catalog through this endpoint",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "allowed_catalog": "new" })));
+    }
+    let area = parse_qq_new_album_area(request.area.as_deref())?;
+    let selection = QqNewAlbumSelection { area };
+    Ok((
+        QqApiRequest::new(
+            NEW_ALBUM_MODULE,
+            NEW_ALBUM_METHOD,
+            json!({
+                "area": area.id(),
+                "num": request.limit,
+                "start": request.offset
+            }),
+        ),
+        selection,
+    ))
+}
+
+fn parse_qq_new_album_area(value: Option<&str>) -> Result<QqNewAlbumArea> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mainland_china")
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "1" | "mainland" | "mainland_china" | "china" | "cn" | "内地" | "大陆" => {
+            Ok(QqNewAlbumArea::MainlandChina)
+        }
+        "2" | "hong_kong_taiwan" | "hongkong_taiwan" | "hk_tw" | "hktw" | "港台" => {
+            Ok(QqNewAlbumArea::HongKongTaiwan)
+        }
+        "3" | "western" | "europe_america" | "eu_us" | "欧美" => Ok(QqNewAlbumArea::Western),
+        "4" | "korea" | "kr" | "韩国" => Ok(QqNewAlbumArea::Korea),
+        "5" | "japan" | "jp" | "日本" => Ok(QqNewAlbumArea::Japan),
+        "6" | "other" | "其他" => Ok(QqNewAlbumArea::Other),
+        _ => Err(
+            TuneWeaveError::invalid_request("QQ new album area is not supported")
+                .with_platform(Platform::Qq)
+                .with_details(json!({
+                    "allowed": [
+                        "mainland_china",
+                        "hong_kong_taiwan",
+                        "western",
+                        "korea",
+                        "japan",
+                        "other"
+                    ]
+                })),
+        ),
+    }
 }
 
 fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
@@ -7767,6 +8012,161 @@ fn map_qq_mv_catalog_item(video: QqMvCatalogItem) -> Result<Video> {
     })
 }
 
+fn map_qq_new_albums(
+    limit: u32,
+    offset: u32,
+    selection: QqNewAlbumSelection,
+    response: QqApiResponse,
+) -> Result<Page<Album>> {
+    let data = serde_json::from_value::<QqNewAlbumResponse>(response.data)
+        .map_err(|error| qq_data_error(format!("QQ new album response is malformed: {error}")))?;
+    let upstream_returned = u32::try_from(data.albums.len())
+        .map_err(|_| qq_data_error("QQ new album page is too large"))?;
+    if upstream_returned > limit {
+        return Err(qq_data_error(
+            "QQ new album response exceeded the requested page size",
+        ));
+    }
+    let next_offset = offset.checked_add(upstream_returned).ok_or_else(|| {
+        qq_data_error("QQ new album pagination exceeded the supported offset range")
+    })?;
+    if (upstream_returned > 0 && u64::from(next_offset) > data.total)
+        || (upstream_returned == 0 && u64::from(offset) < data.total)
+    {
+        return Err(qq_data_error(
+            "QQ new album response has inconsistent pagination",
+        ));
+    }
+
+    let response_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ new album response"))?;
+    let items = data
+        .albums
+        .into_iter()
+        .map(map_qq_new_album)
+        .collect::<Result<Vec<_>>>()?;
+    let has_more = u64::from(next_offset) < data.total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("catalog".to_owned(), json!("new")),
+                ("area".to_owned(), json!(selection.area.key())),
+                ("area_id".to_owned(), json!(selection.area.id())),
+                ("upstream_returned".to_owned(), json!(upstream_returned)),
+                ("data".to_owned(), response_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_new_album(album: QqNewAlbumItem) -> Result<Album> {
+    let album_mid = album.mid.trim();
+    if !album_mid.is_empty() {
+        validate_qq_media_id(album_mid, "album MID")
+            .map_err(|_| qq_data_error("QQ new album response returned an invalid album MID"))?;
+    }
+    let id = if !album_mid.is_empty() {
+        album_mid.to_owned()
+    } else if album.id > 0 {
+        album.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ new album response is missing both album ID and MID",
+        ));
+    };
+    let name = album.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ new album response contains an album without a name",
+        ));
+    }
+    let mut aliases = Vec::new();
+    for alias in [
+        album.translated_name.trim(),
+        album.original_name.trim(),
+        album.other_name.trim(),
+    ] {
+        if !alias.is_empty() && alias != name && !aliases.iter().any(|value| value == alias) {
+            aliases.push(alias.to_owned());
+        }
+    }
+    let artists = album
+        .singers
+        .iter()
+        .map(map_qq_album_singer)
+        .collect::<Result<Vec<_>>>()?;
+    let cover_mid = if !album_mid.is_empty() {
+        Some(album_mid.to_owned())
+    } else {
+        let image_mid = album.photo.pic_mid.trim();
+        if image_mid.is_empty() {
+            None
+        } else {
+            validate_qq_image_id(image_mid).map_err(|_| {
+                qq_data_error("QQ new album response returned an invalid cover image MID")
+            })?;
+            Some(image_mid.to_owned())
+        }
+    };
+    let entry_data = serde_json::to_value(&album)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ new album entry"))?;
+    let company_data = serde_json::to_value(&album.company)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ new album company"))?;
+    let photo_data = serde_json::to_value(&album.photo)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ new album photo"))?;
+    let mut extensions = Extensions::from([
+        ("mid".to_owned(), json!(album.mid)),
+        ("album_type".to_owned(), json!(album.album_type)),
+        ("area".to_owned(), json!(album.area)),
+        ("genre".to_owned(), json!(album.genre)),
+        ("language".to_owned(), json!(album.language)),
+        (
+            "playable_track_count".to_owned(),
+            json!(album.ex.playable_track_count),
+        ),
+        (
+            "long_audio_count".to_owned(),
+            json!(album.ex.long_audio_count),
+        ),
+        ("recommendation".to_owned(), json!(album.ex.recommendation)),
+        (
+            "short_recommendation".to_owned(),
+            json!(album.ex.short_recommendation),
+        ),
+        ("company_detail".to_owned(), company_data),
+        ("photo".to_owned(), photo_data),
+        ("new_album_entry".to_owned(), entry_data),
+    ]);
+    if album.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(album.id));
+    }
+
+    Ok(Album {
+        resource_ref: qq_ref(&id, "album")?,
+        platform: Platform::Qq,
+        id,
+        name: name.to_owned(),
+        aliases,
+        artists,
+        description: album.ex.desc.trim().to_owned(),
+        cover_url: cover_mid.map(|mid| qq_cover_url("T002", &mid)),
+        published_at: (!album.released_at.trim().is_empty())
+            .then(|| album.released_at.trim().to_owned()),
+        track_count: Some(album.ex.track_count),
+        company: (!album.company.name.trim().is_empty())
+            .then(|| album.company.name.trim().to_owned()),
+        kind: None,
+        extensions,
+    })
+}
+
 fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -> Result<Album> {
     let detail = serde_json::from_value::<QqAlbumDetailResponse>(response.data)
         .map_err(|_| qq_data_error("QQ album detail response is malformed"))?;
@@ -7873,11 +8273,15 @@ fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -
 }
 
 fn map_qq_album_singer(singer: &QqAlbumSinger) -> Result<ArtistSummary> {
-    let name = [singer.name.as_str(), singer.title.as_str()]
-        .into_iter()
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .ok_or_else(|| qq_data_error("QQ album detail contains a singer without a name"))?;
+    let name = [
+        singer.name.as_str(),
+        singer.title.as_str(),
+        singer.foreign_name.as_str(),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .ok_or_else(|| qq_data_error("QQ album detail contains a singer without a name"))?;
     let mid = singer.mid.trim();
     let resource_ref = if !mid.is_empty() {
         validate_qq_media_id(mid, "album singer MID")
@@ -12241,6 +12645,208 @@ mod tests {
     }
 
     #[test]
+    fn new_album_request_preserves_exact_offsets_and_all_reference_areas() {
+        let mut request = AlbumListRequest::new(20, 7);
+        request.catalog = Some("new".to_owned());
+        let (api, selection) = qq_new_albums_request(&request).expect("default new albums");
+        assert_eq!(api.module, NEW_ALBUM_MODULE);
+        assert_eq!(api.method, NEW_ALBUM_METHOD);
+        assert_eq!(api.param, json!({"area": 1, "num": 20, "start": 7}));
+        assert_eq!(selection.area, QqNewAlbumArea::MainlandChina);
+
+        for (area, expected_id, expected_key) in [
+            ("1", 1, "mainland_china"),
+            ("港台", 2, "hong_kong_taiwan"),
+            ("western", 3, "western"),
+            ("kr", 4, "korea"),
+            ("日本", 5, "japan"),
+            ("other", 6, "other"),
+        ] {
+            request.area = Some(area.to_owned());
+            let (api, selection) = qq_new_albums_request(&request).expect("QQ album area");
+            assert_eq!(api.param["area"], expected_id);
+            assert_eq!(selection.area.id(), expected_id);
+            assert_eq!(selection.area.key(), expected_key);
+        }
+    }
+
+    #[test]
+    fn new_album_request_rejects_invented_catalogs_areas_and_page_sizes() {
+        for catalog in ["newest", "all", "recommended"] {
+            let mut request = AlbumListRequest::new(20, 0);
+            request.catalog = Some(catalog.to_owned());
+            let error = match qq_new_albums_request(&request) {
+                Ok(_) => panic!("unsupported catalog was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+        for area in ["all", "taiwan", "7"] {
+            let mut request = AlbumListRequest::new(20, 0);
+            request.area = Some(area.to_owned());
+            let error = match qq_new_albums_request(&request) {
+                Ok(_) => panic!("unsupported area was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+        for limit in [0, 101] {
+            let error = match qq_new_albums_request(&AlbumListRequest::new(limit, 0)) {
+                Ok(_) => panic!("invalid page size was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn new_album_mapping_keeps_rich_fields_unknown_data_and_true_pagination() {
+        let page = map_qq_new_albums(
+            2,
+            1,
+            QqNewAlbumSelection {
+                area: QqNewAlbumArea::HongKongTaiwan,
+            },
+            response(json!({
+                "total": "3",
+                "ret_msg": "ok",
+                "albums": [
+                    {
+                        "id": "100",
+                        "mid": "001uKKpF1RuJSd",
+                        "name": "叶惠美",
+                        "trans_name": "Yeh Hui Mei",
+                        "album_ori_name": "Yeh Hui Mei",
+                        "other_name": "叶惠美特别版",
+                        "singers": [{
+                            "id": "4558",
+                            "mid": "0025NhlN2yWrP4",
+                            "name": "周杰伦",
+                            "foreign_name": "Jay Chou",
+                            "futureSingerField": true
+                        }],
+                        "release_time": "2003-07-31",
+                        "type": "2",
+                        "area": "1",
+                        "genre": "3",
+                        "language": "4",
+                        "company": {
+                            "id": "42",
+                            "name": "杰威尔音乐",
+                            "ex": {"desc": "发行公司", "company_photo": "7"},
+                            "futureCompanyField": "kept"
+                        },
+                        "photo": {"pic_mid": "001uKKpF1RuJSd_1", "src_w": "800", "src_h": 800},
+                        "ex": {
+                            "desc": "第四张专辑",
+                            "track_nums": "11",
+                            "playable_track_nums": "10",
+                            "long_audio_nums": "1",
+                            "recommend_reason": "经典专辑",
+                            "short_recommend_reason": "经典",
+                            "futureExtraField": 9
+                        },
+                        "futureAlbumField": {"kept": true}
+                    },
+                    {
+                        "id": 101,
+                        "mid": "001SecondAlbumMid",
+                        "name": "第二张专辑",
+                        "singers": [],
+                        "release_time": "2003-08-01",
+                        "company": {},
+                        "photo": {},
+                        "ex": {"track_nums": 1}
+                    }
+                ],
+                "futureResponseField": false
+            })),
+        )
+        .expect("map QQ new album page");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:001uKKpF1RuJSd");
+        assert_eq!(page.items[0].aliases, ["Yeh Hui Mei", "叶惠美特别版"]);
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(page.items[0].description, "第四张专辑");
+        assert_eq!(page.items[0].published_at.as_deref(), Some("2003-07-31"));
+        assert_eq!(page.items[0].track_count, Some(11));
+        assert_eq!(page.items[0].company.as_deref(), Some("杰威尔音乐"));
+        assert_eq!(page.items[0].extensions["numeric_id"], 100);
+        assert_eq!(page.items[0].extensions["album_type"], 2);
+        assert_eq!(page.items[0].extensions["playable_track_count"], 10);
+        assert_eq!(page.items[0].extensions["long_audio_count"], 1);
+        assert_eq!(page.items[0].extensions["recommendation"], "经典专辑");
+        assert_eq!(
+            page.items[0].extensions["new_album_entry"]["futureAlbumField"]["kept"],
+            true
+        );
+        assert_eq!(
+            page.items[0].extensions["new_album_entry"]["ex"]["futureExtraField"],
+            9
+        );
+        assert_eq!(
+            page.items[0].extensions["company_detail"]["futureCompanyField"],
+            "kept"
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 1);
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["catalog"], "new");
+        assert_eq!(page.pagination.extensions["area"], "hong_kong_taiwan");
+        assert_eq!(page.pagination.extensions["area_id"], 2);
+        assert_eq!(
+            page.pagination.extensions["data"]["futureResponseField"],
+            false
+        );
+        assert_eq!(page.pagination.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn new_album_mapping_rejects_malformed_items_and_inconsistent_pages() {
+        let selection = QqNewAlbumSelection {
+            area: QqNewAlbumArea::MainlandChina,
+        };
+        let item = || {
+            json!({
+                "id": 100,
+                "mid": "001uKKpF1RuJSd",
+                "name": "专辑",
+                "singers": [],
+                "company": {},
+                "photo": {},
+                "ex": {}
+            })
+        };
+        for (limit, offset, data) in [
+            (1, 0, json!({"total": 2, "albums": [item(), item()]})),
+            (2, 0, json!({"total": 3, "albums": []})),
+            (2, 1, json!({"total": 1, "albums": [item()]})),
+        ] {
+            let error = map_qq_new_albums(limit, offset, selection, response(data))
+                .expect_err("inconsistent QQ new album page");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        for malformed in [
+            json!({"total": 1, "albums": [{"name": "专辑", "singers": [], "company": {}, "photo": {}, "ex": {}}]}),
+            json!({"total": 1, "albums": [{"id": 100, "mid": "unsafe/album", "name": "专辑", "singers": [], "company": {}, "photo": {}, "ex": {}}]}),
+            json!({"total": 1, "albums": [{"id": 100, "name": "", "singers": [], "company": {}, "photo": {}, "ex": {}}]}),
+            json!({"total": 1, "albums": [{"id": 100, "name": "专辑", "singers": {}, "company": {}, "photo": {}, "ex": {}}]}),
+            json!({"total": 1, "albums": [{"id": 100, "name": "专辑", "singers": [], "company": {}, "photo": {"pic_mid": "unsafe/image"}, "ex": {}}]}),
+            json!({"total": "many", "albums": []}),
+        ] {
+            let error = map_qq_new_albums(1, 0, selection, response(malformed))
+                .expect_err("malformed QQ new album response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn singer_homepage_request_uses_the_android_mid_contract() {
         let request = qq_singer_homepage_request(" 0025NhlN2yWrP4 ").expect("singer MID");
         assert_eq!(request.module, SINGER_HOMEPAGE_MODULE);
@@ -15641,6 +16247,7 @@ mod tests {
     async fn album_detail_validates_identifiers_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::AlbumDetail));
+        assert!(provider.capabilities().contains(&Capability::AlbumList));
         for id in ["", "0", "18446744073709551616", "unsafe/album"] {
             let error = provider
                 .album(id, None)
@@ -15678,6 +16285,21 @@ mod tests {
             .await
             .expect_err("missing album track account alias");
         assert_eq!(page_account.code, ErrorCode::AuthenticationRequired);
+
+        let mut catalog = AlbumListRequest::new(10, 0);
+        catalog.catalog = Some("newest".to_owned());
+        let catalog_error = provider
+            .albums(&catalog)
+            .await
+            .expect_err("unsupported QQ album catalog");
+        assert_eq!(catalog_error.code, ErrorCode::InvalidRequest);
+        let mut account_catalog = AlbumListRequest::new(10, 0);
+        account_catalog.account = Some("missing-account".to_owned());
+        let account_error = provider
+            .albums(&account_catalog)
+            .await
+            .expect_err("missing new album account alias");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -17165,6 +17787,47 @@ mod tests {
         assert_eq!(by_mid.resource_ref, numeric.resource_ref);
         assert_eq!(by_mid.name, numeric.name);
         assert_eq!(by_mid.artists, numeric.artists);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_new_album_catalog_covers_all_areas_and_exact_offset_windows() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let mut first_request = AlbumListRequest::new(2, 0);
+        first_request.catalog = Some("new".to_owned());
+        first_request.area = Some("mainland_china".to_owned());
+        let first = provider
+            .albums(&first_request)
+            .await
+            .expect("first QQ new album page");
+        let mut shifted_request = first_request.clone();
+        shifted_request.offset = 1;
+        let shifted = provider
+            .albums(&shifted_request)
+            .await
+            .expect("shifted QQ new album page");
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(shifted.items.len(), 2);
+        assert_eq!(first.items[1].resource_ref, shifted.items[0].resource_ref);
+        assert_eq!(first.pagination.total, shifted.pagination.total);
+        assert_eq!(first.pagination.extensions["area_id"], 1);
+
+        for area in 1..=6 {
+            let mut request = AlbumListRequest::new(1, 0);
+            request.catalog = Some("new".to_owned());
+            request.area = Some(area.to_string());
+            let page = provider.albums(&request).await.expect("QQ new album area");
+            assert_eq!(page.items.len(), 1);
+            assert!(page.pagination.total.is_some_and(|total| total > 0));
+            assert_eq!(page.pagination.extensions["area_id"], area);
+            assert_eq!(page.items[0].platform, Platform::Qq);
+            assert!(!page.items[0].name.is_empty());
+            assert!(page.items[0].cover_url.is_some());
+        }
     }
 
     #[tokio::test]
