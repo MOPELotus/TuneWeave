@@ -31,14 +31,15 @@ use tuneweave_core::{
     AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
     AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
     Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
-    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ChartTrackListRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
+    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -311,7 +312,7 @@ pub fn build_router(state: AppState) -> Router {
             "/charts/dimensions/{chart_code}/tracks",
             get(dimension_chart_tracks),
         )
-        .route("/charts/{reference}/tracks", get(playlist_tracks))
+        .route("/charts/{reference}/tracks", get(chart_tracks))
         .route("/artists", get(artists))
         .route(
             "/artists/details",
@@ -2578,6 +2579,67 @@ async fn chart_catalog(
     request.account.clone_from(&account);
     let catalog = provider.chart_catalog(&request).await?;
     let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChartTracksParams {
+    #[serde(alias = "num")]
+    limit: Option<String>,
+    offset: Option<String>,
+    page: Option<String>,
+    account: Option<String>,
+    #[serde(
+        alias = "tag",
+        alias = "tags",
+        alias = "with_tags",
+        alias = "withTags",
+        alias = "includeTags"
+    )]
+    include_tags: Option<String>,
+}
+
+async fn chart_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    Query(params): Query<ChartTracksParams>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit/num", params.limit.as_deref(), 10)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    if params.page.is_some() && params.offset.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "chart pagination cannot combine page with offset",
+        )
+        .into());
+    }
+    let offset = if let Some(page) = params.page.as_deref() {
+        let page = parse_u32_parameter("page", Some(page), 1)?;
+        if page == 0 {
+            return Err(TuneWeaveError::invalid_request("page must start at 1").into());
+        }
+        limit.checked_mul(page - 1).ok_or_else(|| {
+            TuneWeaveError::invalid_request("chart page exceeds the supported offset range")
+        })?
+    } else {
+        parse_u32_parameter("offset", params.offset.as_deref(), 0)?
+    };
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let mut request = ChartTrackListRequest::new(limit, offset);
+    request.include_tags =
+        parse_bool_parameter("tag/include_tags", params.include_tags.as_deref(), true)?;
+    request.account.clone_from(&account);
+    let page = provider.chart_tracks(reference.id(), &request).await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -21553,6 +21615,39 @@ mod tests {
         assert_eq!(tracks["meta"]["account"], "vip");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
         assert_eq!(tracks["meta"]["pagination"]["offset"], 3);
+    }
+
+    #[tokio::test]
+    async fn chart_tracks_accept_reference_page_num_and_tag_parameters() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/netease:19723756/tracks?num=2&page=2&tag=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
+        assert_eq!(tracks["meta"]["pagination"]["offset"], 2);
+
+        let (status, defaults) = json_response_from(
+            test_app_with_provider(),
+            "/v1/charts/netease:19723756/tracks",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(defaults["meta"]["pagination"]["limit"], 10);
+        assert_eq!(defaults["meta"]["pagination"]["offset"], 0);
+
+        for path in [
+            "/v1/charts/netease:19723756/tracks?limit=0",
+            "/v1/charts/netease:19723756/tracks?num=101",
+            "/v1/charts/netease:19723756/tracks?page=0",
+            "/v1/charts/netease:19723756/tracks?page=2&offset=3",
+            "/v1/charts/netease:19723756/tracks?withTags=maybe",
+        ] {
+            let (status, error) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(error["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

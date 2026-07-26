@@ -448,6 +448,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 普通音乐榜单目录使用独立 `ChartCatalog`，不再伪装成普通歌单数组。`view=overview|summary|modern` 分别表示平台的榜单介绍、经典内容摘要和新版分组摘要；默认 `summary`。平台只有一套目录时三种值映射同一份最丰富响应，同时仍原样返回请求视图，不伪造额外上游分支。可播放榜单保留可用于 `/v1/charts/{ref}/tracks` 的引用，H5 等非歌单入口保持 `ref=null` 并通过 `target_kind/target_url` 表达；QQ 榜单引用固定为 `qq:chart:<topId>`，避免数值榜单 ID 与普通公开歌单 ID 冲突。预览项只有平台给出真实歌曲 ID 时才返回 `track_ref`；没有证实含义的平台排名类型和值留在扩展，不猜测成 `previous_rank/rank_change`。完整目录、分组、榜单及排名原文均保留在对应 `extensions`。
 
+榜单歌曲使用独立 `ChartTrackListRequest`，与普通歌单读取能力分开。统一 `limit/offset` 支持任意窗口；参考 `num/page` 也可用，其中 page 从 1 开始并换算为 offset，不能和显式 offset 同时提交。`include_tags` 默认 true，并兼容 `tag/tags/withTags`；平台没有标签分支时 provider 可忽略，QQ 会在 true 时发送真实 JSON 布尔、false 时完全省略字段。平台提供的歌曲标签按真实歌曲 ID 附在对应 `Track.extensions.toplist_tags`，完整榜单摘要、标签、附加信息和索引信息保留在分页扩展。
+
 歌手榜使用 `ArtistChart` 快照：`area` 为 `chinese|western|korean|japanese`，`entries` 中每项包含从 1 开始的 `rank`、有效时才存在的 `previous_rank/rank_change`、平台分数 `score` 和完整统一 `Artist`。网易云也接受参考参数 `type=1|2|3|4`；同时传 `area/type` 时必须指向同一区域。
 
 ### DimensionChart
@@ -1059,7 +1061,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/charts/podcasts` | `platform?`、`account?`、`kind?=new|hot|paid`（默认 `new`，也接受 `type`）、`limit?`、`offset?` | `PodcastChartEntry[]`；排名包装与完整播客分离，不伪造上游实际不支持的续页 |
 | GET | `/v1/charts/podcast-creators` | `platform?`、`account?`、`kind?=newcomer|popular|trending24_hours`（默认 `newcomer`，也接受 `type/new/hot/hours/24h`）、`limit?`、`offset?` | `PodcastCreatorChartEntry[]`；排名、粉丝数与完整用户身份分离，不伪造榜单续页 |
 | GET | `/v1/charts/artists` | `platform?`、`account?`、`area=chinese|western|korean|japanese`（也接受 `type=1|2|3|4`） | 完整 `ArtistChart` 快照 |
-| GET | `/v1/charts/{ref}/tracks` | 分页、`account?` | `Track[]`；引用来自可播放榜单项 |
+| GET | `/v1/charts/{ref}/tracks` | `limit/num?`、`offset?` 或 `page?`、`include_tags/tag/tags/withTags?`、`account?` | `Track[]`；引用来自可播放榜单项，默认 10 条并包含平台歌曲标签 |
 | GET | `/v1/charts/digital-albums` | `platform?`、`account?`、`period=daily|week|year|total`、`type=album|single`、`year?`、分页 | `DigitalAlbumChartEntry[]` |
 | GET | `/v1/charts/dimensions/{chart_code}` | `target_id`、`target_type`、`platform?`、`account?` | `DimensionChart`；也接受参考字段 `targetId/targetType` |
 | GET | `/v1/charts/dimensions/{chart_code}/tracks` | `target_id`、`target_type`、`platform?`、`account?` | 完整 `DimensionChartTrackSnapshot`；无分页元数据 |

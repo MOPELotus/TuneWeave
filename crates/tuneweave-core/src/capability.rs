@@ -69,6 +69,7 @@ pub enum Capability {
     DigitalAlbumList,
     DigitalAlbumCharts,
     ChartCatalog,
+    ChartTracks,
     ArtistCharts,
     DimensionCharts,
     ArtistDetail,
@@ -281,6 +282,11 @@ mod tests {
             serde_json::to_value(Capability::ChartCatalog)
                 .expect("serialize chart catalog capability"),
             serde_json::json!("chart_catalog")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::ChartTracks)
+                .expect("serialize chart tracks capability"),
+            serde_json::json!("chart_tracks")
         );
         assert_eq!(
             serde_json::to_value(Capability::ArtistCharts)

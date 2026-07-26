@@ -2839,6 +2839,26 @@ impl ChartCatalogRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChartTrackListRequest {
+    pub limit: u32,
+    pub offset: u32,
+    pub include_tags: bool,
+    pub account: Option<String>,
+}
+
+impl ChartTrackListRequest {
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit,
+            offset,
+            include_tags: true,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChartTrackPreview {
     pub rank: Option<u32>,
@@ -5018,6 +5038,12 @@ mod tests {
         let request = ChartCatalogRequest::new(ChartCatalogView::Modern);
         assert_eq!(request.view, ChartCatalogView::Modern);
         assert_eq!(request.account, None);
+
+        let tracks = ChartTrackListRequest::new(10, 20);
+        assert_eq!(tracks.limit, 10);
+        assert_eq!(tracks.offset, 20);
+        assert!(tracks.include_tags);
+        assert_eq!(tracks.account, None);
 
         let chart = Chart {
             resource_ref: Some(

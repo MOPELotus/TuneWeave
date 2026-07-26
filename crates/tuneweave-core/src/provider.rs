@@ -10,9 +10,9 @@ use crate::{
     ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch,
     AudioFileRequest, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
     AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, Banner,
-    BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
-    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, ChartTrackListRequest,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, CommentDeleteRequest, CommentListRequest, CommentMutationResult,
     CommentPage, CommentReactionListRequest, CommentReactionMutationRequest,
@@ -625,6 +625,18 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::ChartCatalog,
         ))
+    }
+
+    async fn chart_tracks(&self, id: &str, request: &ChartTrackListRequest) -> Result<Page<Track>> {
+        self.playlist_tracks(
+            id,
+            &PageRequest {
+                limit: request.limit,
+                offset: request.offset,
+                account: request.account.clone(),
+            },
+        )
+        .await
     }
 
     async fn artist_chart(&self, _request: &ArtistChartRequest) -> Result<ArtistChart> {

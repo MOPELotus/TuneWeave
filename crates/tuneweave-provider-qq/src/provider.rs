@@ -16,21 +16,22 @@ use tuneweave_core::{
     ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
     AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
     Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartGroup,
-    ChartTrackPreview, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
-    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
-    MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
-    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    ChartTrackListRequest, ChartTrackPreview, CreatorSummary, ErrorCode, Extensions,
+    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
+    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider, MusicVideoArea,
+    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
+    Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
+    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
+    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, SimilarArtistList, SimilarArtistRequest,
+    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
+    Track, TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
+    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
+    VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -73,6 +74,7 @@ const SIMILAR_SINGER_MODULE: &str = "music.SimilarSingerSvr";
 const SIMILAR_SINGER_METHOD: &str = "GetSimilarSingerList";
 const TOPLIST_MODULE: &str = "music.musicToplist.Toplist";
 const TOPLIST_CATALOG_METHOD: &str = "GetAll";
+const TOPLIST_DETAIL_METHOD: &str = "GetDetail";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
@@ -1732,6 +1734,52 @@ struct QqTopPreview {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqTopSongTag {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    link: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    tagid: u64,
+    #[serde(default, rename = "from_type", deserialize_with = "deserialize_qq_i64")]
+    source_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTopDetailResponse {
+    data: QqTopSummary,
+    #[serde(
+        rename = "songInfoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    songs: Vec<Value>,
+    #[serde(
+        default,
+        rename = "songTagInfoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    song_tags: Vec<QqTopSongTag>,
+    #[serde(
+        default,
+        rename = "extInfoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    ext_info: Vec<BTreeMap<String, Value>>,
+    #[serde(
+        default,
+        rename = "indexInfoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    index_info: Vec<BTreeMap<String, Value>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqSingerSongEntry {
     #[serde(rename = "songInfo")]
@@ -2068,6 +2116,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::ChartCatalog,
+            Capability::ChartTracks,
             Capability::UserMembership,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
@@ -2219,6 +2268,19 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ toplist catalog request returned no response"))?;
         map_qq_top_catalog(request, response)
+    }
+
+    async fn chart_tracks(&self, id: &str, request: &ChartTrackListRequest) -> Result<Page<Track>> {
+        self.validate_public_account(request.account.as_deref())?;
+        let (request_api, top_id) = qq_top_detail_request(id, request)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ toplist detail request returned no response"))?;
+        map_qq_top_detail(top_id, request, response)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -4566,6 +4628,34 @@ fn qq_top_catalog_request() -> QqApiRequest {
     QqApiRequest::new(TOPLIST_MODULE, TOPLIST_CATALOG_METHOD, json!({}))
 }
 
+fn qq_top_detail_request(id: &str, request: &ChartTrackListRequest) -> Result<(QqApiRequest, u64)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ toplist page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let id = id.trim().strip_prefix("chart:").unwrap_or(id.trim());
+    let top_id = parse_qq_playlist_number(id, "toplist ID")?;
+    let mut param = json!({
+        "topId": top_id,
+        "offset": request.offset,
+        "num": request.limit
+    });
+    if request.include_tags {
+        param["withTags"] = json!(true);
+    }
+    let request_api = QqApiRequest::new(TOPLIST_MODULE, TOPLIST_DETAIL_METHOD, param);
+    Ok((
+        if request.include_tags {
+            request_api.preserving_booleans()
+        } else {
+            request_api
+        },
+        top_id,
+    ))
+}
+
 fn qq_singer_homepage_tab_request(
     mid: &str,
     request: &ArtistHomepageTabRequest,
@@ -6793,6 +6883,119 @@ fn map_qq_top_catalog(
         view: request.view,
         groups,
         extensions,
+    })
+}
+
+fn map_qq_top_detail(
+    requested_top_id: u64,
+    request: &ChartTrackListRequest,
+    response: QqApiResponse,
+) -> Result<Page<Track>> {
+    let detail = serde_json::from_value::<QqTopDetailResponse>(response.data).map_err(|error| {
+        qq_data_error(format!("QQ toplist detail response is malformed: {error}"))
+    })?;
+    if detail.data.id != requested_top_id {
+        return Err(qq_data_error(
+            "QQ toplist detail response returned a different toplist ID",
+        ));
+    }
+    if detail.songs.len() > request.limit as usize {
+        return Err(qq_data_error(
+            "QQ toplist detail returned more tracks than requested",
+        ));
+    }
+    let total = detail.data.total_count;
+    let chart_raw = serde_json::to_value(&detail.data)
+        .map_err(|_| qq_data_error("failed to preserve QQ toplist detail metadata"))?;
+    let chart = map_qq_top_summary(chart_raw.clone())?;
+    let song_tags = serde_json::to_value(&detail.song_tags)
+        .map_err(|_| qq_data_error("failed to preserve QQ toplist song tags"))?;
+    let ext_info = serde_json::to_value(&detail.ext_info)
+        .map_err(|_| qq_data_error("failed to preserve QQ toplist extension information"))?;
+    let index_info = serde_json::to_value(&detail.index_info)
+        .map_err(|_| qq_data_error("failed to preserve QQ toplist index information"))?;
+    let items = detail
+        .songs
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let mut track = map_track(raw)?;
+            let index = u32::try_from(index)
+                .map_err(|_| qq_data_error("QQ toplist page index exceeded the supported range"))?;
+            let rank = request
+                .offset
+                .checked_add(index)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| {
+                    qq_data_error("QQ toplist rank exceeded the supported offset range")
+                })?;
+            track
+                .extensions
+                .insert("chart_rank".to_owned(), json!(rank));
+            let numeric_id = track
+                .extensions
+                .get("numeric_id")
+                .and_then(json_u64)
+                .unwrap_or_default();
+            let matching_tags = detail
+                .song_tags
+                .iter()
+                .filter(|tag| tag.id == numeric_id)
+                .collect::<Vec<_>>();
+            if !matching_tags.is_empty() {
+                let matching_tags = serde_json::to_value(matching_tags).map_err(|_| {
+                    qq_data_error("failed to preserve QQ toplist track tag associations")
+                })?;
+                track
+                    .extensions
+                    .insert("toplist_tags".to_owned(), matching_tags);
+            }
+            Ok(track)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let consumed = u32::try_from(items.len())
+        .map_err(|_| qq_data_error("QQ toplist page exceeded the supported size"))?;
+    let next = request.offset.checked_add(consumed).ok_or_else(|| {
+        qq_data_error("QQ toplist pagination exceeded the supported offset range")
+    })?;
+    if u64::from(next) > total {
+        return Err(qq_data_error(
+            "QQ toplist detail returned tracks beyond its reported total",
+        ));
+    }
+    if u64::from(request.offset) < total && items.is_empty() {
+        return Err(qq_data_error(
+            "QQ toplist detail returned an empty page before its reported total",
+        ));
+    }
+    let has_more = u64::from(next) < total;
+    let mut extensions = Extensions::from([
+        ("toplist_id".to_owned(), json!(requested_top_id)),
+        ("include_tags".to_owned(), json!(request.include_tags)),
+        (
+            "chart".to_owned(),
+            serde_json::to_value(chart)
+                .map_err(|_| qq_data_error("failed to preserve mapped QQ toplist detail"))?,
+        ),
+        ("toplist".to_owned(), chart_raw),
+        ("song_tags".to_owned(), song_tags),
+        ("extension_info".to_owned(), ext_info),
+        ("index_info".to_owned(), index_info),
+        ("response".to_owned(), response.raw),
+    ]);
+    if !detail.extra.is_empty() {
+        extensions.insert("detail_extra".to_owned(), json!(detail.extra));
+    }
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next),
+            has_more,
+            extensions,
+        },
     })
 }
 
@@ -10833,6 +11036,28 @@ mod tests {
         })
     }
 
+    fn sample_top_detail() -> Value {
+        let chart = sample_top_catalog()["group"][0]["toplist"][0].clone();
+        json!({
+            "data": chart,
+            "songInfoList": [
+                sample_track(100, "003w2xz20QlUZt", "可爱女人"),
+                sample_track(101, "0039MnYb0qxYhV", "晴天")
+            ],
+            "songTagInfoList": [{
+                "id": 101,
+                "tag": "经典",
+                "link": "qqmusic://qq.com/ui/searchCategory?p=%7B%7D",
+                "tagid": 170,
+                "from_type": 1,
+                "futureTagField": true
+            }],
+            "extInfoList": [{"kind": "future", "value": 42}],
+            "indexInfoList": null,
+            "futureDetailField": true
+        })
+    }
+
     fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
         json!({
             "albumID": id,
@@ -12397,6 +12622,116 @@ mod tests {
         ] {
             let error = map_qq_top_catalog(&request, response(data))
                 .expect_err("malformed QQ toplist catalog");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+    }
+
+    #[test]
+    fn toplist_detail_request_supports_namespaced_ids_offsets_and_tag_branches() {
+        let tagged = ChartTrackListRequest::new(10, 20);
+        let (request, top_id) =
+            qq_top_detail_request(" chart:62 ", &tagged).expect("tagged toplist detail");
+        assert_eq!(top_id, 62);
+        assert_eq!(request.module, TOPLIST_MODULE);
+        assert_eq!(request.method, TOPLIST_DETAIL_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"topId": 62, "offset": 20, "num": 10, "withTags": true})
+        );
+
+        let mut untagged = ChartTrackListRequest::new(3, 1);
+        untagged.include_tags = false;
+        let (request, top_id) =
+            qq_top_detail_request("62", &untagged).expect("untagged toplist detail");
+        assert_eq!(top_id, 62);
+        assert_eq!(request.param, json!({"topId": 62, "offset": 1, "num": 3}));
+
+        for (id, limit) in [
+            ("", 10),
+            ("chart:0", 10),
+            ("chart:not-a-number", 10),
+            ("chart:62", 0),
+            ("chart:62", 101),
+        ] {
+            assert!(
+                qq_top_detail_request(id, &ChartTrackListRequest::new(limit, 0)).is_err(),
+                "{id}/{limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn toplist_detail_mapping_keeps_arbitrary_offsets_tags_and_detail_sections() {
+        let request = ChartTrackListRequest::new(2, 7);
+        let page = map_qq_top_detail(62, &request, response(sample_top_detail()))
+            .expect("map QQ toplist detail");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(page.items[0].extensions["chart_rank"], 8);
+        assert_eq!(page.items[1].extensions["chart_rank"], 9);
+        assert!(!page.items[0].extensions.contains_key("toplist_tags"));
+        assert_eq!(page.items[1].extensions["toplist_tags"][0]["tag"], "经典");
+        assert_eq!(
+            page.items[1].extensions["toplist_tags"][0]["futureTagField"],
+            true
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 7);
+        assert_eq!(page.pagination.total, Some(100));
+        assert_eq!(page.pagination.next_offset, Some(9));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["toplist_id"], 62);
+        assert_eq!(page.pagination.extensions["include_tags"], true);
+        assert_eq!(page.pagination.extensions["chart"]["ref"], "qq:chart:62");
+        assert_eq!(
+            page.pagination.extensions["extension_info"][0]["kind"],
+            "future"
+        );
+        assert_eq!(page.pagination.extensions["index_info"], json!([]));
+        assert_eq!(
+            page.pagination.extensions["detail_extra"]["futureDetailField"],
+            true
+        );
+        assert_eq!(page.pagination.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn toplist_detail_mapping_rejects_identity_count_and_shape_conflicts() {
+        let request = ChartTrackListRequest::new(2, 0);
+        let mut mismatch = sample_top_detail();
+        mismatch["data"]["topId"] = json!(63);
+        let mut too_many = sample_top_detail();
+        too_many["songInfoList"] = json!([
+            sample_track(100, "003w2xz20QlUZt", "可爱女人"),
+            sample_track(101, "0039MnYb0qxYhV", "晴天"),
+            sample_track(102, "0017ahqa0NvuNU", "稻香")
+        ]);
+        let mut beyond_total = sample_top_detail();
+        beyond_total["data"]["totalNum"] = json!(1);
+        let mut early_empty = sample_top_detail();
+        early_empty["songInfoList"] = json!([]);
+        let mut malformed_tags = sample_top_detail();
+        malformed_tags["songTagInfoList"] = json!({});
+        let mut malformed_extension = sample_top_detail();
+        malformed_extension["extInfoList"] = json!(["not-an-object"]);
+        let mut missing_songs = sample_top_detail();
+        missing_songs
+            .as_object_mut()
+            .expect("detail object")
+            .remove("songInfoList");
+        for data in [
+            mismatch,
+            too_many,
+            beyond_total,
+            early_empty,
+            malformed_tags,
+            malformed_extension,
+            missing_songs,
+        ] {
+            let error = map_qq_top_detail(62, &request, response(data))
+                .expect_err("malformed QQ toplist detail");
             assert_eq!(error.code, ErrorCode::UpstreamError);
             assert_eq!(error.platform, Some(Platform::Qq));
         }
@@ -15271,9 +15606,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toplist_catalog_exposes_capability_and_validates_named_accounts_before_network() {
+    async fn toplists_expose_capabilities_and_validate_inputs_before_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::ChartCatalog));
+        assert!(provider.capabilities().contains(&Capability::ChartTracks));
         let mut request = ChartCatalogRequest::new(tuneweave_core::ChartCatalogView::Summary);
         request.account = Some("missing-account".to_owned());
         let error = provider
@@ -15281,6 +15617,24 @@ mod tests {
             .await
             .expect_err("missing toplist account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let invalid_id = provider
+            .chart_tracks("chart:not-a-number", &ChartTrackListRequest::new(10, 0))
+            .await
+            .expect_err("invalid toplist ID");
+        assert_eq!(invalid_id.code, ErrorCode::InvalidRequest);
+        let invalid_limit = provider
+            .chart_tracks("chart:62", &ChartTrackListRequest::new(0, 0))
+            .await
+            .expect_err("invalid toplist page size");
+        assert_eq!(invalid_limit.code, ErrorCode::InvalidRequest);
+        let mut missing_account = ChartTrackListRequest::new(10, 0);
+        missing_account.account = Some("missing-account".to_owned());
+        let account = provider
+            .chart_tracks("chart:62", &missing_account)
+            .await
+            .expect_err("missing toplist account alias");
+        assert_eq!(account.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -16754,6 +17108,40 @@ mod tests {
             }));
             assert!(charts.iter().any(|chart| !chart.previews.is_empty()));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_toplist_detail_supports_overlapping_offsets_and_tag_modes() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .chart_tracks("chart:62", &ChartTrackListRequest::new(2, 0))
+            .await
+            .expect("tagged QQ toplist page");
+        let mut untagged_request = ChartTrackListRequest::new(2, 1);
+        untagged_request.include_tags = false;
+        let overlapping = provider
+            .chart_tracks("62", &untagged_request)
+            .await
+            .expect("untagged QQ toplist page");
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(overlapping.items.len(), 2);
+        assert_eq!(
+            first.items[1].resource_ref,
+            overlapping.items[0].resource_ref
+        );
+        assert_eq!(first.items[0].extensions["chart_rank"], 1);
+        assert_eq!(overlapping.items[0].extensions["chart_rank"], 2);
+        assert_eq!(first.pagination.offset, 0);
+        assert_eq!(overlapping.pagination.offset, 1);
+        assert_eq!(first.pagination.total, overlapping.pagination.total);
+        assert_eq!(first.pagination.extensions["include_tags"], true);
+        assert_eq!(overlapping.pagination.extensions["include_tags"], false);
+        assert!(first.pagination.total.is_some_and(|total| total >= 2));
     }
 
     #[tokio::test]

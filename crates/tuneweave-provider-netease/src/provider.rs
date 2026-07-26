@@ -634,6 +634,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::DigitalAlbumList,
             Capability::DigitalAlbumCharts,
             Capability::ChartCatalog,
+            Capability::ChartTracks,
             Capability::ArtistCharts,
             Capability::DimensionCharts,
             Capability::ArtistDetail,
