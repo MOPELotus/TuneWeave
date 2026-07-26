@@ -1097,6 +1097,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/playlists/created` | 分页、`account?` | 指定用户创建的 `Playlist[]`；平台用户引用的 ID 语义由对应 provider 校验 |
 | GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
+| GET | `/v1/users/{ref}/favorites/albums` | 分页、`account?` | 指定用户收藏的 `Album[]`；目标用户与可选查看者账户分离 |
 | GET | `/v1/users/{ref}/membership` | `account?`、`backend=front|client` | 指定用户的 `MembershipSummary`；引用决定平台，客户端后端要求登录 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由和首页包装保存在扩展 |
@@ -1371,6 +1372,8 @@ QQ 的 `GET /v1/playlists/{ref}` 与 `/tracks` 固定调用 Android `music.srfDi
 QQ 喜欢歌曲使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET /v1/account/favorites/tracks?platform=qq&account=...` 从所选凭据读取 `encryptUin`；`GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 直接使用目标用户的加密 UIN，并允许可选 `account` 作为查看者会话。该分支固定发送 `tag=true/userinfo=true/orderlist=true`，不发送只属于普通歌单精简取曲的 `onlysonglist`；两端共享严格 offset/limit、分页一致性、零进度拒绝和 Track 映射。加密 UIN 作为不透明平台用户 ID 处理，不接受空白、控制字符或超长值，也不会以参考项目的占位凭据代替缺失账户。
 
 QQ 的公开用户歌单目录保持两种身份边界：`GET /v1/users/qq:<numeric-uin>/playlists/created` 调用 `PlaylistBaseRead/GetPlaylistByUin`，只接受正整数 UIN，并在完整取得上游创建目录后应用统一 offset/limit；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 调用 `PlaylistFavRead/CgiGetPlaylistFavInfo`，把目标加密 UIN、offset 和 size 原样提交。两端的 `account` 都只是可选查看者会话，省略时不会被改写为 `default` 或强制要求本地账户。条目明确标记 created/favorite 与 subscribed 状态，删除/失败 ID、隐藏/完成标记、总数和完整响应均保留。2026-07-26 已从公开歌单 `qq:7039749142` 动态取得其创建者两类标识，并通过 provider 与 release HTTP 真实验证两个匿名目录分支：创建目录总数 6137，收藏目录合法返回空目录。
+
+QQ 收藏专辑统一为当前账户与指定用户两个视图：`GET /v1/account/library/albums?platform=qq&account=...` 从精确 `(qq, account)` 凭据读取加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/albums` 直接使用目标用户标识，并允许独立的可选查看者 `account`。两端都固定调用 Android `music.musicasset.AlbumFavRead/CgiGetAlbumFavInfo`，把 `offset/limit` 原样提交为 `offset/size`，不会先换算整页。专辑优先以 MID 建立稳定引用并保留数字 ID、名称/标题/译名、封面 MID、曲数、发行/收藏时间戳、状态、位置、完整歌手和未知字段；平台 `hasmore/total` 同时驱动真实续页，矛盾标志、零进度、超页、畸形身份或必需字段会明确失败。目标加密 UIN 不会被参考项目的占位凭据替换。2026-07-26 provider 已真实验证匿名公开用户的合法空目录响应；当前账户非空成功态待登录账户联合验收。
 
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 

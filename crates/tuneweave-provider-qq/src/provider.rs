@@ -68,6 +68,8 @@ const ALBUM_SONG_MODULE: &str = "music.musichallAlbum.AlbumSongList";
 const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
 const NEW_ALBUM_MODULE: &str = "newalbum.NewAlbumServer";
 const NEW_ALBUM_METHOD: &str = "get_new_album_info";
+const FAVORITE_ALBUM_MODULE: &str = "music.musicasset.AlbumFavRead";
+const FAVORITE_ALBUM_METHOD: &str = "CgiGetAlbumFavInfo";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -712,6 +714,54 @@ struct QqFavoritePlaylistsResponse {
     deleted_ids: Vec<u64>,
     #[serde(default, rename = "v_failTids")]
     failed_ids: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqFavoriteAlbumItem {
+    #[serde(default, alias = "albumID", deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default, alias = "albumMid", alias = "albumMID", alias = "albummid")]
+    mid: String,
+    #[serde(default, alias = "albumName")]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default, alias = "albumTranName")]
+    subtitle: String,
+    #[serde(default, alias = "logo")]
+    pmid: String,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    songnum: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    pubtime: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    ordertime: u64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    status: i64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    loc: i64,
+    #[serde(rename = "v_singer")]
+    singers: Vec<QqAlbumSinger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqFavoriteAlbumsResponse {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    number: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(deserialize_with = "deserialize_qq_bool")]
+    hasmore: bool,
+    #[serde(deserialize_with = "deserialize_qq_bool")]
+    hide: bool,
+    #[serde(rename = "v_list")]
+    albums: Vec<QqFavoriteAlbumItem>,
+    #[serde(rename = "v_failAlbumId")]
+    failed_album_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 struct QqAccountPlaylistPageInput {
@@ -2458,6 +2508,7 @@ impl MusicProvider for QqProvider {
             Capability::PhoneLogin,
             Capability::SessionManagement,
             Capability::AccountPlaylists,
+            Capability::AccountAlbums,
         ])
     }
 
@@ -3402,6 +3453,27 @@ impl MusicProvider for QqProvider {
         })
     }
 
+    async fn account_albums(&self, request: &tuneweave_core::PageRequest) -> Result<Page<Album>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_encrypted_uin(&credential)?;
+        self.qq_favorite_albums_page(encrypted_uin, request, Some(&credential), "current_account")
+            .await
+    }
+
+    async fn user_favorite_albums(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Album>> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let credential = self.qq_credential(request.account.as_deref())?;
+        self.qq_favorite_albums_page(encrypted_uin, request, credential.as_ref(), "user")
+            .await
+    }
+
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
         let locator = parse_qq_playlist_locator(id)?;
         let credential = self.qq_credential(account)?;
@@ -4006,6 +4078,42 @@ impl QqProvider {
         let parsed = parse_qq_playlist_detail(response.data)?;
         validate_qq_playlist_detail_page(&parsed, request.offset, limit)?;
         map_qq_playlist_tracks(request.offset, limit, parsed, response.raw)
+    }
+
+    async fn qq_favorite_albums_page(
+        &self,
+        encrypted_uin: &str,
+        request: &tuneweave_core::PageRequest,
+        credential: Option<&QqCredential>,
+        library_scope: &'static str,
+    ) -> Result<Page<Album>> {
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ favorite album page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_favorite_albums_request(
+                    encrypted_uin,
+                    request.offset,
+                    request.limit,
+                )],
+                credential,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ favorite album request returned no response"))?;
+        map_qq_favorite_albums(
+            encrypted_uin,
+            request.offset,
+            request.limit,
+            library_scope,
+            response,
+        )
     }
 
     async fn prepare_audio_file_items(
@@ -9397,6 +9505,18 @@ fn qq_favorite_playlists_request(encrypted_uin: &str, offset: u32, size: u32) ->
     )
 }
 
+fn qq_favorite_albums_request(encrypted_uin: &str, offset: u32, size: u32) -> QqApiRequest {
+    QqApiRequest::new(
+        FAVORITE_ALBUM_MODULE,
+        FAVORITE_ALBUM_METHOD,
+        json!({
+            "euin": encrypted_uin,
+            "offset": offset,
+            "size": size
+        }),
+    )
+}
+
 fn qq_encrypted_uin(credential: &QqCredential) -> Result<&str> {
     validate_qq_encrypted_uin(&credential.encrypt_uin, "account encrypted UIN").map_err(|_| {
         TuneWeaveError::new(
@@ -9620,6 +9740,139 @@ fn map_favorite_playlist_page(
                 ("response".to_owned(), raw),
             ]),
         },
+    })
+}
+
+fn map_qq_favorite_albums(
+    encrypted_uin: &str,
+    offset: u32,
+    limit: u32,
+    library_scope: &'static str,
+    response: QqApiResponse,
+) -> Result<Page<Album>> {
+    let data =
+        serde_json::from_value::<QqFavoriteAlbumsResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ favorite album response is malformed: {error}"))
+        })?;
+    let returned = u32::try_from(data.albums.len())
+        .map_err(|_| qq_data_error("QQ favorite album page is too large"))?;
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ favorite album pagination exceeded the supported offset range")
+    })?;
+    let computed_has_more = u64::from(next_offset) < data.total;
+    if returned > limit
+        || u64::from(next_offset) > data.total
+        || (data.hasmore && returned == 0)
+        || data.hasmore != computed_has_more
+    {
+        return Err(qq_data_error(
+            "QQ favorite album response has inconsistent pagination",
+        ));
+    }
+    let typed_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ favorite album response"))?;
+    let items = data
+        .albums
+        .into_iter()
+        .map(map_qq_favorite_album)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: computed_has_more.then_some(next_offset),
+            has_more: computed_has_more,
+            extensions: Extensions::from([
+                ("library_scope".to_owned(), json!(library_scope)),
+                ("user_encrypted_uin".to_owned(), json!(encrypted_uin)),
+                ("number".to_owned(), json!(data.number)),
+                ("hidden".to_owned(), json!(data.hide)),
+                ("failed_album_ids".to_owned(), json!(data.failed_album_ids)),
+                ("returned_count".to_owned(), json!(returned)),
+                ("data".to_owned(), typed_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
+    let mid = album.mid.trim();
+    if !mid.is_empty() {
+        validate_qq_media_id(mid, "favorite album MID")
+            .map_err(|_| qq_data_error("QQ favorite album returned an invalid MID"))?;
+    }
+    let id = if !mid.is_empty() {
+        mid.to_owned()
+    } else if album.id > 0 {
+        album.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ favorite album is missing both its numeric ID and MID",
+        ));
+    };
+    let name = [album.name.as_str(), album.title.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ favorite album is missing its name"))?
+        .to_owned();
+    let aliases = [album.title.as_str(), album.subtitle.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != name.as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let image_mid = [album.pmid.as_str(), mid]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    if let Some(image_mid) = image_mid {
+        validate_qq_image_id(image_mid)
+            .map_err(|_| qq_data_error("QQ favorite album returned an invalid cover MID"))?;
+    }
+    let artists = album
+        .singers
+        .iter()
+        .map(map_qq_album_singer)
+        .collect::<Result<Vec<_>>>()?;
+    let raw = serde_json::to_value(&album)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ favorite album item"))?;
+    let published_at = qq_platform_timestamp_rfc3339(album.pubtime);
+    let subscribed_at = qq_platform_timestamp_rfc3339(album.ordertime);
+    let mut extensions = Extensions::from([
+        ("subscribed".to_owned(), json!(true)),
+        ("status".to_owned(), json!(album.status)),
+        ("location".to_owned(), json!(album.loc)),
+        ("published_timestamp".to_owned(), json!(album.pubtime)),
+        ("subscribed_timestamp".to_owned(), json!(album.ordertime)),
+        ("favorite_album".to_owned(), raw),
+    ]);
+    if album.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(album.id));
+    }
+    if let Some(subscribed_at) = subscribed_at {
+        extensions.insert("subscribed_at".to_owned(), json!(subscribed_at));
+    }
+    if let Some(image_mid) = image_mid {
+        extensions.insert("image_mid".to_owned(), json!(image_mid));
+    }
+    Ok(Album {
+        resource_ref: qq_ref(&id, "favorite album")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        aliases,
+        artists,
+        description: String::new(),
+        cover_url: image_mid.map(|image_mid| qq_cover_url("T002", image_mid)),
+        published_at,
+        track_count: Some(album.songnum),
+        company: None,
+        kind: None,
+        extensions,
     })
 }
 
@@ -11527,6 +11780,17 @@ fn qq_expiration_rfc3339(expires_in_seconds: u64) -> Option<String> {
     qq_unix_rfc3339(now.checked_add(expires_in_seconds)?)
 }
 
+fn qq_platform_timestamp_rfc3339(timestamp: u64) -> Option<String> {
+    if timestamp == 0 {
+        return None;
+    }
+    qq_unix_rfc3339(if timestamp > 10_000_000_000 {
+        timestamp / 1_000
+    } else {
+        timestamp
+    })
+}
+
 fn qq_unix_rfc3339(timestamp: u64) -> Option<String> {
     let days = i64::try_from(timestamp / 86_400).ok()?;
     let seconds = timestamp % 86_400;
@@ -11878,6 +12142,30 @@ mod tests {
             "pay": {"pay_play": 1},
             "interval": 269,
             "status": 0
+        })
+    }
+
+    fn sample_favorite_album(id: u64, mid: &str, name: &str) -> Value {
+        json!({
+            "albumID": id,
+            "albumMid": mid,
+            "albumName": name,
+            "title": format!("{name} Title"),
+            "albumTranName": format!("{name} 译名"),
+            "logo": format!("{mid}_1"),
+            "songnum": "12",
+            "pubtime": 1_704_067_200_u64,
+            "ordertime": 1_704_153_600_u64,
+            "status": 1,
+            "loc": 2,
+            "v_singer": [{
+                "singerID": 4558,
+                "singerMid": "0025NhlN2yWrP4",
+                "singerName": "周杰伦",
+                "singerPmid": "0025NhlN2yWrP4_11",
+                "futureSingerField": true
+            }],
+            "futureAlbumField": {"kept": true}
         })
     }
 
@@ -16340,6 +16628,148 @@ mod tests {
     }
 
     #[test]
+    fn favorite_album_request_preserves_encrypted_identity_and_exact_offset() {
+        let encrypted_uin = validate_qq_encrypted_uin("encrypted-uin", "user encrypted UIN")
+            .expect("encrypted UIN");
+        let request = qq_favorite_albums_request(encrypted_uin, 20, 10);
+        assert_eq!(request.module, FAVORITE_ALBUM_MODULE);
+        assert_eq!(request.method, FAVORITE_ALBUM_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"euin": "encrypted-uin", "offset": 20, "size": 10})
+        );
+        assert!(request.param.get("uin").is_none());
+        assert!(request.param.get("page").is_none());
+    }
+
+    #[test]
+    fn favorite_album_mapping_preserves_identity_times_singers_and_page_metadata() {
+        let mut numeric_album = sample_favorite_album(101, "001SecondAlbum", "第二张专辑");
+        numeric_album["albumMid"] = json!("");
+        numeric_album["logo"] = json!("001SecondAlbum_1");
+        let page = map_qq_favorite_albums(
+            "encrypted-uin",
+            0,
+            2,
+            "user",
+            response(json!({
+                "number": "2",
+                "total": 3,
+                "hasmore": 1,
+                "hide": false,
+                "v_list": [
+                    sample_favorite_album(100, "001uKKpF1RuJSd", "叶惠美"),
+                    numeric_album
+                ],
+                "v_failAlbumId": [999],
+                "futureResponseField": {"kept": true}
+            })),
+        )
+        .expect("map QQ favorite albums");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:001uKKpF1RuJSd");
+        assert_eq!(page.items[0].name, "叶惠美");
+        assert_eq!(page.items[0].aliases, ["叶惠美 Title", "叶惠美 译名"]);
+        assert_eq!(page.items[0].artists[0].name, "周杰伦");
+        assert_eq!(page.items[0].track_count, Some(12));
+        assert_eq!(
+            page.items[0].published_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            page.items[0].extensions["subscribed_at"],
+            "2024-01-02T00:00:00Z"
+        );
+        assert_eq!(page.items[0].extensions["subscribed"], true);
+        assert_eq!(page.items[0].extensions["numeric_id"], 100);
+        assert_eq!(
+            page.items[0].extensions["favorite_album"]["futureAlbumField"]["kept"],
+            true
+        );
+        assert!(
+            page.items[0]
+                .cover_url
+                .as_deref()
+                .is_some_and(|url| url.contains("001uKKpF1RuJSd_1"))
+        );
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:101");
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["library_scope"], "user");
+        assert_eq!(
+            page.pagination.extensions["user_encrypted_uin"],
+            "encrypted-uin"
+        );
+        assert_eq!(page.pagination.extensions["number"], 2);
+        assert_eq!(page.pagination.extensions["hidden"], false);
+        assert_eq!(page.pagination.extensions["failed_album_ids"], json!([999]));
+        assert_eq!(
+            page.pagination.extensions["data"]["futureResponseField"]["kept"],
+            true
+        );
+        assert_eq!(page.pagination.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn favorite_album_mapping_rejects_missing_fields_bad_items_and_false_pagination() {
+        let valid = || {
+            json!({
+                "number": 1,
+                "total": 1,
+                "hasmore": false,
+                "hide": false,
+                "v_list": [sample_favorite_album(100, "001uKKpF1RuJSd", "专辑")],
+                "v_failAlbumId": []
+            })
+        };
+        let mut fixtures = vec![
+            json!({}),
+            json!({
+                "number": 2, "total": 2, "hasmore": false, "hide": false,
+                "v_list": [
+                    sample_favorite_album(100, "001uKKpF1RuJSd", "专辑一"),
+                    sample_favorite_album(101, "001SecondAlbum", "专辑二")
+                ],
+                "v_failAlbumId": []
+            }),
+            json!({
+                "number": 1, "total": 2, "hasmore": false, "hide": false,
+                "v_list": [sample_favorite_album(100, "001uKKpF1RuJSd", "专辑")],
+                "v_failAlbumId": []
+            }),
+            json!({
+                "number": 0, "total": 2, "hasmore": true, "hide": false,
+                "v_list": [], "v_failAlbumId": []
+            }),
+        ];
+        for (field, value) in [
+            ("albumID", json!(0)),
+            ("albumMid", json!("unsafe/album")),
+            ("albumName", json!("")),
+            ("logo", json!("unsafe/image")),
+            ("v_singer", json!({})),
+            ("pubtime", json!("not-a-time")),
+        ] {
+            let mut fixture = valid();
+            fixture["v_list"][0][field] = value;
+            if field == "albumID" {
+                fixture["v_list"][0]["albumMid"] = json!("");
+            }
+            if field == "albumName" {
+                fixture["v_list"][0]["title"] = json!("");
+            }
+            fixtures.push(fixture);
+        }
+        for fixture in fixtures {
+            let error = map_qq_favorite_albums("encrypted-uin", 0, 1, "user", response(fixture))
+                .expect_err("invalid QQ favorite album response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn favorite_track_import_source_keeps_user_identity_and_total() {
         let page = Page {
             items: vec![Track::new(
@@ -17771,6 +18201,46 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+    }
+
+    #[tokio::test]
+    async fn favorite_albums_validate_account_identity_user_ids_and_pages_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::AccountAlbums));
+
+        let error = provider
+            .account_albums(&tuneweave_core::PageRequest::new(25, 0))
+            .await
+            .expect_err("current QQ favorite albums require an account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "default");
+
+        for (user_id, limit) in [
+            ("", 25),
+            ("encrypted\nuin", 25),
+            ("encrypted-uin", 0),
+            ("encrypted-uin", 101),
+        ] {
+            let error = provider
+                .user_favorite_albums(user_id, &tuneweave_core::PageRequest::new(limit, 0))
+                .await
+                .expect_err("invalid QQ favorite album request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest, "{user_id:?}/{limit}");
+        }
+
+        let error = provider
+            .user_favorite_albums(
+                "encrypted-uin",
+                &tuneweave_core::PageRequest {
+                    limit: 25,
+                    offset: 0,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing optional viewer account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "missing-account");
     }
 
     #[tokio::test]
@@ -19597,6 +20067,21 @@ mod tests {
             .expect("live user favorite playlists");
         assert!(favorite.pagination.total.is_some());
         assert!(favorite.items.iter().all(|item| !item.name.is_empty()));
+
+        let albums = provider
+            .user_favorite_albums(encrypted_uin, &request)
+            .await
+            .expect("live user favorite albums");
+        assert!(albums.pagination.total.is_some());
+        assert!(albums.items.iter().all(|album| {
+            album.platform == Platform::Qq
+                && !album.id.is_empty()
+                && !album.name.is_empty()
+                && album.cover_url.is_some()
+                && album.extensions["subscribed"] == true
+        }));
+        assert_eq!(albums.pagination.extensions["library_scope"], "user");
+        assert_eq!(albums.pagination.extensions["response"]["code"], 0);
 
         let source = provider
             .playlist_source(encrypted_uin, "favorite_tracks", None)

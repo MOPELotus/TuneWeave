@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=53`、`partial=0`、`implemented=21`、`verified=30`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=52`、`partial=0`、`implemented=22`、`verified=30`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -85,7 +85,7 @@
 | Q064 | 个人音乐库 | `UserApi.get_fav_songlist` | 是 | `implemented` | 当前账户目录已用所选凭据的 `encryptUin` 调用 Android `music.musicasset.PlaylistFavRead/CgiGetPlaylistFavInfo`；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 保留任意用户加密 UIN、可选查看者账户及原生 offset/size。两端精确保留 `number/total/hasmore/hide`、删除/失败 ID 和完整响应；收藏项标记 `subscribed=true`，不会使用参考项目的占位凭据。目录中的具体外部歌单可直接作为 Uni `type=playlist` 来源。2026-07-26 provider 与 release HTTP 匿名真实返回合法空目录；代码分支完整，待真实个人账户联合验收 |
 | Q065 | 个人音乐库 | `UserApi.fav_songlist` | 是 | `implemented` | `PUT /v1/account/favorites/playlists/{qq-ref}?account=...` 通过独立 `playlist_subscription_write` 能力接入 Android `music.musicasset.PlaylistFavWrite/FavPlaylist`。只接受正整数公开歌单 `tid`，不把自建目录 `dirId` 混入；所选 `(qq, account)` 凭据的加密 UIN 与单项 `v_playlistId` 精确提交。响应同时检查 CGI 顶层业务码、强类型 `result` 和 `v_failedPlaylistId`；只有 `result=0` 且目标不在失败列表时返回已收藏，其余平台字段完整保留。统一 HTTP、能力发现、账户前置、成功与失败列表分支已离线验收，真实写入待 QQ 账户联合验收 |
 | Q066 | 个人音乐库 | `UserApi.unfav_songlist` | 是 | `implemented` | `DELETE /v1/account/favorites/playlists/{qq-ref}?account=...` 复用同一公开歌单身份、精确账户隔离和强类型响应，调用 `PlaylistFavWrite/CancelFavPlaylist`。上游声明未收藏时仍可幂等成功；TuneWeave 以实际 `result` 与目标失败列表判断，不依据本地缓存猜测状态。统一 HTTP PUT/DELETE 保持同一 `SubscriptionResult`，未知查询字段在联网前拒绝；真实写入待 QQ 账户联合验收 |
-| Q067 | 个人音乐库 | `UserApi.get_fav_album` | 是 | `pending` | 收藏专辑列表 |
+| Q067 | 个人音乐库 | `UserApi.get_fav_album` | 是 | `implemented` | `GET /v1/account/library/albums?platform=qq&account=...` 从精确 `(qq, account)` 凭据取得目标加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/albums?account?=...` 则完整保留参考方法的任意用户目标和真正可选查看者账户，省略账户时匿名调用，不使用占位凭据。两端固定调用 Android `music.musicasset.AlbumFavRead/CgiGetAlbumFavInfo`，统一任意 `offset/limit` 原样映射为 `offset/size`。响应强类型解析必需的 `number/total/hasmore/hide/v_list/v_failAlbumId`；每张专辑优先使用 MID，保留数字 ID、名称/标题/译名、封面 MID、曲数、发行/收藏时间戳及 RFC 3339、状态、位置、完整歌手、未知字段和原始响应，并明确标记已收藏。返回超页、总数/续页矛盾、零进度、非法身份/图片或畸形必需字段拒绝。统一 HTTP 已接 `AccountAlbums` 能力及用户分支；2026-07-26 provider 真实匿名请求公开用户返回上游码 0 的合法空目录，当前账户非空成功态待 QQ 登录账户联合验收后升为 `verified` |
 | Q068 | 个人音乐库 | `UserApi.get_fav_mv` | 是 | `pending` | 收藏 MV 列表 |
 | Q069 | 个人音乐库 | `UserApi.get_music_gene` | 是 | `pending` | 音乐基因/个性资料 |
 | Q070 | 个人音乐库 | `UserApi.get_dislike_list` | 是 | `pending` | 不喜欢列表 |
