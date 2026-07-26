@@ -55,6 +55,8 @@ const SONG_URL_MODULE: &str = "music.vkey.GetVkey";
 const SONG_URL_METHOD: &str = "UrlGetVkey";
 const ENCRYPTED_SONG_URL_MODULE: &str = "music.vkey.GetEVkey";
 const ENCRYPTED_SONG_URL_METHOD: &str = "CgiGetEVkey";
+const ALBUM_DETAIL_MODULE: &str = "music.musichallAlbum.AlbumInfoServer";
+const ALBUM_DETAIL_METHOD: &str = "GetAlbumDetail";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
@@ -1061,6 +1063,123 @@ struct QqVipInfoResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAlbumDetailInfo {
+    #[serde(default, alias = "albumID", deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default, alias = "albumMid", alias = "albumMID", alias = "albummid")]
+    mid: String,
+    #[serde(default, alias = "albumName")]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default, alias = "albumTranName")]
+    subtitle: String,
+    #[serde(
+        default,
+        rename = "publishDate",
+        alias = "time_public",
+        alias = "publish_date"
+    )]
+    published_at: String,
+    #[serde(default, alias = "logo")]
+    pmid: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default, rename = "albumType")]
+    album_type: String,
+    #[serde(default)]
+    genre: String,
+    #[serde(default)]
+    wikiurl: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAlbumCompany {
+    #[serde(rename = "ID", deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    name: String,
+    #[serde(rename = "isShow", deserialize_with = "deserialize_qq_i64")]
+    is_show: i64,
+    #[serde(default)]
+    brief: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqAlbumSinger {
+    #[serde(
+        default,
+        alias = "singerID",
+        alias = "singerId",
+        alias = "SingerID",
+        alias = "singer_id",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    id: u64,
+    #[serde(
+        default,
+        alias = "singerMid",
+        alias = "singerMID",
+        alias = "SingerMid",
+        alias = "singer_mid"
+    )]
+    mid: String,
+    #[serde(default, alias = "singerName", alias = "singer_name")]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "SingerType",
+        alias = "vt",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    singer_type: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    uin: u64,
+    #[serde(
+        default,
+        alias = "singerPmid",
+        alias = "singer_pmid",
+        alias = "pic_mid"
+    )]
+    pmid: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqAlbumSingerContainer {
+    #[serde(default, rename = "singerList")]
+    singers: Vec<QqAlbumSinger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAlbumDetailResponse {
+    #[serde(rename = "basicInfo")]
+    album: QqAlbumDetailInfo,
+    company: QqAlbumCompany,
+    #[serde(default)]
+    singer: QqAlbumSingerContainer,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum QqAlbumIdentifier {
+    Numeric(u64),
+    Mid(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
     freeflow_url: Vec<String>,
@@ -1178,6 +1297,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::UserMembership,
+            Capability::AlbumDetail,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -1385,6 +1505,19 @@ impl MusicProvider for QqProvider {
                 })
             })
             .collect()
+    }
+
+    async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
+        self.validate_public_account(account)?;
+        let (api_request, identifier) = qq_album_detail_request(id)?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ album detail request returned no response"))?;
+        map_qq_album_detail(&identifier, response)
     }
 
     async fn set_track_subscription(
@@ -3290,6 +3423,18 @@ fn qq_vip_info_request() -> QqApiRequest {
     QqApiRequest::new("VipLogin.VipLoginInter", "vip_login_base", json!({}))
 }
 
+fn qq_album_detail_request(value: &str) -> Result<(QqApiRequest, QqAlbumIdentifier)> {
+    let identifier = parse_qq_album_identifier(value)?;
+    let param = match &identifier {
+        QqAlbumIdentifier::Numeric(id) => json!({ "albumId": id }),
+        QqAlbumIdentifier::Mid(mid) => json!({ "albumMId": mid }),
+    };
+    Ok((
+        QqApiRequest::new(ALBUM_DETAIL_MODULE, ALBUM_DETAIL_METHOD, param),
+        identifier,
+    ))
+}
+
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -3427,6 +3572,29 @@ fn parse_qq_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
     } else {
         Ok(QqTrackIdentifier::Mid(value.to_owned()))
     }
+}
+
+fn parse_qq_album_identifier(value: &str) -> Result<QqAlbumIdentifier> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ album identifier cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .map(QqAlbumIdentifier::Numeric)
+            .ok_or_else(|| {
+                TuneWeaveError::invalid_request("QQ numeric album ID must be a positive integer")
+                    .with_platform(Platform::Qq)
+            });
+    }
+    validate_qq_media_id(value, "album MID")?;
+    Ok(QqAlbumIdentifier::Mid(value.to_owned()))
 }
 
 fn map_query_song_response(
@@ -4773,6 +4941,133 @@ fn map_qq_vip_info(
             ("vip".to_owned(), vip_data),
             ("response".to_owned(), response.raw),
         ]),
+    })
+}
+
+fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -> Result<Album> {
+    let detail = serde_json::from_value::<QqAlbumDetailResponse>(response.data)
+        .map_err(|_| qq_data_error("QQ album detail response is malformed"))?;
+    let album_mid = detail.album.mid.trim();
+    if !album_mid.is_empty() {
+        validate_qq_media_id(album_mid, "album MID")
+            .map_err(|_| qq_data_error("QQ album detail returned an invalid album MID"))?;
+    }
+    match requested {
+        QqAlbumIdentifier::Numeric(id) if detail.album.id > 0 && detail.album.id != *id => {
+            return Err(qq_data_error(
+                "QQ album detail returned a different numeric album ID",
+            ));
+        }
+        QqAlbumIdentifier::Mid(mid) if !album_mid.is_empty() && album_mid != mid => {
+            return Err(qq_data_error(
+                "QQ album detail returned a different album MID",
+            ));
+        }
+        _ => {}
+    }
+    let id = if !album_mid.is_empty() {
+        album_mid.to_owned()
+    } else if detail.album.id > 0 {
+        detail.album.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ album detail is missing both album ID and MID",
+        ));
+    };
+    let name = [detail.album.name.as_str(), detail.album.title.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ album detail is missing its name"))?
+        .to_owned();
+    let aliases = [detail.album.subtitle.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty() && *value != name)
+        .map(str::to_owned)
+        .collect();
+    let artists = detail
+        .singer
+        .singers
+        .iter()
+        .map(map_qq_album_singer)
+        .collect::<Result<Vec<_>>>()?;
+    let cover_mid = if !album_mid.is_empty() {
+        Some(album_mid)
+    } else {
+        let pmid = detail.album.pmid.trim();
+        (!pmid.is_empty()).then_some(pmid)
+    };
+    let cover_url = cover_mid
+        .map(|mid| {
+            validate_qq_media_id(mid, "album cover MID")
+                .map_err(|_| qq_data_error("QQ album detail returned an invalid cover MID"))?;
+            Ok(qq_cover_url("T002", mid))
+        })
+        .transpose()?;
+    let album_data = serde_json::to_value(&detail.album)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ album detail"))?;
+    let company_data = serde_json::to_value(&detail.company)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ album company"))?;
+    let singer_data = serde_json::to_value(&detail.singer)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ album singers"))?;
+    let mut extensions = Extensions::from([
+        ("numeric_id".to_owned(), json!(detail.album.id)),
+        ("mid".to_owned(), json!(detail.album.mid)),
+        ("subtitle".to_owned(), json!(detail.album.subtitle)),
+        ("language".to_owned(), json!(detail.album.language)),
+        ("genre".to_owned(), json!(detail.album.genre)),
+        ("wiki_url".to_owned(), json!(detail.album.wikiurl)),
+        ("company".to_owned(), company_data),
+        ("singer".to_owned(), singer_data),
+        ("album".to_owned(), album_data),
+        ("response".to_owned(), response.raw),
+    ]);
+    extensions.insert(
+        "requested_identifier_kind".to_owned(),
+        json!(match requested {
+            QqAlbumIdentifier::Numeric(_) => "numeric_id",
+            QqAlbumIdentifier::Mid(_) => "mid",
+        }),
+    );
+    Ok(Album {
+        resource_ref: qq_ref(&id, "album")?,
+        platform: Platform::Qq,
+        id,
+        name,
+        aliases,
+        artists,
+        description: detail.album.desc.trim().to_owned(),
+        cover_url,
+        published_at: (!detail.album.published_at.trim().is_empty())
+            .then(|| detail.album.published_at.trim().to_owned()),
+        track_count: None,
+        company: (!detail.company.name.trim().is_empty())
+            .then(|| detail.company.name.trim().to_owned()),
+        kind: (!detail.album.album_type.trim().is_empty())
+            .then(|| detail.album.album_type.trim().to_owned()),
+        extensions,
+    })
+}
+
+fn map_qq_album_singer(singer: &QqAlbumSinger) -> Result<ArtistSummary> {
+    let name = [singer.name.as_str(), singer.title.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ album detail contains a singer without a name"))?;
+    let mid = singer.mid.trim();
+    let resource_ref = if !mid.is_empty() {
+        validate_qq_media_id(mid, "album singer MID")
+            .map_err(|_| qq_data_error("QQ album detail returned an invalid singer MID"))?;
+        Some(qq_ref(mid, "album singer")?)
+    } else if singer.id > 0 {
+        Some(qq_ref(&singer.id.to_string(), "album singer")?)
+    } else {
+        None
+    };
+    Ok(ArtistSummary {
+        resource_ref,
+        name: name.to_owned(),
     })
 }
 
@@ -8380,6 +8675,127 @@ mod tests {
     }
 
     #[test]
+    fn album_detail_request_supports_numeric_ids_and_mids_without_guessing() {
+        let (numeric, identifier) = qq_album_detail_request("100").expect("numeric album");
+        assert_eq!(identifier, QqAlbumIdentifier::Numeric(100));
+        assert_eq!(numeric.module, ALBUM_DETAIL_MODULE);
+        assert_eq!(numeric.method, ALBUM_DETAIL_METHOD);
+        assert_eq!(numeric.param, json!({"albumId": 100}));
+
+        let (mid, identifier) = qq_album_detail_request("001uKKpF1RuJSd").expect("album MID");
+        assert_eq!(
+            identifier,
+            QqAlbumIdentifier::Mid("001uKKpF1RuJSd".to_owned())
+        );
+        assert_eq!(mid.param, json!({"albumMId": "001uKKpF1RuJSd"}));
+    }
+
+    #[test]
+    fn album_detail_mapping_keeps_company_singers_descriptions_and_unknown_fields() {
+        let album = map_qq_album_detail(
+            &QqAlbumIdentifier::Numeric(100),
+            response(json!({
+                "basicInfo": {
+                    "albumID": "100",
+                    "albumMid": "001uKKpF1RuJSd",
+                    "albumName": "叶惠美",
+                    "title": "叶惠美",
+                    "albumTranName": "Yeh Hui Mei",
+                    "publishDate": "2003-07-31",
+                    "logo": "001uKKpF1RuJSd",
+                    "desc": "周杰伦第四张专辑",
+                    "language": "国语",
+                    "albumType": "录音室专辑",
+                    "genre": "流行",
+                    "wikiurl": "https://y.qq.com/wiki/album/100",
+                    "futureAlbumField": true
+                },
+                "company": {
+                    "ID": "42",
+                    "name": "杰威尔音乐",
+                    "isShow": 1,
+                    "brief": "发行公司",
+                    "futureCompanyField": "kept"
+                },
+                "singer": {
+                    "singerList": [{
+                        "singerID": "4558",
+                        "singerMid": "0025NhlN2yWrP4",
+                        "singerName": "周杰伦",
+                        "title": "周杰伦",
+                        "SingerType": 0,
+                        "uin": "0",
+                        "pic_mid": "0025NhlN2yWrP4",
+                        "futureSingerField": 7
+                    }],
+                    "futureSingerContainer": false
+                },
+                "futureTopField": {"kept": true}
+            })),
+        )
+        .expect("map QQ album detail");
+        assert_eq!(album.resource_ref.to_string(), "qq:001uKKpF1RuJSd");
+        assert_eq!(album.id, "001uKKpF1RuJSd");
+        assert_eq!(album.name, "叶惠美");
+        assert_eq!(album.aliases, ["Yeh Hui Mei"]);
+        assert_eq!(album.artists[0].name, "周杰伦");
+        assert_eq!(
+            album.artists[0]
+                .resource_ref
+                .as_ref()
+                .expect("singer MID")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(album.description, "周杰伦第四张专辑");
+        assert_eq!(album.published_at.as_deref(), Some("2003-07-31"));
+        assert_eq!(album.company.as_deref(), Some("杰威尔音乐"));
+        assert_eq!(album.kind.as_deref(), Some("录音室专辑"));
+        assert_eq!(album.extensions["numeric_id"], 100);
+        assert_eq!(album.extensions["language"], "国语");
+        assert_eq!(album.extensions["genre"], "流行");
+        assert_eq!(album.extensions["album"]["futureAlbumField"], true);
+        assert_eq!(album.extensions["company"]["futureCompanyField"], "kept");
+        assert_eq!(
+            album.extensions["singer"]["singerList"][0]["futureSingerField"],
+            7
+        );
+    }
+
+    #[test]
+    fn album_detail_mapping_rejects_identity_conflicts_and_malformed_known_fields() {
+        let valid = || {
+            json!({
+                "basicInfo": {"albumID": 100, "albumMid": "001uKKpF1RuJSd", "albumName": "叶惠美"},
+                "company": {"ID": 42, "name": "杰威尔音乐", "isShow": 1},
+                "singer": {"singerList": []}
+            })
+        };
+        let id_conflict = map_qq_album_detail(&QqAlbumIdentifier::Numeric(101), response(valid()))
+            .expect_err("numeric album mismatch");
+        assert_eq!(id_conflict.code, ErrorCode::UpstreamError);
+        let mid_conflict = map_qq_album_detail(
+            &QqAlbumIdentifier::Mid("001DifferentMid".to_owned()),
+            response(valid()),
+        )
+        .expect_err("album MID mismatch");
+        assert_eq!(mid_conflict.code, ErrorCode::UpstreamError);
+
+        for malformed in [
+            json!({"company": {"ID": 1, "name": "公司", "isShow": 1}}),
+            json!({"basicInfo": {}, "company": {"ID": 1, "name": "公司", "isShow": 1}}),
+            json!({"basicInfo": {"albumID": 100, "albumName": "专辑"}, "company": {"name": "公司", "isShow": 1}}),
+            json!({"basicInfo": {"albumID": 100, "albumName": "专辑"}, "company": {"ID": 1, "name": [], "isShow": 1}}),
+            json!({"basicInfo": {"albumID": 100, "albumName": "专辑"}, "company": {"ID": 1, "name": "公司", "isShow": 1}, "singer": {"singerList": {}}}),
+            json!({"basicInfo": {"albumID": 100, "albumMid": "unsafe/album", "albumName": "专辑"}, "company": {"ID": 1, "name": "公司", "isShow": 1}}),
+        ] {
+            let error = map_qq_album_detail(&QqAlbumIdentifier::Numeric(100), response(malformed))
+                .expect_err("malformed album detail");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn mv_url_request_and_mapping_preserve_batches_and_choose_the_best_mp4() {
         let vids = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
         let (api_request, guid) = qq_mv_urls_request(&vids);
@@ -10090,6 +10506,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn album_detail_validates_identifiers_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::AlbumDetail));
+        for id in ["", "0", "18446744073709551616", "unsafe/album"] {
+            let error = provider
+                .album(id, None)
+                .await
+                .expect_err("invalid album identifier");
+            assert_eq!(error.code, ErrorCode::InvalidRequest, "{id}");
+        }
+        let account = provider
+            .album("100", Some("missing-account"))
+            .await
+            .expect_err("missing album account alias");
+        assert_eq!(account.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn personal_playlists_require_the_selected_account_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         let error = provider
@@ -11271,6 +11705,29 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_album_detail_accepts_numeric_id_and_canonical_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let numeric = provider.album("100", None).await.expect("numeric album");
+        assert_eq!(numeric.platform, Platform::Qq);
+        assert!(!numeric.id.is_empty());
+        assert!(!numeric.name.is_empty());
+        assert!(!numeric.artists.is_empty());
+        assert!(numeric.cover_url.is_some());
+        assert!(numeric.published_at.is_some());
+        assert_eq!(numeric.extensions["numeric_id"], 100);
+
+        let by_mid = provider.album(&numeric.id, None).await.expect("album MID");
+        assert_eq!(by_mid.resource_ref, numeric.resource_ref);
+        assert_eq!(by_mid.name, numeric.name);
+        assert_eq!(by_mid.artists, numeric.artists);
     }
 
     #[tokio::test]

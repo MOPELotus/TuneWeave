@@ -1045,7 +1045,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/tracks/{ref}` | `account?` | `Track`；QQ 数字 ID/MID 分别走 Web 富详情分支，发行公司、流派、简介、语言、发布时间、额外字段和完整子响应位于扩展 |
 | GET | `/v1/tracks/{ref}/availability` | `account?`、`bitrate?`（默认 999000，也接受 `br`） | `TrackAvailability`；不可播仍返回成功包络与 `playable=false` |
 | GET | `/v1/albums` | `platform?`、`account?`、`catalog=new|newest`、`area?`、分页 | `Album[]` |
-| GET | `/v1/albums/{ref}` | `account?` | `Album` |
+| GET | `/v1/albums/{ref}` | `account?` | `Album`；QQ 数字 ID 和 MID 共用同一端点并返回平台规范 MID 身份 |
 | GET | `/v1/albums/{ref}/tracks` | 分页、`account?` | `Track[]` |
 | GET | `/v1/albums/{ref}/track-entitlements` | 分页、`account?` | `TrackEntitlement[]` |
 | GET | `/v1/albums/{ref}/stats` | `account?` | `AlbumStats` |
@@ -1305,6 +1305,8 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 | GET | `/v1/account/cloud/tracks/{ref}/download` | `account?` | 云盘源文件的统一 `Stream`；不可用时返回明确业务错误 |
 | GET | `/v1/account/cloud/tracks/{ref}/download/redirect` | `account?` | 302 到云盘源文件 URL；源文件 URL 缺失时回退到同平台同账户普通取流 |
 | GET | `/v1/account/cloud/lyrics` | `platform?`、`account?`、`user_id`、`track_id` | 云盘文件标签中的统一 `Lyrics` |
+
+QQ 专辑详情固定调用 `AlbumInfoServer/GetAlbumDetail`。纯十进制引用作为正数 `albumId`，其他合法字母数字引用作为 `albumMId`；服务端返回 MID 时统一 `Album.ref/id` 使用该规范身份，数字 ID 保留在扩展。`basicInfo`、发行公司与 `singer.singerList` 分别强类型解析，副标题、发行日期、描述、语种、类型、流派、百科地址、公司资料、全部署名歌手及未知字段不会因统一摘要而丢失；封面 URL 只从已校验 MID 拼接到固定 QQ 图片域。身份冲突、缺失 ID/MID、空名称或畸形已知字段返回上游错误，不会输出半成品专辑。
 
 `principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 

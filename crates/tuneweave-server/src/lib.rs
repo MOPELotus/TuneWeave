@@ -15352,6 +15352,7 @@ mod tests {
                 Capability::TrackSubscriptionWrite,
                 Capability::Lyrics,
                 Capability::UserMembership,
+                Capability::AlbumDetail,
             ])
         }
 
@@ -15536,6 +15537,40 @@ mod tests {
                             "userinfo": {"expire": 1893456000, "music_level": 12}
                         }),
                     ),
+                ]),
+            })
+        }
+
+        async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
+            let canonical_id = if id.bytes().all(|byte| byte.is_ascii_digit()) {
+                "001uKKpF1RuJSd"
+            } else {
+                id
+            };
+            Ok(Album {
+                resource_ref: ResourceRef::new(Platform::Qq, canonical_id)
+                    .expect("valid QQ album reference"),
+                platform: Platform::Qq,
+                id: canonical_id.to_owned(),
+                name: "叶惠美".to_owned(),
+                aliases: vec!["Yeh Hui Mei".to_owned()],
+                artists: vec![ArtistSummary {
+                    resource_ref: Some(
+                        ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                            .expect("valid QQ singer reference"),
+                    ),
+                    name: "周杰伦".to_owned(),
+                }],
+                description: "周杰伦第四张专辑".to_owned(),
+                cover_url: Some("https://example.test/qq-album.jpg".to_owned()),
+                published_at: Some("2003-07-31".to_owned()),
+                track_count: None,
+                company: Some("杰威尔音乐".to_owned()),
+                kind: Some("录音室专辑".to_owned()),
+                extensions: Extensions::from([
+                    ("requested_id".to_owned(), json!(id)),
+                    ("account".to_owned(), json!(account)),
+                    ("numeric_id".to_owned(), json!(100)),
                 ]),
             })
         }
@@ -19105,6 +19140,24 @@ mod tests {
         assert_eq!(tracks["data"][0]["ref"], "netease:185809");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 5);
         assert_eq!(tracks["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn qq_album_detail_canonicalizes_numeric_identity_and_forwards_account() {
+        let (status, album) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/albums/qq:100?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(album["data"]["ref"], "qq:001uKKpF1RuJSd");
+        assert_eq!(album["data"]["id"], "001uKKpF1RuJSd");
+        assert_eq!(album["data"]["name"], "叶惠美");
+        assert_eq!(album["data"]["artists"][0]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(album["data"]["extensions"]["requested_id"], "100");
+        assert_eq!(album["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(album["meta"]["platform"], "qq");
+        assert_eq!(album["meta"]["account"], "green-vip");
     }
 
     #[tokio::test]
