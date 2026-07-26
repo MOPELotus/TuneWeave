@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
     AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistSummary, ArtistTrackListRequest,
-    ArtistTrackOrder, AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch,
-    AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
+    ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
+    AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
     LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
     MultiStyleLyricTranslations, MusicProvider, Page, PageMeta, Platform, Playlist,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
@@ -25,8 +25,8 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
     SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoResourceKind, VideoStream,
-    VideoStreamRequest,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoKind, VideoResourceKind,
+    VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -66,6 +66,8 @@ const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
 const SINGER_ALBUM_METHOD: &str = "GetAlbumList";
+const SINGER_MV_MODULE: &str = "MvService.MvInfoProServer";
+const SINGER_MV_METHOD: &str = "GetSingerMvList";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
@@ -1521,6 +1523,48 @@ struct QqSingerAlbumResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerMv {
+    #[serde(default, rename = "mvid", deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(default)]
+    vid: String,
+    #[serde(default, rename = "type", deserialize_with = "deserialize_qq_i64")]
+    video_type: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    picurl: String,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    picformat: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    duration: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    playcnt: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    pubdate: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    icon_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerMvResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(
+        default,
+        rename = "list",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    videos: Vec<QqSingerMv>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
@@ -1643,6 +1687,7 @@ impl MusicProvider for QqProvider {
             Capability::ArtistDetail,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
+            Capability::ArtistVideos,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -1916,6 +1961,52 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer album request returned no response"))?;
         map_qq_singer_albums(id.trim(), request.limit, request.offset, response)
+    }
+
+    async fn artist_videos(
+        &self,
+        id: &str,
+        request: &ArtistVideoListRequest,
+    ) -> Result<Page<Video>> {
+        self.validate_public_account(request.account.as_deref())?;
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer MV page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request.cursor.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer MV list does not support cursors",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request
+            .order
+            .as_deref()
+            .is_some_and(|order| !order.eq_ignore_ascii_case("hot"))
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer MV list only exposes the upstream hot order",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "allowed_order": "hot" })));
+        }
+        let request_api = qq_singer_mvs_request(id, request.limit, request.offset)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer MV request returned no response"))?;
+        map_qq_singer_mvs(
+            id.trim(),
+            request.limit,
+            request.offset,
+            request.kind,
+            response,
+        )
     }
 
     async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
@@ -3926,6 +4017,21 @@ fn qq_singer_albums_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiR
     ))
 }
 
+fn qq_singer_mvs_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    Ok(QqApiRequest::new(
+        SINGER_MV_MODULE,
+        SINGER_MV_METHOD,
+        json!({
+            "singermid": mid,
+            "order": 1,
+            "count": limit,
+            "start": offset
+        }),
+    ))
+}
+
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -5803,6 +5909,121 @@ fn map_qq_singer_album(singer_mid: &str, album: QqSingerAlbum) -> Result<Album> 
         track_count: Some(album.track_count),
         company: None,
         kind: (!album.album_type.trim().is_empty()).then(|| album.album_type.trim().to_owned()),
+        extensions,
+    })
+}
+
+fn map_qq_singer_mvs(
+    singer_mid: &str,
+    limit: u32,
+    offset: u32,
+    requested_kind: VideoKind,
+    response: QqApiResponse,
+) -> Result<Page<Video>> {
+    validate_qq_media_id(singer_mid, "singer MID")?;
+    let data = serde_json::from_value::<QqSingerMvResponse>(response.data)
+        .map_err(|error| qq_data_error(format!("QQ singer MV response is malformed: {error}")))?;
+    let upstream_returned = u32::try_from(data.videos.len())
+        .map_err(|_| qq_data_error("QQ singer MV page is too large"))?;
+    let upstream_end = offset.checked_add(upstream_returned).ok_or_else(|| {
+        qq_data_error("QQ singer MV pagination exceeded the supported offset range")
+    })?;
+    if u64::from(upstream_end) > data.total
+        || (upstream_returned == 0 && u64::from(offset) < data.total)
+    {
+        return Err(qq_data_error(
+            "QQ singer MV response has inconsistent pagination",
+        ));
+    }
+    let returned = upstream_returned.min(limit);
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ singer MV pagination exceeded the supported offset range")
+    })?;
+    let response_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer MV response"))?;
+    let returned = usize::try_from(returned)
+        .map_err(|_| qq_data_error("QQ singer MV page exceeds this platform's capacity"))?;
+    let mut items = Vec::with_capacity(returned);
+    for video in data.videos.into_iter().take(returned) {
+        items.push(map_qq_singer_mv(singer_mid, video)?);
+    }
+    let has_more = u64::from(next_offset) < data.total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("singer_mid".to_owned(), json!(singer_mid)),
+                ("kind".to_owned(), json!("mv")),
+                ("requested_kind".to_owned(), json!(requested_kind)),
+                ("order".to_owned(), json!("hot")),
+                ("upstream_returned".to_owned(), json!(upstream_returned)),
+                ("limit_applied".to_owned(), json!(true)),
+                ("data".to_owned(), response_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_singer_mv(singer_mid: &str, video: QqSingerMv) -> Result<Video> {
+    let vid = video.vid.trim();
+    if !vid.is_empty() {
+        validate_qq_media_id(vid, "MV VID")
+            .map_err(|_| qq_data_error("QQ singer MV response returned an invalid VID"))?;
+    }
+    let id = if !vid.is_empty() {
+        vid.to_owned()
+    } else if video.id > 0 {
+        video.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ singer MV response is missing both MV ID and VID",
+        ));
+    };
+    let title = [video.title.trim(), video.name.trim()]
+        .into_iter()
+        .find(|title| !title.is_empty())
+        .ok_or_else(|| qq_data_error("QQ singer MV response contains a video without a title"))?
+        .to_owned();
+    let duration_ms = (video.duration > 0)
+        .then(|| {
+            video
+                .duration
+                .checked_mul(1_000)
+                .ok_or_else(|| qq_data_error("QQ singer MV duration is out of range"))
+        })
+        .transpose()?;
+    let video_data = serde_json::to_value(&video)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer MV entry"))?;
+    let mut extensions = Extensions::from([
+        ("singer_mid".to_owned(), json!(singer_mid)),
+        ("vid".to_owned(), json!(video.vid)),
+        ("mv_type".to_owned(), json!(video.video_type)),
+        ("pic_format".to_owned(), json!(video.picformat)),
+        ("icon_type".to_owned(), json!(video.icon_type)),
+        ("published_at_unix_seconds".to_owned(), json!(video.pubdate)),
+        ("singer_mv_entry".to_owned(), video_data),
+    ]);
+    if video.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(video.id));
+    }
+    Ok(Video {
+        resource_ref: qq_ref(&id, "MV")?,
+        platform: Platform::Qq,
+        id,
+        title,
+        creators: Vec::new(),
+        description: String::new(),
+        cover_url: (!video.picurl.trim().is_empty()).then(|| video.picurl.trim().to_owned()),
+        duration_ms,
+        published_at: (video.pubdate > 0).then(|| video.pubdate.to_string()),
+        play_count: Some(video.playcnt),
+        subscribed: None,
         extensions,
     })
 }
@@ -8724,6 +8945,22 @@ mod tests {
         })
     }
 
+    fn sample_singer_mv(id: i64, vid: &str, title: &str) -> Value {
+        json!({
+            "mvid": id,
+            "vid": vid,
+            "type": "0",
+            "title": title,
+            "picurl": "https://y.gtimg.cn/music/photo_new/T015R640x360M000sample.jpg",
+            "picformat": 1,
+            "duration": "269",
+            "playcnt": "123456",
+            "pubdate": "1700000000",
+            "icon_type": 2,
+            "futureMvField": true
+        })
+    }
+
     fn search_query(kind: SearchKind, limit: u32, offset: u32) -> SearchQuery {
         SearchQuery {
             query: "周杰伦".to_owned(),
@@ -10191,6 +10428,111 @@ mod tests {
         ] {
             let error = map_qq_singer_albums("0025NhlN2yWrP4", 10, offset, response(data))
                 .expect_err("malformed singer album response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn singer_mv_request_preserves_hot_order_and_exact_offset() {
+        let request = qq_singer_mvs_request(" 0025NhlN2yWrP4 ", 30, 7).expect("singer MV request");
+        assert_eq!(request.module, SINGER_MV_MODULE);
+        assert_eq!(request.method, SINGER_MV_METHOD);
+        assert_eq!(
+            request.param,
+            json!({
+                "singermid": "0025NhlN2yWrP4",
+                "order": 1,
+                "count": 30,
+                "start": 7
+            })
+        );
+    }
+
+    #[test]
+    fn singer_mv_mapping_preserves_typed_items_overfetch_and_real_pagination() {
+        let page = map_qq_singer_mvs(
+            "0025NhlN2yWrP4",
+            2,
+            0,
+            VideoKind::Mv,
+            response(json!({
+                "total": "5",
+                "list": [
+                    sample_singer_mv(101, "a001mvvid01", "晴天 MV"),
+                    sample_singer_mv(102, "a001mvvid02", "东风破 MV"),
+                    sample_singer_mv(103, "a001mvvid03", "夜曲 MV")
+                ],
+                "futurePageField": "kept"
+            })),
+        )
+        .expect("map singer MV page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:a001mvvid01");
+        assert_eq!(page.items[0].title, "晴天 MV");
+        assert!(page.items[0].creators.is_empty());
+        assert_eq!(page.items[0].duration_ms, Some(269_000));
+        assert_eq!(page.items[0].published_at.as_deref(), Some("1700000000"));
+        assert_eq!(page.items[0].play_count, Some(123_456));
+        assert_eq!(page.items[0].extensions["numeric_id"], 101);
+        assert_eq!(page.items[0].extensions["singer_mid"], "0025NhlN2yWrP4");
+        assert_eq!(
+            page.items[0].extensions["singer_mv_entry"]["futureMvField"],
+            true
+        );
+        assert_eq!(page.pagination.total, Some(5));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["kind"], "mv");
+        assert_eq!(page.pagination.extensions["requested_kind"], "mv");
+        assert_eq!(page.pagination.extensions["order"], "hot");
+        assert_eq!(page.pagination.extensions["upstream_returned"], 3);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            page.pagination.extensions["data"]["futurePageField"],
+            "kept"
+        );
+
+        let empty = map_qq_singer_mvs(
+            "0025NhlN2yWrP4",
+            10,
+            0,
+            VideoKind::All,
+            response(json!({"total": 0, "list": null})),
+        )
+        .expect("null MV list follows the upstream empty-list contract");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.total, Some(0));
+        assert_eq!(empty.pagination.extensions["requested_kind"], "all");
+        assert!(!empty.pagination.has_more);
+    }
+
+    #[test]
+    fn singer_mv_mapping_rejects_malformed_items_and_pagination() {
+        for (offset, data) in [
+            (0, json!({"total": "many", "list": []})),
+            (0, json!({"total": 1, "list": {}})),
+            (0, json!({"total": 1, "list": [{}]})),
+            (
+                0,
+                json!({"total": 1, "list": [sample_singer_mv(101, "unsafe/vid", "晴天 MV")]}),
+            ),
+            (
+                0,
+                json!({"total": 1, "list": [sample_singer_mv(0, "", "晴天 MV")]}),
+            ),
+            (
+                0,
+                json!({"total": 1, "list": [sample_singer_mv(101, "a001mvvid01", " ")]}),
+            ),
+            (0, json!({"total": 1, "list": []})),
+            (
+                1,
+                json!({"total": 1, "list": [sample_singer_mv(101, "a001mvvid01", "晴天 MV")]}),
+            ),
+        ] {
+            let error =
+                map_qq_singer_mvs("0025NhlN2yWrP4", 10, offset, VideoKind::Mv, response(data))
+                    .expect_err("malformed singer MV response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
     }
@@ -12071,6 +12413,7 @@ mod tests {
         assert!(provider.capabilities().contains(&Capability::ArtistDetail));
         assert!(provider.capabilities().contains(&Capability::ArtistAlbums));
         assert!(provider.capabilities().contains(&Capability::ArtistTracks));
+        assert!(provider.capabilities().contains(&Capability::ArtistVideos));
         for mid in ["", "unsafe/singer", "singer mid"] {
             let error = provider
                 .artist(mid, None)
@@ -12122,6 +12465,35 @@ mod tests {
             .artist_albums("0025NhlN2yWrP4", &albums)
             .await
             .expect_err("missing singer album account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let mut videos = ArtistVideoListRequest::new(0, 0);
+        let error = provider
+            .artist_videos("0025NhlN2yWrP4", &videos)
+            .await
+            .expect_err("invalid singer MV page size");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        videos.limit = 10;
+        videos.cursor = Some("cursor".to_owned());
+        let error = provider
+            .artist_videos("0025NhlN2yWrP4", &videos)
+            .await
+            .expect_err("unsupported singer MV cursor");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        videos.cursor = None;
+        videos.order = Some("time".to_owned());
+        let error = provider
+            .artist_videos("0025NhlN2yWrP4", &videos)
+            .await
+            .expect_err("unsupported singer MV order");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.details["allowed_order"], "hot");
+        videos.order = Some("HOT".to_owned());
+        videos.account = Some("missing-account".to_owned());
+        let error = provider
+            .artist_videos("0025NhlN2yWrP4", &videos)
+            .await
+            .expect_err("missing singer MV account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -13441,6 +13813,52 @@ mod tests {
             .artist_albums("0025NhlN2yWrP4", &request(2))
             .await
             .expect("continued singer album page");
+        assert!(!continuation.items.is_empty());
+        assert_eq!(
+            continuation.items[0].resource_ref,
+            shifted.items[1].resource_ref
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_mv_pages_preserve_exact_offsets_and_continuation() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let request = |offset| {
+            let mut request = ArtistVideoListRequest::new(2, offset);
+            request.kind = VideoKind::Mv;
+            request
+        };
+        let first = provider
+            .artist_videos("0025NhlN2yWrP4", &request(0))
+            .await
+            .expect("first singer MV page");
+        assert_eq!(first.items.len(), 2);
+        assert!(first.pagination.total.is_some_and(|total| total > 2));
+        assert_eq!(first.pagination.next_offset, Some(2));
+        assert_eq!(first.pagination.extensions["singer_mid"], "0025NhlN2yWrP4");
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|video| video.platform == Platform::Qq)
+        );
+
+        let shifted = provider
+            .artist_videos("0025NhlN2yWrP4", &request(1))
+            .await
+            .expect("non-aligned singer MV page");
+        assert_eq!(shifted.items.len(), 2);
+        assert_eq!(shifted.items[0].resource_ref, first.items[1].resource_ref);
+
+        let continuation = provider
+            .artist_videos("0025NhlN2yWrP4", &request(2))
+            .await
+            .expect("continued singer MV page");
         assert!(!continuation.items.is_empty());
         assert_eq!(
             continuation.items[0].resource_ref,

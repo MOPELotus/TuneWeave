@@ -1067,7 +1067,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/artists/{ref}/top-tracks` | `account?` | 热门 `Track[]` 固定快照；不接受伪分页，`has_more=false` |
 | GET | `/v1/artists/{ref}/albums` | 分页、`account?` | `Album[]`；QQ 支持精确任意偏移，歌手级上游信息保留在分页扩展 |
 | GET | `/v1/artists/{ref}/fans` | 分页、`account?` | `User[]`；上游无可靠总数时 `total=null` |
-| GET | `/v1/artists/{ref}/videos` | `type=mv|all`、分页、`cursor?`、`order?`、`account?` | `Video[]` |
+| GET | `/v1/artists/{ref}/videos` | `type=mv|all`、分页、`cursor?`、`order?`、`account?` | `Video[]`；QQ 支持 MV/精确任意偏移和 hot 排序，不支持游标 |
 | GET | `/v1/videos` | `platform?`、`account?`、`catalog=all|latest|exclusive|timeline_all|timeline_recommended|group`、`area?`、`type?`、`order?`、`group_id?`、分页 | `Video[]`；MV 与站内视频目录按后端真实能力约束筛选及续页 |
 | GET | `/v1/videos/taxonomy` | `platform?`、`account?`、`kind/type=categories|groups`、分页 | `VideoCatalogOption[]`；视频分类或完整标签目录 |
 | PUT/DELETE | `/v1/account/library/videos/{ref}` | `account?`、`kind/type?=mv|video` | `SubscriptionResult`；收藏或取消收藏视频资源，平台只支持其中一种资源时明确拒绝其余类型 |
@@ -1315,6 +1315,8 @@ QQ 歌手详情固定调用 Android `UnifiedHomepageSrv/GetHomepageHeader` 并�
 QQ 歌手歌曲固定调用 Android `musichall.song_list_server/GetSingerSongList`，使用 `singerMid/order=1/begin/number`；参考能力没有时间排序，`order=time` 不会静默降级。当前上游会忽略较小的 `number` 并固定返回最多 30 条，但 `begin` 仍精确应用，因此 TuneWeave 把物理响应安全裁成调用方请求的逻辑窗口，用逻辑条目数推进 `next_offset`，同时在分页扩展公开 `upstream_returned/limit_applied` 并保留完整物理响应。这样任意非整页 `offset` 可连续遍历且不会因上游过取而越过资源；`singerMid/totalNum/songList[*].songInfo`、外层曲序和未知字段均经强类型包装保留。
 
 QQ 歌手专辑固定调用 Android `music.musichallAlbum.AlbumListServer/GetAlbumList`，使用 `singerMid/order=1/number/begin`。稳定专辑 MID 优先于数字 ID，译名、歌手、封面、发行日期、曲数、类型、标签和完整原项均映射或保留；`albumList=null` 作为合法空页处理，歌手身份、总数或条目畸形则明确失败。当前上游同样会把较小的 `number` 固定过取为 30 条，统一接口按请求的逻辑窗口裁切并在分页扩展公开 `upstream_returned/limit_applied`；2026-07-26 的 release HTTP 验证确认任意 offset 连续且不会跳过专辑。
+
+QQ 歌手 MV 固定调用 Android `MvService.MvInfoProServer/GetSingerMvList`，使用 `singermid/order=1/count/start`。默认 `type=mv`，显式 `type=all` 在 QQ 当前只提供歌手 MV 的能力边界内使用同一目录；排序只接受 hot，不支持游标。VID 优先于数字 MV ID，标题、封面、时长、播放量、发布时间戳和完整原项均映射或保留；该响应不包含歌手名，TuneWeave 不伪造空名 creator，而是在条目及分页扩展保留 `singer_mid`。分页保留过取裁切防线及 `upstream_returned/limit_applied`，2026-07-26 的 release HTTP 验证中上游 `count=2` 精确返回 2 条，总数 10426，offset 0/1/2 连续。
 
 `principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 

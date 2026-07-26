@@ -15356,6 +15356,7 @@ mod tests {
                 Capability::ArtistDetail,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
+                Capability::ArtistVideos,
             ])
         }
 
@@ -15666,6 +15667,60 @@ mod tests {
                     has_more,
                     extensions: Extensions::from([
                         ("singer_mid".to_owned(), json!(id)),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                },
+            })
+        }
+
+        async fn artist_videos(
+            &self,
+            id: &str,
+            request: &ArtistVideoListRequest,
+        ) -> Result<Page<Video>> {
+            let mut videos = [
+                ("a001mvvid01", "晴天 MV"),
+                ("a001mvvid02", "东风破 MV"),
+                ("a001mvvid03", "夜曲 MV"),
+            ]
+            .into_iter()
+            .map(|(video_id, title)| Video {
+                resource_ref: ResourceRef::new(Platform::Qq, video_id)
+                    .expect("valid QQ singer MV reference"),
+                platform: Platform::Qq,
+                id: video_id.to_owned(),
+                title: title.to_owned(),
+                creators: Vec::new(),
+                description: String::new(),
+                cover_url: None,
+                duration_ms: Some(269_000),
+                published_at: Some("1700000000".to_owned()),
+                play_count: Some(123_456),
+                subscribed: None,
+                extensions: Extensions::from([("singer_mid".to_owned(), json!(id))]),
+            })
+            .collect::<Vec<_>>();
+            let start = usize::try_from(request.offset)
+                .unwrap_or(usize::MAX)
+                .min(videos.len());
+            let end = start
+                .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+                .min(videos.len());
+            let items = videos.drain(start..end).collect::<Vec<_>>();
+            let has_more = end < 3;
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset: has_more.then(|| u32::try_from(end).expect("small test offset")),
+                    has_more,
+                    extensions: Extensions::from([
+                        ("singer_mid".to_owned(), json!(id)),
+                        ("kind".to_owned(), json!("mv")),
+                        ("requested_kind".to_owned(), json!(request.kind)),
+                        ("order".to_owned(), json!("hot")),
                         ("account".to_owned(), json!(request.account)),
                     ]),
                 },
@@ -19399,7 +19454,7 @@ mod tests {
         assert_eq!(artist["meta"]["account"], "green-vip");
 
         let (status, tracks) = json_response_from(
-            app,
+            app.clone(),
             "/v1/artists/qq:0025NhlN2yWrP4/tracks?order=hot&limit=2&offset=0&account=green-vip",
         )
         .await;
@@ -19417,6 +19472,31 @@ mod tests {
         assert_eq!(tracks["meta"]["pagination"]["extensions"]["order"], "hot");
         assert_eq!(
             tracks["meta"]["pagination"]["extensions"]["account"],
+            "green-vip"
+        );
+
+        let (status, videos) = json_response_from(
+            app,
+            "/v1/artists/qq:0025NhlN2yWrP4/videos?type=mv&order=hot&limit=2&offset=0&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(videos["data"].as_array().expect("singer MVs").len(), 2);
+        assert_eq!(videos["data"][0]["ref"], "qq:a001mvvid01");
+        assert_eq!(videos["data"][0]["title"], "晴天 MV");
+        assert_eq!(videos["meta"]["pagination"]["limit"], 2);
+        assert_eq!(videos["meta"]["pagination"]["total"], 3);
+        assert_eq!(videos["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(
+            videos["meta"]["pagination"]["extensions"]["singer_mid"],
+            "0025NhlN2yWrP4"
+        );
+        assert_eq!(
+            videos["meta"]["pagination"]["extensions"]["requested_kind"],
+            "mv"
+        );
+        assert_eq!(
+            videos["meta"]["pagination"]["extensions"]["account"],
             "green-vip"
         );
     }

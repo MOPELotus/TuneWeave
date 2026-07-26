@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=64`、`partial=0`、`implemented=21`、`verified=19`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=63`、`partial=0`、`implemented=21`、`verified=20`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -54,7 +54,7 @@
 | Q033 | 内容展示 | `SingerApi.get_similar` | 是 | `pending` | 相似歌手 |
 | Q034 | 内容展示 | `SingerApi.get_songs_list` | 是 | `verified` | `GET /v1/artists/{qq-ref}/tracks?order=hot` 精确调用 Android `musichall.song_list_server/GetSingerSongList`，提交安全 `singerMid`、参考固定 `order=1` 以及统一 `offset/limit` 对应的 `begin/number`；参考方法没有时间排序分支，因此 `order=time` 明确拒绝而不偷换为 hot。响应强类型解析 `singerMid/totalNum/songList[*].songInfo`，歌曲复用完整统一 `Track` 映射，外层条目、顺序、重复项、未知字段和完整响应均保留；`null` 列表按参考语义映射为空。当前平台会忽略小 `number` 并固定过取 30 条，但真实验证确认 `begin` 精确生效；TuneWeave 保留 30 条物理响应，只提升请求窗口所需的条目，并以 `upstream_returned/limit_applied` 明示适配，真实 `total/next_offset/has_more` 按统一窗口推进。MID 冲突、提前空页、总数越界或畸形条目均拒绝为假成功；命名账户只验证精确别名。2026-07-26 Rust provider 与 release 统一 HTTP 真实验证周杰伦 MID 总数 1013、物理返回 30 条，`limit=2` 的 `offset=0/1/2` 连续无偏移，time 排序返回 400 |
 | Q035 | 内容展示 | `SingerApi.get_album_list` | 是 | `verified` | `GET /v1/artists/{ref}/albums`（固定调用 Android `music.musichallAlbum.AlbumListServer/GetAlbumList`，精确提交 `singerMid/order=1/number/begin`；严格校验歌手 MID、总数、分页边界和专辑身份，优先以专辑 MID 建立稳定引用并保留数字 ID 回退；专辑名/译名、歌手、封面、发行日期、曲数、类型、标签、完整原项和响应均进入强类型统一结果；兼容上游 `albumList=null`，拒绝畸形身份、条目及不一致分页；当前上游会把小 `number` 固定过取为 30 条，provider 按调用方 `limit/offset` 裁出连续逻辑窗口，并在分页扩展记录 `upstream_returned/limit_applied`；2026-07-26 已以周杰伦歌手 MID 在 Rust provider 与 release HTTP 对 offset 0/1/2 真实验证，总数 43、每页 2 条且相邻窗口连续） |
-| Q036 | 内容展示 | `SingerApi.get_mv_list` | 是 | `pending` | 歌手 MV 分页 |
+| Q036 | 内容展示 | `SingerApi.get_mv_list` | 是 | `verified` | `GET /v1/artists/{ref}/videos`（默认及 `type=mv` 固定调用 Android `MvService.MvInfoProServer/GetSingerMvList`，精确提交 `singermid/order=1/count/start`；仅接受上游实际支持的 hot 排序并拒绝游标，`type=all` 在 QQ 当前只有 MV 的能力边界内返回同一目录；VID 优先于数字 MV ID 建立稳定引用，标题、封面、秒级时长、播放量、发布时间戳、类型、图标、完整原项和响应均映射或保留；上游未返回歌手名时不伪造空名 creator，以 `singer_mid` 保留来源；兼容 `list=null`，拒绝畸形身份、条目和不一致分页，并保留过取裁切防线；2026-07-26 Rust provider 与 release HTTP 以周杰伦 MID 对 offset 0/1/2 真实验证，当前总数 10426、`count=2` 精确返回 2 条且连续） |
 | Q037 | 内容展示 | `SonglistApi.get_detail` | 是 | `implemented` | `GET /v1/playlists/{qq-ref}` 与 `/tracks` 精确调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss`。公开 `qq:<playlist-id>` 映射 `disstid`；`qq:dir:<dirid>` 映射 `disstid=0/dirid` 并以所选账户 `encryptUin` 提交 `enc_host_uin`。详情分支固定 `tag/userinfo=true`、`onlysonglist=false`，歌曲分页固定 `tag/userinfo=false`、`onlysonglist=true`，两者都保留 `orderlist=true` 和精确 `song_begin/song_num`；强类型解析 `dirinfo/creator/songlist_size/songlist/total_song_num/hasmore`，业务码、ID 冲突和分页矛盾均拒绝为假成功，歌曲复用完整 QQ Track 映射。2026-07-25 provider 与 release 统一 HTTP 真实验证公开歌单 `7039749142`：详情非空、首个 2 曲分页总数 99、首曲 `0039MnYb0qxYhV`；账户特殊目录代码和参数已离线验收，真实账户待联合验收，故保持 `implemented` |
 | Q038 | 内容展示 | `MvApi.get_detail` | 是 | `pending` | 批量 MV 详情 |
 | Q039 | 内容展示 | `MvApi.get_mv_list` | 是 | `pending` | 地区、版本、排序 MV 目录 |
