@@ -1168,6 +1168,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/tracks/{ref}` | `account?` | `Track`；QQ 数字 ID/MID 分别走 Web 富详情分支，发行公司、流派、简介、语言、发布时间、额外字段和完整子响应位于扩展 |
 | GET | `/v1/tracks/{ref}/similar` | `limit?`（也接受 `limit_per_section/limitPerSection`，默认 15）、`account?` | `SimilarTrackList`；按分区保留直接相似和相同听众歌曲，每区本地上限 1–100，不伪造分页 |
 | GET | `/v1/tracks/{ref}/labels` | `account?` | `TrackLabelList`；保留零 ID、空展示字段、多行文本、图标、动作及平台原生类型/分类，不猜测未知 taxonomy |
+| GET | `/v1/tracks/{ref}/related-playlists` | `previous_ids?`（也接受 `last/vecPlaylist/vec_playlist/cursor`，JSON 数组或逗号列表）、`account?` | `RelatedPlaylistList`；分离直接/听众分组，`next_ids` 是平台真实换批游标 |
 | GET | `/v1/tracks/{ref}/availability` | `account?`、`bitrate?`（默认 999000，也接受 `br`） | `TrackAvailability`；不可播仍返回成功包络与 `playable=false` |
 | GET | `/v1/albums` | `platform?`、`account?`、`catalog=new|newest`、`area?`、分页 | `Album[]`；QQ 只支持真实 `catalog=new`，地区见下文 |
 | GET | `/v1/albums/{ref}` | `account?` | `Album`；QQ 数字 ID 和 MID 共用同一端点并返回平台规范 MID 身份 |
@@ -1296,7 +1297,9 @@ QQ 雷达推荐使用 `source=radar`，固定调用 Android `music.recommend.Tra
 
 QQ 相似歌曲使用 `GET /v1/tracks/{qq-ref}/similar`，固定调用 Android `music.recommend.TrackRelationServer/GetSimilarSongs` 并提交正数 `songid`。数字 ID 直接使用；MID 先复用 Web 富详情取得同一数字身份，响应中的 `track_ref` 仍保留调用方原引用。平台一次返回两个不同语义的数据源：`vecSong` 是直接相似歌曲，`vecSongNew` 是带标题模板的相同听众分组；参考响应模型只选择后者，TuneWeave 以强类型 `direct/audience` 分区同时保留两者。`limit`（别名 `limit_per_section/limitPerSection`）默认 15，在每个不可续页快照分区本地裁切且保存原数量和是否应用上限，不把重复请求伪装成分页。歌曲保留完整统一详情、发布时间、分区排名、实验、`tf`、Trace 和未知包装；`songTagInfoList` 按数字歌曲 ID 附到对应歌曲，完整标签目录、分组模板/内容、`extra_info`、平台消息和完整响应也不会丢失。公开请求可匿名，显式账户只校验精确别名。2026-07-26 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 provider 请求均返回直接相似 12 首和一个 15 首相同听众分组，两种身份各取每区 3 首通过。
 
-QQ 歌曲标签使用 `GET /v1/tracks/{qq-ref}/labels`，固定调用同一 Android `TrackRelationServer/GetSongLabels` 并提交正数 `songid`；数字 ID/MID 的身份解析和精确账户隔离与相似歌曲一致。`TrackLabelList` 将平台标签 ID 表达为可扩展字符串，展示文字、图标和动作均为独立可选字段，原生 `tagType/species` 只提升为明确的 `platform_type/platform_category`，在语义未证实时不擅自命名。平台合法返回 `id=0`、只有图标而无文字、只有 taxonomy 而无展示字段，以及包含换行的多项奖项；这些分支全部保留，危险图标 URL、危险动作 scheme、畸形字段、非法控制字符和超大列表会拒绝。完整原项、实验、未来字段和平台响应进入扩展，空目录按参考模型的真实空列表行为返回且不伪造分页。2026-07-26 真实响应已确认数字 ID `97773` 同时覆盖 11 个标签项；数字 ID 与 MID 两条 provider 链路将在同一实现上联合验收。
+QQ 歌曲标签使用 `GET /v1/tracks/{qq-ref}/labels`，固定调用同一 Android `TrackRelationServer/GetSongLabels` 并提交正数 `songid`；数字 ID/MID 的身份解析和精确账户隔离与相似歌曲一致。`TrackLabelList` 将平台标签 ID 表达为可扩展字符串，展示文字、图标和动作均为独立可选字段，原生 `tagType/species` 只提升为明确的 `platform_type/platform_category`，在语义未证实时不擅自命名。平台合法返回 `id=0`、只有图标而无文字、只有 taxonomy 而无展示字段，以及包含换行的多项奖项；这些分支全部保留，危险图标 URL、危险动作 scheme、畸形字段、非法控制字符和超大列表会拒绝。完整原项、实验、未来字段和平台响应进入扩展，空目录按参考模型的真实空列表行为返回且不伪造分页。2026-07-26 真实响应已确认数字 ID `97773` 同时覆盖 11 个标签项；数字 ID 与 MID 两条 provider 链路已联合验收。
+
+QQ 相关歌单使用 `GET /v1/tracks/{qq-ref}/related-playlists`，固定调用 Android `TrackRelationServer/GetRelatedPlaylist`，提交正数 `songid` 和上一批 `vecPlaylist`。统一输入 `previous_ids` 兼容参考 `last`、原生 `vecPlaylist/vec_playlist` 与 `cursor`，可用 JSON 数组或逗号列表；超过 100 项、空项、重复项、零/非法 QQ 歌单 ID 均在联网前拒绝。平台响应实际包含两支：`vecPlaylist` 是 3 项可换批直接结果，`vecPlaylistNew` 是带“喜欢这首歌的人也爱”标题的 7 项稳定分组；参考模型只展开后者，并错误地从稳定分组生成下一游标，回传后会原样重复。TuneWeave 以 `direct/audience` 强类型分区完整保留两支，只从直接结果生成 `next_ids`，并拒绝 `hasMore` 但空批或游标集合不前进的假续页。歌单保留标题、安全封面、创建者、歌曲数、可选播放量、完整原项、分组标题/附加字段和完整响应；空播放量不会被伪造成零。2026-07-26 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 首批真实通过，随后把首批 3 个直接 ID 回传得到不同的下一批，参考游标缺陷经差分验证确认。
 
 首页视频推荐以 `kind/view` 保留三个不同上游能力：`mv/featured` 对应 WeAPI `/api/personalized/mv`，`exclusive/featured`（别名 `privatecontent/entry`）对应 `/api/personalized/privatecontent`，二者都是不可续页快照；`exclusive/catalog`（也接受 `view=list/all`）对应 `/api/v2/privatecontent/list`，精确提交 `offset/limit/total="true"` 并按真实 `more` 生成下一偏移。平台没有个性化 MV 分页目录，因此 `mv/catalog` 会明确拒绝，不会拿独家放送替代。条目统一为 `Video`，MV 艺人、封面、正时长、播放量、收藏态和独家放送时间按可用字段映射，入口与分页包装完整保留在扩展。
 

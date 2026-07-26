@@ -2758,6 +2758,53 @@ pub struct TrackLabelList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelatedPlaylistSectionKind {
+    Direct,
+    Audience,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RelatedPlaylistRequest {
+    pub previous_ids: Vec<String>,
+    pub account: Option<String>,
+}
+
+impl RelatedPlaylistRequest {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            previous_ids: Vec::new(),
+            account: None,
+        }
+    }
+}
+
+impl Default for RelatedPlaylistRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelatedPlaylistSection {
+    pub kind: RelatedPlaylistSectionKind,
+    pub title_template: Option<String>,
+    pub title_content: Option<String>,
+    pub playlists: Vec<Playlist>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelatedPlaylistList {
+    pub track_ref: ResourceRef,
+    pub sections: Vec<RelatedPlaylistSection>,
+    pub next_ids: Option<Vec<String>>,
+    pub has_more: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -5892,6 +5939,62 @@ mod tests {
         assert_eq!(value["labels"][0]["platform_category"], "8");
         assert_eq!(value["labels"][1]["text"], Value::Null);
         assert_eq!(value["labels"][1]["icon_url"], "https://y.qq.com/icon.png");
+    }
+
+    #[test]
+    fn related_playlist_contract_keeps_sections_and_batch_cursor_distinct() {
+        let mut request = RelatedPlaylistRequest::new();
+        request.previous_ids = vec!["101".to_owned(), "102".to_owned()];
+        request.account = Some("green-vip".to_owned());
+        let value = serde_json::to_value(&request).expect("serialize related playlist request");
+        assert_eq!(value["previous_ids"], serde_json::json!(["101", "102"]));
+        assert_eq!(value["account"], "green-vip");
+
+        let playlist = |id: &str, name: &str| Playlist {
+            resource_ref: ResourceRef::new(Platform::Qq, id)
+                .expect("valid related playlist reference"),
+            platform: Platform::Qq,
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: String::new(),
+            cover_url: None,
+            creator: None,
+            track_count: None,
+            tags: Vec::new(),
+            subscribed: None,
+            created_at: None,
+            updated_at: None,
+            extensions: Extensions::new(),
+        };
+        let list = RelatedPlaylistList {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid source track reference"),
+            sections: vec![
+                RelatedPlaylistSection {
+                    kind: RelatedPlaylistSectionKind::Direct,
+                    title_template: None,
+                    title_content: None,
+                    playlists: vec![playlist("201", "直接推荐")],
+                    extensions: Extensions::new(),
+                },
+                RelatedPlaylistSection {
+                    kind: RelatedPlaylistSectionKind::Audience,
+                    title_template: Some("喜欢「{String}」的人也爱它们".to_owned()),
+                    title_content: Some("晴天".to_owned()),
+                    playlists: vec![playlist("301", "听众也爱")],
+                    extensions: Extensions::new(),
+                },
+            ],
+            next_ids: Some(vec!["201".to_owned()]),
+            has_more: true,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize related playlist list");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["sections"][0]["kind"], "direct");
+        assert_eq!(value["sections"][1]["kind"], "audience");
+        assert_eq!(value["next_ids"], serde_json::json!(["201"]));
+        assert_eq!(value["has_more"], true);
     }
 
     #[test]

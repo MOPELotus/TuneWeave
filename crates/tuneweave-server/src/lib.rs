@@ -73,14 +73,14 @@ use tuneweave_core::{
     RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
-    RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
-    ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
-    SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, SimilarArtistList,
-    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
-    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
+    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSelector, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement,
     TrackIdentifierKind, TrackLabelList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
     UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
@@ -284,6 +284,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/similar", get(similar_tracks))
         .route("/tracks/{reference}/labels", get(track_labels))
+        .route(
+            "/tracks/{reference}/related-playlists",
+            get(related_playlists),
+        )
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7428,6 +7432,19 @@ struct TrackLabelParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelatedPlaylistParams {
+    #[serde(
+        alias = "last",
+        alias = "vecPlaylist",
+        alias = "vec_playlist",
+        alias = "cursor"
+    )]
+    previous_ids: Option<String>,
+    account: Option<String>,
+}
+
 async fn similar_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -7476,6 +7493,88 @@ async fn track_labels(
         response = response.with_account(account);
     }
     Ok(Json(response))
+}
+
+async fn related_playlists(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<RelatedPlaylistParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RelatedPlaylistList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let previous_ids = parse_related_playlist_previous_ids(params.previous_ids.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .related_playlists(
+            reference.id(),
+            &RelatedPlaylistRequest {
+                previous_ids,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn parse_related_playlist_previous_ids(value: Option<&str>) -> Result<Vec<String>, TuneWeaveError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "previous_ids must not be empty when provided",
+        ));
+    }
+    let values = if value.starts_with('[') {
+        serde_json::from_str::<Vec<Value>>(value)
+            .map_err(|error| {
+                TuneWeaveError::invalid_request(format!(
+                    "previous_ids must be a JSON array or comma-separated list: {error}"
+                ))
+            })?
+            .into_iter()
+            .map(|value| match value {
+                Value::String(value) => Ok(value),
+                Value::Number(value) => Ok(value.to_string()),
+                _ => Err(TuneWeaveError::invalid_request(
+                    "previous_ids JSON array entries must be strings or numbers",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        value.split(',').map(str::to_owned).collect()
+    };
+    if values.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "previous_ids cannot contain more than 100 items",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                return Err(TuneWeaveError::invalid_request(
+                    "previous_ids cannot contain empty or invalid entries",
+                ));
+            }
+            if !seen.insert(value.to_owned()) {
+                return Err(TuneWeaveError::invalid_request(
+                    "previous_ids cannot contain duplicates",
+                )
+                .with_details(json!({"duplicate_id": value})));
+            }
+            Ok(value.to_owned())
+        })
+        .collect()
 }
 
 async fn similar_artists(
@@ -13417,7 +13516,8 @@ mod tests {
         CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
         DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
         PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
-        RadioPlaybackItem, RadioStyle, RadioStyleSource, Result, SearchQuery, SimilarTrackSection,
+        RadioPlaybackItem, RadioStyle, RadioStyleSource, RelatedPlaylistSection,
+        RelatedPlaylistSectionKind, Result, SearchQuery, SimilarTrackSection,
         SimilarTrackSectionKind, StreamRequest, TrackLabel, VideoResolution,
     };
 
@@ -16985,6 +17085,7 @@ mod tests {
                 Capability::SimilarArtists,
                 Capability::SimilarTracks,
                 Capability::TrackLabels,
+                Capability::RelatedPlaylists,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17454,6 +17555,55 @@ mod tests {
                     },
                 ],
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn related_playlists(
+            &self,
+            id: &str,
+            request: &RelatedPlaylistRequest,
+        ) -> Result<RelatedPlaylistList> {
+            let playlist = |playlist_id: &str, name: &str| Playlist {
+                resource_ref: ResourceRef::new(Platform::Qq, playlist_id)
+                    .expect("valid related QQ playlist reference"),
+                platform: Platform::Qq,
+                id: playlist_id.to_owned(),
+                name: name.to_owned(),
+                description: String::new(),
+                cover_url: None,
+                creator: None,
+                track_count: Some(20),
+                tags: Vec::new(),
+                subscribed: None,
+                created_at: None,
+                updated_at: None,
+                extensions: Extensions::new(),
+            };
+            Ok(RelatedPlaylistList {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid QQ related playlist source reference"),
+                sections: vec![
+                    RelatedPlaylistSection {
+                        kind: RelatedPlaylistSectionKind::Direct,
+                        title_template: None,
+                        title_content: None,
+                        playlists: vec![playlist("201", "直接推荐")],
+                        extensions: Extensions::new(),
+                    },
+                    RelatedPlaylistSection {
+                        kind: RelatedPlaylistSectionKind::Audience,
+                        title_template: Some("喜欢「{String}」的人也爱它们".to_owned()),
+                        title_content: Some("晴天".to_owned()),
+                        playlists: vec![playlist("301", "听众也爱")],
+                        extensions: Extensions::new(),
+                    },
+                ],
+                next_ids: Some(vec!["201".to_owned()]),
+                has_more: true,
+                extensions: Extensions::from([
+                    ("previous_ids".to_owned(), json!(request.previous_ids)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -21668,6 +21818,57 @@ mod tests {
         for path in [
             "/v1/tracks/qq:97773/labels?unknown=true",
             "/v1/tracks/not-a-reference/labels",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_related_playlists_preserve_sections_batch_cursor_aliases_and_strict_inputs() {
+        let app = test_app_with_import_providers();
+        let (status, list) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:97773/related-playlists?last=101,102&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["data"]["track_ref"], "qq:97773");
+        assert_eq!(list["data"]["sections"][0]["kind"], "direct");
+        assert_eq!(list["data"]["sections"][0]["playlists"][0]["ref"], "qq:201");
+        assert_eq!(list["data"]["sections"][1]["kind"], "audience");
+        assert_eq!(
+            list["data"]["sections"][1]["title_template"],
+            "喜欢「{String}」的人也爱它们"
+        );
+        assert_eq!(list["data"]["next_ids"], json!(["201"]));
+        assert_eq!(list["data"]["has_more"], true);
+        assert_eq!(
+            list["data"]["extensions"]["previous_ids"],
+            json!(["101", "102"])
+        );
+        assert_eq!(list["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(list["meta"]["platform"], "qq");
+        assert_eq!(list["meta"]["account"], "green-vip");
+
+        let (status, alias) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:97773/related-playlists?vecPlaylist=%5B201%2C202%5D",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{alias}");
+        assert_eq!(
+            alias["data"]["extensions"]["previous_ids"],
+            json!(["201", "202"])
+        );
+
+        for path in [
+            "/v1/tracks/qq:97773/related-playlists?previous_ids=",
+            "/v1/tracks/qq:97773/related-playlists?previous_ids=101,101",
+            "/v1/tracks/qq:97773/related-playlists?previous_ids=%5Btrue%5D",
+            "/v1/tracks/qq:97773/related-playlists?unknown=true",
+            "/v1/tracks/not-a-reference/related-playlists",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

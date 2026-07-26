@@ -43,16 +43,17 @@ use crate::{
     ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
     RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationFeed, RecommendationFeedRequest, RecommendationRequest, ResolutionStatus, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, SimilarArtistList, SimilarArtistRequest,
-    SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
-    StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement,
-    TrackLabelList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
+    RecommendationFeed, RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList,
+    RelatedPlaylistRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, SimilarArtistList, SimilarArtistRequest, SimilarTrackList,
+    SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement, TrackLabelList,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream,
+    VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -742,6 +743,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackLabels,
+        ))
+    }
+
+    async fn related_playlists(
+        &self,
+        _id: &str,
+        _request: &RelatedPlaylistRequest,
+    ) -> Result<RelatedPlaylistList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RelatedPlaylists,
         ))
     }
 

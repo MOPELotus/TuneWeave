@@ -32,16 +32,17 @@ use tuneweave_core::{
     RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
     RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
     RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
-    RecommendationRequest, RecommendationSource, ResourceRef, Result, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, SimilarArtistList,
-    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SimilarTrackSection,
-    SimilarTrackSectionKind, SingingAnnotationsAvailability, StoredAccountCredential,
-    StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrackLabel, TrackLabelList, TrialWindow, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResourceKind, VideoStream, VideoStreamRequest,
+    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
+    RelatedPlaylistSection, RelatedPlaylistSectionKind, ResourceRef, Result, SearchItem,
+    SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrackLabel, TrackLabelList, TrialWindow,
+    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -71,6 +72,7 @@ const RECOMMENDATION_RADAR_PAGE_SIZE: u32 = 10;
 const SIMILAR_TRACK_MODULE: &str = "music.recommend.TrackRelationServer";
 const SIMILAR_TRACK_METHOD: &str = "GetSimilarSongs";
 const TRACK_LABEL_METHOD: &str = "GetSongLabels";
+const RELATED_PLAYLIST_METHOD: &str = "GetRelatedPlaylist";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1107,6 +1109,56 @@ struct QqTrackLabelResponse {
     abt: String,
     #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
     labels: Vec<QqTrackLabel>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRelatedPlaylist {
+    #[serde(rename = "tid", deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    title: String,
+    cover: String,
+    creator: String,
+    #[serde(rename = "playCnt", default)]
+    play_count: Value,
+    #[serde(rename = "songNum", deserialize_with = "deserialize_qq_u64")]
+    track_count: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRelatedPlaylistGroup {
+    title_template: String,
+    title_content: String,
+    #[serde(default)]
+    extra_info: BTreeMap<String, Value>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    playlists: Vec<QqRelatedPlaylist>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRelatedPlaylistResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    msg: String,
+    #[serde(rename = "hasMore", deserialize_with = "deserialize_qq_binary_bool")]
+    has_more: bool,
+    #[serde(
+        rename = "vecPlaylist",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    direct_playlists: Vec<QqRelatedPlaylist>,
+    #[serde(
+        rename = "vecPlaylistNew",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    groups: Vec<QqRelatedPlaylistGroup>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3290,6 +3342,7 @@ impl MusicProvider for QqProvider {
             Capability::SimilarArtists,
             Capability::SimilarTracks,
             Capability::TrackLabels,
+            Capability::RelatedPlaylists,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3747,6 +3800,25 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ track label request returned no response"))?;
         map_qq_track_labels(id.trim(), song_id, response)
+    }
+
+    async fn related_playlists(
+        &self,
+        id: &str,
+        request: &RelatedPlaylistRequest,
+    ) -> Result<RelatedPlaylistList> {
+        let previous_ids = validate_qq_related_playlist_request(request)?;
+        let (_, song_id) = self
+            .resolve_lyric_song_id(id, request.account.as_deref())
+            .await?;
+        let response = self
+            .client
+            .request_android(&[qq_related_playlists_request(song_id, &previous_ids)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ related playlist request returned no response"))?;
+        map_qq_related_playlists(id.trim(), song_id, &previous_ids, response)
     }
 
     async fn artist_tracks(
@@ -7182,6 +7254,279 @@ fn validate_qq_track_label_response(response: &QqTrackLabelResponse) -> Result<(
             validate_qq_recommendation_scheme(&label.action_url)?;
         }
     }
+    Ok(())
+}
+
+fn validate_qq_related_playlist_request(request: &RelatedPlaylistRequest) -> Result<Vec<u64>> {
+    if request.previous_ids.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ related playlist previous_ids cannot contain more than 100 items",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let mut seen = BTreeSet::new();
+    request
+        .previous_ids
+        .iter()
+        .map(|id| {
+            let id = parse_qq_playlist_number(id.trim(), "related playlist cursor ID")?;
+            if !seen.insert(id) {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ related playlist previous_ids cannot contain duplicates",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({"duplicate_id": id})));
+            }
+            Ok(id)
+        })
+        .collect()
+}
+
+fn qq_related_playlists_request(song_id: u64, previous_ids: &[u64]) -> QqApiRequest {
+    QqApiRequest::new(
+        SIMILAR_TRACK_MODULE,
+        RELATED_PLAYLIST_METHOD,
+        json!({"songid": song_id, "vecPlaylist": previous_ids}),
+    )
+}
+
+fn map_qq_related_playlists(
+    requested_id: &str,
+    song_id: u64,
+    previous_ids: &[u64],
+    response: QqApiResponse,
+) -> Result<RelatedPlaylistList> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqRelatedPlaylistResponse>(response_data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ related playlist response is malformed: {error}"
+            ))
+        })?;
+    validate_qq_related_playlist_response(&parsed, previous_ids)?;
+    let QqRelatedPlaylistResponse {
+        retcode,
+        msg,
+        has_more,
+        direct_playlists,
+        groups,
+        extra,
+    } = parsed;
+    let next_numeric_ids = direct_playlists
+        .iter()
+        .map(|playlist| playlist.id)
+        .collect::<Vec<_>>();
+    let next_ids = has_more.then(|| {
+        next_numeric_ids
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+    });
+    let direct_count = direct_playlists.len();
+    let mut sections = Vec::with_capacity(groups.len().saturating_add(1));
+    sections.push(RelatedPlaylistSection {
+        kind: RelatedPlaylistSectionKind::Direct,
+        title_template: None,
+        title_content: None,
+        playlists: direct_playlists
+            .into_iter()
+            .map(|playlist| map_qq_related_playlist(playlist, RelatedPlaylistSectionKind::Direct))
+            .collect::<Result<Vec<_>>>()?,
+        extensions: Extensions::from([
+            ("upstream_count".to_owned(), json!(direct_count)),
+            ("cursor_source".to_owned(), json!("vecPlaylist")),
+        ]),
+    });
+    for group in groups {
+        let QqRelatedPlaylistGroup {
+            title_template,
+            title_content,
+            extra_info,
+            playlists,
+            extra,
+        } = group;
+        let upstream_count = playlists.len();
+        sections.push(RelatedPlaylistSection {
+            kind: RelatedPlaylistSectionKind::Audience,
+            title_template: normalized_qq_text(&title_template),
+            title_content: normalized_qq_text(&title_content),
+            playlists: playlists
+                .into_iter()
+                .map(|playlist| {
+                    map_qq_related_playlist(playlist, RelatedPlaylistSectionKind::Audience)
+                })
+                .collect::<Result<Vec<_>>>()?,
+            extensions: Extensions::from([
+                ("upstream_count".to_owned(), json!(upstream_count)),
+                ("extra_info".to_owned(), json!(extra_info)),
+                ("extra".to_owned(), json!(extra)),
+            ]),
+        });
+    }
+    Ok(RelatedPlaylistList {
+        track_ref: qq_ref(requested_id, "related playlist source")?,
+        sections,
+        next_ids,
+        has_more,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("previous_ids".to_owned(), json!(previous_ids)),
+            ("message".to_owned(), json!(msg)),
+            ("platform_code".to_owned(), json!(retcode)),
+            ("cursor_source".to_owned(), json!("vecPlaylist")),
+            ("reference_cursor_corrected".to_owned(), Value::Bool(true)),
+            ("extra".to_owned(), json!(extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_related_playlist(
+    playlist: QqRelatedPlaylist,
+    section: RelatedPlaylistSectionKind,
+) -> Result<Playlist> {
+    let raw = serde_json::to_value(&playlist)
+        .map_err(|_| qq_data_error("failed to preserve QQ related playlist"))?;
+    let QqRelatedPlaylist {
+        id,
+        title,
+        cover,
+        creator,
+        play_count,
+        track_count,
+        extra,
+    } = playlist;
+    let name = title.trim();
+    if id == 0 || name.is_empty() {
+        return Err(qq_data_error(
+            "QQ related playlist is missing a positive ID or title",
+        ));
+    }
+    let creator_name = creator.trim();
+    let creator = (!creator_name.is_empty()).then(|| ArtistSummary {
+        resource_ref: None,
+        name: creator_name.to_owned(),
+    });
+    let play_count = qq_related_playlist_play_count(&play_count)?;
+    let mut extensions = Extensions::from([
+        ("section".to_owned(), json!(section)),
+        ("extra".to_owned(), json!(extra)),
+        ("raw".to_owned(), raw),
+    ]);
+    if let Some(play_count) = play_count {
+        extensions.insert("play_count".to_owned(), json!(play_count));
+    }
+    Ok(Playlist {
+        resource_ref: qq_ref(&id.to_string(), "related playlist")?,
+        platform: Platform::Qq,
+        id: id.to_string(),
+        name: name.to_owned(),
+        description: String::new(),
+        cover_url: first_qq_display_url(&[(&cover, "related playlist cover")])?,
+        creator,
+        track_count: Some(track_count),
+        tags: Vec::new(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    })
+}
+
+fn qq_related_playlist_play_count(value: &Value) -> Result<Option<u64>> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) if value.trim().is_empty() => Ok(None),
+        _ => json_u64(value)
+            .map(Some)
+            .ok_or_else(|| qq_data_error("QQ related playlist response has an invalid play count")),
+    }
+}
+
+fn validate_qq_related_playlist_response(
+    response: &QqRelatedPlaylistResponse,
+    previous_ids: &[u64],
+) -> Result<()> {
+    if response.retcode != 0 {
+        return Err(qq_data_error(format!(
+            "QQ related playlist request failed with code {}",
+            response.retcode
+        )));
+    }
+    if response.msg.len() > 8_192 || response.msg.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ related playlist response has an invalid message",
+        ));
+    }
+    if response.direct_playlists.len() > 100 || response.groups.len() > 20 {
+        return Err(qq_data_error(
+            "QQ related playlist response exceeded its safe section bounds",
+        ));
+    }
+    if response.has_more && response.direct_playlists.is_empty() {
+        return Err(qq_data_error(
+            "QQ related playlist response claimed continuation without a direct cursor batch",
+        ));
+    }
+    let mut direct_ids = BTreeSet::new();
+    for playlist in &response.direct_playlists {
+        if !direct_ids.insert(playlist.id) {
+            return Err(qq_data_error(
+                "QQ related playlist response contains duplicate direct cursor IDs",
+            ));
+        }
+        validate_qq_related_playlist(playlist)?;
+    }
+    if response.has_more
+        && !previous_ids.is_empty()
+        && direct_ids == previous_ids.iter().copied().collect::<BTreeSet<_>>()
+    {
+        return Err(qq_data_error(
+            "QQ related playlist response did not advance its direct cursor batch",
+        ));
+    }
+    for group in &response.groups {
+        if group.playlists.len() > 100 {
+            return Err(qq_data_error(
+                "QQ related playlist response exceeded its safe group size",
+            ));
+        }
+        for (value, context) in [
+            (&group.title_template, "group title template"),
+            (&group.title_content, "group title content"),
+        ] {
+            if value.len() > 8_192 || value.chars().any(char::is_control) {
+                return Err(qq_data_error(format!(
+                    "QQ related playlist response has invalid {context}"
+                )));
+            }
+        }
+        for playlist in &group.playlists {
+            validate_qq_related_playlist(playlist)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_qq_related_playlist(playlist: &QqRelatedPlaylist) -> Result<()> {
+    if playlist.id == 0
+        || playlist.title.trim().is_empty()
+        || playlist.title.len() > 8_192
+        || playlist.title.chars().any(char::is_control)
+        || playlist.creator.len() > 8_192
+        || playlist.creator.chars().any(char::is_control)
+    {
+        return Err(qq_data_error(
+            "QQ related playlist response has invalid identity metadata",
+        ));
+    }
+    if !playlist.cover.trim().is_empty() {
+        first_qq_display_url(&[(&playlist.cover, "related playlist cover")])?;
+    }
+    qq_related_playlist_play_count(&playlist.play_count)?;
     Ok(())
 }
 
@@ -25667,6 +26012,189 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    fn related_playlist_item(id: u64, title: &str, play_count: Value) -> Value {
+        json!({
+            "cover": format!("https://y.qq.com/playlist/{id}.jpg"),
+            "creator": format!("创建者{id}"),
+            "playCnt": play_count,
+            "songNum": 20,
+            "tid": id,
+            "title": title,
+            "futurePlaylistField": true
+        })
+    }
+
+    fn related_playlist_fixture(direct: Vec<Value>, audience: Vec<Value>, has_more: bool) -> Value {
+        json!({
+            "hasMore": u8::from(has_more),
+            "msg": "",
+            "retcode": 0,
+            "vecPlaylist": direct,
+            "vecPlaylistNew": [{
+                "extra_info": {"module": "1", "futureInfoField": true},
+                "playlists": audience,
+                "title_content": "晴天",
+                "title_template": "喜欢「{String}」的人也爱它们",
+                "futureGroupField": true
+            }],
+            "futureResponseField": true
+        })
+    }
+
+    #[test]
+    fn related_playlist_request_and_mapping_preserve_both_sections_and_direct_cursor() {
+        let request = qq_related_playlists_request(97773, &[101, 102]);
+        assert_eq!(request.module, SIMILAR_TRACK_MODULE);
+        assert_eq!(request.method, RELATED_PLAYLIST_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"songid": 97773, "vecPlaylist": [101, 102]})
+        );
+
+        let data = related_playlist_fixture(
+            vec![
+                related_playlist_item(201, "直接推荐一", json!("")),
+                related_playlist_item(202, "直接推荐二", json!(1234)),
+            ],
+            vec![related_playlist_item(301, "听众也爱", json!("5678"))],
+            true,
+        );
+        let list = map_qq_related_playlists(
+            "0039MnYb0qxYhV",
+            97773,
+            &[101, 102],
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ related playlists");
+        assert_eq!(list.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert!(list.has_more);
+        assert_eq!(
+            list.next_ids.as_deref(),
+            Some(["201".to_owned(), "202".to_owned()].as_slice())
+        );
+        assert_eq!(list.sections.len(), 2);
+        assert_eq!(list.sections[0].kind, RelatedPlaylistSectionKind::Direct);
+        assert_eq!(list.sections[0].playlists.len(), 2);
+        assert_eq!(
+            list.sections[0].playlists[0].resource_ref.to_string(),
+            "qq:201"
+        );
+        assert_eq!(
+            list.sections[0].playlists[0].extensions.get("play_count"),
+            None
+        );
+        assert_eq!(list.sections[0].playlists[1].extensions["play_count"], 1234);
+        assert_eq!(
+            list.sections[0].playlists[0].extensions["raw"]["futurePlaylistField"],
+            true
+        );
+        assert_eq!(list.sections[1].kind, RelatedPlaylistSectionKind::Audience);
+        assert_eq!(
+            list.sections[1].title_template.as_deref(),
+            Some("喜欢「{String}」的人也爱它们")
+        );
+        assert_eq!(list.sections[1].title_content.as_deref(), Some("晴天"));
+        assert_eq!(list.sections[1].playlists[0].extensions["play_count"], 5678);
+        assert_eq!(
+            list.sections[1].extensions["extra_info"]["futureInfoField"],
+            true
+        );
+        assert_eq!(
+            list.sections[1].extensions["extra"]["futureGroupField"],
+            true
+        );
+        assert_eq!(list.extensions["cursor_source"], "vecPlaylist");
+        assert_eq!(list.extensions["reference_cursor_corrected"], true);
+        assert_eq!(
+            list.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn related_playlist_mapping_rejects_false_continuation_unsafe_items_and_nonprogress() {
+        let valid_direct = || related_playlist_item(201, "直接推荐", json!(""));
+        let valid_audience = || related_playlist_item(301, "听众也爱", json!("123"));
+        let mut fixtures = vec![json!({})];
+        let mut business_error =
+            related_playlist_fixture(vec![valid_direct()], vec![valid_audience()], true);
+        business_error["retcode"] = json!(1000);
+        fixtures.push(business_error);
+        fixtures.push(related_playlist_fixture(
+            Vec::new(),
+            vec![valid_audience()],
+            true,
+        ));
+        fixtures.push(related_playlist_fixture(
+            vec![valid_direct(), valid_direct()],
+            vec![valid_audience()],
+            true,
+        ));
+        let mut unsafe_cover =
+            related_playlist_fixture(vec![valid_direct()], vec![valid_audience()], true);
+        unsafe_cover["vecPlaylist"][0]["cover"] = json!("javascript:alert(1)");
+        fixtures.push(unsafe_cover);
+        let mut invalid_play_count =
+            related_playlist_fixture(vec![valid_direct()], vec![valid_audience()], true);
+        invalid_play_count["vecPlaylist"][0]["playCnt"] = json!("-1");
+        fixtures.push(invalid_play_count);
+
+        for fixture in fixtures {
+            let error = map_qq_related_playlists("97773", 97773, &[], response(fixture))
+                .expect_err("invalid QQ related playlist response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let nonprogress =
+            related_playlist_fixture(vec![valid_direct()], vec![valid_audience()], true);
+        let error = map_qq_related_playlists("97773", 97773, &[201], response(nonprogress))
+            .expect_err("non-progressing QQ related playlist cursor");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[tokio::test]
+    async fn related_playlists_validate_cursor_before_exact_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::RelatedPlaylists)
+        );
+        let invalid = provider
+            .related_playlists(
+                "97773",
+                &RelatedPlaylistRequest {
+                    previous_ids: vec!["0".to_owned()],
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("invalid QQ related playlist cursor");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+
+        let duplicate = validate_qq_related_playlist_request(&RelatedPlaylistRequest {
+            previous_ids: vec!["101".to_owned(), "101".to_owned()],
+            account: None,
+        })
+        .expect_err("duplicate QQ related playlist cursor");
+        assert_eq!(duplicate.code, ErrorCode::InvalidRequest);
+
+        let missing = provider
+            .related_playlists(
+                "97773",
+                &RelatedPlaylistRequest {
+                    previous_ids: Vec::new(),
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing QQ related playlist account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
@@ -26761,6 +27289,77 @@ mod tests {
                     && label.extensions["raw"].is_object()
             }));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_related_playlists_preserve_both_sections_and_advance_the_direct_cursor() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let first = provider
+                .related_playlists(id, &RelatedPlaylistRequest::new())
+                .await
+                .unwrap_or_else(|error| panic!("live QQ related playlists for {id}: {error}"));
+            assert_eq!(first.track_ref.to_string(), format!("qq:{id}"));
+            assert_eq!(first.extensions["numeric_id"], 97773);
+            assert_eq!(first.extensions["cursor_source"], "vecPlaylist");
+            assert_eq!(first.sections[0].kind, RelatedPlaylistSectionKind::Direct);
+            assert!(!first.sections[0].playlists.is_empty());
+            let audience = first
+                .sections
+                .iter()
+                .find(|section| section.kind == RelatedPlaylistSectionKind::Audience)
+                .expect("audience related playlist section");
+            assert!(!audience.playlists.is_empty());
+            assert!(
+                audience
+                    .title_template
+                    .as_deref()
+                    .is_some_and(|title| !title.is_empty())
+            );
+            assert!(
+                first
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.playlists)
+                    .all(|playlist| {
+                        playlist.platform == Platform::Qq
+                            && !playlist.name.is_empty()
+                            && playlist.cover_url.is_some()
+                    })
+            );
+        }
+
+        let first = provider
+            .related_playlists("97773", &RelatedPlaylistRequest::new())
+            .await
+            .expect("first live QQ related playlist cursor page");
+        let previous_ids = first.next_ids.expect("first related playlist cursor");
+        let second = provider
+            .related_playlists(
+                "97773",
+                &RelatedPlaylistRequest {
+                    previous_ids: previous_ids.clone(),
+                    account: None,
+                },
+            )
+            .await
+            .expect("second live QQ related playlist cursor page");
+        assert_ne!(
+            second.sections[0]
+                .playlists
+                .iter()
+                .map(|playlist| playlist.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            previous_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        );
     }
 
     #[tokio::test]
