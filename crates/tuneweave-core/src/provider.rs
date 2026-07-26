@@ -1052,6 +1052,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn user_favorite_videos(
+        &self,
+        _user_id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<Video>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountVideos,
+        ))
+    }
+
     async fn account_radio_stations(&self, _request: &PageRequest) -> Result<Page<RadioStation>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

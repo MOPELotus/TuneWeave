@@ -70,6 +70,8 @@ const NEW_ALBUM_MODULE: &str = "newalbum.NewAlbumServer";
 const NEW_ALBUM_METHOD: &str = "get_new_album_info";
 const FAVORITE_ALBUM_MODULE: &str = "music.musicasset.AlbumFavRead";
 const FAVORITE_ALBUM_METHOD: &str = "CgiGetAlbumFavInfo";
+const FAVORITE_MV_MODULE: &str = "music.musicasset.MVFavRead";
+const FAVORITE_MV_METHOD: &str = "getMyFavMV_v2";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -760,6 +762,63 @@ struct QqFavoriteAlbumsResponse {
     albums: Vec<QqFavoriteAlbumItem>,
     #[serde(rename = "v_failAlbumId")]
     failed_album_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqFavoriteMvItem {
+    #[serde(
+        default,
+        alias = "sid",
+        alias = "mvid",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    id: i64,
+    #[serde(default)]
+    vid: String,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "vt",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    video_type: i64,
+    #[serde(default, alias = "mvname")]
+    name: String,
+    #[serde(default, alias = "title_main")]
+    title: String,
+    #[serde(rename = "picUrl")]
+    picture_url: String,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    playcount: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    publish_date: u64,
+    #[serde(rename = "singerId", deserialize_with = "deserialize_qq_i64")]
+    singer_id: i64,
+    #[serde(rename = "singerMid")]
+    singer_mid: String,
+    #[serde(rename = "singerName")]
+    singer_name: String,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    status: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqFavoriteMvsResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(
+        rename = "subCode",
+        alias = "subcode",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    sub_code: i64,
+    msg: String,
+    #[serde(rename = "mvlist")]
+    videos: Vec<QqFavoriteMvItem>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2509,6 +2568,7 @@ impl MusicProvider for QqProvider {
             Capability::SessionManagement,
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
+            Capability::AccountVideos,
         ])
     }
 
@@ -3474,6 +3534,41 @@ impl MusicProvider for QqProvider {
             .await
     }
 
+    async fn account_videos(&self, request: &tuneweave_core::PageRequest) -> Result<Page<Video>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_encrypted_uin(&credential)?;
+        self.qq_favorite_mvs_page(encrypted_uin, request, &credential, "current_account")
+            .await
+    }
+
+    async fn user_favorite_videos(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Video>> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let account = request
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "QQ favorite MV listing requires an explicit viewer account",
+                )
+                .with_platform(Platform::Qq)
+            })?;
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        self.qq_favorite_mvs_page(encrypted_uin, request, &credential, "user")
+            .await
+    }
+
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
         let locator = parse_qq_playlist_locator(id)?;
         let credential = self.qq_credential(account)?;
@@ -4113,6 +4208,36 @@ impl QqProvider {
             request.limit,
             library_scope,
             response,
+        )
+    }
+
+    async fn qq_favorite_mvs_page(
+        &self,
+        encrypted_uin: &str,
+        request: &tuneweave_core::PageRequest,
+        credential: &QqCredential,
+        library_scope: &'static str,
+    ) -> Result<Page<Video>> {
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ favorite MV page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let (requests, first_page, skip) =
+            qq_favorite_mv_requests(encrypted_uin, request.offset, request.limit)?;
+        let responses = self
+            .client
+            .request_android_with_credential(&requests, Some(credential))
+            .await?;
+        map_qq_favorite_mvs(
+            encrypted_uin,
+            request.offset,
+            request.limit,
+            first_page,
+            skip,
+            library_scope,
+            responses,
         )
     }
 
@@ -9517,6 +9642,44 @@ fn qq_favorite_albums_request(encrypted_uin: &str, offset: u32, size: u32) -> Qq
     )
 }
 
+fn qq_favorite_mv_request(encrypted_uin: &str, page_size: u32, page_index: u32) -> QqApiRequest {
+    QqApiRequest::new(
+        FAVORITE_MV_MODULE,
+        FAVORITE_MV_METHOD,
+        json!({
+            "encuin": encrypted_uin,
+            "pagesize": page_size,
+            "num": page_index
+        }),
+    )
+}
+
+fn qq_favorite_mv_requests(
+    encrypted_uin: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<QqApiRequest>, u32, u32)> {
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ favorite MV page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let first_page = offset / limit;
+    let skip = offset % limit;
+    let mut requests = vec![qq_favorite_mv_request(encrypted_uin, limit, first_page)];
+    if skip > 0 {
+        let next_page = first_page.checked_add(1).ok_or_else(|| {
+            TuneWeaveError::invalid_request(
+                "QQ favorite MV offset exceeds the supported page range",
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        requests.push(qq_favorite_mv_request(encrypted_uin, limit, next_page));
+    }
+    Ok((requests, first_page, skip))
+}
+
 fn qq_encrypted_uin(credential: &QqCredential) -> Result<&str> {
     validate_qq_encrypted_uin(&credential.encrypt_uin, "account encrypted UIN").map_err(|_| {
         TuneWeaveError::new(
@@ -9872,6 +10035,193 @@ fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
         track_count: Some(album.songnum),
         company: None,
         kind: None,
+        extensions,
+    })
+}
+
+fn map_qq_favorite_mvs(
+    encrypted_uin: &str,
+    offset: u32,
+    limit: u32,
+    first_page: u32,
+    skip: u32,
+    library_scope: &'static str,
+    responses: Vec<QqApiResponse>,
+) -> Result<Page<Video>> {
+    let expected_responses = if skip > 0 { 2 } else { 1 };
+    if responses.len() != expected_responses {
+        return Err(qq_data_error(
+            "QQ favorite MV request returned an inconsistent response batch",
+        ));
+    }
+
+    let mut pages = Vec::with_capacity(responses.len());
+    let mut typed_pages = Vec::with_capacity(responses.len());
+    let mut raw_responses = Vec::with_capacity(responses.len());
+    let mut page_counts = Vec::with_capacity(responses.len());
+    let mut reached_end = false;
+    for response in responses {
+        let data =
+            serde_json::from_value::<QqFavoriteMvsResponse>(response.data).map_err(|error| {
+                qq_data_error(format!("QQ favorite MV response is malformed: {error}"))
+            })?;
+        if data.code != 0 || data.sub_code != 0 {
+            let business_code = [data.code, data.sub_code]
+                .into_iter()
+                .find(|code| *code != 0)
+                .expect("a non-zero QQ favorite MV business code was checked");
+            return Err(
+                qq_login_business_error(business_code, "QQ favorite MV listing failed")
+                    .with_details(json!({
+                        "platform_code": data.code,
+                        "platform_subcode": data.sub_code,
+                        "platform_message": data.msg
+                    })),
+            );
+        }
+        let count = u32::try_from(data.videos.len())
+            .map_err(|_| qq_data_error("QQ favorite MV page is too large"))?;
+        if count > limit || (reached_end && count > 0) {
+            return Err(qq_data_error(
+                "QQ favorite MV response has inconsistent page boundaries",
+            ));
+        }
+        reached_end |= count < limit;
+        page_counts.push(count);
+        typed_pages.push(
+            serde_json::to_value(&data)
+                .map_err(|_| qq_data_error("failed to preserve typed QQ favorite MV response"))?,
+        );
+        raw_responses.push(response.raw);
+        pages.push(data.videos);
+    }
+
+    let last_page_count = page_counts.last().copied().unwrap_or_default();
+    let flattened = pages.into_iter().flatten().collect::<Vec<_>>();
+    let skip = usize::try_from(skip)
+        .map_err(|_| qq_data_error("QQ favorite MV page offset exceeds this platform"))?;
+    let available = flattened.len().saturating_sub(skip);
+    let take = available.min(usize::try_from(limit).unwrap_or(usize::MAX));
+    let items = flattened
+        .into_iter()
+        .skip(skip)
+        .take(take)
+        .map(map_qq_favorite_mv)
+        .collect::<Result<Vec<_>>>()?;
+    let returned = u32::try_from(items.len())
+        .map_err(|_| qq_data_error("QQ favorite MV logical page is too large"))?;
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ favorite MV pagination exceeded the supported offset range")
+    })?;
+    let buffered_items = available > take;
+    let has_more = returned > 0 && (buffered_items || last_page_count == limit);
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: None,
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("library_scope".to_owned(), json!(library_scope)),
+                ("user_encrypted_uin".to_owned(), json!(encrypted_uin)),
+                ("first_upstream_page".to_owned(), json!(first_page)),
+                ("upstream_page_size".to_owned(), json!(limit)),
+                ("upstream_page_counts".to_owned(), json!(page_counts)),
+                ("returned_count".to_owned(), json!(returned)),
+                ("has_more_inferred".to_owned(), json!(true)),
+                ("data".to_owned(), json!(typed_pages)),
+                ("responses".to_owned(), json!(raw_responses)),
+            ]),
+        },
+    })
+}
+
+fn map_qq_favorite_mv(video: QqFavoriteMvItem) -> Result<Video> {
+    if video.id < 0 || video.video_type < 0 || video.singer_id < 0 {
+        return Err(qq_data_error(
+            "QQ favorite MV response contains a negative identity or type",
+        ));
+    }
+    let vid = video.vid.trim();
+    if !vid.is_empty() {
+        validate_qq_media_id(vid, "favorite MV VID")
+            .map_err(|_| qq_data_error("QQ favorite MV returned an invalid VID"))?;
+    }
+    let id = if !vid.is_empty() {
+        vid.to_owned()
+    } else if video.id > 0 {
+        video.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ favorite MV is missing both its numeric ID and VID",
+        ));
+    };
+    let title = [video.title.as_str(), video.name.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ favorite MV is missing its title"))?
+        .to_owned();
+    let cover_url = first_qq_display_url(&[(video.picture_url.as_str(), "favorite MV picture")])?;
+
+    let singer_mid = video.singer_mid.trim();
+    if !singer_mid.is_empty() {
+        validate_qq_media_id(singer_mid, "favorite MV singer MID")
+            .map_err(|_| qq_data_error("QQ favorite MV returned an invalid singer MID"))?;
+    }
+    let singer_name = video.singer_name.trim();
+    let has_singer_identity = !singer_mid.is_empty() || video.singer_id > 0;
+    if has_singer_identity && singer_name.is_empty() {
+        return Err(qq_data_error(
+            "QQ favorite MV returned a singer identity without a name",
+        ));
+    }
+    let creator_ref = if !singer_mid.is_empty() {
+        Some(qq_ref(singer_mid, "favorite MV singer")?)
+    } else if video.singer_id > 0 {
+        Some(qq_ref(&video.singer_id.to_string(), "favorite MV singer")?)
+    } else {
+        None
+    };
+    let creators = (!singer_name.is_empty())
+        .then(|| CreatorSummary {
+            resource_ref: creator_ref,
+            name: singer_name.to_owned(),
+            avatar_url: None,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let published_at = qq_platform_timestamp_rfc3339(video.publish_date);
+    let raw = serde_json::to_value(&video)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ favorite MV item"))?;
+    let mut extensions = Extensions::from([
+        ("subscribed".to_owned(), json!(true)),
+        ("vid".to_owned(), json!(video.vid)),
+        ("mv_type".to_owned(), json!(video.video_type)),
+        ("status".to_owned(), json!(video.status)),
+        ("published_timestamp".to_owned(), json!(video.publish_date)),
+        ("singer_id".to_owned(), json!(video.singer_id)),
+        ("singer_mid".to_owned(), json!(video.singer_mid)),
+        ("singer_name".to_owned(), json!(video.singer_name)),
+        ("favorite_mv".to_owned(), raw),
+    ]);
+    if video.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(video.id));
+    }
+    Ok(Video {
+        resource_ref: qq_ref(&id, "favorite MV")?,
+        platform: Platform::Qq,
+        id,
+        title,
+        creators,
+        description: String::new(),
+        cover_url,
+        duration_ms: None,
+        published_at,
+        play_count: Some(video.playcount),
+        subscribed: Some(true),
         extensions,
     })
 }
@@ -12166,6 +12516,24 @@ mod tests {
                 "futureSingerField": true
             }],
             "futureAlbumField": {"kept": true}
+        })
+    }
+
+    fn sample_favorite_mv(id: i64, vid: &str, title: &str) -> Value {
+        json!({
+            "id": id,
+            "vid": vid,
+            "type": 0,
+            "name": format!("{title} 名称"),
+            "title": title,
+            "picUrl": "https://y.gtimg.cn/music/photo_new/T015R640x360M000favorite.jpg",
+            "playcount": "123456",
+            "publish_date": 1_704_067_200_u64,
+            "singerId": 4558,
+            "singerMid": "0025NhlN2yWrP4",
+            "singerName": "周杰伦",
+            "status": 1,
+            "futureMvField": {"kept": true}
         })
     }
 
@@ -16767,6 +17135,281 @@ mod tests {
                 .expect_err("invalid QQ favorite album response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn favorite_mv_requests_preserve_zero_based_pages_and_arbitrary_offsets() {
+        let (requests, first_page, skip) =
+            qq_favorite_mv_requests("encrypted-uin", 25, 10).expect("favorite MV requests");
+        assert_eq!(first_page, 2);
+        assert_eq!(skip, 5);
+        assert_eq!(requests.len(), 2);
+        for (request, page) in requests.iter().zip([2, 3]) {
+            assert_eq!(request.module, FAVORITE_MV_MODULE);
+            assert_eq!(request.method, FAVORITE_MV_METHOD);
+            assert_eq!(
+                request.param,
+                json!({"encuin": "encrypted-uin", "pagesize": 10, "num": page})
+            );
+            assert!(request.param.get("euin").is_none());
+            assert!(request.param.get("offset").is_none());
+        }
+
+        let (aligned, first_page, skip) =
+            qq_favorite_mv_requests("encrypted-uin", 20, 10).expect("aligned page");
+        assert_eq!(first_page, 2);
+        assert_eq!(skip, 0);
+        assert_eq!(aligned.len(), 1);
+        assert_eq!(aligned[0].param["num"], 2);
+        assert!(qq_favorite_mv_requests("encrypted-uin", 0, 0).is_err());
+        assert!(qq_favorite_mv_requests("encrypted-uin", 0, 101).is_err());
+    }
+
+    #[test]
+    fn favorite_mv_mapping_preserves_cross_page_identity_and_metadata() {
+        let mut numeric = sample_favorite_mv(42, "secondVid", "第二支 MV");
+        numeric["vid"] = json!("");
+        let page = map_qq_favorite_mvs(
+            "encrypted-uin",
+            1,
+            2,
+            0,
+            1,
+            "user",
+            vec![
+                response(json!({
+                    "code": 0,
+                    "subCode": 0,
+                    "msg": "",
+                    "mvlist": [
+                        sample_favorite_mv(10, "firstVid", "第一支 MV"),
+                        sample_favorite_mv(11, "wantedVid", "目标 MV")
+                    ],
+                    "futurePageField": "first"
+                })),
+                response(json!({
+                    "code": "0",
+                    "subcode": 0,
+                    "msg": "ok",
+                    "mvlist": [numeric, sample_favorite_mv(43, "bufferedVid", "缓冲 MV")],
+                    "futurePageField": "second"
+                })),
+            ],
+        )
+        .expect("map QQ favorite MVs");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:wantedVid");
+        assert_eq!(page.items[0].title, "目标 MV");
+        assert_eq!(page.items[0].creators[0].name, "周杰伦");
+        assert_eq!(
+            page.items[0].creators[0]
+                .resource_ref
+                .as_ref()
+                .expect("singer ref")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(page.items[0].play_count, Some(123456));
+        assert_eq!(page.items[0].subscribed, Some(true));
+        assert_eq!(
+            page.items[0].published_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            page.items[0].extensions["favorite_mv"]["futureMvField"]["kept"],
+            true
+        );
+        assert!(
+            page.items[0]
+                .cover_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://y.gtimg.cn/"))
+        );
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:42");
+        assert_eq!(page.pagination.total, None);
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["library_scope"], "user");
+        assert_eq!(
+            page.pagination.extensions["user_encrypted_uin"],
+            "encrypted-uin"
+        );
+        assert_eq!(page.pagination.extensions["first_upstream_page"], 0);
+        assert_eq!(
+            page.pagination.extensions["upstream_page_counts"],
+            json!([2, 2])
+        );
+        assert_eq!(
+            page.pagination.extensions["data"][1]["futurePageField"],
+            "second"
+        );
+        assert_eq!(page.pagination.extensions["responses"][0]["code"], 0);
+
+        let final_page = map_qq_favorite_mvs(
+            "encrypted-uin",
+            1,
+            2,
+            0,
+            1,
+            "current_account",
+            vec![
+                response(json!({
+                    "code": 0, "subCode": 0, "msg": "",
+                    "mvlist": [
+                        sample_favorite_mv(10, "firstVid", "第一支 MV"),
+                        sample_favorite_mv(11, "wantedVid", "目标 MV")
+                    ]
+                })),
+                response(json!({
+                    "code": 0, "subCode": 0, "msg": "", "mvlist": []
+                })),
+            ],
+        )
+        .expect("map final QQ favorite MV page");
+        assert_eq!(final_page.items.len(), 1);
+        assert!(!final_page.pagination.has_more);
+        assert_eq!(final_page.pagination.next_offset, None);
+    }
+
+    #[test]
+    fn favorite_mv_mapping_rejects_business_errors_ambiguous_ids_and_bad_pages() {
+        let valid = || {
+            json!({
+                "code": 0,
+                "subCode": 0,
+                "msg": "",
+                "mvlist": [sample_favorite_mv(10, "favoriteVid", "收藏 MV")]
+            })
+        };
+        let mut fixtures = vec![
+            json!({}),
+            json!({
+                "code": 0, "subCode": 0, "msg": "", "mvlist": {}
+            }),
+        ];
+        for (field, value) in [
+            ("id", json!(-1)),
+            ("vid", json!("unsafe/vid")),
+            ("type", json!(-1)),
+            ("title", json!("")),
+            ("picUrl", json!("file:///secret")),
+            ("playcount", json!("not-a-count")),
+            ("publish_date", json!(-1)),
+            ("singerId", json!(-1)),
+            ("singerMid", json!("unsafe/singer")),
+            ("singerName", json!("")),
+        ] {
+            let mut fixture = valid();
+            fixture["mvlist"][0][field] = value;
+            if field == "title" {
+                fixture["mvlist"][0]["name"] = json!("");
+            }
+            fixtures.push(fixture);
+        }
+        let mut singer_id_only = valid();
+        singer_id_only["mvlist"][0]["id"] = json!(0);
+        singer_id_only["mvlist"][0]["vid"] = json!("");
+        fixtures.push(singer_id_only);
+
+        for fixture in fixtures {
+            let error =
+                map_qq_favorite_mvs("encrypted-uin", 0, 1, 0, 0, "user", vec![response(fixture)])
+                    .expect_err("invalid QQ favorite MV response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let auth_error = map_qq_favorite_mvs(
+            "encrypted-uin",
+            0,
+            1,
+            0,
+            0,
+            "user",
+            vec![response(json!({
+                "code": 1000, "subCode": 0, "msg": "expired", "mvlist": []
+            }))],
+        )
+        .expect_err("expired QQ favorite MV credential");
+        assert_eq!(auth_error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(auth_error.details["platform_code"], 1000);
+
+        let too_many = map_qq_favorite_mvs(
+            "encrypted-uin",
+            0,
+            1,
+            0,
+            0,
+            "user",
+            vec![response(json!({
+                "code": 0, "subCode": 0, "msg": "",
+                "mvlist": [
+                    sample_favorite_mv(10, "firstVid", "第一支 MV"),
+                    sample_favorite_mv(11, "secondVid", "第二支 MV")
+                ]
+            }))],
+        )
+        .expect_err("favorite MV page exceeding requested size");
+        assert_eq!(too_many.code, ErrorCode::UpstreamError);
+
+        let gap = map_qq_favorite_mvs(
+            "encrypted-uin",
+            1,
+            2,
+            0,
+            1,
+            "user",
+            vec![
+                response(json!({
+                    "code": 0, "subCode": 0, "msg": "", "mvlist": []
+                })),
+                response(json!({
+                    "code": 0, "subCode": 0, "msg": "",
+                    "mvlist": [sample_favorite_mv(11, "laterVid", "越界 MV")]
+                })),
+            ],
+        )
+        .expect_err("favorite MV page after an early terminal page");
+        assert_eq!(gap.code, ErrorCode::UpstreamError);
+
+        let batch_error =
+            map_qq_favorite_mvs("encrypted-uin", 1, 2, 0, 1, "user", vec![response(valid())])
+                .expect_err("missing second favorite MV response");
+        assert_eq!(batch_error.code, ErrorCode::UpstreamError);
+    }
+
+    #[tokio::test]
+    async fn favorite_mv_lists_require_exact_accounts_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::AccountVideos));
+        let account_error = provider
+            .account_videos(&tuneweave_core::PageRequest {
+                limit: 25,
+                offset: 0,
+                account: Some("personal".to_owned()),
+            })
+            .await
+            .expect_err("missing current QQ account");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+
+        let viewer_error = provider
+            .user_favorite_videos("encrypted-uin", &tuneweave_core::PageRequest::new(25, 0))
+            .await
+            .expect_err("explicit QQ viewer account required");
+        assert_eq!(viewer_error.code, ErrorCode::AuthenticationRequired);
+
+        let invalid_user = provider
+            .user_favorite_videos(
+                "bad\nuser",
+                &tuneweave_core::PageRequest {
+                    limit: 25,
+                    offset: 0,
+                    account: Some("personal".to_owned()),
+                },
+            )
+            .await
+            .expect_err("invalid target identity rejected before account lookup");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
     }
 
     #[test]

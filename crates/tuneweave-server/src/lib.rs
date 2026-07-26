@@ -475,6 +475,10 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/albums",
             get(user_favorite_albums),
         )
+        .route(
+            "/users/{reference}/favorites/videos",
+            get(user_favorite_videos),
+        )
         .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
@@ -8082,6 +8086,48 @@ async fn user_favorite_albums(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserFavoriteVideoParams {
+    limit: Option<String>,
+    offset: Option<String>,
+    account: Option<String>,
+}
+
+async fn user_favorite_videos(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UserFavoriteVideoParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .user_favorite_videos(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 async fn user_playlist_directory(
     state: AppState,
     reference: String,
@@ -14839,6 +14885,29 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
+                    extensions: Extensions::from([("user_id".to_owned(), json!(user_id))]),
+                },
+            })
+        }
+
+        async fn user_favorite_videos(
+            &self,
+            user_id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<Video>> {
+            let mut video = sample_video(user_id);
+            video.subscribed = Some(true);
+            video
+                .extensions
+                .insert("library_scope".to_owned(), json!("user_favorite"));
+            Ok(Page {
+                items: vec![video],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: None,
+                    next_offset: Some(request.offset.saturating_add(1)),
+                    has_more: true,
                     extensions: Extensions::from([("user_id".to_owned(), json!(user_id))]),
                 },
             })
@@ -25402,6 +25471,53 @@ mod tests {
             "/v1/users/netease:encrypted-user/favorites/albums?offset=next",
             "/v1/users/netease:encrypted-user/favorites/albums?unknown=true",
             "/v1/users/unknown:encrypted-user/favorites/albums",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_favorite_videos_keep_target_identity_and_optional_viewer_account() {
+        let app = test_app_with_provider();
+        let (status, public) = json_response_from(
+            app.clone(),
+            "/v1/users/netease:encrypted-user/favorites/videos?limit=25&offset=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(public["data"][0]["ref"], "netease:encrypted-user");
+        assert_eq!(public["data"][0]["subscribed"], true);
+        assert_eq!(
+            public["data"][0]["extensions"]["library_scope"],
+            "user_favorite"
+        );
+        assert_eq!(public["meta"]["platform"], "netease");
+        assert!(public["meta"]["account"].is_null());
+        assert_eq!(public["meta"]["pagination"]["limit"], 25);
+        assert!(public["meta"]["pagination"]["total"].is_null());
+        assert_eq!(
+            public["meta"]["pagination"]["extensions"]["user_id"],
+            "encrypted-user"
+        );
+
+        let (status, viewed) = json_response_from(
+            app,
+            "/v1/users/netease:encrypted-user/favorites/videos?account=viewer&limit=10&offset=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(viewed["meta"]["account"], "viewer");
+        assert_eq!(viewed["meta"]["pagination"]["limit"], 10);
+        assert_eq!(viewed["meta"]["pagination"]["offset"], 1);
+
+        for path in [
+            "/v1/users/netease:encrypted-user/favorites/videos?limit=0",
+            "/v1/users/netease:encrypted-user/favorites/videos?limit=101",
+            "/v1/users/netease:encrypted-user/favorites/videos?offset=next",
+            "/v1/users/netease:encrypted-user/favorites/videos?unknown=true",
+            "/v1/users/unknown:encrypted-user/favorites/videos",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
