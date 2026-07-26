@@ -8996,16 +8996,17 @@ async fn recommended_tracks(
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let request = recommendation_request(&params, Some(account.clone()))?;
+    let account = optional_trimmed(params.account.clone());
+    let request = recommendation_request(&params, account.clone())?;
     let provider = state.registry.require(platform)?;
     let page = provider.recommended_tracks(&request).await?;
-    Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
-            .with_pagination(page.pagination),
-    ))
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn recommended_playlists(
@@ -9054,6 +9055,9 @@ fn parse_recommendation_source(
         None | Some("daily" | "default") => Ok(RecommendationSource::Daily),
         Some("personalized" | "personalised" | "homepage" | "home") => {
             Ok(RecommendationSource::Personalized)
+        }
+        Some("new_releases" | "new-releases" | "new" | "latest") => {
+            Ok(RecommendationSource::NewReleases)
         }
         Some(value) => Err(TuneWeaveError::invalid_request(format!(
             "unsupported recommendation source: {value}",
@@ -26926,6 +26930,19 @@ mod tests {
         assert_eq!(tracks["meta"]["platform"], "netease");
         assert_eq!(tracks["meta"]["account"], "personal");
         assert_eq!(tracks["meta"]["pagination"]["limit"], 10);
+
+        let (status, new_releases) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/tracks?platform=netease&source=new_releases&areaId=5&limit=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            new_releases["data"][0]["extensions"]["source"],
+            "new_releases"
+        );
+        assert_eq!(new_releases["data"][0]["extensions"]["area_id"], 5);
+        assert!(new_releases["meta"]["account"].is_null());
 
         let (status, playlists) = json_response_from(
             test_app_with_provider(),

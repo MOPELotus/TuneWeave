@@ -2772,6 +2772,10 @@ impl MusicProvider for NeteaseProvider {
                 map_recommended_tracks(response, request.limit, request.offset)
             }
             RecommendationSource::Personalized => map_personalized_tracks(response.body, request),
+            RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
+                "NetEase track recommendations do not expose the new_releases source yet",
+            )
+            .with_platform(Platform::Netease)),
         }
     }
 
@@ -2791,6 +2795,10 @@ impl MusicProvider for NeteaseProvider {
             RecommendationSource::Personalized => {
                 map_personalized_playlists(response.body, request)
             }
+            RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
+                "NetEase playlist recommendations do not support the new_releases source",
+            )
+            .with_platform(Platform::Netease)),
         }
     }
 
@@ -5251,6 +5259,10 @@ fn netease_track_recommendation_request(
                 "areaId": request.area_id.unwrap_or(0),
             }),
         )),
+        RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
+            "NetEase track recommendations do not expose the new_releases source yet",
+        )
+        .with_platform(Platform::Netease)),
     }
 }
 
@@ -5264,6 +5276,10 @@ fn netease_playlist_recommendation_request(
             "/api/personalized/playlist",
             json!({ "limit": request.limit, "total": true, "n": 1000 }),
         )),
+        RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
+            "NetEase playlist recommendations do not support the new_releases source",
+        )
+        .with_platform(Platform::Netease)),
     }
 }
 

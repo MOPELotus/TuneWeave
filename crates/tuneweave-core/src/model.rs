@@ -2046,6 +2046,7 @@ pub enum RecommendationSource {
     #[default]
     Daily,
     Personalized,
+    NewReleases,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -4944,6 +4945,11 @@ mod tests {
             serde_json::to_value(recommendations).expect("serialize recommendation request");
         assert_eq!(value["source"], "personalized");
         assert_eq!(value["area_id"], 7);
+        assert_eq!(
+            serde_json::to_value(RecommendationSource::NewReleases)
+                .expect("serialize new release recommendation source"),
+            serde_json::json!("new_releases")
+        );
 
         let videos = VideoRecommendationRequest {
             kind: VideoRecommendationKind::Exclusive,

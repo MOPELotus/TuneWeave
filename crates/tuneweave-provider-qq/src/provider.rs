@@ -59,6 +59,8 @@ const RECOMMENDATION_FEED_MODULE: &str = "music.recommend.RecommendFeed";
 const RECOMMENDATION_FEED_METHOD: &str = "get_recommend_feed";
 const RECOMMENDATION_PLAYLIST_MODULE: &str = "music.playlist.PlaylistSquare";
 const RECOMMENDATION_PLAYLIST_METHOD: &str = "GetRecommendFeed";
+const RECOMMENDATION_NEW_TRACK_MODULE: &str = "newsong.NewSongServer";
+const RECOMMENDATION_NEW_TRACK_METHOD: &str = "get_new_song_info";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -846,6 +848,50 @@ struct QqRecommendationPlaylistResponse {
     from_limit: i64,
     #[serde(rename = "Msg")]
     message: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationNewTrackArea {
+    #[serde(rename = "type", deserialize_with = "deserialize_qq_i64")]
+    type_code: i64,
+    lan: String,
+    name: String,
+    tjreport: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationNewTrackTag {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    tagid: u64,
+    tag: String,
+    link: String,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    from_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationNewTrackResponse {
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    lanlist: Vec<QqRecommendationNewTrackArea>,
+    lan: String,
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    songlist: Vec<Value>,
+    ret_msg: String,
+    #[serde(rename = "type", deserialize_with = "deserialize_qq_i64")]
+    type_code: i64,
+    #[serde(
+        rename = "songTagInfoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    tags: Vec<QqRecommendationNewTrackTag>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3143,6 +3189,19 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ recommendation feed returned no response"))?;
         map_qq_recommendation_feed(request, seen_ids, response)
+    }
+
+    async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
+        let api_request = qq_recommendation_new_track_request(request)?;
+        self.validate_public_account(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ recommended new tracks returned no response"))?;
+        map_qq_recommendation_new_tracks(request, response)
     }
 
     async fn recommended_playlists(
@@ -5823,6 +5882,196 @@ fn validate_qq_recommendation_scheme(scheme: &str) -> Result<String> {
         }
     }
     Ok(scheme.to_owned())
+}
+
+fn qq_recommendation_new_track_request(request: &RecommendationRequest) -> Result<QqApiRequest> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended new track limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if !matches!(
+        request.source,
+        RecommendationSource::Daily | RecommendationSource::NewReleases
+    ) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended new tracks only support the daily or new_releases source",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "source": request.source })));
+    }
+    if request.refresh {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended new tracks do not expose a refresh branch",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let area_type = request.area_id.unwrap_or(5);
+    if !(1..=6).contains(&area_type) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended new track area_id must be between 1 and 6",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "area_id": area_type })));
+    }
+    Ok(QqApiRequest::new(
+        RECOMMENDATION_NEW_TRACK_MODULE,
+        RECOMMENDATION_NEW_TRACK_METHOD,
+        json!({"type": area_type}),
+    ))
+}
+
+fn map_qq_recommendation_new_tracks(
+    request: &RecommendationRequest,
+    response: QqApiResponse,
+) -> Result<Page<Track>> {
+    let requested_type = i64::try_from(request.area_id.unwrap_or(5))
+        .map_err(|_| qq_data_error("QQ recommended new track area type is invalid"))?;
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqRecommendationNewTrackResponse>(response_data)
+        .map_err(|error| {
+            qq_data_error(format!(
+                "QQ recommended new track response is malformed: {error}"
+            ))
+        })?;
+    if parsed.type_code != requested_type {
+        return Err(qq_data_error(
+            "QQ recommended new track response returned a different area type",
+        ));
+    }
+    validate_qq_recommendation_new_track_metadata(&parsed)?;
+
+    let total = parsed.songlist.len();
+    let start = usize::try_from(request.offset)
+        .unwrap_or(usize::MAX)
+        .min(total);
+    let end = start
+        .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+        .min(total);
+    let mut items = Vec::with_capacity(end.saturating_sub(start));
+    for raw in parsed.songlist[start..end].iter().cloned() {
+        let published_at = nonempty_string(raw.get("time_public"));
+        let mut track = map_track(raw)?;
+        track.extensions.remove("search_item");
+        insert_some(&mut track.extensions, "published_at", published_at);
+        let numeric_id = track
+            .extensions
+            .get("numeric_id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse::<u64>().ok());
+        let tags = parsed
+            .tags
+            .iter()
+            .filter(|tag| Some(tag.id) == numeric_id)
+            .collect::<Vec<_>>();
+        track.extensions.insert(
+            "recommendation".to_owned(),
+            json!({
+                "source": RecommendationSource::NewReleases,
+                "area_type": parsed.type_code,
+                "language": parsed.lan,
+                "tags": tags,
+            }),
+        );
+        items.push(track);
+    }
+
+    let consumed = u32::try_from(end)
+        .map_err(|_| qq_data_error("QQ recommended new track page offset overflowed"))?;
+    let has_more = end < total;
+    let available_areas = serde_json::to_value(&parsed.lanlist)
+        .map_err(|_| qq_data_error("failed to preserve QQ new track area options"))?;
+    let tags = serde_json::to_value(&parsed.tags)
+        .map_err(|_| qq_data_error("failed to preserve QQ new track tags"))?;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(
+                u64::try_from(total)
+                    .map_err(|_| qq_data_error("QQ recommended new track total overflowed"))?,
+            ),
+            next_offset: has_more.then_some(consumed),
+            has_more,
+            extensions: Extensions::from([
+                (
+                    "source".to_owned(),
+                    json!(RecommendationSource::NewReleases),
+                ),
+                ("area_type".to_owned(), json!(parsed.type_code)),
+                ("language".to_owned(), json!(parsed.lan)),
+                ("available_areas".to_owned(), available_areas),
+                ("tags".to_owned(), tags),
+                ("message".to_owned(), json!(parsed.ret_msg)),
+                ("extra".to_owned(), json!(parsed.extra)),
+                ("response".to_owned(), response_raw),
+            ]),
+        },
+    })
+}
+
+fn validate_qq_recommendation_new_track_metadata(
+    response: &QqRecommendationNewTrackResponse,
+) -> Result<()> {
+    if response.lan.trim().is_empty()
+        || response.lan.len() > 128
+        || response.lan.chars().any(char::is_control)
+    {
+        return Err(qq_data_error(
+            "QQ recommended new track response has an invalid language label",
+        ));
+    }
+    let mut area_types = BTreeSet::new();
+    for area in &response.lanlist {
+        if !(1..=6).contains(&area.type_code)
+            || !area_types.insert(area.type_code)
+            || area.lan.trim().is_empty()
+            || area.name.trim().is_empty()
+            || area.lan.len() > 128
+            || area.name.len() > 128
+            || area.tjreport.len() > 1_024
+            || area
+                .lan
+                .chars()
+                .chain(area.name.chars())
+                .chain(area.tjreport.chars())
+                .any(char::is_control)
+        {
+            return Err(qq_data_error(
+                "QQ recommended new track response has an invalid area option",
+            ));
+        }
+    }
+    if !response
+        .lanlist
+        .iter()
+        .any(|area| area.type_code == response.type_code && area.lan == response.lan)
+    {
+        return Err(qq_data_error(
+            "QQ recommended new track response does not identify its selected area",
+        ));
+    }
+    for tag in &response.tags {
+        if tag.id == 0
+            || tag.tagid == 0
+            || tag.tag.trim().is_empty()
+            || tag.tag.len() > 256
+            || tag.tag.chars().any(char::is_control)
+        {
+            return Err(qq_data_error(
+                "QQ recommended new track response has an invalid song tag",
+            ));
+        }
+        if !tag.link.trim().is_empty() {
+            validate_qq_recommendation_scheme(&tag.link)?;
+        }
+    }
+    Ok(())
 }
 
 fn qq_recommendation_playlist_request(request: &RecommendationRequest) -> Result<QqApiRequest> {
@@ -23366,6 +23615,194 @@ mod tests {
     }
 
     #[test]
+    fn recommended_new_track_request_preserves_area_and_rejects_unsupported_branches() {
+        let default = qq_recommendation_new_track_request(&RecommendationRequest::new(30, 0))
+            .expect("default QQ recommended new track request");
+        assert_eq!(default.module, RECOMMENDATION_NEW_TRACK_MODULE);
+        assert_eq!(default.method, RECOMMENDATION_NEW_TRACK_METHOD);
+        assert_eq!(default.param, json!({"type": 5}));
+
+        let selected = qq_recommendation_new_track_request(&RecommendationRequest {
+            source: RecommendationSource::NewReleases,
+            area_id: Some(6),
+            ..RecommendationRequest::new(5, 10)
+        })
+        .expect("selected QQ recommended new track request");
+        assert_eq!(selected.param, json!({"type": 6}));
+
+        for request in [
+            RecommendationRequest::new(0, 0),
+            RecommendationRequest::new(101, 0),
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(30, 0)
+            },
+            RecommendationRequest {
+                refresh: true,
+                ..RecommendationRequest::new(30, 0)
+            },
+            RecommendationRequest {
+                area_id: Some(0),
+                ..RecommendationRequest::new(30, 0)
+            },
+            RecommendationRequest {
+                area_id: Some(7),
+                ..RecommendationRequest::new(30, 0)
+            },
+        ] {
+            let error = qq_recommendation_new_track_request(&request)
+                .err()
+                .expect("unsupported QQ recommended new track request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn recommended_new_track_mapping_preserves_catalog_metadata_and_local_page() {
+        let mut first = sample_track(101, "001newTrack0001", "第一首");
+        first["time_public"] = json!("2026-07-26");
+        let mut second = sample_track(102, "001newTrack0002", "第二首");
+        second["time_public"] = json!("2026-07-25");
+        let third = sample_track(103, "001newTrack0003", "第三首");
+        let data = json!({
+            "lan": "最新",
+            "lanlist": [
+                {"lan": "最新", "name": "new_song", "tjreport": "report-5", "type": 5},
+                {"lan": "内地", "name": "neidi", "tjreport": "report-1", "type": 1}
+            ],
+            "ret_msg": "ok",
+            "songTagInfoList": [{
+                "from_type": 11,
+                "id": 102,
+                "link": "",
+                "tag": "独家首发",
+                "tagid": 4016,
+                "futureTagField": true
+            }],
+            "songlist": [first, second, third],
+            "type": 5,
+            "futureResponseField": "kept"
+        });
+        let page = map_qq_recommendation_new_tracks(
+            &RecommendationRequest {
+                source: RecommendationSource::NewReleases,
+                ..RecommendationRequest::new(1, 1)
+            },
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ recommended new tracks");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:001newTrack0002");
+        assert_eq!(page.items[0].extensions["published_at"], "2026-07-25");
+        assert_eq!(
+            page.items[0].extensions["recommendation"]["source"],
+            "new_releases"
+        );
+        assert_eq!(
+            page.items[0].extensions["recommendation"]["tags"][0]["tag"],
+            "独家首发"
+        );
+        assert!(!page.items[0].extensions.contains_key("search_item"));
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["area_type"], 5);
+        assert_eq!(page.pagination.extensions["language"], "最新");
+        assert_eq!(
+            page.pagination.extensions["available_areas"][1]["name"],
+            "neidi"
+        );
+        assert_eq!(
+            page.pagination.extensions["tags"][0]["futureTagField"],
+            true
+        );
+        assert_eq!(
+            page.pagination.extensions["response"]["data"]["futureResponseField"],
+            "kept"
+        );
+    }
+
+    #[test]
+    fn recommended_new_track_mapping_rejects_malformed_catalog_metadata() {
+        let valid = || {
+            json!({
+                "lan": "最新",
+                "lanlist": [
+                    {"lan": "最新", "name": "new_song", "tjreport": "report-5", "type": 5}
+                ],
+                "ret_msg": "",
+                "songTagInfoList": [],
+                "songlist": [sample_track(101, "001newTrack0001", "新歌")],
+                "type": 5
+            })
+        };
+        let mut fixtures = vec![json!({})];
+        let mut wrong_type = valid();
+        wrong_type["type"] = json!(1);
+        fixtures.push(wrong_type);
+        let mut missing_selected = valid();
+        missing_selected["lanlist"][0]["type"] = json!(1);
+        fixtures.push(missing_selected);
+        let mut duplicate_area = valid();
+        duplicate_area["lanlist"] = json!([
+            {"lan": "最新", "name": "new_song", "tjreport": "a", "type": 5},
+            {"lan": "重复", "name": "duplicate", "tjreport": "b", "type": 5}
+        ]);
+        fixtures.push(duplicate_area);
+        let mut invalid_tag = valid();
+        invalid_tag["songTagInfoList"] =
+            json!([{"from_type": 11, "id": 0, "link": "", "tag": "", "tagid": 0}]);
+        fixtures.push(invalid_tag);
+        let mut unsafe_tag = valid();
+        unsafe_tag["songTagInfoList"] = json!([{
+            "from_type": 11,
+            "id": 101,
+            "link": "javascript:alert(1)",
+            "tag": "标签",
+            "tagid": 1
+        }]);
+        fixtures.push(unsafe_tag);
+        let mut invalid_track = valid();
+        invalid_track["songlist"] = json!([{"id": 101, "title": ""}]);
+        fixtures.push(invalid_track);
+
+        for fixture in fixtures {
+            let error = map_qq_recommendation_new_tracks(
+                &RecommendationRequest::new(30, 0),
+                response(fixture),
+            )
+            .expect_err("invalid QQ recommended new track response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn recommended_new_tracks_validate_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .recommended_tracks(&RecommendationRequest {
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(30, 0)
+            })
+            .await
+            .expect_err("missing optional recommended new track account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .recommended_tracks(&RecommendationRequest {
+                limit: 0,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(30, 0)
+            })
+            .await
+            .expect_err("invalid recommended new track request");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
             "List": [{
@@ -24233,6 +24670,59 @@ mod tests {
                 .iter()
                 .all(|first| second.items.iter().all(|second| second.id != first.id))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_recommended_new_tracks_cover_every_area_and_local_pagination() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for area_type in 1..=6 {
+            let first = provider
+                .recommended_tracks(&RecommendationRequest {
+                    source: RecommendationSource::NewReleases,
+                    area_id: Some(area_type),
+                    ..RecommendationRequest::new(3, 0)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("live QQ recommended new tracks area {area_type}: {error:?}")
+                });
+            assert!(!first.items.is_empty(), "area {area_type}");
+            assert!(first.items.iter().all(|track| !track.name.is_empty()));
+            assert_eq!(first.pagination.extensions["area_type"], json!(area_type));
+            assert_eq!(
+                first.pagination.extensions["available_areas"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(6)
+            );
+            if let Some(next_offset) = first.pagination.next_offset {
+                let second = provider
+                    .recommended_tracks(&RecommendationRequest {
+                        source: RecommendationSource::NewReleases,
+                        area_id: Some(area_type),
+                        ..RecommendationRequest::new(3, next_offset)
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "live QQ recommended new tracks area {area_type} continuation: {error:?}"
+                        )
+                    });
+                assert_eq!(second.pagination.offset, next_offset);
+                assert!(
+                    first
+                        .items
+                        .iter()
+                        .all(|first| second.items.iter().all(|second| first.id != second.id)),
+                    "area {area_type}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

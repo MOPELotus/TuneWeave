@@ -1224,7 +1224,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/users/{ref}/membership` | `account?`、`backend=front|client` | 指定用户的 `MembershipSummary`；引用决定平台，客户端后端要求登录 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/recommendations/feed` | `platform?`、`account?`、`page?`、`direction?=initial|forward`、`loaded_count?`（也接受 `s_num/snum`）、`seen_ids?`（也接受 `v_cache/cache`，JSON 数组或逗号列表） | `RecommendationFeed`；楼层化推荐卡片及完整多字段防重复续页状态 |
-| GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由和首页包装保存在扩展 |
+| GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized|new_releases`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由、地区目录、标签和首页包装保存在扩展 |
 | GET | `/v1/recommendations/playlists` | `platform?`、`account?`、`source?=daily|personalized`、分页 | `Playlist[]` |
 | GET | `/v1/recommendations/videos` | `platform?`、`account?`、`kind=mv|exclusive`、`view=featured|catalog`、分页 | `Video[]`；`exclusive/catalog` 是独家放送真实分页列表 |
 | GET | `/v1/recommendations/podcast-episodes` | `platform?`、`account?`、`source?=personalized|category`、`category_id?`（也接受 `categoryId/cateId/type`）、`limit?`、`offset?` | `PodcastEpisode[]`；个性化固定快照或可分类、可偏移的推荐节目目录 |
@@ -1285,6 +1285,8 @@ QQ 会员信息只支持当前登录账户：`GET /v1/account/membership?platfor
 私人 FM 与每日推荐目录分离。`backend` 缺省为 `classic`，也接受 `default/personal_fm`；网易云固定使用 WeAPI `/api/v1/radio/get` 且不提交伪分页参数。`backend=mode`（也接受 `personal_fm_mode`）使用 EAPI 同路径，完整保留可选 `mode/subMode/limit`，其中 `sub_mode` 也接受 `submode/subMode`。模式字符串只做长度和空白边界校验，不把平台将来增加的模式限制在本地枚举中。响应是当前队列快照：`total` 为本次返回数量，`has_more=false/next_offset=null/continuation_supported=false`；`limit` 只控制本次映射上限，不会伪造上游分页。2026-07-18 匿名真实联网已分别验证经典和模式后端均返回非空统一 `Track` 队列。
 
 首页个性化和登录账户每日推荐共用按资源类型稳定的端点，但以显式 `source` 分支区分，不静默互换。`source` 缺省为 `daily`，也接受 `default`；`personalized` 兼容 `homepage/home/personalised`。网易云个性化新歌固定使用 WeAPI `/api/personalized/newsong`，提交 `type=recommend/limit/areaId`，其中 `area_id` 缺省为 0 且只允许用于该分支；个性化歌单固定使用 `/api/personalized/playlist`，精确提交 `limit/total=true/n=1000`。两者均为不支持 offset 的首页快照，非零 offset 会明确拒绝；推荐算法、文案、是否可反馈及完整包装保存在单项扩展，当前上游可能把歌单播放量返回为浮点 JSON，TuneWeave 会无损保留而不强制降格为整数。
+
+QQ 新歌发现复用 `GET /v1/recommendations/tracks` 的 `source=new_releases` 分支；为保持省略 `source` 时平台端点可直接使用，QQ 的缺省 `daily` 也指向该公开目录，但响应扩展会明确标记真实来源为 `new_releases`。`area_id` 精确采用 QQ 原生六类：`1` 内地、`2` 欧美、`3` 日本、`4` 韩国、`5` 最新（缺省）、`6` 港台；其余值、`refresh=true` 和 `source=personalized` 在该方法接入前明确拒绝。QQ 固定调用 Android `newsong.NewSongServer/get_new_song_info`，平台只接受地区类型而没有原生分页，因此 TuneWeave 对同一完整快照应用稳定 `offset/limit`，返回真实总数与下一偏移。当前地区、六类可选目录、统计标识、按歌曲数字 ID 关联的首发标签、发布时间和完整平台响应均保留；已知目录与标签先经强类型和安全链接校验，不把畸形字段伪装成空结果。匿名请求可直接使用，显式 `account` 只校验精确别名。2026-07-26 已真实逐类验证六个地区及各自第二个本地分页窗口。
 
 首页视频推荐以 `kind/view` 保留三个不同上游能力：`mv/featured` 对应 WeAPI `/api/personalized/mv`，`exclusive/featured`（别名 `privatecontent/entry`）对应 `/api/personalized/privatecontent`，二者都是不可续页快照；`exclusive/catalog`（也接受 `view=list/all`）对应 `/api/v2/privatecontent/list`，精确提交 `offset/limit/total="true"` 并按真实 `more` 生成下一偏移。平台没有个性化 MV 分页目录，因此 `mv/catalog` 会明确拒绝，不会拿独家放送替代。条目统一为 `Video`，MV 艺人、封面、正时长、播放量、收藏态和独家放送时间按可用字段映射，入口与分页包装完整保留在扩展。
 
