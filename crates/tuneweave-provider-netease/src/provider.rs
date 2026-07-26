@@ -17,8 +17,8 @@ use tuneweave_core::{
     AccountCredentialStore, AccountProfile, Album, AlbumListRequest, AlbumStats, AlbumSummary,
     AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea,
     ArtistBiographySection, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartEntry,
-    ArtistChartRequest, ArtistContentCount, ArtistListRequest, ArtistOverview, ArtistStats,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
+    ArtistChartRequest, ArtistContentCount, ArtistGenre, ArtistListRequest, ArtistOverview,
+    ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
     AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
@@ -1907,13 +1907,19 @@ impl MusicProvider for NeteaseProvider {
 
     async fn artists(&self, request: &ArtistListRequest) -> Result<Page<Artist>> {
         let limit = request.limit.clamp(1, 100);
+        if request.genre != ArtistGenre::All {
+            return Err(TuneWeaveError::invalid_request(
+                "the NetEase artist catalog does not support genre filters",
+            )
+            .with_platform(Platform::Netease));
+        }
         let client = self.client_for(request.account.as_deref())?;
         let mut payload = json!({
             "limit": limit,
             "offset": request.offset,
             "total": true,
             "type": netease_artist_category(request.category),
-            "area": netease_artist_area(request.area)
+            "area": netease_artist_area(request.area)?
         });
         if let Some(initial) = netease_artist_initial(request.initial.as_deref())? {
             payload["initial"] = Value::from(initial);
@@ -11629,14 +11635,18 @@ const fn netease_artist_category(category: ArtistCategory) -> i64 {
     }
 }
 
-const fn netease_artist_area(area: ArtistArea) -> i64 {
+fn netease_artist_area(area: ArtistArea) -> Result<i64> {
     match area {
-        ArtistArea::All => -1,
-        ArtistArea::Chinese => 7,
-        ArtistArea::Western => 96,
-        ArtistArea::Japanese => 8,
-        ArtistArea::Korean => 16,
-        ArtistArea::Other => 0,
+        ArtistArea::All => Ok(-1),
+        ArtistArea::Chinese => Ok(7),
+        ArtistArea::Western => Ok(96),
+        ArtistArea::Japanese => Ok(8),
+        ArtistArea::Korean => Ok(16),
+        ArtistArea::Other => Ok(0),
+        ArtistArea::HongKongTaiwan => Err(TuneWeaveError::invalid_request(
+            "the NetEase artist catalog does not expose a separate Hong Kong/Taiwan area",
+        )
+        .with_platform(Platform::Netease)),
     }
 }
 
@@ -22455,8 +22465,20 @@ mod tests {
     fn maps_netease_artist_catalog_filters_and_items() {
         assert_eq!(netease_artist_category(ArtistCategory::Male), 1);
         assert_eq!(netease_artist_category(ArtistCategory::Group), 3);
-        assert_eq!(netease_artist_area(ArtistArea::Western), 96);
-        assert_eq!(netease_artist_area(ArtistArea::Korean), 16);
+        assert_eq!(
+            netease_artist_area(ArtistArea::Western).expect("western area"),
+            96
+        );
+        assert_eq!(
+            netease_artist_area(ArtistArea::Korean).expect("Korean area"),
+            16
+        );
+        assert_eq!(
+            netease_artist_area(ArtistArea::HongKongTaiwan)
+                .expect_err("unsupported split area")
+                .code,
+            ErrorCode::InvalidRequest
+        );
         assert_eq!(
             netease_artist_initial(Some("b")).expect("letter initial"),
             Some(66)

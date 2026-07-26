@@ -23,23 +23,23 @@ use serde_json::{Value, json};
 use tuneweave_core::{
     AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest,
     AlbumStats, AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist,
-    ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
-    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabRequest, ArtistListRequest,
-    ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AudioRecognition,
-    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
-    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    ChartTrackListRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
-    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistArea, ArtistCatalog, ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea,
+    ArtistChartRequest, ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind,
+    ArtistHomepageTabRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
+    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
+    ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest,
+    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
+    BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
+    ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest, CloudImportRequest,
+    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
+    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -314,6 +314,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/charts/{reference}/tracks", get(chart_tracks))
         .route("/artists", get(artists))
+        .route("/artists/catalog", get(artist_catalog))
         .route(
             "/artists/details",
             get(artist_details_get).post(artist_details_post),
@@ -6966,6 +6967,36 @@ fn track_from_uni_item(item: UniPlaylistItem) -> Track {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct ArtistCatalogParams {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(rename = "type", alias = "category", alias = "sex")]
+    category: Option<String>,
+    area: Option<String>,
+    genre: Option<String>,
+}
+
+async fn artist_catalog(
+    State(state): State<AppState>,
+    Query(params): Query<ArtistCatalogParams>,
+) -> Result<Json<ApiResponse<ArtistCatalog>>, ApiError> {
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let mut request = ArtistCatalogRequest::new();
+    request.account.clone_from(&account);
+    request.category = parse_artist_category(params.category.as_deref())?;
+    request.area = parse_artist_area(params.area.as_deref())?;
+    request.genre = parse_artist_genre(params.genre.as_deref())?;
+    let catalog = provider.artist_catalog(&request).await?;
+    let mut response = ApiResponse::new(catalog).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct ArtistListParams {
     platform: Option<String>,
     account: Option<String>,
@@ -6974,6 +7005,7 @@ struct ArtistListParams {
     #[serde(rename = "type", alias = "category")]
     category: Option<String>,
     area: Option<String>,
+    genre: Option<String>,
     initial: Option<String>,
 }
 
@@ -6993,6 +7025,7 @@ async fn artists(
     request.account.clone_from(&account);
     request.category = parse_artist_category(params.category.as_deref())?;
     request.area = parse_artist_area(params.area.as_deref())?;
+    request.genre = parse_artist_genre(params.genre.as_deref())?;
     request.initial = optional_trimmed(params.initial);
     let page = provider.artists(&request).await?;
     let mut response = ApiResponse::new(page.items)
@@ -11857,6 +11890,9 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
     match value.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
         "all" => Ok(ArtistArea::All),
         "chinese" => Ok(ArtistArea::Chinese),
+        "hong_kong_taiwan" | "hongkong_taiwan" | "hk_tw" | "hktw" | "taiwan" => {
+            Ok(ArtistArea::HongKongTaiwan)
+        }
         "western" => Ok(ArtistArea::Western),
         "japanese" => Ok(ArtistArea::Japanese),
         "korean" => Ok(ArtistArea::Korean),
@@ -11864,7 +11900,61 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
         value => Err(
             TuneWeaveError::invalid_request(format!("unsupported artist area: {value}"))
                 .with_details(json!({
-                    "allowed": ["all", "chinese", "western", "japanese", "korean", "other"]
+                    "allowed": [
+                        "all",
+                        "chinese",
+                        "hong_kong_taiwan",
+                        "western",
+                        "japanese",
+                        "korean",
+                        "other"
+                    ]
+                })),
+        ),
+    }
+}
+
+fn parse_artist_genre(value: Option<&str>) -> Result<ArtistGenre, TuneWeaveError> {
+    match value
+        .unwrap_or("all")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "all" => Ok(ArtistGenre::All),
+        "pop" => Ok(ArtistGenre::Pop),
+        "rap" | "hip_hop" | "hiphop" => Ok(ArtistGenre::Rap),
+        "chinese_style" | "chinese" => Ok(ArtistGenre::ChineseStyle),
+        "rock" => Ok(ArtistGenre::Rock),
+        "electronic" | "electronic_music" => Ok(ArtistGenre::Electronic),
+        "folk" => Ok(ArtistGenre::Folk),
+        "r_and_b" | "r&b" | "rnb" => Ok(ArtistGenre::RAndB),
+        "ethnic" | "world" => Ok(ArtistGenre::Ethnic),
+        "light_music" | "easy_listening" => Ok(ArtistGenre::LightMusic),
+        "jazz" => Ok(ArtistGenre::Jazz),
+        "classical" => Ok(ArtistGenre::Classical),
+        "country" => Ok(ArtistGenre::Country),
+        "blues" => Ok(ArtistGenre::Blues),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported artist genre: {value}"))
+                .with_details(json!({
+                    "allowed": [
+                        "all",
+                        "pop",
+                        "rap",
+                        "chinese_style",
+                        "rock",
+                        "electronic",
+                        "folk",
+                        "r_and_b",
+                        "ethnic",
+                        "light_music",
+                        "jazz",
+                        "classical",
+                        "country",
+                        "blues"
+                    ]
                 })),
         ),
     }
@@ -12635,6 +12725,7 @@ mod tests {
                 Capability::ArtistDetail,
                 Capability::ArtistOverview,
                 Capability::ArtistStats,
+                Capability::ArtistCatalog,
                 Capability::ArtistList,
                 Capability::ArtistAlbums,
                 Capability::ArtistFans,
@@ -14168,6 +14259,29 @@ mod tests {
             Ok(sample_artist_stats(id))
         }
 
+        async fn artist_catalog(&self, request: &ArtistCatalogRequest) -> Result<ArtistCatalog> {
+            Ok(ArtistCatalog {
+                platform: Platform::Netease,
+                area: request.area,
+                category: request.category,
+                genre: request.genre,
+                featured_artists: vec![sample_artist("4558")],
+                artists: vec![sample_artist("178059")],
+                filters: tuneweave_core::ArtistCatalogFilters {
+                    areas: vec![tuneweave_core::ArtistCatalogFilterOption {
+                        id: "200".to_owned(),
+                        name: "华语".to_owned(),
+                        extensions: Extensions::new(),
+                    }],
+                    categories: Vec::new(),
+                    genres: Vec::new(),
+                    initials: Vec::new(),
+                    extensions: Extensions::new(),
+                },
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
         async fn artists(&self, request: &ArtistListRequest) -> Result<Page<Artist>> {
             let mut artist = sample_artist("178059");
             artist
@@ -14176,6 +14290,9 @@ mod tests {
             artist
                 .extensions
                 .insert("area".to_owned(), json!(request.area));
+            artist
+                .extensions
+                .insert("genre".to_owned(), json!(request.genre));
             if let Some(initial) = &request.initial {
                 artist
                     .extensions
@@ -21021,6 +21138,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artist_snapshot_catalog_uses_unified_area_category_and_genre_filters() {
+        let (status, catalog) = json_response_from(
+            test_app_with_provider(),
+            "/v1/artists/catalog?platform=netease&account=collector&type=female&area=hong_kong_taiwan&genre=pop",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(catalog["data"]["platform"], "netease");
+        assert_eq!(catalog["data"]["category"], "female");
+        assert_eq!(catalog["data"]["area"], "hong_kong_taiwan");
+        assert_eq!(catalog["data"]["genre"], "pop");
+        assert_eq!(
+            catalog["data"]["featured_artists"][0]["ref"],
+            "netease:4558"
+        );
+        assert_eq!(catalog["data"]["artists"][0]["ref"], "netease:178059");
+        assert_eq!(catalog["data"]["filters"]["areas"][0]["id"], "200");
+        assert_eq!(catalog["data"]["extensions"]["account"], "collector");
+        assert_eq!(catalog["meta"]["platform"], "netease");
+        assert_eq!(catalog["meta"]["account"], "collector");
+
+        for path in [
+            "/v1/artists/catalog?genre=disco",
+            "/v1/artists/catalog?area=mars",
+            "/v1/artists/catalog?type=solo",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn artist_catalog_uses_unified_filters_and_pagination() {
         let (status, artists) = json_response_from(
             test_app_with_provider(),
@@ -21031,6 +21181,7 @@ mod tests {
         assert_eq!(artists["data"][0]["ref"], "netease:178059");
         assert_eq!(artists["data"][0]["extensions"]["category"], "male");
         assert_eq!(artists["data"][0]["extensions"]["area"], "western");
+        assert_eq!(artists["data"][0]["extensions"]["genre"], "all");
         assert_eq!(artists["data"][0]["extensions"]["initial"], "b");
         assert_eq!(artists["meta"]["platform"], "netease");
         assert_eq!(artists["meta"]["account"], "collector");

@@ -77,6 +77,7 @@ pub enum Capability {
     SimilarArtists,
     ArtistOverview,
     ArtistStats,
+    ArtistCatalog,
     ArtistList,
     ArtistAlbums,
     ArtistFans,

@@ -1066,6 +1066,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/charts/dimensions/{chart_code}` | `target_id`、`target_type`、`platform?`、`account?` | `DimensionChart`；也接受参考字段 `targetId/targetType` |
 | GET | `/v1/charts/dimensions/{chart_code}/tracks` | `target_id`、`target_type`、`platform?`、`account?` | 完整 `DimensionChartTrackSnapshot`；无分页元数据 |
 | GET | `/v1/artists` | `platform?`、`account?`、`type`、`area`、`initial`、分页 | `Artist[]`；分类歌手目录 |
+| GET | `/v1/artists/catalog` | `platform?`、`account?`、`type`、`area`、`genre` | `ArtistCatalog`；热门、完整快照与可选筛选标签分离 |
 | GET/POST | `/v1/artists/details` | `refs`，或 `ids/mids + platform?`；`account?`；POST 接受字符串或数组 | 批量 `Artist[]`；限制同平台 1–100 项，保留输入顺序与重复项；QQ 使用原生批量详情协议 |
 | GET | `/v1/artists/{ref}` | `account?` | `Artist`；身份详情与分段传记，平台原始附加信息保留在扩展字段；QQ 使用歌手 MID 并保留主页计数及头图结构 |
 | GET | `/v1/artists/{ref}/tabs/{tab}` | `page?`、`limit?`（兼容 `num/page_size`）、`account?` | `ArtistHomepageTab`；`tab` 接受 `wiki|album|composer|lyricist|producer|arranger|musician|song|video` 及平台常用别名，音乐资源强类型返回，异构介绍保留稳定摘要与完整扩展 |
@@ -1324,6 +1325,8 @@ QQ 专辑详情固定调用 `AlbumInfoServer/GetAlbumDetail`。纯十进制引�
 QQ 专辑歌曲固定调用 `AlbumSongList/GetAlbumSongList`，数字 ID 使用 `albumId`，MID 使用大小写精确的 `albumMid`；统一 `offset/limit` 直接映射到 `begin/num`，因此非整页对齐的偏移不会被静默取整。`songList[*].songInfo` 逐项进入完整统一曲目映射，外层曲序信息、未知字段和完整响应位于扩展；平台返回的 `albumMid/totalNum` 驱动规范专辑身份与真实 `total/next_offset/has_more`。响应专辑身份不一致、曲目指向其他专辑、超过请求页宽、总数越界或在总数耗尽前返回空页时会明确报上游错误。
 
 QQ 新专辑目录固定调用 Android `newalbum.NewAlbumServer/get_new_album_info`，只接受该平台真实存在的 `catalog=new`。`area` 省略时为内地，也接受 `1|mainland_china|内地`、`2|hong_kong_taiwan|港台`、`3|western|欧美`、`4|korea|韩国`、`5|japan|日本`、`6|other|其他` 及文档化短别名；QQ 没有全部地区和独立 `newest` 分支，相关输入会明确拒绝。统一任意 `offset/limit` 精确映射为 `start/num`，总数和返回数驱动真实续页。每张专辑以规范 MID 为稳定身份，数字 ID、三类别名、全部歌手、发行日期、平台类型/地区/流派/语种、公司、封面、曲数/可播放曲数/长音频数、推荐理由及未知字段都被保留；2026-07-26 provider 和 release HTTP 已验证 offset 0/1 连续窗口与全部六区非空目录。
+
+QQ 歌手快照目录使用独立 `GET /v1/artists/catalog`，固定调用 Web `music.musichallSinger.SingerList/GetSingerList` 并提交 `hastag=0`。`type` 支持 `all|male|female|group`；`area` 支持 `all|chinese|hong_kong_taiwan|western|japanese|korean`；`genre` 支持 `all|pop|rap|chinese_style|rock|electronic|folk|r_and_b|ethnic|light_music|jazz|classical|country|blues` 及文档化别名。结果以 `ArtistCatalog.featured_artists/artists/filters` 分开保存热门歌手、完整平台快照和可选地区/性别/流派/首字母标签；Q029 的索引分页仍使用 `/v1/artists`，不会把一次性快照伪装成真实续页。歌手 MID、数字 ID、别名、拼音、国家/地区、趋势、关注数、图片及未知字段完整保留；命名账户只验证精确别名，不向公开 Web 目录注入密钥。2026-07-26 provider 和 release HTTP 已真实验证默认及华语女流行筛选非空。
 
 QQ 歌手详情固定调用 Android `UnifiedHomepageSrv/GetHomepageHeader` 并以歌手 MID 定位。`Info.Singer` 和 `Info.BaseInfo` 提升为统一身份、名称、别名、头像与背景；歌手数字 ID、类型、关注态、粉丝/关注/好友/访客计数，以及完整 `Info/TabDetail/Prompt` 保留在扩展。当前平台把 `SingerHeaderPic` 返回为包含裁剪坐标、高分辨率图、3D 图和图片 MID 的对象，TuneWeave 同时兼容参考项目声明的旧字符串形态；图片资源 MID 独立允许平台实际使用的下划线版本后缀，但歌手资源 MID 仍保持严格字母数字校验。主页默认 Tab 返回的 `null` 列表规范化为空列表，不据此伪造作品总数；所有对外图片 URL 必须是无内嵌凭据的 HTTP(S) 地址。
 

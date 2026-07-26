@@ -2091,10 +2091,85 @@ pub enum ArtistArea {
     #[default]
     All,
     Chinese,
+    HongKongTaiwan,
     Western,
     Japanese,
     Korean,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistGenre {
+    #[default]
+    All,
+    Pop,
+    Rap,
+    ChineseStyle,
+    Rock,
+    Electronic,
+    Folk,
+    RAndB,
+    Ethnic,
+    LightMusic,
+    Jazz,
+    Classical,
+    Country,
+    Blues,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistCatalogRequest {
+    pub account: Option<String>,
+    pub category: ArtistCategory,
+    pub area: ArtistArea,
+    pub genre: ArtistGenre,
+}
+
+impl ArtistCatalogRequest {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            account: None,
+            category: ArtistCategory::All,
+            area: ArtistArea::All,
+            genre: ArtistGenre::All,
+        }
+    }
+}
+
+impl Default for ArtistCatalogRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistCatalogFilterOption {
+    pub id: String,
+    pub name: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistCatalogFilters {
+    pub areas: Vec<ArtistCatalogFilterOption>,
+    pub categories: Vec<ArtistCatalogFilterOption>,
+    pub genres: Vec<ArtistCatalogFilterOption>,
+    pub initials: Vec<ArtistCatalogFilterOption>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistCatalog {
+    pub platform: Platform,
+    pub area: ArtistArea,
+    pub category: ArtistCategory,
+    pub genre: ArtistGenre,
+    pub featured_artists: Vec<Artist>,
+    pub artists: Vec<Artist>,
+    pub filters: ArtistCatalogFilters,
+    pub extensions: Extensions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2104,6 +2179,7 @@ pub struct ArtistListRequest {
     pub account: Option<String>,
     pub category: ArtistCategory,
     pub area: ArtistArea,
+    pub genre: ArtistGenre,
     pub initial: Option<String>,
 }
 
@@ -2116,6 +2192,7 @@ impl ArtistListRequest {
             account: None,
             category: ArtistCategory::All,
             area: ArtistArea::All,
+            genre: ArtistGenre::All,
             initial: None,
         }
     }
@@ -5275,6 +5352,7 @@ mod tests {
 
         assert_eq!(request.category, ArtistCategory::All);
         assert_eq!(request.area, ArtistArea::All);
+        assert_eq!(request.genre, ArtistGenre::All);
         assert_eq!(request.initial, None);
         assert_eq!(
             serde_json::to_value(ArtistCategory::Group).expect("serialize artist category"),
@@ -5284,6 +5362,36 @@ mod tests {
             serde_json::to_value(ArtistArea::Western).expect("serialize artist area"),
             "western"
         );
+        assert_eq!(
+            serde_json::to_value(ArtistArea::HongKongTaiwan)
+                .expect("serialize split Chinese artist area"),
+            "hong_kong_taiwan"
+        );
+        assert_eq!(
+            serde_json::to_value(ArtistGenre::RAndB).expect("serialize artist genre"),
+            "r_and_b"
+        );
+
+        let mut catalog = ArtistCatalogRequest::new();
+        catalog.area = ArtistArea::HongKongTaiwan;
+        catalog.category = ArtistCategory::Female;
+        catalog.genre = ArtistGenre::Pop;
+        catalog.account = Some("collector".to_owned());
+        let value = serde_json::to_value(catalog).expect("serialize artist catalog request");
+        assert_eq!(value["area"], "hong_kong_taiwan");
+        assert_eq!(value["category"], "female");
+        assert_eq!(value["genre"], "pop");
+        assert_eq!(value["account"], "collector");
+
+        let filter = ArtistCatalogFilterOption {
+            id: "200".to_owned(),
+            name: "华语".to_owned(),
+            extensions: Extensions::from([("selected".to_owned(), serde_json::json!(true))]),
+        };
+        let value = serde_json::to_value(filter).expect("serialize artist catalog filter");
+        assert_eq!(value["id"], "200");
+        assert_eq!(value["name"], "华语");
+        assert_eq!(value["extensions"]["selected"], true);
     }
 
     #[test]

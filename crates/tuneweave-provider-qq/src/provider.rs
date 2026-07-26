@@ -10,28 +10,29 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
-    AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistBiographySection,
-    ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
-    ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistSummary, ArtistTrackListRequest,
-    ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
-    AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartGroup,
-    ChartTrackListRequest, ChartTrackPreview, CreatorSummary, ErrorCode, Extensions,
-    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
-    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider, MusicVideoArea,
-    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
-    Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
-    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
-    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SimilarArtistList, SimilarArtistRequest,
-    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
-    Track, TrackDetailBatchRequest, TrackDetailRequestItem, TrackIdentifierKind, TrialWindow,
-    TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
-    VideoStream, VideoStreamRequest,
+    AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistArea,
+    ArtistBiographySection, ArtistCatalog, ArtistCatalogFilterOption, ArtistCatalogFilters,
+    ArtistCatalogRequest, ArtistCategory, ArtistGenre, ArtistHomepageIntroduction,
+    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabMetadata, ArtistHomepageTabRequest,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistVideoListRequest,
+    AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
+    AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Chart,
+    ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest, ChartTrackPreview,
+    CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
+    MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
+    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -74,6 +75,8 @@ const SINGER_DESCRIPTION_MODULE: &str = "music.musichallSinger.SingerInfoInter";
 const SINGER_DESCRIPTION_METHOD: &str = "GetSingerDetail";
 const SIMILAR_SINGER_MODULE: &str = "music.SimilarSingerSvr";
 const SIMILAR_SINGER_METHOD: &str = "GetSimilarSingerList";
+const SINGER_CATALOG_MODULE: &str = "music.musichallSinger.SingerList";
+const SINGER_CATALOG_METHOD: &str = "GetSingerList";
 const TOPLIST_MODULE: &str = "music.musicToplist.Toplist";
 const TOPLIST_CATALOG_METHOD: &str = "GetAll";
 const TOPLIST_DETAIL_METHOD: &str = "GetDetail";
@@ -2004,6 +2007,116 @@ struct QqSingerAlbumResponse {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerCatalogOption {
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerCatalogTags {
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    area: Vec<QqSingerCatalogOption>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    genre: Vec<QqSingerCatalogOption>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    sex: Vec<QqSingerCatalogOption>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    index: Vec<QqSingerCatalogOption>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerCatalogItem {
+    #[serde(
+        default = "negative_one_i64",
+        rename = "singer_id",
+        alias = "singerId",
+        alias = "id",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    id: i64,
+    #[serde(default, rename = "singer_mid", alias = "singerMid", alias = "mid")]
+    mid: String,
+    #[serde(default, rename = "singer_name", alias = "singerName", alias = "name")]
+    name: String,
+    #[serde(default, rename = "singer_pmid", alias = "singerPmid", alias = "pmid")]
+    image_mid: String,
+    #[serde(
+        default = "negative_one_i64",
+        rename = "area_id",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    area_id: i64,
+    #[serde(
+        default = "negative_one_i64",
+        rename = "country_id",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    country_id: i64,
+    #[serde(default)]
+    country: String,
+    #[serde(default, rename = "other_name")]
+    other_name: String,
+    #[serde(default)]
+    spell: String,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    trend: i64,
+    #[serde(
+        default,
+        rename = "concernNum",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    follower_count: u64,
+    #[serde(default, rename = "singer_pic")]
+    image_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerCatalogResponse {
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    area: i64,
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    sex: i64,
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    genre: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    hotlist: Vec<QqSingerCatalogItem>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singerlist: Vec<QqSingerCatalogItem>,
+    #[serde(default)]
+    tags: Option<QqSingerCatalogTags>,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(default, rename = "tjReport")]
+    report: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QqSingerCatalogSelection {
+    area: i64,
+    sex: i64,
+    genre: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct QqSingerMv {
     #[serde(default, rename = "mvid", deserialize_with = "deserialize_qq_i64")]
     id: i64,
@@ -2280,6 +2393,7 @@ impl MusicProvider for QqProvider {
             Capability::AlbumList,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
+            Capability::ArtistCatalog,
             Capability::ArtistHomepageTabs,
             Capability::SimilarArtists,
             Capability::ArtistAlbums,
@@ -2548,6 +2662,19 @@ impl MusicProvider for QqProvider {
             .expect("one requested QQ singer description was checked");
         merge_qq_singer_description(&mut artist, description)?;
         Ok(artist)
+    }
+
+    async fn artist_catalog(&self, request: &ArtistCatalogRequest) -> Result<ArtistCatalog> {
+        self.validate_public_account(request.account.as_deref())?;
+        let (api_request, selection) = qq_singer_catalog_request(request)?;
+        let response = self
+            .client
+            .request_web(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer catalog request returned no response"))?;
+        map_qq_singer_catalog(request, selection, response)
     }
 
     async fn artist_descriptions(
@@ -4831,6 +4958,71 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_singer_catalog_request(
+    request: &ArtistCatalogRequest,
+) -> Result<(QqApiRequest, QqSingerCatalogSelection)> {
+    let area = match request.area {
+        ArtistArea::All => -100,
+        ArtistArea::Chinese => 200,
+        ArtistArea::HongKongTaiwan => 2,
+        ArtistArea::Western => 5,
+        ArtistArea::Japanese => 4,
+        ArtistArea::Korean => 3,
+        ArtistArea::Other => {
+            return Err(TuneWeaveError::invalid_request(
+                "the QQ singer catalog does not expose an other area",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({
+                "allowed": [
+                    "all",
+                    "chinese",
+                    "hong_kong_taiwan",
+                    "western",
+                    "japanese",
+                    "korean"
+                ]
+            })));
+        }
+    };
+    let sex = match request.category {
+        ArtistCategory::All => -100,
+        ArtistCategory::Male => 0,
+        ArtistCategory::Female => 1,
+        ArtistCategory::Group => 2,
+    };
+    let genre = match request.genre {
+        ArtistGenre::All => -100,
+        ArtistGenre::Pop => 7,
+        ArtistGenre::Rap => 3,
+        ArtistGenre::ChineseStyle => 19,
+        ArtistGenre::Rock => 4,
+        ArtistGenre::Electronic => 2,
+        ArtistGenre::Folk => 8,
+        ArtistGenre::RAndB => 11,
+        ArtistGenre::Ethnic => 37,
+        ArtistGenre::LightMusic => 93,
+        ArtistGenre::Jazz => 14,
+        ArtistGenre::Classical => 33,
+        ArtistGenre::Country => 13,
+        ArtistGenre::Blues => 10,
+    };
+    let selection = QqSingerCatalogSelection { area, sex, genre };
+    Ok((
+        QqApiRequest::new(
+            SINGER_CATALOG_MODULE,
+            SINGER_CATALOG_METHOD,
+            json!({
+                "hastag": 0,
+                "area": area,
+                "sex": sex,
+                "genre": genre
+            }),
+        ),
+        selection,
+    ))
+}
+
 fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
     if mids.is_empty() || mids.len() > 100 {
         return Err(TuneWeaveError::invalid_request(
@@ -6628,6 +6820,163 @@ fn map_qq_vip_info(
             ("vip".to_owned(), vip_data),
             ("response".to_owned(), response.raw),
         ]),
+    })
+}
+
+fn map_qq_singer_catalog(
+    request: &ArtistCatalogRequest,
+    selection: QqSingerCatalogSelection,
+    response: QqApiResponse,
+) -> Result<ArtistCatalog> {
+    let data =
+        serde_json::from_value::<QqSingerCatalogResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ singer catalog response is malformed: {error}"))
+        })?;
+    if data.code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ singer catalog failed with code {}", data.code),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_code": data.code })));
+    }
+    if (data.area, data.sex, data.genre) != (selection.area, selection.sex, selection.genre) {
+        return Err(qq_data_error(
+            "QQ singer catalog response returned different filters than requested",
+        ));
+    }
+    let response_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer catalog response"))?;
+    let featured_artists = data
+        .hotlist
+        .into_iter()
+        .map(|artist| map_qq_singer_catalog_item(artist, "featured singer"))
+        .collect::<Result<Vec<_>>>()?;
+    let artists = data
+        .singerlist
+        .into_iter()
+        .map(|artist| map_qq_singer_catalog_item(artist, "catalog singer"))
+        .collect::<Result<Vec<_>>>()?;
+    let tags_present = data.tags.is_some();
+    let tags = data.tags.unwrap_or_default();
+    let filters = ArtistCatalogFilters {
+        areas: map_qq_singer_catalog_options(tags.area, "area")?,
+        categories: map_qq_singer_catalog_options(tags.sex, "category")?,
+        genres: map_qq_singer_catalog_options(tags.genre, "genre")?,
+        initials: map_qq_singer_catalog_options(tags.index, "initial")?,
+        extensions: Extensions::from([
+            ("tags_present".to_owned(), json!(tags_present)),
+            ("tags_extra".to_owned(), json!(tags.extra)),
+        ]),
+    };
+    Ok(ArtistCatalog {
+        platform: Platform::Qq,
+        area: request.area,
+        category: request.category,
+        genre: request.genre,
+        featured_artists,
+        artists,
+        filters,
+        extensions: Extensions::from([
+            ("area_id".to_owned(), json!(selection.area)),
+            ("sex_id".to_owned(), json!(selection.sex)),
+            ("genre_id".to_owned(), json!(selection.genre)),
+            ("report".to_owned(), json!(data.report)),
+            ("data".to_owned(), response_data),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_qq_singer_catalog_options(
+    options: Vec<QqSingerCatalogOption>,
+    kind: &str,
+) -> Result<Vec<ArtistCatalogFilterOption>> {
+    options
+        .into_iter()
+        .map(|option| {
+            let raw = serde_json::to_value(&option).map_err(|_| {
+                qq_data_error(format!("failed to preserve typed QQ singer {kind} option"))
+            })?;
+            Ok(ArtistCatalogFilterOption {
+                id: option.id.to_string(),
+                name: option.name.trim().to_owned(),
+                extensions: Extensions::from([("option".to_owned(), raw)]),
+            })
+        })
+        .collect()
+}
+
+fn map_qq_singer_catalog_item(item: QqSingerCatalogItem, context: &str) -> Result<Artist> {
+    let mid = item.mid.trim();
+    if !mid.is_empty() {
+        validate_qq_media_id(mid, "singer MID")
+            .map_err(|_| qq_data_error(format!("QQ {context} returned an invalid MID")))?;
+    }
+    let id = if !mid.is_empty() {
+        mid.to_owned()
+    } else if item.id > 0 {
+        item.id.to_string()
+    } else {
+        return Err(qq_data_error(format!(
+            "QQ {context} is missing both singer ID and MID"
+        )));
+    };
+    let name = item.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(format!(
+            "QQ {context} is missing its display name"
+        )));
+    }
+    let image_mid = [item.image_mid.as_str(), mid]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    if let Some(image_mid) = image_mid {
+        validate_qq_image_id(image_mid)
+            .map_err(|_| qq_data_error(format!("QQ {context} returned an invalid image MID")))?;
+    }
+    let image_mid = image_mid.map(str::to_owned);
+    let avatar_url = first_qq_display_url(&[(item.image_url.as_str(), context)])?
+        .or_else(|| image_mid.as_deref().map(|mid| qq_cover_url("T001", mid)));
+    let raw = serde_json::to_value(&item)
+        .map_err(|_| qq_data_error(format!("failed to preserve typed QQ {context}")))?;
+    let aliases = [item.other_name.trim()]
+        .into_iter()
+        .filter(|alias| !alias.is_empty() && *alias != name)
+        .map(str::to_owned)
+        .collect();
+    let mut extensions = Extensions::from([
+        ("area_id".to_owned(), json!(item.area_id)),
+        ("country_id".to_owned(), json!(item.country_id)),
+        ("country".to_owned(), json!(item.country)),
+        ("spell".to_owned(), json!(item.spell)),
+        ("trend".to_owned(), json!(item.trend)),
+        ("follower_count".to_owned(), json!(item.follower_count)),
+        ("catalog_item".to_owned(), raw),
+    ]);
+    if item.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(item.id));
+    }
+    if let Some(image_mid) = image_mid {
+        extensions.insert("image_mid".to_owned(), json!(image_mid));
+    }
+    Ok(Artist {
+        resource_ref: qq_ref(&id, context)?,
+        platform: Platform::Qq,
+        id,
+        name: name.to_owned(),
+        aliases,
+        description: String::new(),
+        biography_sections: Vec::new(),
+        avatar_url: avatar_url.clone(),
+        cover_url: avatar_url,
+        album_count: None,
+        track_count: None,
+        mv_count: None,
+        video_count: None,
+        identities: Vec::new(),
+        extensions,
     })
 }
 
@@ -9937,6 +10286,14 @@ where
     json_u64(&value).ok_or_else(|| D::Error::custom("expected a QQ unsigned integer"))
 }
 
+const fn negative_one_i64() -> i64 {
+    -1
+}
+
+const fn negative_one_hundred_i64() -> i64 {
+    -100
+}
+
 fn deserialize_qq_i64<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
 where
     D: Deserializer<'de>,
@@ -12842,6 +13199,216 @@ mod tests {
         ] {
             let error = map_qq_new_albums(1, 0, selection, response(malformed))
                 .expect_err("malformed QQ new album response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn singer_catalog_request_preserves_every_reference_filter_id() {
+        let request = ArtistCatalogRequest::new();
+        let (api, selection) = qq_singer_catalog_request(&request).expect("default catalog");
+        assert_eq!(api.module, SINGER_CATALOG_MODULE);
+        assert_eq!(api.method, SINGER_CATALOG_METHOD);
+        assert_eq!(
+            api.param,
+            json!({"hastag": 0, "area": -100, "sex": -100, "genre": -100})
+        );
+        assert_eq!(
+            selection,
+            QqSingerCatalogSelection {
+                area: -100,
+                sex: -100,
+                genre: -100
+            }
+        );
+
+        for (area, expected) in [
+            (ArtistArea::All, -100),
+            (ArtistArea::Chinese, 200),
+            (ArtistArea::HongKongTaiwan, 2),
+            (ArtistArea::Western, 5),
+            (ArtistArea::Japanese, 4),
+            (ArtistArea::Korean, 3),
+        ] {
+            let mut request = ArtistCatalogRequest::new();
+            request.area = area;
+            let (api, _) = qq_singer_catalog_request(&request).expect("QQ singer area");
+            assert_eq!(api.param["area"], expected);
+        }
+        for (category, expected) in [
+            (ArtistCategory::All, -100),
+            (ArtistCategory::Male, 0),
+            (ArtistCategory::Female, 1),
+            (ArtistCategory::Group, 2),
+        ] {
+            let mut request = ArtistCatalogRequest::new();
+            request.category = category;
+            let (api, _) = qq_singer_catalog_request(&request).expect("QQ singer category");
+            assert_eq!(api.param["sex"], expected);
+        }
+        for (genre, expected) in [
+            (ArtistGenre::All, -100),
+            (ArtistGenre::Pop, 7),
+            (ArtistGenre::Rap, 3),
+            (ArtistGenre::ChineseStyle, 19),
+            (ArtistGenre::Rock, 4),
+            (ArtistGenre::Electronic, 2),
+            (ArtistGenre::Folk, 8),
+            (ArtistGenre::RAndB, 11),
+            (ArtistGenre::Ethnic, 37),
+            (ArtistGenre::LightMusic, 93),
+            (ArtistGenre::Jazz, 14),
+            (ArtistGenre::Classical, 33),
+            (ArtistGenre::Country, 13),
+            (ArtistGenre::Blues, 10),
+        ] {
+            let mut request = ArtistCatalogRequest::new();
+            request.genre = genre;
+            let (api, _) = qq_singer_catalog_request(&request).expect("QQ singer genre");
+            assert_eq!(api.param["genre"], expected);
+        }
+
+        let mut unsupported = ArtistCatalogRequest::new();
+        unsupported.area = ArtistArea::Other;
+        let error = match qq_singer_catalog_request(&unsupported) {
+            Ok(_) => panic!("unsupported QQ singer area was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.platform, Some(Platform::Qq));
+    }
+
+    #[test]
+    fn singer_catalog_mapping_keeps_featured_full_lists_tags_and_unknown_fields() {
+        let mut request = ArtistCatalogRequest::new();
+        request.area = ArtistArea::HongKongTaiwan;
+        request.category = ArtistCategory::Female;
+        request.genre = ArtistGenre::Jazz;
+        let selection = QqSingerCatalogSelection {
+            area: 2,
+            sex: 1,
+            genre: 14,
+        };
+        let item = |id: i64, mid: &str, name: &str| {
+            json!({
+                "area_id": 2,
+                "singer_id": id,
+                "country_id": 852,
+                "singer_name": name,
+                "country": "中国香港",
+                "other_name": "English Name",
+                "singer_mid": mid,
+                "spell": "artistspell",
+                "trend": 1,
+                "singer_pmid": format!("{mid}_11"),
+                "concernNum": "1234",
+                "singer_pic": "//example.test/artist.jpg",
+                "futureSingerField": {"kept": true}
+            })
+        };
+        let catalog = map_qq_singer_catalog(
+            &request,
+            selection,
+            response(json!({
+                "area": 2,
+                "sex": 1,
+                "genre": 14,
+                "hotlist": [item(1, "001FeaturedSinger", "热门歌手")],
+                "singerlist": [item(2, "001CatalogSinger", "目录歌手")],
+                "tags": {
+                    "area": [{"id": 2, "name": "港台", "futureOption": true}],
+                    "sex": [{"id": 1, "name": "女"}],
+                    "genre": [{"id": 14, "name": "爵士"}],
+                    "index": [{"id": 1, "name": "A"}],
+                    "futureTags": "kept"
+                },
+                "code": 0,
+                "tjReport": "trace",
+                "ext": {"abt": "experiment"},
+                "futureResponseField": 9
+            })),
+        )
+        .expect("map QQ singer catalog");
+
+        assert_eq!(catalog.platform, Platform::Qq);
+        assert_eq!(catalog.area, ArtistArea::HongKongTaiwan);
+        assert_eq!(catalog.category, ArtistCategory::Female);
+        assert_eq!(catalog.genre, ArtistGenre::Jazz);
+        assert_eq!(catalog.featured_artists.len(), 1);
+        assert_eq!(catalog.artists.len(), 1);
+        assert_eq!(catalog.featured_artists[0].id, "001FeaturedSinger");
+        assert_eq!(
+            catalog.artists[0].resource_ref.to_string(),
+            "qq:001CatalogSinger"
+        );
+        assert_eq!(catalog.artists[0].aliases, ["English Name"]);
+        assert_eq!(
+            catalog.artists[0].avatar_url.as_deref(),
+            Some("https://example.test/artist.jpg")
+        );
+        assert_eq!(catalog.artists[0].extensions["numeric_id"], 2);
+        assert_eq!(catalog.artists[0].extensions["follower_count"], 1234);
+        assert_eq!(
+            catalog.artists[0].extensions["catalog_item"]["futureSingerField"]["kept"],
+            true
+        );
+        assert_eq!(catalog.filters.areas[0].id, "2");
+        assert_eq!(catalog.filters.areas[0].name, "港台");
+        assert_eq!(catalog.filters.categories[0].name, "女");
+        assert_eq!(catalog.filters.genres[0].name, "爵士");
+        assert_eq!(catalog.filters.initials[0].name, "A");
+        assert_eq!(catalog.filters.extensions["tags_present"], true);
+        assert_eq!(
+            catalog.filters.extensions["tags_extra"]["futureTags"],
+            "kept"
+        );
+        assert_eq!(catalog.extensions["area_id"], 2);
+        assert_eq!(catalog.extensions["sex_id"], 1);
+        assert_eq!(catalog.extensions["genre_id"], 14);
+        assert_eq!(catalog.extensions["report"], "trace");
+        assert_eq!(catalog.extensions["data"]["futureResponseField"], 9);
+        assert_eq!(catalog.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn singer_catalog_mapping_accepts_reference_null_lists_but_rejects_false_success() {
+        let request = ArtistCatalogRequest::new();
+        let selection = QqSingerCatalogSelection {
+            area: -100,
+            sex: -100,
+            genre: -100,
+        };
+        let empty = map_qq_singer_catalog(
+            &request,
+            selection,
+            response(json!({
+                "area": -100,
+                "sex": -100,
+                "genre": -100,
+                "hotlist": null,
+                "singerlist": null,
+                "tags": null,
+                "code": 0
+            })),
+        )
+        .expect("reference null catalog fields");
+        assert!(empty.featured_artists.is_empty());
+        assert!(empty.artists.is_empty());
+        assert!(empty.filters.areas.is_empty());
+        assert_eq!(empty.filters.extensions["tags_present"], false);
+
+        for malformed in [
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 1}),
+            json!({"area": 200, "sex": -100, "genre": -100, "code": 0}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "singerlist": [{"singer_id": -1, "singer_mid": "", "singer_name": "歌手"}]}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "singerlist": [{"singer_id": 1, "singer_mid": "unsafe/singer", "singer_name": "歌手"}]}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "singerlist": [{"singer_id": 1, "singer_mid": "001SingerMid", "singer_name": ""}]}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "singerlist": [{"singer_id": 1, "singer_mid": "001SingerMid", "singer_name": "歌手", "singer_pmid": "unsafe/image"}]}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "singerlist": [{"singer_id": 1, "singer_mid": "001SingerMid", "singer_name": "歌手", "singer_pic": "javascript:alert(1)"}]}),
+            json!({"area": -100, "sex": -100, "genre": -100, "code": 0, "tags": {"area": {}}}),
+        ] {
+            let error = map_qq_singer_catalog(&request, selection, response(malformed))
+                .expect_err("malformed QQ singer catalog");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
     }
@@ -16306,6 +16873,7 @@ mod tests {
     async fn singer_homepage_validates_mids_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::ArtistDetail));
+        assert!(provider.capabilities().contains(&Capability::ArtistCatalog));
         assert!(provider.capabilities().contains(&Capability::ArtistAlbums));
         assert!(provider.capabilities().contains(&Capability::ArtistTracks));
         assert!(provider.capabilities().contains(&Capability::ArtistVideos));
@@ -16320,6 +16888,14 @@ mod tests {
             .artist("0025NhlN2yWrP4", Some("missing-account"))
             .await
             .expect_err("missing singer account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let mut catalog = ArtistCatalogRequest::new();
+        catalog.account = Some("missing-account".to_owned());
+        let error = provider
+            .artist_catalog(&catalog)
+            .await
+            .expect_err("missing singer catalog account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
 
         let mut request = ArtistTrackListRequest::new(0, 0);
@@ -17828,6 +18404,48 @@ mod tests {
             assert!(!page.items[0].name.is_empty());
             assert!(page.items[0].cover_url.is_some());
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_catalog_returns_featured_full_and_filtered_snapshots() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let all = provider
+            .artist_catalog(&ArtistCatalogRequest::new())
+            .await
+            .expect("complete QQ singer catalog");
+        assert!(!all.featured_artists.is_empty());
+        assert!(!all.artists.is_empty());
+        assert!(all.featured_artists.iter().all(|artist| {
+            artist.platform == Platform::Qq
+                && !artist.id.is_empty()
+                && !artist.name.is_empty()
+                && artist.avatar_url.is_some()
+        }));
+        assert_eq!(all.extensions["area_id"], -100);
+        assert_eq!(all.extensions["sex_id"], -100);
+        assert_eq!(all.extensions["genre_id"], -100);
+        assert_eq!(all.extensions["response"]["code"], 0);
+
+        let mut filtered = ArtistCatalogRequest::new();
+        filtered.area = ArtistArea::Chinese;
+        filtered.category = ArtistCategory::Female;
+        filtered.genre = ArtistGenre::Pop;
+        let filtered = provider
+            .artist_catalog(&filtered)
+            .await
+            .expect("filtered QQ singer catalog");
+        assert!(!filtered.artists.is_empty());
+        assert_eq!(filtered.area, ArtistArea::Chinese);
+        assert_eq!(filtered.category, ArtistCategory::Female);
+        assert_eq!(filtered.genre, ArtistGenre::Pop);
+        assert_eq!(filtered.extensions["area_id"], 200);
+        assert_eq!(filtered.extensions["sex_id"], 1);
+        assert_eq!(filtered.extensions["genre_id"], 7);
     }
 
     #[tokio::test]

@@ -26,9 +26,10 @@ pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
     AiLyricDictionary, AiLyricDictionaryAvailability, AiLyricDictionaryEntry, Album,
     AlbumListRequest, AlbumStats, AlbumSummary, AnonymousSession, AntiCheatToken,
-    AntiCheatTokenVersion, Artist, ArtistArea, ArtistBiographySection, ArtistCategory, ArtistChart,
-    ArtistChartArea, ArtistChartEntry, ArtistChartRequest, ArtistContentCount,
-    ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
+    AntiCheatTokenVersion, Artist, ArtistArea, ArtistBiographySection, ArtistCatalog,
+    ArtistCatalogFilterOption, ArtistCatalogFilters, ArtistCatalogRequest, ArtistCategory,
+    ArtistChart, ArtistChartArea, ArtistChartEntry, ArtistChartRequest, ArtistContentCount,
+    ArtistGenre, ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
     ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch,
