@@ -1063,7 +1063,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/artists/{ref}` | `account?` | `Artist`；身份详情与分段传记，平台原始附加信息保留在扩展字段；QQ 使用歌手 MID 并保留主页计数及头图结构 |
 | GET | `/v1/artists/{ref}/overview` | `account?` | `ArtistOverview`；歌手摘要、精选 `Track[]` 与是否仍有更多曲目 |
 | GET | `/v1/artists/{ref}/stats` | `account?` | `ArtistStats`；关注态、视频分类计数与在线演出计数 |
-| GET | `/v1/artists/{ref}/tracks` | `order=hot|time`、分页、`account?` | `Track[]`；默认按热度排序，完整平台曲目字段保留在单项扩展 |
+| GET | `/v1/artists/{ref}/tracks` | `order=hot|time`、分页、`account?` | `Track[]`；默认按热度排序，完整平台曲目字段保留在单项扩展；QQ 上游只提供 hot，time 会明确拒绝 |
 | GET | `/v1/artists/{ref}/top-tracks` | `account?` | 热门 `Track[]` 固定快照；不接受伪分页，`has_more=false` |
 | GET | `/v1/artists/{ref}/albums` | 分页、`account?` | `Album[]`；歌手级上游信息保留在分页扩展 |
 | GET | `/v1/artists/{ref}/fans` | 分页、`account?` | `User[]`；上游无可靠总数时 `total=null` |
@@ -1311,6 +1311,8 @@ QQ 专辑详情固定调用 `AlbumInfoServer/GetAlbumDetail`。纯十进制引�
 QQ 专辑歌曲固定调用 `AlbumSongList/GetAlbumSongList`，数字 ID 使用 `albumId`，MID 使用大小写精确的 `albumMid`；统一 `offset/limit` 直接映射到 `begin/num`，因此非整页对齐的偏移不会被静默取整。`songList[*].songInfo` 逐项进入完整统一曲目映射，外层曲序信息、未知字段和完整响应位于扩展；平台返回的 `albumMid/totalNum` 驱动规范专辑身份与真实 `total/next_offset/has_more`。响应专辑身份不一致、曲目指向其他专辑、超过请求页宽、总数越界或在总数耗尽前返回空页时会明确报上游错误。
 
 QQ 歌手详情固定调用 Android `UnifiedHomepageSrv/GetHomepageHeader` 并以歌手 MID 定位。`Info.Singer` 和 `Info.BaseInfo` 提升为统一身份、名称、别名、头像与背景；歌手数字 ID、类型、关注态、粉丝/关注/好友/访客计数，以及完整 `Info/TabDetail/Prompt` 保留在扩展。当前平台把 `SingerHeaderPic` 返回为包含裁剪坐标、高分辨率图、3D 图和图片 MID 的对象，TuneWeave 同时兼容参考项目声明的旧字符串形态；图片资源 MID 独立允许平台实际使用的下划线版本后缀，但歌手资源 MID 仍保持严格字母数字校验。主页默认 Tab 返回的 `null` 列表规范化为空列表，不据此伪造作品总数；所有对外图片 URL 必须是无内嵌凭据的 HTTP(S) 地址。
+
+QQ 歌手歌曲固定调用 Android `musichall.song_list_server/GetSingerSongList`，使用 `singerMid/order=1/begin/number`；参考能力没有时间排序，`order=time` 不会静默降级。当前上游会忽略较小的 `number` 并固定返回最多 30 条，但 `begin` 仍精确应用，因此 TuneWeave 把物理响应安全裁成调用方请求的逻辑窗口，用逻辑条目数推进 `next_offset`，同时在分页扩展公开 `upstream_returned/limit_applied` 并保留完整物理响应。这样任意非整页 `offset` 可连续遍历且不会因上游过取而越过资源；`singerMid/totalNum/songList[*].songInfo`、外层曲序和未知字段均经强类型包装保留。
 
 `principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 

@@ -15354,6 +15354,7 @@ mod tests {
                 Capability::UserMembership,
                 Capability::AlbumDetail,
                 Capability::ArtistDetail,
+                Capability::ArtistTracks,
             ])
         }
 
@@ -15564,6 +15565,57 @@ mod tests {
                     ("numeric_id".to_owned(), json!(4558)),
                     ("follower_count".to_owned(), json!(50_540_499)),
                 ]),
+            })
+        }
+
+        async fn artist_tracks(
+            &self,
+            id: &str,
+            request: &ArtistTrackListRequest,
+        ) -> Result<Page<Track>> {
+            let mut tracks = [
+                ("0039MnYb0qxYhV", "晴天"),
+                ("003v4UL61IYlTY", "东风破"),
+                ("001Bbywq2gicae", "她的睫毛"),
+            ]
+            .into_iter()
+            .map(|(track_id, name)| {
+                let mut track = Track::new(
+                    ResourceRef::new(Platform::Qq, track_id)
+                        .expect("valid QQ singer track reference"),
+                    name,
+                );
+                track.artists = vec![ArtistSummary {
+                    resource_ref: Some(
+                        ResourceRef::new(Platform::Qq, id).expect("valid QQ singer reference"),
+                    ),
+                    name: "周杰伦".to_owned(),
+                }];
+                track
+            })
+            .collect::<Vec<_>>();
+            let start = usize::try_from(request.offset)
+                .unwrap_or(usize::MAX)
+                .min(tracks.len());
+            let end = start
+                .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+                .min(tracks.len());
+            let items = tracks.drain(start..end).collect::<Vec<_>>();
+            let has_more = end < 3;
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset: has_more.then(|| u32::try_from(end).expect("small test offset")),
+                    has_more,
+                    extensions: Extensions::from([
+                        ("singer_mid".to_owned(), json!(id)),
+                        ("order".to_owned(), json!(request.order)),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                },
             })
         }
 
@@ -19256,8 +19308,9 @@ mod tests {
 
     #[tokio::test]
     async fn qq_artist_detail_forwards_mid_and_named_account() {
+        let app = test_app_with_import_providers();
         let (status, artist) = json_response_from(
-            test_app_with_import_providers(),
+            app.clone(),
             "/v1/artists/qq:0025NhlN2yWrP4?account=green-vip",
         )
         .await;
@@ -19270,6 +19323,28 @@ mod tests {
         assert_eq!(artist["data"]["extensions"]["account"], "green-vip");
         assert_eq!(artist["meta"]["platform"], "qq");
         assert_eq!(artist["meta"]["account"], "green-vip");
+
+        let (status, tracks) = json_response_from(
+            app,
+            "/v1/artists/qq:0025NhlN2yWrP4/tracks?order=hot&limit=2&offset=0&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"].as_array().expect("singer tracks").len(), 2);
+        assert_eq!(tracks["data"][0]["ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(tracks["data"][0]["artists"][0]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 3);
+        assert_eq!(tracks["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["singer_mid"],
+            "0025NhlN2yWrP4"
+        );
+        assert_eq!(tracks["meta"]["pagination"]["extensions"]["order"], "hot");
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["account"],
+            "green-vip"
+        );
     }
 
     #[tokio::test]

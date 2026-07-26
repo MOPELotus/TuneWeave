@@ -10,22 +10,23 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
-    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch,
-    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
-    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, ErrorCode,
-    Extensions, ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream,
-    MembershipSummary, MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider,
-    Page, PageMeta, Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
-    PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
-    ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
-    SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
-    VideoResourceKind, VideoStream, VideoStreamRequest,
+    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistSummary, ArtistTrackListRequest,
+    ArtistTrackOrder, AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch,
+    AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
+    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    MultiStyleLyricTranslations, MusicProvider, Page, PageMeta, Platform, Playlist,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
+    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
+    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoResourceKind, VideoStream,
+    VideoStreamRequest,
 };
 
 use crate::client::{
@@ -61,6 +62,8 @@ const ALBUM_SONG_MODULE: &str = "music.musichallAlbum.AlbumSongList";
 const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
+const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
+const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
@@ -1453,6 +1456,30 @@ struct QqSingerHomepageResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerSongEntry {
+    #[serde(rename = "songInfo")]
+    song: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerSongResponse {
+    #[serde(default, rename = "singerMid")]
+    singer_mid: String,
+    #[serde(default, rename = "totalNum", deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(
+        default,
+        rename = "songList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    songs: Vec<QqSingerSongEntry>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
     freeflow_url: Vec<String>,
@@ -1572,6 +1599,7 @@ impl MusicProvider for QqProvider {
             Capability::UserMembership,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
+            Capability::ArtistTracks,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -1792,6 +1820,36 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer homepage request returned no response"))?;
         map_qq_singer_homepage(id.trim(), response)
+    }
+
+    async fn artist_tracks(
+        &self,
+        id: &str,
+        request: &ArtistTrackListRequest,
+    ) -> Result<Page<Track>> {
+        self.validate_public_account(request.account.as_deref())?;
+        if request.order != ArtistTrackOrder::Hot {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer song list only exposes the upstream hot order",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "allowed_order": "hot" })));
+        }
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer song page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let request_api = qq_singer_songs_request(id, request.limit, request.offset)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer song request returned no response"))?;
+        map_qq_singer_songs(id.trim(), request.limit, request.offset, response)
     }
 
     async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
@@ -3772,6 +3830,21 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_singer_songs_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    Ok(QqApiRequest::new(
+        SINGER_SONG_MODULE,
+        SINGER_SONG_METHOD,
+        json!({
+            "singerMid": mid,
+            "order": 1,
+            "number": limit,
+            "begin": offset
+        }),
+    ))
+}
+
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -5454,6 +5527,74 @@ fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
         return Ok(Some(normalized));
     }
     Ok(None)
+}
+
+fn map_qq_singer_songs(
+    requested_mid: &str,
+    limit: u32,
+    offset: u32,
+    response: QqApiResponse,
+) -> Result<Page<Track>> {
+    let data = serde_json::from_value::<QqSingerSongResponse>(response.data)
+        .map_err(|error| qq_data_error(format!("QQ singer song response is malformed: {error}")))?;
+    let singer_mid = data.singer_mid.trim();
+    validate_qq_media_id(singer_mid, "singer MID")
+        .map_err(|_| qq_data_error("QQ singer song response contains an invalid singer MID"))?;
+    if singer_mid != requested_mid {
+        return Err(qq_data_error(
+            "QQ singer song response returned a different singer MID",
+        ));
+    }
+    let upstream_returned = u32::try_from(data.songs.len())
+        .map_err(|_| qq_data_error("QQ singer song page is too large"))?;
+    let upstream_end = offset.checked_add(upstream_returned).ok_or_else(|| {
+        qq_data_error("QQ singer song pagination exceeded the supported offset range")
+    })?;
+    if u64::from(upstream_end) > data.total
+        || (upstream_returned == 0 && u64::from(offset) < data.total)
+    {
+        return Err(qq_data_error(
+            "QQ singer song response has inconsistent pagination",
+        ));
+    }
+    let returned = upstream_returned.min(limit);
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ singer song pagination exceeded the supported offset range")
+    })?;
+
+    let response_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer song response"))?;
+    let returned = usize::try_from(returned)
+        .map_err(|_| qq_data_error("QQ singer song page exceeds this platform's capacity"))?;
+    let mut items = Vec::with_capacity(returned);
+    for entry in data.songs.into_iter().take(returned) {
+        let entry_data = serde_json::to_value(&entry)
+            .map_err(|_| qq_data_error("failed to preserve typed QQ singer song entry"))?;
+        let mut track = map_track(entry.song)?;
+        track
+            .extensions
+            .insert("singer_song_entry".to_owned(), entry_data);
+        items.push(track);
+    }
+    let has_more = u64::from(next_offset) < data.total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("singer_mid".to_owned(), json!(singer_mid)),
+                ("order".to_owned(), json!("hot")),
+                ("upstream_returned".to_owned(), json!(upstream_returned)),
+                ("limit_applied".to_owned(), json!(true)),
+                ("data".to_owned(), response_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
 }
 
 fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -> Result<Album> {
@@ -9576,6 +9717,135 @@ mod tests {
     }
 
     #[test]
+    fn singer_song_request_preserves_hot_order_and_exact_offset() {
+        let request =
+            qq_singer_songs_request(" 0025NhlN2yWrP4 ", 30, 7).expect("singer song request");
+        assert_eq!(request.module, SINGER_SONG_MODULE);
+        assert_eq!(request.method, SINGER_SONG_METHOD);
+        assert_eq!(
+            request.param,
+            json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "order": 1,
+                "number": 30,
+                "begin": 7
+            })
+        );
+    }
+
+    #[test]
+    fn singer_song_mapping_preserves_wrappers_tracks_and_real_pagination() {
+        let page = map_qq_singer_songs(
+            "0025NhlN2yWrP4",
+            2,
+            0,
+            response(json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "totalNum": "5",
+                "songList": [{
+                    "songInfo": sample_track(97_773, "0039MnYb0qxYhV", "晴天"),
+                    "index": 1,
+                    "futureEntryField": true
+                }, {
+                    "songInfo": sample_track(48_283, "003v4UL61IYlTY", "东风破"),
+                    "index": 2
+                }, {
+                    "songInfo": sample_track(67_409, "001Bbywq2gicae", "她的睫毛"),
+                    "index": 3
+                }],
+                "futurePageField": "kept"
+            })),
+        )
+        .expect("map singer song page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:003v4UL61IYlTY");
+        assert_eq!(page.items[0].extensions["singer_song_entry"]["index"], 1);
+        assert_eq!(
+            page.items[0].extensions["singer_song_entry"]["futureEntryField"],
+            true
+        );
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 0);
+        assert_eq!(page.pagination.total, Some(5));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["singer_mid"], "0025NhlN2yWrP4");
+        assert_eq!(page.pagination.extensions["order"], "hot");
+        assert_eq!(page.pagination.extensions["upstream_returned"], 3);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            page.pagination.extensions["data"]["songList"]
+                .as_array()
+                .expect("complete upstream song list")
+                .len(),
+            3
+        );
+        assert_eq!(
+            page.pagination.extensions["data"]["futurePageField"],
+            "kept"
+        );
+
+        let empty = map_qq_singer_songs(
+            "0025NhlN2yWrP4",
+            10,
+            0,
+            response(json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "totalNum": 0,
+                "songList": null
+            })),
+        )
+        .expect("null song list follows the upstream empty-list contract");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.total, Some(0));
+        assert!(!empty.pagination.has_more);
+    }
+
+    #[test]
+    fn singer_song_mapping_rejects_malformed_identity_wrappers_and_pagination() {
+        for (limit, offset, data) in [
+            (10, 0, json!({"totalNum": 0, "songList": []})),
+            (
+                10,
+                0,
+                json!({"singerMid": "differentMid", "totalNum": 0, "songList": []}),
+            ),
+            (
+                10,
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "totalNum": "many", "songList": []}),
+            ),
+            (
+                10,
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "totalNum": 1, "songList": {}}),
+            ),
+            (
+                10,
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "totalNum": 1, "songList": [{}]}),
+            ),
+            (
+                10,
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "totalNum": 1, "songList": []}),
+            ),
+            (
+                10,
+                1,
+                json!({"singerMid": "0025NhlN2yWrP4", "totalNum": 1, "songList": [
+                    {"songInfo": sample_track(97_773, "0039MnYb0qxYhV", "晴天")}
+                ]}),
+            ),
+        ] {
+            let error = map_qq_singer_songs("0025NhlN2yWrP4", limit, offset, response(data))
+                .expect_err("malformed singer song response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn album_song_request_preserves_numeric_mid_and_exact_offset_pagination() {
         let (numeric, identifier) =
             qq_album_songs_request("100", 30, 7).expect("numeric album songs");
@@ -11449,6 +11719,7 @@ mod tests {
     async fn singer_homepage_validates_mids_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::ArtistDetail));
+        assert!(provider.capabilities().contains(&Capability::ArtistTracks));
         for mid in ["", "unsafe/singer", "singer mid"] {
             let error = provider
                 .artist(mid, None)
@@ -11460,6 +11731,28 @@ mod tests {
             .artist("0025NhlN2yWrP4", Some("missing-account"))
             .await
             .expect_err("missing singer account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let mut request = ArtistTrackListRequest::new(0, 0);
+        let error = provider
+            .artist_tracks("0025NhlN2yWrP4", &request)
+            .await
+            .expect_err("invalid singer song page size");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        request.limit = 10;
+        request.order = ArtistTrackOrder::Time;
+        let error = provider
+            .artist_tracks("0025NhlN2yWrP4", &request)
+            .await
+            .expect_err("unsupported singer song order");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(error.details["allowed_order"], "hot");
+        request.order = ArtistTrackOrder::Hot;
+        request.account = Some("missing-account".to_owned());
+        let error = provider
+            .artist_tracks("0025NhlN2yWrP4", &request)
+            .await
+            .expect_err("missing singer song account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -12703,6 +12996,41 @@ mod tests {
                 .is_some_and(|url| url.starts_with("http"))
         );
         assert_eq!(artist.extensions["response"]["code"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_song_pages_preserve_exact_offsets_and_continuation() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .artist_tracks("0025NhlN2yWrP4", &ArtistTrackListRequest::new(2, 0))
+            .await
+            .expect("first singer song page");
+        assert_eq!(first.items.len(), 2);
+        assert!(first.pagination.total.is_some_and(|total| total > 2));
+        assert_eq!(first.pagination.next_offset, Some(2));
+        assert_eq!(first.pagination.extensions["singer_mid"], "0025NhlN2yWrP4");
+
+        let shifted = provider
+            .artist_tracks("0025NhlN2yWrP4", &ArtistTrackListRequest::new(2, 1))
+            .await
+            .expect("non-aligned singer song page");
+        assert_eq!(shifted.items.len(), 2);
+        assert_eq!(shifted.items[0].resource_ref, first.items[1].resource_ref);
+
+        let continuation = provider
+            .artist_tracks("0025NhlN2yWrP4", &ArtistTrackListRequest::new(2, 2))
+            .await
+            .expect("continued singer song page");
+        assert!(!continuation.items.is_empty());
+        assert_eq!(
+            continuation.items[0].resource_ref,
+            shifted.items[1].resource_ref
+        );
     }
 
     #[tokio::test]
