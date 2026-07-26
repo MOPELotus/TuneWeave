@@ -2400,9 +2400,15 @@ pub enum MusicVideoArea {
 pub enum MusicVideoType {
     #[default]
     All,
+    Mv,
     Official,
     Original,
     Live,
+    Cover,
+    Dance,
+    Film,
+    Variety,
+    Children,
     Netease,
 }
 
@@ -6032,6 +6038,20 @@ mod tests {
         assert_eq!(value["order"], "hot");
         assert!(value["group_id"].is_null());
         assert_eq!(value["account"], "viewer");
+
+        for (video_type, expected) in [
+            (MusicVideoType::Mv, "mv"),
+            (MusicVideoType::Cover, "cover"),
+            (MusicVideoType::Dance, "dance"),
+            (MusicVideoType::Film, "film"),
+            (MusicVideoType::Variety, "variety"),
+            (MusicVideoType::Children, "children"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(video_type).expect("serialize QQ MV type"),
+                expected
+            );
+        }
 
         let mut grouped = MusicVideoListRequest::new(MusicVideoCatalog::Group, 8, 16);
         grouped.group_id = Some("58100".to_owned());

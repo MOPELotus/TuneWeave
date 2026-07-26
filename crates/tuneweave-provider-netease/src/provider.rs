@@ -11932,7 +11932,7 @@ fn netease_music_video_catalog_request(
             }
             let tags = json!({
                 "地区": netease_music_video_area(request.area.unwrap_or_default()),
-                "类型": netease_music_video_type(request.video_type.unwrap_or_default()),
+                "类型": netease_music_video_type(request.video_type.unwrap_or_default())?,
                 "排序": netease_music_video_order(request.order.unwrap_or_default()),
             })
             .to_string();
@@ -12070,13 +12070,25 @@ fn netease_music_video_area(area: MusicVideoArea) -> &'static str {
     }
 }
 
-fn netease_music_video_type(video_type: MusicVideoType) -> &'static str {
+fn netease_music_video_type(video_type: MusicVideoType) -> Result<&'static str> {
     match video_type {
-        MusicVideoType::All => "全部",
-        MusicVideoType::Official => "官方版",
-        MusicVideoType::Original => "原生",
-        MusicVideoType::Live => "现场版",
-        MusicVideoType::Netease => "网易出品",
+        MusicVideoType::All => Ok("全部"),
+        MusicVideoType::Official => Ok("官方版"),
+        MusicVideoType::Original => Ok("原生"),
+        MusicVideoType::Live => Ok("现场版"),
+        MusicVideoType::Netease => Ok("网易出品"),
+        MusicVideoType::Mv
+        | MusicVideoType::Cover
+        | MusicVideoType::Dance
+        | MusicVideoType::Film
+        | MusicVideoType::Variety
+        | MusicVideoType::Children => Err(TuneWeaveError::invalid_request(
+            "the selected MV type is not supported by NetEase",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({
+            "allowed": ["all", "official", "original", "live", "netease"]
+        }))),
     }
 }
 
@@ -22812,6 +22824,23 @@ mod tests {
                 .code,
             ErrorCode::InvalidRequest
         );
+        for video_type in [
+            MusicVideoType::Mv,
+            MusicVideoType::Cover,
+            MusicVideoType::Dance,
+            MusicVideoType::Film,
+            MusicVideoType::Variety,
+            MusicVideoType::Children,
+        ] {
+            let mut qq_only = MusicVideoListRequest::new(MusicVideoCatalog::All, 30, 0);
+            qq_only.video_type = Some(video_type);
+            assert_eq!(
+                netease_music_video_catalog_request(&qq_only, 30)
+                    .expect_err("QQ-only MV type on NetEase")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
     }
 
     #[test]

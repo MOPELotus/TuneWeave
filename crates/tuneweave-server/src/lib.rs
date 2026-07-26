@@ -11684,15 +11684,21 @@ fn parse_music_video_type(value: &str) -> Result<MusicVideoType, TuneWeaveError>
         .as_str()
     {
         "all" | "全部" => Ok(MusicVideoType::All),
+        "mv" | "music_video" => Ok(MusicVideoType::Mv),
         "official" | "official_version" | "官方版" => Ok(MusicVideoType::Official),
         "original" | "原生" => Ok(MusicVideoType::Original),
         "live" | "live_version" | "现场版" => Ok(MusicVideoType::Live),
+        "cover" | "cover_version" | "翻唱" => Ok(MusicVideoType::Cover),
+        "dance" | "舞蹈" => Ok(MusicVideoType::Dance),
+        "film" | "movie" | "影视" => Ok(MusicVideoType::Film),
+        "variety" | "variety_show" | "综艺" => Ok(MusicVideoType::Variety),
+        "children" | "kids" | "儿歌" => Ok(MusicVideoType::Children),
         "netease" | "netease_produced" | "网易出品" => Ok(MusicVideoType::Netease),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported music video type: {value}"
         ))
         .with_details(json!({
-            "allowed": ["all", "official", "original", "live", "netease"]
+            "allowed": ["all", "mv", "official", "original", "live", "cover", "dance", "film", "variety", "children", "netease"]
         }))),
     }
 }
@@ -15535,6 +15541,7 @@ mod tests {
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
+                Capability::VideoCatalog,
             ])
         }
 
@@ -15899,6 +15906,63 @@ mod tests {
                         ("kind".to_owned(), json!("mv")),
                         ("requested_kind".to_owned(), json!(request.kind)),
                         ("order".to_owned(), json!("hot")),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                },
+            })
+        }
+
+        async fn music_videos(&self, request: &MusicVideoListRequest) -> Result<Page<Video>> {
+            let mut videos = [
+                ("a001mvvid01", "晴天 MV"),
+                ("a001mvvid02", "东风破 MV"),
+                ("a001mvvid03", "夜曲 MV"),
+            ]
+            .into_iter()
+            .map(|(video_id, title)| Video {
+                resource_ref: ResourceRef::new(Platform::Qq, video_id)
+                    .expect("valid QQ MV catalog reference"),
+                platform: Platform::Qq,
+                id: video_id.to_owned(),
+                title: title.to_owned(),
+                creators: vec![CreatorSummary {
+                    resource_ref: Some(
+                        ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                            .expect("valid QQ MV creator reference"),
+                    ),
+                    name: "周杰伦".to_owned(),
+                    avatar_url: None,
+                }],
+                description: String::new(),
+                cover_url: None,
+                duration_ms: Some(269_000),
+                published_at: Some("1700000000".to_owned()),
+                play_count: Some(123_456),
+                subscribed: None,
+                extensions: Extensions::from([("catalog".to_owned(), json!(request.catalog))]),
+            })
+            .collect::<Vec<_>>();
+            let start = usize::try_from(request.offset)
+                .unwrap_or(usize::MAX)
+                .min(videos.len());
+            let end = start
+                .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+                .min(videos.len());
+            let items = videos.drain(start..end).collect::<Vec<_>>();
+            let has_more = end < 3;
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset: has_more
+                        .then(|| u32::try_from(end).expect("small test MV offset")),
+                    has_more,
+                    extensions: Extensions::from([
+                        ("area".to_owned(), json!(request.area)),
+                        ("video_type".to_owned(), json!(request.video_type)),
+                        ("order".to_owned(), json!(request.order)),
                         ("account".to_owned(), json!(request.account)),
                     ]),
                 },
@@ -19842,6 +19906,23 @@ mod tests {
             group["meta"]["pagination"]["extensions"]["group_id"],
             "58100"
         );
+
+        let (status, qq) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/videos?platform=qq&catalog=all&area=western&type=live&order=new&limit=2&offset=0&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(qq["data"][0]["ref"], "qq:a001mvvid01");
+        assert_eq!(qq["data"][0]["extensions"]["catalog"], "all");
+        assert_eq!(qq["meta"]["platform"], "qq");
+        assert_eq!(qq["meta"]["account"], "green-vip");
+        assert_eq!(qq["meta"]["pagination"]["limit"], 2);
+        assert_eq!(qq["meta"]["pagination"]["offset"], 0);
+        assert_eq!(qq["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(qq["meta"]["pagination"]["extensions"]["area"], "western");
+        assert_eq!(qq["meta"]["pagination"]["extensions"]["video_type"], "live");
+        assert_eq!(qq["meta"]["pagination"]["extensions"]["order"], "new");
     }
 
     #[tokio::test]
