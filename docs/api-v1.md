@@ -173,7 +173,7 @@
 }
 ```
 
-稳定歌手详情合并平台的身份详情与传记能力。网易云的 `/artist/detail` 提供名称、图片、身份与作品计数，`/artist/desc` 提供简介和分段传记；TuneWeave 将二者组合为一个 `Artist`。无法跨平台统一的认证、排行、黑名单和专题数据分别保留在 `extensions.detail_response` 与 `extensions.description_response`，不会因统一映射丢失。
+稳定歌手详情合并平台的身份详情与传记能力。网易云的 `/artist/detail` 提供名称、图片、身份与作品计数，`/artist/desc` 提供简介和分段传记；QQ 将主页头部与批量歌手详情放在同一上游批包中读取。TuneWeave 将这些响应组合为一个 `Artist`。无法跨平台统一的认证、排行、图片版本、组合资料和专题数据保留在扩展字段，不会因统一映射丢失。
 
 歌手分类目录使用跨平台枚举：`type=all|male|female|group`，`area=all|chinese|western|japanese|korean|other`，`initial` 接受单个英文字母、`hot` 或 `other`。适配器负责转换平台数值；列表上游没有可靠总数时 `total=null`，通过 `has_more/next_offset` 继续翻页。
 
@@ -1062,6 +1062,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/charts/dimensions/{chart_code}` | `target_id`、`target_type`、`platform?`、`account?` | `DimensionChart`；也接受参考字段 `targetId/targetType` |
 | GET | `/v1/charts/dimensions/{chart_code}/tracks` | `target_id`、`target_type`、`platform?`、`account?` | 完整 `DimensionChartTrackSnapshot`；无分页元数据 |
 | GET | `/v1/artists` | `platform?`、`account?`、`type`、`area`、`initial`、分页 | `Artist[]`；分类歌手目录 |
+| GET/POST | `/v1/artists/details` | `refs`，或 `ids/mids + platform?`；`account?`；POST 接受字符串或数组 | 批量 `Artist[]`；限制同平台 1–100 项，保留输入顺序与重复项；QQ 使用原生批量详情协议 |
 | GET | `/v1/artists/{ref}` | `account?` | `Artist`；身份详情与分段传记，平台原始附加信息保留在扩展字段；QQ 使用歌手 MID 并保留主页计数及头图结构 |
 | GET | `/v1/artists/{ref}/tabs/{tab}` | `page?`、`limit?`（兼容 `num/page_size`）、`account?` | `ArtistHomepageTab`；`tab` 接受 `wiki|album|composer|lyricist|producer|arranger|musician|song|video` 及平台常用别名，音乐资源强类型返回，异构介绍保留稳定摘要与完整扩展 |
 | GET | `/v1/artists/{ref}/overview` | `account?` | `ArtistOverview`；歌手摘要、精选 `Track[]` 与是否仍有更多曲目 |

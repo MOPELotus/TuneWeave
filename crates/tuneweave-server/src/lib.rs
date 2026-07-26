@@ -313,6 +313,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/charts/{reference}/tracks", get(playlist_tracks))
         .route("/artists", get(artists))
+        .route(
+            "/artists/details",
+            get(artist_details_get).post(artist_details_post),
+        )
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/tabs/{tab}", get(artist_homepage_tab))
         .route("/artists/{reference}/overview", get(artist_overview))
@@ -6952,6 +6956,128 @@ async fn artist(
     let provider = state.registry.require(platform)?;
     let artist = provider.artist(reference.id(), account).await?;
     let mut response = ApiResponse::new(artist).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtistDetailBatchParams {
+    refs: Option<String>,
+    #[serde(alias = "mids")]
+    ids: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtistDetailBatchBody {
+    refs: Option<StreamReferenceInput>,
+    #[serde(alias = "mids")]
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn artist_details_get(
+    State(state): State<AppState>,
+    params: Result<Query<ArtistDetailBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let params = query_params(params)?;
+    artist_details_response(
+        &state,
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        params.account,
+    )
+    .await
+}
+
+async fn artist_details_post(
+    State(state): State<AppState>,
+    body: Result<Json<ArtistDetailBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let body = json_body(body)?;
+    artist_details_response(
+        &state,
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        body.account,
+    )
+    .await
+}
+
+async fn artist_details_response(
+    state: &AppState,
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    account: Option<String>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let references =
+        parse_batch_references(refs, ids, platform, state.default_platform, "artist detail")?;
+    if references.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "artist detail batch cannot contain more than 100 references",
+        )
+        .into());
+    }
+    let selected_platform = references[0].platform();
+    if references
+        .iter()
+        .any(|reference| reference.platform() != selected_platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "artist detail batch references must use one platform",
+        )
+        .with_details(json!({
+            "platforms": references
+                .iter()
+                .map(ResourceRef::platform)
+                .collect::<BTreeSet<_>>()
+        }))
+        .into());
+    }
+    let account = optional_trimmed(account);
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let provider = state.registry.require(selected_platform)?;
+    let artists = provider
+        .artist_descriptions(&ids, account.as_deref())
+        .await?;
+    if artists.len() != references.len() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "artist provider returned an inconsistent detail batch",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({
+            "requested": references.len(),
+            "returned": artists.len()
+        }))
+        .into());
+    }
+    if let Some(index) = artists
+        .iter()
+        .zip(&references)
+        .position(|(artist, reference)| artist.resource_ref != *reference)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "artist provider returned detail for the wrong reference",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({ "index": index }))
+        .into());
+    }
+    let mut response = ApiResponse::new(artists).with_platform(selected_platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -15828,6 +15954,32 @@ mod tests {
             })
         }
 
+        async fn artist_descriptions(
+            &self,
+            ids: &[String],
+            account: Option<&str>,
+        ) -> Result<Vec<Artist>> {
+            let mut artists = Vec::with_capacity(ids.len());
+            for (index, id) in ids.iter().enumerate() {
+                let mut artist = self.artist(id, account).await?;
+                artist.description = "华语流行歌手、词曲作者与制作人。".to_owned();
+                artist.biography_sections = vec![ArtistBiographySection {
+                    title: "百科".to_owned(),
+                    text: "周杰伦的完整百科介绍。".to_owned(),
+                }];
+                artist.identities = vec!["歌手".to_owned(), "创作歌手".to_owned()];
+                artist
+                    .extensions
+                    .insert("batch_index".to_owned(), json!(index));
+                artist.extensions.insert(
+                    "description_detail".to_owned(),
+                    json!({"account": account, "groups": 1, "wikis": 1}),
+                );
+                artists.push(artist);
+            }
+            Ok(artists)
+        }
+
         async fn artist_homepage_tab(
             &self,
             id: &str,
@@ -19922,6 +20074,65 @@ mod tests {
             albums["meta"]["pagination"]["extensions"]["account"],
             "green-vip"
         );
+    }
+
+    #[tokio::test]
+    async fn qq_artist_description_batches_preserve_order_duplicates_and_inputs() {
+        let app = test_app_with_import_providers();
+        let (status, artists) = json_response_from(
+            app.clone(),
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4,qq:001fNHEf1SFEFN,qq:0025NhlN2yWrP4&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artists["data"].as_array().expect("artist details").len(), 3);
+        assert_eq!(artists["data"][0]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(artists["data"][1]["ref"], "qq:001fNHEf1SFEFN");
+        assert_eq!(artists["data"][2]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(
+            artists["data"][0]["description"],
+            "华语流行歌手、词曲作者与制作人。"
+        );
+        assert_eq!(artists["data"][0]["biography_sections"][0]["title"], "百科");
+        assert_eq!(artists["data"][0]["extensions"]["batch_index"], 0);
+        assert_eq!(artists["data"][2]["extensions"]["batch_index"], 2);
+        assert_eq!(artists["meta"]["platform"], "qq");
+        assert_eq!(artists["meta"]["account"], "green-vip");
+
+        let (status, posted) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/artists/details",
+            Some(json!({
+                "mids": ["0025NhlN2yWrP4", "001fNHEf1SFEFN"],
+                "platform": "qq",
+                "account": "green-vip"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            posted["data"]
+                .as_array()
+                .expect("posted artist details")
+                .len(),
+            2
+        );
+        assert_eq!(posted["data"][0]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(posted["data"][1]["ref"], "qq:001fNHEf1SFEFN");
+
+        for path in [
+            "/v1/artists/details",
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4&ids=0025NhlN2yWrP4",
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4&platform=qq",
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4,netease:6452",
+            "/v1/artists/details?ids=0025NhlN2yWrP4&platform=unknown",
+            "/v1/artists/details?ids=0025NhlN2yWrP4&unknown=true",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

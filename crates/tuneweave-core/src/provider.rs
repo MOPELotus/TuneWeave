@@ -658,6 +658,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn artist_descriptions(
+        &self,
+        ids: &[String],
+        account: Option<&str>,
+    ) -> Result<Vec<Artist>> {
+        let mut artists = Vec::with_capacity(ids.len());
+        for id in ids {
+            artists.push(self.artist(id, account).await?);
+        }
+        Ok(artists)
+    }
+
     async fn artist_homepage_tab(
         &self,
         _id: &str,

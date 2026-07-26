@@ -10,13 +10,13 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
-    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistHomepageIntroduction,
-    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabMetadata, ArtistHomepageTabRequest,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistVideoListRequest,
-    AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
-    CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistBiographySection,
+    ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
+    ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistSummary, ArtistTrackListRequest,
+    ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
+    AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
+    Capability, ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
+    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
     MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
     MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
@@ -66,6 +66,8 @@ const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
+const SINGER_DESCRIPTION_MODULE: &str = "music.musichallSinger.SingerInfoInter";
+const SINGER_DESCRIPTION_METHOD: &str = "GetSingerDetail";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
@@ -1467,6 +1469,90 @@ struct QqSingerHomepageResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerDescriptionBasic {
+    #[serde(default, rename = "singer_id", deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(default, rename = "singer_mid")]
+    mid: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "type", deserialize_with = "deserialize_qq_i64")]
+    singer_type: i64,
+    #[serde(default, rename = "singer_pmid")]
+    image_mid: String,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    has_photo: i64,
+    #[serde(default)]
+    wikiurl: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerDescriptionExtra {
+    #[serde(default, deserialize_with = "deserialize_qq_zeroable_string")]
+    area: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default)]
+    tag: String,
+    #[serde(default, deserialize_with = "deserialize_qq_zeroable_string")]
+    identity: String,
+    #[serde(default, deserialize_with = "deserialize_qq_zeroable_string")]
+    instrument: String,
+    #[serde(default, deserialize_with = "deserialize_qq_zeroable_string")]
+    genre: String,
+    #[serde(default)]
+    foreign_name: String,
+    #[serde(default)]
+    birthday: String,
+    #[serde(default, deserialize_with = "deserialize_qq_zeroable_string")]
+    enter: String,
+    #[serde(default, rename = "blogFlag", deserialize_with = "deserialize_qq_i64")]
+    blog_flag: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerDescription {
+    #[serde(rename = "basic_info")]
+    basic: QqSingerDescriptionBasic,
+    #[serde(default, rename = "ex_info")]
+    extra_info: QqSingerDescriptionExtra,
+    #[serde(default)]
+    wiki: String,
+    #[serde(
+        default,
+        rename = "group_list",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    group_list: Vec<Value>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    photos: Vec<Value>,
+    #[serde(
+        default,
+        rename = "group_info",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    group_info: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerDescriptionResponse {
+    #[serde(
+        default,
+        rename = "singer_list",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    singers: Vec<QqSingerDescription>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqSingerSongEntry {
     #[serde(rename = "songInfo")]
@@ -2022,15 +2108,52 @@ impl MusicProvider for QqProvider {
 
     async fn artist(&self, id: &str, account: Option<&str>) -> Result<Artist> {
         self.validate_public_account(account)?;
-        let request = qq_singer_homepage_request(id)?;
+        let homepage_request = qq_singer_homepage_request(id)?;
+        let requested_mids = vec![id.trim().to_owned()];
+        let description_request = qq_singer_descriptions_request(&requested_mids)?;
+        let mut responses = self
+            .client
+            .request_android(&[homepage_request, description_request])
+            .await?;
+        if responses.len() != 2 {
+            return Err(qq_data_error(
+                "QQ singer detail request returned an inconsistent response batch",
+            ));
+        }
+        let description_response = responses
+            .pop()
+            .expect("two QQ singer detail responses were checked");
+        let homepage_response = responses
+            .pop()
+            .expect("two QQ singer detail responses were checked");
+        let mut artist = map_qq_singer_homepage(id.trim(), homepage_response)?;
+        let mut descriptions = map_qq_singer_descriptions(&requested_mids, description_response)?;
+        let description = descriptions
+            .pop()
+            .expect("one requested QQ singer description was checked");
+        merge_qq_singer_description(&mut artist, description)?;
+        Ok(artist)
+    }
+
+    async fn artist_descriptions(
+        &self,
+        ids: &[String],
+        account: Option<&str>,
+    ) -> Result<Vec<Artist>> {
+        self.validate_public_account(account)?;
+        let normalized = ids
+            .iter()
+            .map(|id| id.trim().to_owned())
+            .collect::<Vec<_>>();
+        let request = qq_singer_descriptions_request(&normalized)?;
         let response = self
             .client
             .request_android(&[request])
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| qq_data_error("QQ singer homepage request returned no response"))?;
-        map_qq_singer_homepage(id.trim(), response)
+            .ok_or_else(|| qq_data_error("QQ singer description request returned no response"))?;
+        map_qq_singer_descriptions(&normalized, response)
     }
 
     async fn artist_homepage_tab(
@@ -4191,6 +4314,28 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
+    if mids.is_empty() || mids.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ singer description batch must contain between 1 and 100 MIDs",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let mids = mids
+        .iter()
+        .map(|mid| {
+            let mid = mid.trim();
+            validate_qq_media_id(mid, "singer MID")?;
+            Ok(mid.to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(QqApiRequest::new(
+        SINGER_DESCRIPTION_MODULE,
+        SINGER_DESCRIPTION_METHOD,
+        json!({ "singer_mids": mids, "groups": 1, "wikis": 1 }),
+    ))
+}
+
 fn qq_singer_homepage_tab_request(
     mid: &str,
     request: &ArtistHomepageTabRequest,
@@ -6054,6 +6199,220 @@ fn map_qq_singer_homepage(requested_mid: &str, response: QqApiResponse) -> Resul
         identities: Vec::new(),
         extensions,
     })
+}
+
+fn map_qq_singer_descriptions(
+    requested_mids: &[String],
+    response: QqApiResponse,
+) -> Result<Vec<Artist>> {
+    let raw_singers = response
+        .data
+        .get("singer_list")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            qq_data_error("QQ singer description response is missing its singer list")
+        })?;
+    let data =
+        serde_json::from_value::<QqSingerDescriptionResponse>(response.data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ singer description response is malformed: {error}"
+            ))
+        })?;
+    if data.singers.len() != requested_mids.len() {
+        return Err(qq_data_error(
+            "QQ singer description response did not preserve batch cardinality",
+        ));
+    }
+    if raw_singers.len() != data.singers.len() {
+        return Err(qq_data_error(
+            "QQ singer description response could not preserve every raw item",
+        ));
+    }
+    let response_extra = serde_json::to_value(&data.extra)
+        .map_err(|_| qq_data_error("failed to preserve QQ singer description response fields"))?;
+    let has_response_extra = !data.extra.is_empty();
+    data.singers
+        .into_iter()
+        .zip(raw_singers)
+        .zip(requested_mids)
+        .enumerate()
+        .map(|(index, ((description, raw_detail), requested_mid))| {
+            let mut artist = map_qq_singer_description(requested_mid, description, raw_detail)?;
+            artist
+                .extensions
+                .insert("batch_index".to_owned(), json!(index));
+            if has_response_extra {
+                artist
+                    .extensions
+                    .insert("response_extra".to_owned(), response_extra.clone());
+            }
+            Ok(artist)
+        })
+        .collect()
+}
+
+fn map_qq_singer_description(
+    requested_mid: &str,
+    description: QqSingerDescription,
+    detail: Value,
+) -> Result<Artist> {
+    let basic = &description.basic;
+    let singer_mid = basic.mid.trim();
+    validate_qq_media_id(singer_mid, "singer MID")
+        .map_err(|_| qq_data_error("QQ singer description returned an invalid singer MID"))?;
+    if singer_mid != requested_mid {
+        return Err(qq_data_error(
+            "QQ singer description returned a different singer MID",
+        ));
+    }
+    if basic.id <= 0 {
+        return Err(qq_data_error(
+            "QQ singer description is missing a positive numeric singer ID",
+        ));
+    }
+    let name = basic.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ singer description is missing its display name",
+        ));
+    }
+
+    let image_mid = [basic.image_mid.as_str(), singer_mid]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .expect("validated singer MID provides an image fallback");
+    validate_qq_image_id(image_mid)
+        .map_err(|_| qq_data_error("QQ singer description returned an invalid image MID"))?;
+    let wiki_url = first_qq_display_url(&[(basic.wikiurl.as_str(), "singer wiki")])?;
+    let extra = &description.extra_info;
+    let summary = extra.desc.trim();
+    let wiki = description.wiki.trim();
+    let (description_text, description_source) = if !summary.is_empty() {
+        (summary.to_owned(), Some("ex_info.desc"))
+    } else if !wiki.is_empty() {
+        (wiki.to_owned(), Some("wiki"))
+    } else {
+        (String::new(), None)
+    };
+    let biography_sections = (!wiki.is_empty() && wiki != description_text)
+        .then(|| ArtistBiographySection {
+            title: "百科".to_owned(),
+            text: wiki.to_owned(),
+        })
+        .into_iter()
+        .collect();
+
+    let mut aliases = Vec::new();
+    let foreign_name = extra.foreign_name.trim();
+    if !foreign_name.is_empty() && foreign_name != name {
+        aliases.push(foreign_name.to_owned());
+    }
+    let mut identities = Vec::new();
+    for identity in [
+        extra.identity.as_str(),
+        extra.tag.as_str(),
+        extra.genre.as_str(),
+        extra.instrument.as_str(),
+    ] {
+        let identity = identity.trim();
+        if !identity.is_empty() && !identities.iter().any(|known| known == identity) {
+            identities.push(identity.to_owned());
+        }
+    }
+
+    let mut extensions = Extensions::from([
+        ("numeric_id".to_owned(), json!(basic.id)),
+        ("singer_type".to_owned(), json!(basic.singer_type)),
+        ("has_photo".to_owned(), json!(basic.has_photo)),
+        ("blog_flag".to_owned(), json!(extra.blog_flag)),
+        ("group_list".to_owned(), json!(&description.group_list)),
+        ("photos".to_owned(), json!(&description.photos)),
+        ("group_info".to_owned(), json!(&description.group_info)),
+        ("detail".to_owned(), detail),
+    ]);
+    if image_mid != singer_mid {
+        extensions.insert("image_mid".to_owned(), json!(image_mid));
+    }
+    if let Some(wiki_url) = wiki_url {
+        extensions.insert("wiki_url".to_owned(), json!(wiki_url));
+    }
+    if let Some(source) = description_source {
+        extensions.insert("description_source".to_owned(), json!(source));
+    }
+    for (key, value) in [
+        ("area", extra.area.as_str()),
+        ("tag", extra.tag.as_str()),
+        ("instrument", extra.instrument.as_str()),
+        ("genre", extra.genre.as_str()),
+        ("birthday", extra.birthday.as_str()),
+        ("enter", extra.enter.as_str()),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            extensions.insert(key.to_owned(), json!(value));
+        }
+    }
+
+    Ok(Artist {
+        resource_ref: qq_ref(singer_mid, "singer")?,
+        platform: Platform::Qq,
+        id: singer_mid.to_owned(),
+        name: name.to_owned(),
+        aliases,
+        description: description_text,
+        biography_sections,
+        avatar_url: Some(qq_cover_url("T001", image_mid)),
+        cover_url: None,
+        album_count: None,
+        track_count: None,
+        mv_count: None,
+        video_count: None,
+        identities,
+        extensions,
+    })
+}
+
+fn merge_qq_singer_description(homepage: &mut Artist, description: Artist) -> Result<()> {
+    if homepage.resource_ref != description.resource_ref {
+        return Err(qq_data_error(
+            "QQ singer homepage and description identities do not match",
+        ));
+    }
+    if homepage.name != description.name
+        && !homepage
+            .aliases
+            .iter()
+            .any(|alias| alias == &description.name)
+    {
+        homepage.aliases.push(description.name.clone());
+    }
+    for alias in &description.aliases {
+        if alias != &homepage.name && !homepage.aliases.iter().any(|known| known == alias) {
+            homepage.aliases.push(alias.clone());
+        }
+    }
+    if !description.description.is_empty() {
+        homepage.description.clone_from(&description.description);
+    }
+    homepage
+        .biography_sections
+        .clone_from(&description.biography_sections);
+    for identity in &description.identities {
+        if !homepage.identities.iter().any(|known| known == identity) {
+            homepage.identities.push(identity.clone());
+        }
+    }
+    if homepage.avatar_url.is_none() {
+        homepage.avatar_url.clone_from(&description.avatar_url);
+    }
+    homepage.extensions.insert(
+        "description_detail".to_owned(),
+        serde_json::to_value(description)
+            .map_err(|_| qq_data_error("failed to preserve merged QQ singer description"))?,
+    );
+    Ok(())
 }
 
 fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
@@ -8473,6 +8832,21 @@ where
     value_as_string(Some(&value)).ok_or_else(|| D::Error::custom("expected a QQ scalar string"))
 }
 
+fn deserialize_qq_zeroable_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(value)) => Ok(value),
+        Some(Value::Number(value)) if value.as_i64() == Some(0) => Ok(String::new()),
+        Some(Value::Number(value)) => Ok(value.to_string()),
+        Some(_) => Err(D::Error::custom(
+            "expected a nullable QQ string or numeric zero",
+        )),
+    }
+}
+
 fn deserialize_qq_optional_string<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<String>, D::Error>
@@ -9808,6 +10182,40 @@ mod tests {
         })
     }
 
+    fn sample_singer_description(mid: &str, name: &str, id: i64) -> Value {
+        json!({
+            "basic_info": {
+                "singer_id": id,
+                "singer_mid": mid,
+                "name": name,
+                "type": 0,
+                "singer_pmid": format!("{mid}_11"),
+                "has_photo": 11,
+                "wikiurl": "https://wiki.y.qq.com/i/public-singer",
+                "futureBasicField": true
+            },
+            "ex_info": {
+                "area": "港台",
+                "desc": "华语流行歌手、词曲作者与制作人。",
+                "tag": "创作歌手",
+                "identity": "歌手",
+                "instrument": "钢琴",
+                "genre": "流行",
+                "foreign_name": "Jay Chou",
+                "birthday": "1979-01-18",
+                "enter": "2000年出道",
+                "blogFlag": 0,
+                "futureExtraField": "kept"
+            },
+            "wiki": "周杰伦的完整百科介绍。",
+            "group_list": [{"name": "组合成员", "futureGroupField": true}],
+            "photos": [{"url": "https://y.gtimg.cn/singer/photo.jpg"}],
+            "group_info": [{"title": "组合信息"}],
+            "pic": {"big_black": "", "big_white": "", "pic": ""},
+            "futureDetailField": 42
+        })
+    }
+
     fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
         json!({
             "albumID": id,
@@ -11005,6 +11413,148 @@ mod tests {
             assert_eq!(error.code, ErrorCode::InvalidRequest);
             assert_eq!(error.platform, Some(Platform::Qq));
         }
+    }
+
+    #[test]
+    fn singer_description_request_preserves_batch_order_duplicates_and_reference_flags() {
+        let mids = vec![
+            " 0025NhlN2yWrP4 ".to_owned(),
+            "001fNHEf1SFEFN".to_owned(),
+            "0025NhlN2yWrP4".to_owned(),
+        ];
+        let request = qq_singer_descriptions_request(&mids).expect("singer description request");
+        assert_eq!(request.module, SINGER_DESCRIPTION_MODULE);
+        assert_eq!(request.method, SINGER_DESCRIPTION_METHOD);
+        assert_eq!(
+            request.param,
+            json!({
+                "singer_mids": ["0025NhlN2yWrP4", "001fNHEf1SFEFN", "0025NhlN2yWrP4"],
+                "groups": 1,
+                "wikis": 1
+            })
+        );
+
+        assert!(qq_singer_descriptions_request(&[]).is_err());
+        assert!(qq_singer_descriptions_request(&vec!["0025NhlN2yWrP4".to_owned(); 101]).is_err());
+        assert!(qq_singer_descriptions_request(&["unsafe/singer".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn singer_descriptions_map_rich_fields_and_preserve_duplicate_positions() {
+        let requested = vec![
+            "0025NhlN2yWrP4".to_owned(),
+            "001fNHEf1SFEFN".to_owned(),
+            "0025NhlN2yWrP4".to_owned(),
+        ];
+        let mut gem = sample_singer_description("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        gem["basic_info"]["singer_pmid"] = json!("001fNHEf1SFEFN_7");
+        gem["basic_info"]["has_photo"] = json!(7);
+        gem["ex_info"]["area"] = json!(0);
+        gem["ex_info"]["identity"] = json!(0);
+        gem["ex_info"]["instrument"] = json!(0);
+        gem["ex_info"]["genre"] = json!(0);
+        gem["ex_info"]["enter"] = json!(0);
+        let artists = map_qq_singer_descriptions(
+            &requested,
+            response(json!({
+                "singer_list": [
+                    sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558),
+                    gem,
+                    sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558)
+                ],
+                "futureResponseField": true
+            })),
+        )
+        .expect("map singer descriptions");
+        assert_eq!(artists.len(), 3);
+        assert_eq!(artists[0].resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(artists[1].resource_ref.to_string(), "qq:001fNHEf1SFEFN");
+        assert_eq!(artists[2].resource_ref, artists[0].resource_ref);
+        assert_eq!(artists[0].description, "华语流行歌手、词曲作者与制作人。");
+        assert_eq!(artists[0].biography_sections[0].title, "百科");
+        assert_eq!(artists[0].aliases, ["Jay Chou"]);
+        assert_eq!(artists[0].identities, ["歌手", "创作歌手", "流行", "钢琴"]);
+        assert_eq!(artists[0].extensions["has_photo"], 11);
+        assert_eq!(artists[0].extensions["batch_index"], 0);
+        assert_eq!(artists[2].extensions["batch_index"], 2);
+        assert_eq!(artists[0].extensions["detail"]["futureDetailField"], 42);
+        assert!(
+            artists[0]
+                .avatar_url
+                .as_deref()
+                .is_some_and(|url| url.contains("0025NhlN2yWrP4_11"))
+        );
+        assert_eq!(artists[1].extensions.get("area"), None);
+        assert!(artists[1].identities.iter().all(|value| value != "0"));
+        assert_eq!(artists[1].extensions["detail"]["ex_info"]["area"], 0);
+        assert_eq!(
+            artists[1].extensions["response_extra"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn singer_description_mapping_rejects_cardinality_identity_and_unsafe_fields() {
+        let requested = vec!["0025NhlN2yWrP4".to_owned()];
+        for data in [
+            json!({"singer_list": []}),
+            json!({"singer_list": [sample_singer_description("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13948)]}),
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["basic_info"]["singer_id"] = json!(0);
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["basic_info"]["name"] = json!("");
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["basic_info"]["singer_pmid"] = json!("unsafe/image");
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["basic_info"]["wikiurl"] = json!("javascript:alert(1)");
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["group_list"] = json!({});
+                json!({"singer_list": [value]})
+            },
+        ] {
+            let error = map_qq_singer_descriptions(&requested, response(data))
+                .expect_err("malformed singer description response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn singer_description_enriches_the_homepage_without_losing_header_fields() {
+        let mut homepage = map_qq_singer_homepage(
+            "0025NhlN2yWrP4",
+            response(sample_singer_homepage("0025NhlN2yWrP4")),
+        )
+        .expect("map singer homepage");
+        let raw_description = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+        let description = map_qq_singer_description(
+            "0025NhlN2yWrP4",
+            serde_json::from_value(raw_description.clone()).expect("description model"),
+            raw_description,
+        )
+        .expect("map singer description");
+        let original_cover = homepage.cover_url.clone();
+        merge_qq_singer_description(&mut homepage, description).expect("merge singer detail");
+        assert_eq!(homepage.description, "华语流行歌手、词曲作者与制作人。");
+        assert_eq!(homepage.biography_sections[0].title, "百科");
+        assert_eq!(homepage.identities, ["歌手", "创作歌手", "流行", "钢琴"]);
+        assert_eq!(homepage.cover_url, original_cover);
+        assert_eq!(
+            homepage.extensions["description_detail"]["extensions"]["numeric_id"],
+            4558
+        );
     }
 
     #[test]
@@ -14047,6 +14597,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn singer_descriptions_validate_batches_mids_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        for ids in [
+            Vec::new(),
+            vec!["0025NhlN2yWrP4".to_owned(); 101],
+            vec!["unsafe/singer".to_owned()],
+        ] {
+            let error = provider
+                .artist_descriptions(&ids, None)
+                .await
+                .expect_err("invalid singer description request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let error = provider
+            .artist_descriptions(&["0025NhlN2yWrP4".to_owned()], Some("missing-account"))
+            .await
+            .expect_err("missing singer description account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn mv_catalog_validates_page_sizes_filters_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::VideoCatalog));
@@ -15318,6 +15889,60 @@ mod tests {
                 .is_some_and(|url| url.starts_with("http"))
         );
         assert_eq!(artist.extensions["response"]["code"], 0);
+        assert_eq!(
+            artist.extensions["description_detail"]["ref"],
+            "qq:0025NhlN2yWrP4"
+        );
+        assert!(
+            artist.extensions["description_detail"]["extensions"]["has_photo"]
+                .as_i64()
+                .is_some_and(|version| version > 0)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_descriptions_preserve_batch_order_duplicates_and_current_fields() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let requested = vec![
+            "0025NhlN2yWrP4".to_owned(),
+            "001fNHEf1SFEFN".to_owned(),
+            "0025NhlN2yWrP4".to_owned(),
+        ];
+        let artists = provider
+            .artist_descriptions(&requested, None)
+            .await
+            .expect("singer description batch");
+        assert_eq!(artists.len(), requested.len());
+        for (index, (artist, requested_mid)) in artists.iter().zip(&requested).enumerate() {
+            assert_eq!(
+                artist.resource_ref.to_string(),
+                format!("qq:{requested_mid}")
+            );
+            assert!(!artist.name.is_empty());
+            assert_eq!(artist.extensions["batch_index"], index);
+            assert!(
+                artist.extensions["numeric_id"]
+                    .as_i64()
+                    .is_some_and(|id| id > 0)
+            );
+            assert!(
+                artist.extensions["has_photo"]
+                    .as_i64()
+                    .is_some_and(|version| version > 0)
+            );
+            assert!(
+                artist.extensions["wiki_url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("https://"))
+            );
+        }
+        assert_eq!(artists[0].resource_ref, artists[2].resource_ref);
+        assert_eq!(artists[0].name, artists[2].name);
     }
 
     #[tokio::test]
