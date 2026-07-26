@@ -77,6 +77,8 @@ const SIMILAR_SINGER_MODULE: &str = "music.SimilarSingerSvr";
 const SIMILAR_SINGER_METHOD: &str = "GetSimilarSingerList";
 const SINGER_CATALOG_MODULE: &str = "music.musichallSinger.SingerList";
 const SINGER_CATALOG_METHOD: &str = "GetSingerList";
+const SINGER_INDEX_METHOD: &str = "GetSingerListIndex";
+const SINGER_INDEX_PAGE_SIZE: u32 = 80;
 const TOPLIST_MODULE: &str = "music.musicToplist.Toplist";
 const TOPLIST_CATALOG_METHOD: &str = "GetAll";
 const TOPLIST_DETAIL_METHOD: &str = "GetDetail";
@@ -2109,6 +2111,44 @@ struct QqSingerCatalogResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerIndexResponse {
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    area: i64,
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    sex: i64,
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    genre: i64,
+    #[serde(
+        default = "negative_one_hundred_i64",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    index: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singerlist: Vec<QqSingerCatalogItem>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    hotlist: Vec<QqSingerCatalogItem>,
+    #[serde(default)]
+    tags: Option<QqSingerCatalogTags>,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(default, rename = "tjReport")]
+    report: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QqSingerCatalogSelection {
     area: i64,
@@ -2394,6 +2434,7 @@ impl MusicProvider for QqProvider {
             Capability::AlbumDetail,
             Capability::ArtistDetail,
             Capability::ArtistCatalog,
+            Capability::ArtistList,
             Capability::ArtistHomepageTabs,
             Capability::SimilarArtists,
             Capability::ArtistAlbums,
@@ -2675,6 +2716,13 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer catalog request returned no response"))?;
         map_qq_singer_catalog(request, selection, response)
+    }
+
+    async fn artists(&self, request: &tuneweave_core::ArtistListRequest) -> Result<Page<Artist>> {
+        self.validate_public_account(request.account.as_deref())?;
+        let (api_requests, selection, index) = qq_singer_index_requests(request)?;
+        let responses = self.client.request_web(&api_requests).await?;
+        map_qq_singer_index(request, selection, index, responses)
     }
 
     async fn artist_descriptions(
@@ -4961,7 +5009,28 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
 fn qq_singer_catalog_request(
     request: &ArtistCatalogRequest,
 ) -> Result<(QqApiRequest, QqSingerCatalogSelection)> {
-    let area = match request.area {
+    let selection = qq_singer_filter_selection(request.area, request.category, request.genre)?;
+    Ok((
+        QqApiRequest::new(
+            SINGER_CATALOG_MODULE,
+            SINGER_CATALOG_METHOD,
+            json!({
+                "hastag": 0,
+                "area": selection.area,
+                "sex": selection.sex,
+                "genre": selection.genre
+            }),
+        ),
+        selection,
+    ))
+}
+
+fn qq_singer_filter_selection(
+    area: ArtistArea,
+    category: ArtistCategory,
+    genre: ArtistGenre,
+) -> Result<QqSingerCatalogSelection> {
+    let area = match area {
         ArtistArea::All => -100,
         ArtistArea::Chinese => 200,
         ArtistArea::HongKongTaiwan => 2,
@@ -4985,13 +5054,13 @@ fn qq_singer_catalog_request(
             })));
         }
     };
-    let sex = match request.category {
+    let sex = match category {
         ArtistCategory::All => -100,
         ArtistCategory::Male => 0,
         ArtistCategory::Female => 1,
         ArtistCategory::Group => 2,
     };
-    let genre = match request.genre {
+    let genre = match genre {
         ArtistGenre::All => -100,
         ArtistGenre::Pop => 7,
         ArtistGenre::Rap => 3,
@@ -5007,20 +5076,70 @@ fn qq_singer_catalog_request(
         ArtistGenre::Country => 13,
         ArtistGenre::Blues => 10,
     };
-    let selection = QqSingerCatalogSelection { area, sex, genre };
-    Ok((
-        QqApiRequest::new(
+    Ok(QqSingerCatalogSelection { area, sex, genre })
+}
+
+fn qq_singer_index_requests(
+    request: &tuneweave_core::ArtistListRequest,
+) -> Result<(Vec<QqApiRequest>, QqSingerCatalogSelection, i64)> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ singer index page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let selection = qq_singer_filter_selection(request.area, request.category, request.genre)?;
+    let index = parse_qq_singer_index(request.initial.as_deref())?;
+    let windows = request.limit.div_ceil(SINGER_INDEX_PAGE_SIZE);
+    let mut requests = Vec::with_capacity(usize::try_from(windows).unwrap_or(2));
+    for window in 0..windows {
+        let shift = window
+            .checked_mul(SINGER_INDEX_PAGE_SIZE)
+            .ok_or_else(|| qq_data_error("QQ singer index window exceeded the offset range"))?;
+        let sin = request.offset.checked_add(shift).ok_or_else(|| {
+            TuneWeaveError::invalid_request("QQ singer index offset is too large")
+                .with_platform(Platform::Qq)
+        })?;
+        let current_page = sin / SINGER_INDEX_PAGE_SIZE + 1;
+        requests.push(QqApiRequest::new(
             SINGER_CATALOG_MODULE,
-            SINGER_CATALOG_METHOD,
+            SINGER_INDEX_METHOD,
             json!({
-                "hastag": 0,
-                "area": area,
-                "sex": sex,
-                "genre": genre
+                "area": selection.area,
+                "sex": selection.sex,
+                "genre": selection.genre,
+                "index": index,
+                "sin": sin,
+                "cur_page": current_page
             }),
-        ),
-        selection,
-    ))
+        ));
+    }
+    Ok((requests, selection, index))
+}
+
+fn parse_qq_singer_index(value: Option<&str>) -> Result<i64> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("all");
+    match value.to_ascii_lowercase().as_str() {
+        "all" | "-100" => Ok(-100),
+        "#" | "hash" | "other" | "27" => Ok(27),
+        value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphabetic() => Ok(i64::from(
+            value.as_bytes()[0].to_ascii_uppercase() - b'A' + 1,
+        )),
+        value => value
+            .parse::<i64>()
+            .ok()
+            .filter(|value| (1..=26).contains(value))
+            .ok_or_else(|| {
+                TuneWeaveError::invalid_request(
+                    "QQ singer initial must be A-Z, all, hash, or an index from 1 to 27",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "initial": value }))
+            }),
+    }
 }
 
 fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
@@ -6857,18 +6976,7 @@ fn map_qq_singer_catalog(
         .into_iter()
         .map(|artist| map_qq_singer_catalog_item(artist, "catalog singer"))
         .collect::<Result<Vec<_>>>()?;
-    let tags_present = data.tags.is_some();
-    let tags = data.tags.unwrap_or_default();
-    let filters = ArtistCatalogFilters {
-        areas: map_qq_singer_catalog_options(tags.area, "area")?,
-        categories: map_qq_singer_catalog_options(tags.sex, "category")?,
-        genres: map_qq_singer_catalog_options(tags.genre, "genre")?,
-        initials: map_qq_singer_catalog_options(tags.index, "initial")?,
-        extensions: Extensions::from([
-            ("tags_present".to_owned(), json!(tags_present)),
-            ("tags_extra".to_owned(), json!(tags.extra)),
-        ]),
-    };
+    let filters = map_qq_singer_catalog_tags(data.tags)?;
     Ok(ArtistCatalog {
         platform: Platform::Qq,
         area: request.area,
@@ -6884,6 +6992,163 @@ fn map_qq_singer_catalog(
             ("report".to_owned(), json!(data.report)),
             ("data".to_owned(), response_data),
             ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_qq_singer_index(
+    request: &tuneweave_core::ArtistListRequest,
+    selection: QqSingerCatalogSelection,
+    index: i64,
+    responses: Vec<QqApiResponse>,
+) -> Result<Page<Artist>> {
+    let expected_windows = request.limit.div_ceil(SINGER_INDEX_PAGE_SIZE);
+    if responses.len() != usize::try_from(expected_windows).unwrap_or(2) {
+        return Err(qq_data_error(
+            "QQ singer index request returned an inconsistent response batch",
+        ));
+    }
+    let mut total = None;
+    let mut physical_artists = Vec::new();
+    let mut data_values = Vec::with_capacity(responses.len());
+    let mut raw_responses = Vec::with_capacity(responses.len());
+    let mut featured_artists = Vec::new();
+    let mut filters = None;
+    for (window, response) in responses.into_iter().enumerate() {
+        let data =
+            serde_json::from_value::<QqSingerIndexResponse>(response.data).map_err(|error| {
+                qq_data_error(format!("QQ singer index response is malformed: {error}"))
+            })?;
+        if data.code != 0 {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("QQ singer index failed with code {}", data.code),
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "platform_code": data.code })));
+        }
+        if (data.area, data.sex, data.genre, data.index)
+            != (selection.area, selection.sex, selection.genre, index)
+        {
+            return Err(qq_data_error(
+                "QQ singer index response returned different filters than requested",
+            ));
+        }
+        if total.is_some_and(|total| total != data.total) {
+            return Err(qq_data_error(
+                "QQ singer index windows returned different totals",
+            ));
+        }
+        total = Some(data.total);
+        let upstream_returned = u32::try_from(data.singerlist.len())
+            .map_err(|_| qq_data_error("QQ singer index window is too large"))?;
+        if upstream_returned > SINGER_INDEX_PAGE_SIZE {
+            return Err(qq_data_error(
+                "QQ singer index response exceeded its fixed window size",
+            ));
+        }
+        let window = u32::try_from(window)
+            .map_err(|_| qq_data_error("QQ singer index window count is too large"))?;
+        let window_start = request
+            .offset
+            .checked_add(window.saturating_mul(SINGER_INDEX_PAGE_SIZE))
+            .ok_or_else(|| qq_data_error("QQ singer index window exceeded the offset range"))?;
+        let expected_returned = data
+            .total
+            .saturating_sub(u64::from(window_start))
+            .min(u64::from(SINGER_INDEX_PAGE_SIZE));
+        if u64::from(upstream_returned) != expected_returned {
+            return Err(qq_data_error(
+                "QQ singer index response returned an incomplete fixed window",
+            ));
+        }
+        let data_value = serde_json::to_value(&data)
+            .map_err(|_| qq_data_error("failed to preserve typed QQ singer index response"))?;
+        if window == 0 {
+            featured_artists = data
+                .hotlist
+                .into_iter()
+                .map(|artist| map_qq_singer_catalog_item(artist, "featured singer"))
+                .collect::<Result<Vec<_>>>()?;
+            filters = Some(map_qq_singer_catalog_tags(data.tags)?);
+        }
+        physical_artists.extend(
+            data.singerlist
+                .into_iter()
+                .map(|artist| map_qq_singer_catalog_item(artist, "indexed singer"))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        data_values.push(data_value);
+        raw_responses.push(response.raw);
+    }
+    let total = total.ok_or_else(|| qq_data_error("QQ singer index returned no response"))?;
+    let available = total.saturating_sub(u64::from(request.offset));
+    let returned = usize::try_from(available.min(u64::from(request.limit)))
+        .map_err(|_| qq_data_error("QQ singer index page exceeds this platform's capacity"))?;
+    if physical_artists.len() < returned {
+        return Err(qq_data_error(
+            "QQ singer index response ended before the requested logical page",
+        ));
+    }
+    let upstream_returned = physical_artists.len();
+    let items = physical_artists
+        .into_iter()
+        .take(returned)
+        .collect::<Vec<_>>();
+    let limit_applied = upstream_returned > items.len();
+    let returned = u32::try_from(items.len())
+        .map_err(|_| qq_data_error("QQ singer index logical page is too large"))?;
+    let next_offset = request.offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ singer index pagination exceeded the supported offset range")
+    })?;
+    let has_more = u64::from(next_offset) < total;
+    let filters = filters.unwrap_or_else(|| ArtistCatalogFilters {
+        areas: Vec::new(),
+        categories: Vec::new(),
+        genres: Vec::new(),
+        initials: Vec::new(),
+        extensions: Extensions::new(),
+    });
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("area_id".to_owned(), json!(selection.area)),
+                ("sex_id".to_owned(), json!(selection.sex)),
+                ("genre_id".to_owned(), json!(selection.genre)),
+                ("index_id".to_owned(), json!(index)),
+                (
+                    "fixed_window_size".to_owned(),
+                    json!(SINGER_INDEX_PAGE_SIZE),
+                ),
+                ("request_windows".to_owned(), json!(expected_windows)),
+                ("upstream_returned".to_owned(), json!(upstream_returned)),
+                ("limit_applied".to_owned(), json!(limit_applied)),
+                ("featured_artists".to_owned(), json!(featured_artists)),
+                ("filters".to_owned(), json!(filters)),
+                ("data".to_owned(), json!(data_values)),
+                ("responses".to_owned(), json!(raw_responses)),
+            ]),
+        },
+    })
+}
+
+fn map_qq_singer_catalog_tags(tags: Option<QqSingerCatalogTags>) -> Result<ArtistCatalogFilters> {
+    let tags_present = tags.is_some();
+    let tags = tags.unwrap_or_default();
+    Ok(ArtistCatalogFilters {
+        areas: map_qq_singer_catalog_options(tags.area, "area")?,
+        categories: map_qq_singer_catalog_options(tags.sex, "category")?,
+        genres: map_qq_singer_catalog_options(tags.genre, "genre")?,
+        initials: map_qq_singer_catalog_options(tags.index, "initial")?,
+        extensions: Extensions::from([
+            ("tags_present".to_owned(), json!(tags_present)),
+            ("tags_extra".to_owned(), json!(tags.extra)),
         ]),
     })
 }
@@ -11671,6 +11936,55 @@ mod tests {
         })
     }
 
+    fn sample_singer_index_item(position: u32) -> Value {
+        let mid = format!("S{position:013}");
+        json!({
+            "area_id": 200,
+            "singer_id": u64::from(position) + 1,
+            "country_id": 86,
+            "singer_name": format!("歌手 {position}"),
+            "country": "中国",
+            "other_name": format!("Artist {position}"),
+            "singer_mid": mid,
+            "spell": format!("artist{position}"),
+            "trend": 0,
+            "singer_pmid": format!("S{position:013}_11"),
+            "concernNum": u64::from(position) * 10,
+            "futureSingerField": {"position": position}
+        })
+    }
+
+    fn sample_singer_index_data(
+        start: u32,
+        count: u32,
+        total: u64,
+        selection: QqSingerCatalogSelection,
+        index: i64,
+    ) -> Value {
+        let singerlist = (start..start + count)
+            .map(sample_singer_index_item)
+            .collect::<Vec<_>>();
+        json!({
+            "area": selection.area,
+            "sex": selection.sex,
+            "genre": selection.genre,
+            "index": index,
+            "total": total,
+            "singerlist": singerlist,
+            "hotlist": [sample_singer_index_item(9000)],
+            "tags": {
+                "area": [{"id": selection.area, "name": "地区"}],
+                "sex": [{"id": selection.sex, "name": "性别"}],
+                "genre": [{"id": selection.genre, "name": "流派"}],
+                "index": [{"id": index, "name": "首字母"}],
+                "futureTags": true
+            },
+            "code": 0,
+            "tjReport": "index-trace",
+            "futureResponseField": {"kept": true}
+        })
+    }
+
     fn sample_singer_homepage_tab(tab_id: &str, has_more: i64) -> Value {
         json!({
             "TabID": tab_id,
@@ -13411,6 +13725,254 @@ mod tests {
                 .expect_err("malformed QQ singer catalog");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn singer_index_request_preserves_reference_filters_offsets_and_fixed_windows() {
+        let mut request = tuneweave_core::ArtistListRequest::new(2, 1);
+        request.area = ArtistArea::HongKongTaiwan;
+        request.category = ArtistCategory::Female;
+        request.genre = ArtistGenre::Jazz;
+        request.initial = Some("b".to_owned());
+        let (requests, selection, index) =
+            qq_singer_index_requests(&request).expect("QQ singer index request");
+        assert_eq!(
+            selection,
+            QqSingerCatalogSelection {
+                area: 2,
+                sex: 1,
+                genre: 14
+            }
+        );
+        assert_eq!(index, 2);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].module, SINGER_CATALOG_MODULE);
+        assert_eq!(requests[0].method, SINGER_INDEX_METHOD);
+        assert_eq!(
+            requests[0].param,
+            json!({
+                "area": 2,
+                "sex": 1,
+                "genre": 14,
+                "index": 2,
+                "sin": 1,
+                "cur_page": 1
+            })
+        );
+        assert!(requests[0].param.get("num").is_none());
+
+        let request = tuneweave_core::ArtistListRequest::new(100, 1);
+        let (requests, _, _) =
+            qq_singer_index_requests(&request).expect("two QQ singer index windows");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].param["sin"], 1);
+        assert_eq!(requests[0].param["cur_page"], 1);
+        assert_eq!(requests[1].param["sin"], 81);
+        assert_eq!(requests[1].param["cur_page"], 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.param.get("num").is_none())
+        );
+    }
+
+    #[test]
+    fn singer_index_request_accepts_every_reference_initial_and_rejects_invalid_pages() {
+        for (initial, expected) in [
+            (None, -100),
+            (Some("all"), -100),
+            (Some("-100"), -100),
+            (Some("a"), 1),
+            (Some("Z"), 26),
+            (Some("#"), 27),
+            (Some("hash"), 27),
+            (Some("other"), 27),
+            (Some("1"), 1),
+            (Some("26"), 26),
+            (Some("27"), 27),
+        ] {
+            assert_eq!(
+                parse_qq_singer_index(initial).expect("valid QQ singer initial"),
+                expected,
+                "{initial:?}"
+            );
+        }
+        for invalid in [Some(""), Some("AA"), Some("0"), Some("28"), Some("中文")] {
+            if invalid == Some("") {
+                assert_eq!(
+                    parse_qq_singer_index(invalid).expect("blank initial uses all"),
+                    -100
+                );
+            } else {
+                let error = parse_qq_singer_index(invalid).expect_err("invalid QQ initial");
+                assert_eq!(error.code, ErrorCode::InvalidRequest);
+                assert_eq!(error.platform, Some(Platform::Qq));
+            }
+        }
+
+        for limit in [0, 101] {
+            let error =
+                match qq_singer_index_requests(&tuneweave_core::ArtistListRequest::new(limit, 0)) {
+                    Ok(_) => panic!("invalid QQ singer page size was accepted"),
+                    Err(error) => error,
+                };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let error = match qq_singer_index_requests(&tuneweave_core::ArtistListRequest::new(
+            100,
+            u32::MAX,
+        )) {
+            Ok(_) => panic!("overflowing QQ singer offset was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn singer_index_mapping_applies_logical_limits_and_preserves_physical_windows() {
+        let selection = QqSingerCatalogSelection {
+            area: -100,
+            sex: -100,
+            genre: -100,
+        };
+        let request = tuneweave_core::ArtistListRequest::new(2, 1);
+        let page = map_qq_singer_index(
+            &request,
+            selection,
+            -100,
+            vec![response(sample_singer_index_data(
+                1, 80, 200, selection, -100,
+            ))],
+        )
+        .expect("map logical QQ singer page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:S0000000000001");
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:S0000000000002");
+        assert_eq!(page.items[0].aliases, ["Artist 1"]);
+        assert_eq!(page.items[0].extensions["numeric_id"], 2);
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 1);
+        assert_eq!(page.pagination.total, Some(200));
+        assert_eq!(page.pagination.next_offset, Some(3));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["fixed_window_size"], 80);
+        assert_eq!(page.pagination.extensions["request_windows"], 1);
+        assert_eq!(page.pagination.extensions["upstream_returned"], 80);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            page.pagination.extensions["featured_artists"][0]["id"],
+            "S0000000009000"
+        );
+        assert_eq!(
+            page.pagination.extensions["filters"]["extensions"]["tags_present"],
+            true
+        );
+        assert_eq!(
+            page.pagination.extensions["data"][0]["futureResponseField"]["kept"],
+            true
+        );
+        assert_eq!(page.pagination.extensions["responses"][0]["code"], 0);
+    }
+
+    #[test]
+    fn singer_index_mapping_combines_two_windows_and_finishes_at_the_real_total() {
+        let selection = QqSingerCatalogSelection {
+            area: -100,
+            sex: -100,
+            genre: -100,
+        };
+        let request = tuneweave_core::ArtistListRequest::new(100, 1);
+        let page = map_qq_singer_index(
+            &request,
+            selection,
+            -100,
+            vec![
+                response(sample_singer_index_data(1, 80, 200, selection, -100)),
+                response(sample_singer_index_data(81, 80, 200, selection, -100)),
+            ],
+        )
+        .expect("map two QQ singer windows");
+        assert_eq!(page.items.len(), 100);
+        assert_eq!(page.items[79].id, "S0000000000080");
+        assert_eq!(page.items[80].id, "S0000000000081");
+        assert_eq!(page.items[99].id, "S0000000000100");
+        assert_eq!(page.pagination.next_offset, Some(101));
+        assert_eq!(page.pagination.extensions["request_windows"], 2);
+        assert_eq!(page.pagination.extensions["upstream_returned"], 160);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+
+        let end_request = tuneweave_core::ArtistListRequest::new(2, 2);
+        let end = map_qq_singer_index(
+            &end_request,
+            selection,
+            -100,
+            vec![response(sample_singer_index_data(2, 1, 3, selection, -100))],
+        )
+        .expect("map final QQ singer page");
+        assert_eq!(end.items.len(), 1);
+        assert_eq!(end.pagination.total, Some(3));
+        assert_eq!(end.pagination.next_offset, None);
+        assert!(!end.pagination.has_more);
+        assert_eq!(end.pagination.extensions["limit_applied"], false);
+    }
+
+    #[test]
+    fn singer_index_mapping_rejects_false_success_and_incomplete_windows() {
+        let selection = QqSingerCatalogSelection {
+            area: -100,
+            sex: -100,
+            genre: -100,
+        };
+        let request = tuneweave_core::ArtistListRequest::new(2, 0);
+        let invalid_batches = vec![
+            Vec::new(),
+            vec![response(json!({
+                "area": -100, "sex": -100, "genre": -100, "index": -100,
+                "total": 200, "singerlist": [], "code": 1
+            }))],
+            vec![response(sample_singer_index_data(
+                0,
+                80,
+                200,
+                QqSingerCatalogSelection {
+                    area: 200,
+                    ..selection
+                },
+                -100,
+            ))],
+            vec![response(sample_singer_index_data(
+                0, 79, 200, selection, -100,
+            ))],
+            vec![response(sample_singer_index_data(
+                0, 81, 200, selection, -100,
+            ))],
+            vec![response(json!({
+                "area": -100, "sex": -100, "genre": -100, "index": -100,
+                "total": 200,
+                "singerlist": [
+                    {"singer_id": 1, "singer_mid": "unsafe/singer", "singer_name": "歌手"}
+                ],
+                "code": 0
+            }))],
+        ];
+        for responses in invalid_batches {
+            let error = map_qq_singer_index(&request, selection, -100, responses)
+                .expect_err("invalid QQ singer index response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let two_windows = tuneweave_core::ArtistListRequest::new(100, 0);
+        let error = map_qq_singer_index(
+            &two_windows,
+            selection,
+            -100,
+            vec![
+                response(sample_singer_index_data(0, 80, 200, selection, -100)),
+                response(sample_singer_index_data(80, 80, 199, selection, -100)),
+            ],
+        )
+        .expect_err("QQ singer totals changed between windows");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[test]
@@ -16874,6 +17436,7 @@ mod tests {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::ArtistDetail));
         assert!(provider.capabilities().contains(&Capability::ArtistCatalog));
+        assert!(provider.capabilities().contains(&Capability::ArtistList));
         assert!(provider.capabilities().contains(&Capability::ArtistAlbums));
         assert!(provider.capabilities().contains(&Capability::ArtistTracks));
         assert!(provider.capabilities().contains(&Capability::ArtistVideos));
@@ -16896,6 +17459,35 @@ mod tests {
             .artist_catalog(&catalog)
             .await
             .expect_err("missing singer catalog account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        for request in [
+            tuneweave_core::ArtistListRequest::new(0, 0),
+            tuneweave_core::ArtistListRequest::new(101, 0),
+            tuneweave_core::ArtistListRequest::new(100, u32::MAX),
+            {
+                let mut request = tuneweave_core::ArtistListRequest::new(10, 0);
+                request.initial = Some("AA".to_owned());
+                request
+            },
+            {
+                let mut request = tuneweave_core::ArtistListRequest::new(10, 0);
+                request.area = ArtistArea::Other;
+                request
+            },
+        ] {
+            let error = provider
+                .artists(&request)
+                .await
+                .expect_err("invalid singer index request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let mut indexed = tuneweave_core::ArtistListRequest::new(10, 0);
+        indexed.account = Some("missing-account".to_owned());
+        let error = provider
+            .artists(&indexed)
+            .await
+            .expect_err("missing singer index account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
 
         let mut request = ArtistTrackListRequest::new(0, 0);
@@ -18446,6 +19038,52 @@ mod tests {
         assert_eq!(filtered.extensions["area_id"], 200);
         assert_eq!(filtered.extensions["sex_id"], 1);
         assert_eq!(filtered.extensions["genre_id"], 7);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_index_supports_exact_offsets_two_windows_and_initials() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .artists(&tuneweave_core::ArtistListRequest::new(2, 0))
+            .await
+            .expect("first QQ singer index page");
+        let shifted = provider
+            .artists(&tuneweave_core::ArtistListRequest::new(2, 1))
+            .await
+            .expect("shifted QQ singer index page");
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(shifted.items.len(), 2);
+        assert_eq!(first.items[1].resource_ref, shifted.items[0].resource_ref);
+        assert_eq!(first.pagination.total, shifted.pagination.total);
+        assert_eq!(first.pagination.extensions["fixed_window_size"], 80);
+        assert_eq!(first.pagination.extensions["index_id"], -100);
+
+        let two_windows = provider
+            .artists(&tuneweave_core::ArtistListRequest::new(100, 1))
+            .await
+            .expect("two-window QQ singer page");
+        assert_eq!(two_windows.items.len(), 100);
+        assert_eq!(
+            two_windows.items[0].resource_ref,
+            shifted.items[0].resource_ref
+        );
+        assert_eq!(two_windows.pagination.extensions["request_windows"], 2);
+        assert_eq!(two_windows.pagination.extensions["upstream_returned"], 160);
+
+        let mut initial = tuneweave_core::ArtistListRequest::new(2, 0);
+        initial.initial = Some("A".to_owned());
+        let initial = provider
+            .artists(&initial)
+            .await
+            .expect("A-initial QQ singer page");
+        assert!(!initial.items.is_empty());
+        assert_eq!(initial.pagination.extensions["index_id"], 1);
+        assert!(initial.pagination.total.is_some_and(|total| total > 0));
     }
 
     #[tokio::test]
