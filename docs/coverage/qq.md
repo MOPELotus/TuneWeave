@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=48`、`partial=0`、`implemented=26`、`verified=30`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=47`、`partial=0`、`implemented=27`、`verified=30`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -89,7 +89,7 @@
 | Q068 | 个人音乐库 | `UserApi.get_fav_mv` | 是 | `implemented` | `GET /v1/account/library/videos?platform=qq&account=...` 从精确 `(qq, account)` 凭据取目标加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/videos?account=...` 保留任意目标用户，并因上游 `require_login` 明确要求查看者账户，不以匿名或占位凭据请求。两端固定调用 Android `music.musicasset.MVFavRead/getMyFavMV_v2`，精确提交 `encuin/pagesize/num`，其中 `num` 为零基页；统一任意 `offset/limit` 通过同一物理页宽及至多两个连续真实页适配，不丢失跨页项目。响应强类型要求 `code/subCode/msg/mvlist` 和每项已知字段，VID 优先于正数 MV ID，保留标题/名称、安全封面、播放量、发布时间戳及 RFC 3339、歌手身份、状态、未知字段、完整分页数据和原响应，并标记 `subscribed=true`。参考模型把 `singerId` 列为 MV ID 兼容来源会混淆歌手与视频身份，TuneWeave 修正为绝不使用该回退。上游不返回总数和续页标志，因此 `total=null`，只有真实缓冲项目或满物理页才推断 `has_more`；断页、超页、危险 URL、业务错误、身份/必需字段畸形均拒绝。能力、统一 HTTP、精确账户前置及全部分页/错误分支已离线验收，真实登录成功态待 QQ 账户联合验收 |
 | Q069 | 个人音乐库 | `UserApi.get_music_gene` | 是 | `pending` | 音乐基因/个性资料 |
 | Q070 | 个人音乐库 | `UserApi.get_dislike_list` | 是 | `implemented` | `GET /v1/account/dislikes?platform=qq&account=...` 以 `kind=track|artist|style` 统一歌曲、歌手与风格三类目录，同时兼容参考 `cmd=3|2|4`、`type` 及 `lastid`。三类请求分别精确提交 `SongLastid/SingersLastid/StyleLastid`，页码和末项 ID 游标不会串到其他类别。QQ provider 使用精确 `(qq, account)` 凭据调用签名端点 `musics.fcg` 的 `music.feedback.FeedbackBlack/GetDislikeList`；`zzc` 签名基于实际发送的同一份 JSON 字节计算，并用独立向量验收。响应强类型区分 `Songs/Singers/Styles`，要求容器与 `IdType=1/2/3` 一致，保留名称、安全图片、添加时间、分页 Token、未知字段和完整响应；参考分页器会同时索引三个列表末项而在只有一个类别非空时失败，TuneWeave 修正为只从所选类别推导下一页及游标，空页明确终止。统一 HTTP、签名向量、三类参数、映射、错误及精确账户前置均已离线验收；真实登录账户的签名成功态待联合验收 |
-| Q071 | 个人音乐库 | `UserApi.add_dislike` | 是 | `pending` | 添加不喜欢内容 |
+| Q071 | 个人音乐库 | `UserApi.add_dislike` | 是 | `implemented` | `POST /v1/account/dislikes` 接受统一 `kind/type=track|artist|style` 或参考 `id_type/idType=1|2|3`，并以 `ids` 或参考 `values` 提交单项、数组或逗号列表。QQ provider 在联网前要求非空正整数 ID 和精确 `(qq, account)`，规范化前导零但保留输入顺序及重复项；歌曲、歌手、风格分别只生成 `Songs/Singers/Styles` 一个容器，每项精确携带字符串 `ID` 和对应 `IdType`。固定调用普通 Android `music.feedback.FeedbackBlack/AddDislike`，不会因 Q070 读取需要签名而把写操作错误改道；响应强类型要求 `Retcode/Msg`，非零结果不包装成成功，未知字段和完整响应保留。统一 HTTP、三类请求、批量身份、映射、错误与账户前置均已离线验收；真实账户写入及随后的读取/取消闭环待集中联合验收 |
 | Q072 | 个人音乐库 | `UserApi.cancel_dislike` | 是 | `pending` | 取消单项不喜欢 |
 | Q073 | 个人音乐库 | `UserApi.cancel_all_dislike_song` | 是 | `pending` | 清空歌曲不喜欢列表 |
 | Q074 | 评论（全量） | `CommentApi.get_comment_count` | 否 | `pending` | QQ 全量阶段接入，不从最终范围删除 |

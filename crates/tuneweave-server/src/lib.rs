@@ -21,17 +21,18 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest, AccountProfile,
-    AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats,
-    AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea,
-    ArtistCatalog, ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea,
-    ArtistChartRequest, ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind,
-    ArtistHomepageTabRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
-    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
-    ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
-    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
-    BannerCatalog, BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
+    AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest,
+    AccountDislikeMutationRequest, AccountDislikeMutationResult, AccountProfile, AiLyricDictionary,
+    AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats, AlbumSummary,
+    AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCatalog,
+    ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
+    ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabRequest,
+    ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest,
+    ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
+    ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
+    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
     ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
     CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
@@ -582,7 +583,10 @@ pub fn build_router(state: AppState) -> Router {
             "/account/podcast-episodes/{reference}",
             axum::routing::delete(podcast_episode_delete),
         )
-        .route("/account/dislikes", get(account_dislikes))
+        .route(
+            "/account/dislikes",
+            get(account_dislikes).post(account_dislikes_add),
+        )
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -11096,6 +11100,21 @@ struct AccountDislikeParams {
     last_id: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountDislikeMutationBody {
+    platform: Option<String>,
+    account: Option<String>,
+    kind: Option<Value>,
+    #[serde(rename = "type")]
+    resource_type: Option<Value>,
+    #[serde(alias = "idType")]
+    id_type: Option<Value>,
+    #[serde(alias = "id")]
+    ids: Option<PlaylistReferenceInput>,
+    values: Option<PlaylistReferenceInput>,
+}
+
 fn parse_account_dislike_kind(
     kind: Option<&str>,
     resource_type: Option<&str>,
@@ -11160,6 +11179,77 @@ fn parse_account_dislike_cursor(
     Ok((cursor > 0).then_some(cursor))
 }
 
+fn parse_account_dislike_mutation_kind(
+    kind: Option<&Value>,
+    resource_type: Option<&Value>,
+    id_type: Option<&Value>,
+) -> Result<AccountDislikeKind, TuneWeaveError> {
+    let provided = [kind, resource_type, id_type]
+        .into_iter()
+        .filter(|value| value.is_some())
+        .count();
+    if provided != 1 {
+        return Err(TuneWeaveError::invalid_request(
+            "exactly one of kind, type, or id_type must be provided",
+        )
+        .with_details(json!({ "fields": ["kind", "type", "id_type"] })));
+    }
+    let (field, value) = if let Some(value) = kind {
+        ("kind", value)
+    } else if let Some(value) = resource_type {
+        ("type", value)
+    } else {
+        (
+            "id_type",
+            id_type.expect("one dislike kind field is present"),
+        )
+    };
+    let value = required_string_or_number(field, value)?
+        .trim()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "track" | "song" | "music" | "1" => Ok(AccountDislikeKind::Track),
+        "artist" | "singer" | "2" => Ok(AccountDislikeKind::Artist),
+        "style" | "genre" | "3" => Ok(AccountDislikeKind::Style),
+        _ => Err(
+            TuneWeaveError::invalid_request(format!("unsupported dislike {field}: {value}"))
+                .with_details(json!({
+                    "allowed": ["track", "artist", "style", 1, 2, 3]
+                })),
+        ),
+    }
+}
+
+fn parse_account_dislike_mutation_ids(
+    ids: Option<PlaylistReferenceInput>,
+    values: Option<PlaylistReferenceInput>,
+) -> Result<Vec<String>, TuneWeaveError> {
+    let values = match (ids, values) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "ids and values cannot be provided together",
+            )
+            .with_details(json!({ "conflicts": ["ids", "values"] })));
+        }
+        (None, None) => {
+            return Err(TuneWeaveError::invalid_request(
+                "one of ids or values must be provided",
+            ));
+        }
+        (Some(values), None) | (None, Some(values)) => values.into_values(),
+    };
+    let ids = split_playlist_reference_values("dislike ids", values)?;
+    for id in &ids {
+        if id.len() > 512 || id.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(TuneWeaveError::invalid_request(
+                "dislike IDs must contain at most 512 bytes and no control characters",
+            )
+            .with_details(json!({ "id": id })));
+        }
+    }
+    Ok(ids)
+}
+
 async fn account_dislikes(
     State(state): State<AppState>,
     params: Result<Query<AccountDislikeParams>, QueryRejection>,
@@ -11188,6 +11278,34 @@ async fn account_dislikes(
         .await?;
     Ok(Json(
         ApiResponse::new(list)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn account_dislikes_add(
+    State(state): State<AppState>,
+    payload: Result<Json<AccountDislikeMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = account_platform(&state, body.platform.as_deref())?;
+    let account = account_alias(body.account.as_deref())?;
+    let kind = parse_account_dislike_mutation_kind(
+        body.kind.as_ref(),
+        body.resource_type.as_ref(),
+        body.id_type.as_ref(),
+    )?;
+    let ids = parse_account_dislike_mutation_ids(body.ids, body.values)?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .add_account_dislikes(&AccountDislikeMutationRequest {
+            kind,
+            ids,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
             .with_platform(platform)
             .with_account(account),
     ))
@@ -15268,6 +15386,20 @@ mod tests {
                 next_cursor: Some(398_282_803),
                 token: Some("opaque-token".to_owned()),
                 extensions: Extensions::from([("mock".to_owned(), json!(true))]),
+            })
+        }
+
+        async fn add_account_dislikes(
+            &self,
+            request: &AccountDislikeMutationRequest,
+        ) -> Result<AccountDislikeMutationResult> {
+            Ok(AccountDislikeMutationResult {
+                platform: self.platform(),
+                kind: request.kind,
+                action: tuneweave_core::AccountDislikeMutationAction::Add,
+                ids: request.ids.clone(),
+                applied: true,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -25559,6 +25691,66 @@ mod tests {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_dislike_add_preserves_reference_types_ids_and_account() {
+        let (status, artists) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/dislikes",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "kind": "artist",
+                "ids": [4558, "6452", 4558]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artists["data"]["platform"], "netease");
+        assert_eq!(artists["data"]["kind"], "artist");
+        assert_eq!(artists["data"]["action"], "add");
+        assert_eq!(artists["data"]["ids"], json!(["4558", "6452", "4558"]));
+        assert_eq!(artists["data"]["applied"], true);
+        assert_eq!(artists["meta"]["account"], "personal");
+
+        let (status, styles) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/account/dislikes",
+            Some(json!({
+                "platform": "netease",
+                "idType": 3,
+                "values": "7,8"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(styles["data"]["kind"], "style");
+        assert_eq!(styles["data"]["ids"], json!(["7", "8"]));
+        assert_eq!(styles["meta"]["account"], "default");
+
+        for body in [
+            json!({"platform": "netease", "ids": [1]}),
+            json!({"platform": "netease", "kind": "track"}),
+            json!({"platform": "netease", "kind": "track", "ids": []}),
+            json!({"platform": "netease", "kind": "track", "ids": [1], "values": [2]}),
+            json!({"platform": "netease", "kind": "track", "id_type": 1, "ids": [1]}),
+            json!({"platform": "netease", "kind": "unknown", "ids": [1]}),
+            json!({"platform": "netease", "kind": "track", "ids": ["1,,2"]}),
+            json!({"platform": "netease", "kind": "track", "ids": [1], "unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                test_app_with_provider(),
+                Method::POST,
+                "/v1/account/dislikes",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
         }
     }
 

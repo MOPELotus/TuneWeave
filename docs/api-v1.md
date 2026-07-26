@@ -1083,6 +1083,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | PUT/DELETE | `/v1/account/library/videos/{ref}` | `account?`、`kind/type?=mv|video` | `SubscriptionResult`；收藏或取消收藏视频资源，平台只支持其中一种资源时明确拒绝其余类型 |
 | GET | `/v1/account/library/videos` | `platform?`、`account?`、分页 | 已收藏 `Video[]`；MV 与普通视频按平台真实返回共同映射，来源类型及完整条目保留在扩展 |
 | GET | `/v1/account/dislikes` | `platform?`、`account?`、`kind/type?=track|artist|style`、`page?`、`cursor/last_id?`；QQ 兼容 `cmd=3|2|4` 与 `lastid` | `AccountDislikeList`；歌曲、歌手和风格三类不喜欢目录共用强类型条目，返回下一页、末项游标及平台分页元数据 |
+| POST | `/v1/account/dislikes` | JSON `{platform?, account?, kind|type|id_type, ids|values}`；类别接受 `track|artist|style` 或 `1|2|3`，ID 接受单项、数组或逗号列表 | `AccountDislikeMutationResult`；批量添加不喜欢内容，顺序和重复项原样保留 |
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist`；`uni:` 复用同一实体，混合项目数位于 `extensions.uni_item_count`，不伪装成纯歌曲数 |
 | GET | `/v1/playlists/{ref}/items` | 分页、`account?` | `PlaylistPlayableEntry[]`；统一返回 `track/mv/video/podcast_episode/radio_station`、资源引用、位置与紧凑快照；Uni 项提供稳定 `item_id`，外部只读项目为 `null` |
 | GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]`；混合 Uni 歌单先过滤非歌曲再计算真实分页，B 站合集/收藏夹视频按可播放音频内容归一并保留 `video_ref` |
@@ -1138,6 +1139,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 QQ 用户资料只支持 modern 后端，固定调用 Android `music.UnifiedHomepage.UnifiedHomepageSrv/GetHomepageHeader` 并提交 `uin/IsQueryTabDetail=1`。`GET /v1/users/qq:<encrypted-uin>?account=...` 把路径中的加密 UIN 作为目标用户，显式 `account` 只选择登录查看者；`GET /v1/account/profile?platform=qq&account=...` 则把所选会话的数值 music ID 精确换成同一凭据保存的 `encryptUin`，不会混用两种身份。稳定资料包含规范用户引用、名称、安全头像/背景、关注态和粉丝/关注数；朋友/访客数、用户类型、歌手关联、标签页、提示、未知字段与完整响应保存在扩展。响应身份不一致、非法布尔标志、危险 URL、畸形必需字段和非零状态都会拒绝。参考实现的匿名分支会注入固定假 music ID/musickey；TuneWeave 不制造或发送占位凭据，2026-07-26 真实匿名请求已确认返回业务码 1000，因此两条 QQ 路径均要求真实 `(qq, account)` 登录态，成功态留待账户联合验收。
 
 QQ 不喜欢目录固定调用签名端点 `https://u.y.qq.com/cgi-bin/musics.fcg` 的 `music.feedback.FeedbackBlack/GetDislikeList`。`track/artist/style` 分别映射 `Cmd=3/2/4`、`SongLastid/SingersLastid/StyleLastid` 和条目 `IdType=1/2/3`；`page` 从 1 开始，零游标按参考首屏语义省略。`zzc` 签名基于实际发送的同一份 JSON 字节计算，调用方不能注入目标 URL、签名、Cookie、代理或请求头。响应只接受所选类别容器，条目返回字符串 ID、名称、安全图片和 RFC 3339 添加时间；平台 `Token` 是目录分页元数据，不是账户凭据。QQ 没有返回可靠总数或 `has_more`，因此非空页从所选类别末项推导 `next_page/next_cursor`，空页终止，完整遍历可能需要一次终止空页；不会沿用参考分页器同时索引三个类别列表而在其余列表为空时失败。该端点要求精确 `(qq, account)`，缺失别名在签名联网前返回 401。
+
+添加 QQ 不喜欢内容使用普通 Android `music.feedback.FeedbackBlack/AddDislike`，不复用读取目录的签名端点。统一 `track/artist/style` 和参考 `id_type=1/2/3` 分别只生成 `Songs/Singers/Styles` 一个请求容器；每项携带规范十进制字符串 `ID` 及对应 `IdType`，批量顺序和重复项不会被集合化。空列表、非正整数、超出 `u64` 的 QQ ID、类别冲突和 `ids/values` 冲突均在账户查找或联网前拒绝。成功结果明确返回 `action=add/applied=true` 和规范 ID；`Retcode` 非零进入统一上游错误而不虚报写入成功，完整响应保留在扩展。该写操作通过 `account_dislike_write` 能力发现，并要求精确 `(qq, account)`。
 
 会员摘要同时提供公开用户和当前账户两条统一路径。`backend` 缺省为 `front`，也接受 `public/v1`；网易云固定使用 WeAPI `/api/music-vip-membership/front/vip/info`，公开用户把引用 ID 作为 `userId`，当前账户按参考默认分支提交空字符串。`redVipLevel/redVipAnnualCount/redVipLevelIcon` 分别映射为等级、年费次数和图标；该公开接口没有可靠有效期和激活态，因此相关字段保持可空。
 

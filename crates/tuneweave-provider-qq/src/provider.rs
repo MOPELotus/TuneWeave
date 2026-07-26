@@ -10,7 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountDislikeEntry, AccountDislikeKind, AccountDislikeList,
-    AccountDislikeListRequest, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
+    AccountDislikeListRequest, AccountDislikeMutationAction, AccountDislikeMutationRequest,
+    AccountDislikeMutationResult, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
     AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistArea,
     ArtistBiographySection, ArtistCatalog, ArtistCatalogFilterOption, ArtistCatalogFilters,
     ArtistCatalogRequest, ArtistCategory, ArtistGenre, ArtistHomepageIntroduction,
@@ -78,6 +79,7 @@ const FOLLOWED_SINGER_MODULE: &str = "music.concern.RelationList";
 const FOLLOWED_SINGER_METHOD: &str = "GetFollowSingerList";
 const DISLIKE_MODULE: &str = "music.feedback.FeedbackBlack";
 const DISLIKE_LIST_METHOD: &str = "GetDislikeList";
+const DISLIKE_ADD_METHOD: &str = "AddDislike";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -847,6 +849,16 @@ struct QqDislikeListResponse {
     page: u64,
     #[serde(default, rename = "Token")]
     token: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqDislikeMutationResponse {
+    #[serde(rename = "Retcode", deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    #[serde(default, rename = "Msg")]
+    message: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2711,6 +2723,7 @@ impl MusicProvider for QqProvider {
             Capability::AccountVideos,
             Capability::AccountFollowingArtists,
             Capability::AccountDislikes,
+            Capability::AccountDislikeWrite,
         ])
     }
 
@@ -3814,6 +3827,30 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ dislike list request returned no response"))?;
         map_qq_dislike_list(request, response)
+    }
+
+    async fn add_account_dislikes(
+        &self,
+        request: &AccountDislikeMutationRequest,
+    ) -> Result<AccountDislikeMutationResult> {
+        let (api_request, normalized_ids) = qq_dislike_add_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let response = self
+            .client
+            .request_android_with_credential(&[api_request], Some(&credential))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ add dislike request returned no response"))?;
+        map_qq_dislike_mutation(
+            request.kind,
+            AccountDislikeMutationAction::Add,
+            normalized_ids,
+            response,
+        )
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -10115,6 +10152,38 @@ fn qq_dislike_list_request(request: &AccountDislikeListRequest) -> Result<QqApiR
     ))
 }
 
+fn qq_dislike_add_request(
+    request: &AccountDislikeMutationRequest,
+) -> Result<(QqApiRequest, Vec<String>)> {
+    if request.ids.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ add dislike request must contain at least one ID",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let (_, _, id_type) = qq_dislike_kind_contract(request.kind);
+    let container = match request.kind {
+        AccountDislikeKind::Track => "Songs",
+        AccountDislikeKind::Artist => "Singers",
+        AccountDislikeKind::Style => "Styles",
+    };
+    let normalized_ids = request
+        .ids
+        .iter()
+        .map(|id| parse_qq_playlist_number(id.trim(), "dislike item ID").map(|id| id.to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let items = normalized_ids
+        .iter()
+        .map(|id| json!({"ID": id, "IdType": id_type}))
+        .collect::<Vec<_>>();
+    let mut param = serde_json::Map::new();
+    param.insert(container.to_owned(), Value::Array(items));
+    Ok((
+        QqApiRequest::new(DISLIKE_MODULE, DISLIKE_ADD_METHOD, Value::Object(param)),
+        normalized_ids,
+    ))
+}
+
 fn qq_favorite_mv_request(encrypted_uin: &str, page_size: u32, page_index: u32) -> QqApiRequest {
     QqApiRequest::new(
         FAVORITE_MV_MODULE,
@@ -10736,6 +10805,46 @@ fn map_qq_dislike_item(
             ("id_type".to_owned(), json!(item.id_type)),
             ("timestamp".to_owned(), json!(item.timestamp)),
             ("dislike_item".to_owned(), raw),
+        ]),
+    })
+}
+
+fn map_qq_dislike_mutation(
+    kind: AccountDislikeKind,
+    action: AccountDislikeMutationAction,
+    ids: Vec<String>,
+    response: QqApiResponse,
+) -> Result<AccountDislikeMutationResult> {
+    let data =
+        serde_json::from_value::<QqDislikeMutationResponse>(response.data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ dislike mutation response is malformed: {error}"
+            ))
+        })?;
+    if data.retcode != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ dislike mutation failed with code {}", data.retcode),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": data.retcode,
+            "platform_message": data.message
+        })));
+    }
+    let typed_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ dislike mutation response"))?;
+    Ok(AccountDislikeMutationResult {
+        platform: Platform::Qq,
+        kind,
+        action,
+        ids,
+        applied: true,
+        extensions: Extensions::from([
+            ("platform_code".to_owned(), json!(data.retcode)),
+            ("platform_message".to_owned(), json!(data.message)),
+            ("data".to_owned(), typed_data),
+            ("response".to_owned(), response.raw),
         ]),
     })
 }
@@ -18465,6 +18574,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dislike_add_requests_preserve_kind_order_duplicates_and_numeric_identity() {
+        for (kind, container, id_type) in [
+            (AccountDislikeKind::Track, "Songs", 1),
+            (AccountDislikeKind::Artist, "Singers", 2),
+            (AccountDislikeKind::Style, "Styles", 3),
+        ] {
+            let (request, ids) = qq_dislike_add_request(&AccountDislikeMutationRequest {
+                kind,
+                ids: vec![
+                    "398282803".to_owned(),
+                    "0007".to_owned(),
+                    "398282803".to_owned(),
+                ],
+                account: Some("personal".to_owned()),
+            })
+            .expect("QQ add dislike request");
+            assert_eq!(request.module, DISLIKE_MODULE);
+            assert_eq!(request.method, DISLIKE_ADD_METHOD);
+            assert_eq!(
+                ids,
+                vec![
+                    "398282803".to_owned(),
+                    "7".to_owned(),
+                    "398282803".to_owned()
+                ]
+            );
+            assert_eq!(request.param.as_object().expect("object").len(), 1);
+            assert_eq!(
+                request.param[container],
+                json!([
+                    {"ID": "398282803", "IdType": id_type},
+                    {"ID": "7", "IdType": id_type},
+                    {"ID": "398282803", "IdType": id_type}
+                ])
+            );
+        }
+
+        for ids in [
+            Vec::new(),
+            vec!["".to_owned()],
+            vec!["0".to_owned()],
+            vec!["-1".to_owned()],
+            vec!["not-numeric".to_owned()],
+            vec!["18446744073709551616".to_owned()],
+        ] {
+            let result = qq_dislike_add_request(&AccountDislikeMutationRequest {
+                kind: AccountDislikeKind::Track,
+                ids,
+                account: None,
+            });
+            assert!(result.is_err(), "invalid dislike identity rejected");
+            let error = result.err().expect("invalid request error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn dislike_add_mapping_preserves_typed_success_and_rejects_false_results() {
+        let result = map_qq_dislike_mutation(
+            AccountDislikeKind::Artist,
+            AccountDislikeMutationAction::Add,
+            vec!["4558".to_owned(), "6452".to_owned()],
+            response(json!({
+                "Retcode": 0,
+                "Msg": "ok",
+                "futureMutationField": {"kept": true}
+            })),
+        )
+        .expect("QQ add dislike result");
+        assert_eq!(result.platform, Platform::Qq);
+        assert_eq!(result.kind, AccountDislikeKind::Artist);
+        assert_eq!(result.action, AccountDislikeMutationAction::Add);
+        assert_eq!(result.ids, vec!["4558".to_owned(), "6452".to_owned()]);
+        assert!(result.applied);
+        assert_eq!(result.extensions["platform_code"], 0);
+        assert_eq!(
+            result.extensions["data"]["futureMutationField"]["kept"],
+            true
+        );
+        assert_eq!(result.extensions["response"]["code"], 0);
+
+        for fixture in [
+            json!({}),
+            json!({"Retcode": "invalid"}),
+            json!({"Retcode": 1000, "Msg": "login required"}),
+        ] {
+            let error = map_qq_dislike_mutation(
+                AccountDislikeKind::Track,
+                AccountDislikeMutationAction::Add,
+                vec!["398282803".to_owned()],
+                response(fixture),
+            )
+            .expect_err("malformed or rejected mutation");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
     #[tokio::test]
     async fn dislike_list_requires_the_exact_account_before_signed_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -18472,6 +18679,11 @@ mod tests {
             provider
                 .capabilities()
                 .contains(&Capability::AccountDislikes)
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::AccountDislikeWrite)
         );
         let missing = provider
             .account_dislikes(&AccountDislikeListRequest {
@@ -18492,6 +18704,31 @@ mod tests {
             .await
             .expect_err("invalid page rejected before account lookup");
         assert_eq!(invalid_page.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn dislike_add_validates_ids_and_exact_account_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .add_account_dislikes(&AccountDislikeMutationRequest {
+                kind: AccountDislikeKind::Track,
+                ids: vec!["398282803".to_owned()],
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("missing exact account rejected");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing");
+
+        let invalid = provider
+            .add_account_dislikes(&AccountDislikeMutationRequest {
+                kind: AccountDislikeKind::Track,
+                ids: vec!["not-numeric".to_owned()],
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("invalid ID rejected before account lookup");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
     }
 
     #[test]

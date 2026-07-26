@@ -25,6 +25,7 @@ pub use error::{ErrorCode, Result, TuneWeaveError};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
     AccountDislikeEntry, AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest,
+    AccountDislikeMutationAction, AccountDislikeMutationRequest, AccountDislikeMutationResult,
     AiLyricDictionary, AiLyricDictionaryAvailability, AiLyricDictionaryEntry, Album,
     AlbumListRequest, AlbumStats, AlbumSummary, AnonymousSession, AntiCheatToken,
     AntiCheatTokenVersion, Artist, ArtistArea, ArtistBiographySection, ArtistCatalog,

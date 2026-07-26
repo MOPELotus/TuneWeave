@@ -2126,6 +2126,31 @@ pub struct AccountDislikeList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountDislikeMutationAction {
+    Add,
+    Remove,
+    Clear,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountDislikeMutationRequest {
+    pub kind: AccountDislikeKind,
+    pub ids: Vec<String>,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AccountDislikeMutationResult {
+    pub platform: Platform,
+    pub kind: AccountDislikeKind,
+    pub action: AccountDislikeMutationAction,
+    pub ids: Vec<String>,
+    pub applied: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtistCategory {
@@ -4813,6 +4838,21 @@ mod tests {
         assert_eq!(value["items"][0]["kind"], "style");
         assert_eq!(value["next_page"], 3);
         assert_eq!(value["next_cursor"], 123);
+
+        let mutation = AccountDislikeMutationResult {
+            platform: Platform::Qq,
+            kind: AccountDislikeKind::Artist,
+            action: AccountDislikeMutationAction::Add,
+            ids: vec!["4558".to_owned(), "6452".to_owned()],
+            applied: true,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(mutation).expect("serialize account dislike mutation");
+        assert_eq!(value["platform"], "qq");
+        assert_eq!(value["kind"], "artist");
+        assert_eq!(value["action"], "add");
+        assert_eq!(value["ids"], serde_json::json!(["4558", "6452"]));
+        assert_eq!(value["applied"], true);
     }
 
     #[test]
