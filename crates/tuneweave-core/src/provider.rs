@@ -1101,6 +1101,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn user_following_artists(
+        &self,
+        _user_id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<Artist>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountFollowingArtists,
+        ))
+    }
+
     async fn account_artist_new_videos(
         &self,
         _request: &ArtistUpdatesRequest,

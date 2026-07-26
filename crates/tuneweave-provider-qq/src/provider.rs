@@ -73,6 +73,8 @@ const FAVORITE_ALBUM_MODULE: &str = "music.musicasset.AlbumFavRead";
 const FAVORITE_ALBUM_METHOD: &str = "CgiGetAlbumFavInfo";
 const FAVORITE_MV_MODULE: &str = "music.musicasset.MVFavRead";
 const FAVORITE_MV_METHOD: &str = "getMyFavMV_v2";
+const FOLLOWED_SINGER_MODULE: &str = "music.concern.RelationList";
+const FOLLOWED_SINGER_METHOD: &str = "GetFollowSingerList";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -763,6 +765,49 @@ struct QqFavoriteAlbumsResponse {
     albums: Vec<QqFavoriteAlbumItem>,
     #[serde(rename = "v_failAlbumId")]
     failed_album_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqFollowedSingerItem {
+    #[serde(rename = "MID")]
+    mid: String,
+    #[serde(rename = "EncUin")]
+    encrypted_uin: String,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Desc")]
+    description: String,
+    #[serde(rename = "AvatarUrl")]
+    avatar_url: String,
+    #[serde(rename = "FanNum", deserialize_with = "deserialize_qq_u64")]
+    follower_count: u64,
+    #[serde(rename = "IsFollow", deserialize_with = "deserialize_qq_binary_bool")]
+    followed: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqFollowedSingerResponse {
+    #[serde(rename = "Total", deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(rename = "List")]
+    artists: Vec<QqFollowedSingerItem>,
+    #[serde(rename = "HasMore", deserialize_with = "deserialize_qq_binary_bool")]
+    has_more: bool,
+    #[serde(
+        rename = "LastPos",
+        deserialize_with = "deserialize_qq_zeroable_string"
+    )]
+    last_position: String,
+    #[serde(rename = "Msg")]
+    message: String,
+    #[serde(rename = "LockFlag", deserialize_with = "deserialize_qq_i64")]
+    lock_flag: i64,
+    #[serde(rename = "LockMsg")]
+    lock_message: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2625,6 +2670,7 @@ impl MusicProvider for QqProvider {
             Capability::AccountPlaylists,
             Capability::AccountAlbums,
             Capability::AccountVideos,
+            Capability::AccountFollowingArtists,
         ])
     }
 
@@ -3665,6 +3711,44 @@ impl MusicProvider for QqProvider {
             .await
     }
 
+    async fn account_following_artists(
+        &self,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Artist>> {
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_encrypted_uin(&credential)?;
+        self.qq_following_artists_page(encrypted_uin, request, &credential, "current_account")
+            .await
+    }
+
+    async fn user_following_artists(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Artist>> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let account = request
+            .account
+            .as_deref()
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "QQ followed artist listing requires an explicit viewer account",
+                )
+                .with_platform(Platform::Qq)
+            })?;
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        self.qq_following_artists_page(encrypted_uin, request, &credential, "user")
+            .await
+    }
+
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
         let locator = parse_qq_playlist_locator(id)?;
         let credential = self.qq_credential(account)?;
@@ -4334,6 +4418,42 @@ impl QqProvider {
             skip,
             library_scope,
             responses,
+        )
+    }
+
+    async fn qq_following_artists_page(
+        &self,
+        encrypted_uin: &str,
+        request: &tuneweave_core::PageRequest,
+        credential: &QqCredential,
+        library_scope: &'static str,
+    ) -> Result<Page<Artist>> {
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ followed artist page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_followed_artists_request(
+                    encrypted_uin,
+                    request.offset,
+                    request.limit,
+                )?],
+                Some(credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ followed artist request returned no response"))?;
+        map_qq_followed_artists(
+            encrypted_uin,
+            request.offset,
+            request.limit,
+            library_scope,
+            response,
         )
     }
 
@@ -9872,6 +9992,29 @@ fn qq_favorite_albums_request(encrypted_uin: &str, offset: u32, size: u32) -> Qq
     )
 }
 
+fn qq_followed_artists_request(
+    encrypted_uin: &str,
+    offset: u32,
+    size: u32,
+) -> Result<QqApiRequest> {
+    let encrypted_uin = validate_qq_encrypted_uin(encrypted_uin, "user encrypted UIN")?;
+    if !(1..=100).contains(&size) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ followed artist page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        FOLLOWED_SINGER_MODULE,
+        FOLLOWED_SINGER_METHOD,
+        json!({
+            "HostUin": encrypted_uin,
+            "From": offset,
+            "Size": size
+        }),
+    ))
+}
+
 fn qq_favorite_mv_request(encrypted_uin: &str, page_size: u32, page_index: u32) -> QqApiRequest {
     QqApiRequest::new(
         FAVORITE_MV_MODULE,
@@ -10266,6 +10409,121 @@ fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
         company: None,
         kind: None,
         extensions,
+    })
+}
+
+fn map_qq_followed_artists(
+    encrypted_uin: &str,
+    offset: u32,
+    limit: u32,
+    library_scope: &'static str,
+    response: QqApiResponse,
+) -> Result<Page<Artist>> {
+    let data =
+        serde_json::from_value::<QqFollowedSingerResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ followed artist response is malformed: {error}"))
+        })?;
+    if data.lock_flag < 0 {
+        return Err(qq_data_error(
+            "QQ followed artist response returned a negative lock flag",
+        ));
+    }
+    let returned = u32::try_from(data.artists.len())
+        .map_err(|_| qq_data_error("QQ followed artist page is too large"))?;
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ followed artist pagination exceeded the supported offset range")
+    })?;
+    if returned > limit
+        || (returned > 0 && u64::from(next_offset) > data.total)
+        || (data.has_more && returned == 0)
+    {
+        return Err(qq_data_error(
+            "QQ followed artist response has inconsistent pagination",
+        ));
+    }
+    let locked = data.lock_flag != 0;
+    if locked && (!data.artists.is_empty() || data.has_more) {
+        return Err(qq_data_error(
+            "QQ followed artist locked response contains visible continuation data",
+        ));
+    }
+    let computed_has_more = !locked && returned > 0 && u64::from(next_offset) < data.total;
+    if data.has_more != computed_has_more {
+        return Err(qq_data_error(
+            "QQ followed artist response has an inconsistent continuation flag",
+        ));
+    }
+    let typed_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ followed artist response"))?;
+    let items = data
+        .artists
+        .into_iter()
+        .map(map_qq_followed_artist)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: computed_has_more.then_some(next_offset),
+            has_more: computed_has_more,
+            extensions: Extensions::from([
+                ("library_scope".to_owned(), json!(library_scope)),
+                ("user_encrypted_uin".to_owned(), json!(encrypted_uin)),
+                ("last_position".to_owned(), json!(data.last_position)),
+                ("message".to_owned(), json!(data.message)),
+                ("lock_flag".to_owned(), json!(data.lock_flag)),
+                ("lock_message".to_owned(), json!(data.lock_message)),
+                ("returned_count".to_owned(), json!(returned)),
+                ("data".to_owned(), typed_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_followed_artist(item: QqFollowedSingerItem) -> Result<Artist> {
+    let mid = item.mid.trim();
+    validate_qq_media_id(mid, "followed singer MID")
+        .map_err(|_| qq_data_error("QQ followed artist returned an invalid singer MID"))?;
+    let encrypted_uin =
+        validate_qq_encrypted_uin(item.encrypted_uin.trim(), "followed singer encrypted UIN")
+            .map_err(|_| {
+                qq_data_error("QQ followed artist returned an invalid singer encrypted UIN")
+            })?;
+    let name = item.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ followed artist is missing its display name",
+        ));
+    }
+    let avatar_url = first_qq_display_url(&[(item.avatar_url.as_str(), "followed artist avatar")])?
+        .or_else(|| Some(qq_cover_url("T001", mid)));
+    let raw = serde_json::to_value(&item)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ followed artist item"))?;
+    Ok(Artist {
+        resource_ref: qq_ref(mid, "followed artist")?,
+        platform: Platform::Qq,
+        id: mid.to_owned(),
+        name: name.to_owned(),
+        aliases: Vec::new(),
+        description: item.description.trim().to_owned(),
+        biography_sections: Vec::new(),
+        avatar_url: avatar_url.clone(),
+        cover_url: avatar_url,
+        album_count: None,
+        track_count: None,
+        mv_count: None,
+        video_count: None,
+        identities: Vec::new(),
+        extensions: Extensions::from([
+            ("target_follows".to_owned(), json!(true)),
+            ("viewer_follows".to_owned(), json!(item.followed)),
+            ("follower_count".to_owned(), json!(item.follower_count)),
+            ("encrypted_uin".to_owned(), json!(encrypted_uin)),
+            ("relation_item".to_owned(), raw),
+        ]),
     })
 }
 
@@ -11497,6 +11755,27 @@ where
             _ => Err(D::Error::custom("expected a QQ boolean flag")),
         },
         _ => Err(D::Error::custom("expected a QQ boolean flag")),
+    }
+}
+
+fn deserialize_qq_binary_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Bool(value) => Ok(value),
+        Value::Number(value) => match value.as_i64() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(D::Error::custom("expected a binary QQ boolean flag")),
+        },
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => Err(D::Error::custom("expected a binary QQ boolean flag")),
+        },
+        _ => Err(D::Error::custom("expected a binary QQ boolean flag")),
     }
 }
 
@@ -12746,6 +13025,19 @@ mod tests {
                 "futureSingerField": true
             }],
             "futureAlbumField": {"kept": true}
+        })
+    }
+
+    fn sample_followed_artist(mid: &str, name: &str) -> Value {
+        json!({
+            "MID": mid,
+            "EncUin": "artist-encrypted-uin",
+            "Name": name,
+            "Desc": "歌手简介",
+            "AvatarUrl": "//y.qq.com/artist/avatar.jpg",
+            "FanNum": "50540499",
+            "IsFollow": 1,
+            "futureRelationField": {"kept": true}
         })
     }
 
@@ -17523,6 +17815,237 @@ mod tests {
                 .expect_err("invalid QQ favorite album response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn followed_artist_request_preserves_target_and_direct_offset_contract() {
+        let request = qq_followed_artists_request(" encrypted-uin ", 20, 10)
+            .expect("followed artist request");
+        assert_eq!(request.module, FOLLOWED_SINGER_MODULE);
+        assert_eq!(request.method, FOLLOWED_SINGER_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"HostUin": "encrypted-uin", "From": 20, "Size": 10})
+        );
+        assert!(request.param.get("Page").is_none());
+        assert!(request.param.get("LastPos").is_none());
+        assert!(qq_followed_artists_request("", 0, 10).is_err());
+        assert!(qq_followed_artists_request("bad\nuser", 0, 10).is_err());
+        assert!(qq_followed_artists_request("encrypted-uin", 0, 0).is_err());
+        assert!(qq_followed_artists_request("encrypted-uin", 0, 101).is_err());
+    }
+
+    #[test]
+    fn followed_artist_mapping_preserves_relationship_identity_and_page_metadata() {
+        let page = map_qq_followed_artists(
+            "encrypted-uin",
+            0,
+            2,
+            "user",
+            response(json!({
+                "Total": "3",
+                "List": [
+                    sample_followed_artist("0025NhlN2yWrP4", "周杰伦"),
+                    sample_followed_artist("003Nz2So3XXYek", "林俊杰")
+                ],
+                "HasMore": 1,
+                "LastPos": "opaque-position",
+                "Msg": "ok",
+                "LockFlag": 0,
+                "LockMsg": "",
+                "futurePageField": {"kept": true}
+            })),
+        )
+        .expect("map QQ followed artists");
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(page.items[0].name, "周杰伦");
+        assert_eq!(page.items[0].description, "歌手简介");
+        assert_eq!(page.items[0].extensions["target_follows"], true);
+        assert_eq!(page.items[0].extensions["viewer_follows"], true);
+        assert_eq!(page.items[0].extensions["follower_count"], 50_540_499);
+        assert_eq!(
+            page.items[0].extensions["encrypted_uin"],
+            "artist-encrypted-uin"
+        );
+        assert_eq!(
+            page.items[0].extensions["relation_item"]["futureRelationField"]["kept"],
+            true
+        );
+        assert_eq!(
+            page.items[0].avatar_url.as_deref(),
+            Some("https://y.qq.com/artist/avatar.jpg")
+        );
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["library_scope"], "user");
+        assert_eq!(
+            page.pagination.extensions["user_encrypted_uin"],
+            "encrypted-uin"
+        );
+        assert_eq!(
+            page.pagination.extensions["last_position"],
+            "opaque-position"
+        );
+        assert_eq!(page.pagination.extensions["message"], "ok");
+        assert_eq!(
+            page.pagination.extensions["data"]["futurePageField"]["kept"],
+            true
+        );
+        assert_eq!(page.pagination.extensions["response"]["code"], 0);
+
+        let locked = map_qq_followed_artists(
+            "private-user",
+            0,
+            10,
+            "user",
+            response(json!({
+                "Total": 4,
+                "List": [],
+                "HasMore": false,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 1,
+                "LockMsg": "列表不可见"
+            })),
+        )
+        .expect("locked directory remains an explicit empty page");
+        assert!(locked.items.is_empty());
+        assert!(!locked.pagination.has_more);
+        assert_eq!(locked.pagination.total, Some(4));
+        assert_eq!(locked.pagination.extensions["lock_flag"], 1);
+
+        let beyond_end = map_qq_followed_artists(
+            "encrypted-uin",
+            10,
+            10,
+            "user",
+            response(json!({
+                "Total": 3,
+                "List": [],
+                "HasMore": false,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 0,
+                "LockMsg": ""
+            })),
+        )
+        .expect("offset beyond the end is an empty page");
+        assert!(beyond_end.items.is_empty());
+        assert!(!beyond_end.pagination.has_more);
+    }
+
+    #[test]
+    fn followed_artist_mapping_rejects_malformed_items_flags_and_pagination() {
+        let valid = || {
+            json!({
+                "Total": 1,
+                "List": [sample_followed_artist("0025NhlN2yWrP4", "周杰伦")],
+                "HasMore": false,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 0,
+                "LockMsg": ""
+            })
+        };
+        let mut fixtures = vec![
+            json!({}),
+            json!({
+                "Total": 2,
+                "List": [sample_followed_artist("0025NhlN2yWrP4", "周杰伦")],
+                "HasMore": false,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 0,
+                "LockMsg": ""
+            }),
+            json!({
+                "Total": 1,
+                "List": [],
+                "HasMore": true,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 0,
+                "LockMsg": ""
+            }),
+            json!({
+                "Total": 1,
+                "List": [sample_followed_artist("0025NhlN2yWrP4", "周杰伦")],
+                "HasMore": false,
+                "LastPos": "",
+                "Msg": "",
+                "LockFlag": 1,
+                "LockMsg": "locked"
+            }),
+        ];
+        for (field, value) in [
+            ("MID", json!("unsafe/mid")),
+            ("EncUin", json!("bad\nuser")),
+            ("Name", json!("")),
+            ("AvatarUrl", json!("javascript:alert(1)")),
+            ("FanNum", json!(-1)),
+            ("IsFollow", json!(2)),
+        ] {
+            let mut fixture = valid();
+            fixture["List"][0][field] = value;
+            fixtures.push(fixture);
+        }
+        for (field, value) in [
+            ("HasMore", json!(2)),
+            ("LockFlag", json!(-1)),
+            ("List", json!({})),
+        ] {
+            let mut fixture = valid();
+            fixture[field] = value;
+            fixtures.push(fixture);
+        }
+
+        for fixture in fixtures {
+            let error = map_qq_followed_artists("encrypted-uin", 0, 1, "user", response(fixture))
+                .expect_err("invalid QQ followed artist response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn followed_artist_catalog_requires_exact_accounts_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::AccountFollowingArtists)
+        );
+        let request = tuneweave_core::PageRequest::new(10, 0);
+        let current = provider
+            .account_following_artists(&request)
+            .await
+            .expect_err("current account catalog requires a stored default account");
+        assert_eq!(current.code, ErrorCode::AuthenticationRequired);
+
+        let arbitrary = provider
+            .user_following_artists("encrypted-user", &request)
+            .await
+            .expect_err("arbitrary user catalog requires an explicit viewer account");
+        assert_eq!(arbitrary.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .user_following_artists("bad\nuser", &request)
+            .await
+            .expect_err("invalid target is rejected before account lookup");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+
+        let missing_request = tuneweave_core::PageRequest {
+            account: Some("missing".to_owned()),
+            ..request
+        };
+        let missing = provider
+            .user_following_artists("encrypted-user", &missing_request)
+            .await
+            .expect_err("missing viewer alias is rejected before network");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing");
     }
 
     #[test]

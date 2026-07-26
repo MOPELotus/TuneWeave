@@ -479,6 +479,10 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/favorites/videos",
             get(user_favorite_videos),
         )
+        .route(
+            "/users/{reference}/following/artists",
+            get(user_following_artists),
+        )
         .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
@@ -8128,6 +8132,48 @@ async fn user_favorite_videos(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserFollowingArtistParams {
+    limit: Option<String>,
+    offset: Option<String>,
+    account: Option<String>,
+}
+
+async fn user_following_artists(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UserFollowingArtistParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let page = provider
+        .user_following_artists(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 async fn user_playlist_directory(
     state: AppState,
     reference: String,
@@ -11033,10 +11079,20 @@ fn parse_optional_podcast_filter(
     Ok(Some(reference.id().to_owned()))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountFollowingArtistParams {
+    platform: Option<String>,
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
 async fn account_following_artists(
     State(state): State<AppState>,
-    Query(params): Query<AccountQuery>,
+    params: Result<Query<AccountFollowingArtistParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
+    let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
@@ -14908,6 +14964,28 @@ mod tests {
                     total: None,
                     next_offset: Some(request.offset.saturating_add(1)),
                     has_more: true,
+                    extensions: Extensions::from([("user_id".to_owned(), json!(user_id))]),
+                },
+            })
+        }
+
+        async fn user_following_artists(
+            &self,
+            user_id: &str,
+            request: &PageRequest,
+        ) -> Result<Page<Artist>> {
+            let mut artist = sample_artist(user_id);
+            artist
+                .extensions
+                .insert("library_scope".to_owned(), json!("user_following"));
+            Ok(Page {
+                items: vec![artist],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
                     extensions: Extensions::from([("user_id".to_owned(), json!(user_id))]),
                 },
             })
@@ -25284,6 +25362,14 @@ mod tests {
         assert_eq!(json["meta"]["pagination"]["total"], 8);
         assert_eq!(json["meta"]["pagination"]["next_offset"], 5);
         assert_eq!(json["meta"]["pagination"]["has_more"], true);
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/following/artists?platform=netease&unknown=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
@@ -25518,6 +25604,42 @@ mod tests {
             "/v1/users/netease:encrypted-user/favorites/videos?offset=next",
             "/v1/users/netease:encrypted-user/favorites/videos?unknown=true",
             "/v1/users/unknown:encrypted-user/favorites/videos",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn user_following_artists_keep_target_identity_and_viewer_account() {
+        let app = test_app_with_provider();
+        let (status, viewed) = json_response_from(
+            app,
+            "/v1/users/netease:encrypted-user/following/artists?account=viewer&limit=10&offset=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(viewed["data"][0]["ref"], "netease:encrypted-user");
+        assert_eq!(
+            viewed["data"][0]["extensions"]["library_scope"],
+            "user_following"
+        );
+        assert_eq!(viewed["meta"]["platform"], "netease");
+        assert_eq!(viewed["meta"]["account"], "viewer");
+        assert_eq!(viewed["meta"]["pagination"]["limit"], 10);
+        assert_eq!(viewed["meta"]["pagination"]["offset"], 1);
+        assert_eq!(
+            viewed["meta"]["pagination"]["extensions"]["user_id"],
+            "encrypted-user"
+        );
+
+        for path in [
+            "/v1/users/netease:encrypted-user/following/artists?limit=0",
+            "/v1/users/netease:encrypted-user/following/artists?limit=101",
+            "/v1/users/netease:encrypted-user/following/artists?offset=next",
+            "/v1/users/netease:encrypted-user/following/artists?unknown=true",
+            "/v1/users/unknown:encrypted-user/following/artists",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

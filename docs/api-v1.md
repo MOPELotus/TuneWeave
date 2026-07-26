@@ -1099,6 +1099,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/favorites/albums` | 分页、`account?` | 指定用户收藏的 `Album[]`；目标用户与可选查看者账户分离 |
 | GET | `/v1/users/{ref}/favorites/videos` | 分页、`account?` | 指定用户收藏的 `Video[]`；目标用户与查看者账户分离，平台要求登录时 `account` 必填 |
+| GET | `/v1/users/{ref}/following/artists` | 分页、`account?` | 指定用户关注的 `Artist[]`；目标用户与查看者账户分离，平台要求登录时 `account` 必填 |
 | GET | `/v1/users/{ref}/membership` | `account?`、`backend=front|client` | 指定用户的 `MembershipSummary`；引用决定平台，客户端后端要求登录 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由和首页包装保存在扩展 |
@@ -1379,6 +1380,8 @@ QQ 的公开用户歌单目录保持两种身份边界：`GET /v1/users/qq:<nume
 QQ 收藏专辑统一为当前账户与指定用户两个视图：`GET /v1/account/library/albums?platform=qq&account=...` 从精确 `(qq, account)` 凭据读取加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/albums` 直接使用目标用户标识，并允许独立的可选查看者 `account`。两端都固定调用 Android `music.musicasset.AlbumFavRead/CgiGetAlbumFavInfo`，把 `offset/limit` 原样提交为 `offset/size`，不会先换算整页。专辑优先以 MID 建立稳定引用并保留数字 ID、名称/标题/译名、封面 MID、曲数、发行/收藏时间戳、状态、位置、完整歌手和未知字段；平台 `hasmore/total` 同时驱动真实续页，矛盾标志、零进度、超页、畸形身份或必需字段会明确失败。目标加密 UIN 不会被参考项目的占位凭据替换。2026-07-26 provider 已真实验证匿名公开用户的合法空目录响应；当前账户非空成功态待登录账户联合验收。
 
 QQ 收藏 MV 同样保留当前账户和指定用户两种视图：`GET /v1/account/library/videos?platform=qq&account=...` 使用所选账户自身的加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/videos?account=...` 使用路径中的目标用户，但因上游明确要求登录，查看者 `account` 必须显式给出。两端固定调用 Android `music.musicasset.MVFavRead/getMyFavMV_v2`，精确提交 `encuin/pagesize/num`，其中 `num` 是零基页。统一任意 `offset/limit` 会用相同物理页宽读取至多两个连续页并裁出逻辑窗口，不要求调用方按页对齐。响应没有可靠 `total/hasmore`，因此 `total=null`，只在已读缓冲区仍有项目或末个真实页恰好满页时推断 `has_more`；完整页数据、计数和原响应保留在分页扩展。每项优先以 VID 建立稳定引用，正数 MV ID 仅作回退；标题、名称、安全封面、播放量、发布时间、歌手、状态和未知字段全部保留并标记已收藏。参考模型允许用 `singerId` 填补 MV ID，可能把歌手身份误当视频身份，TuneWeave 明确拒绝该歧义。当前请求、映射、跨页、账户及错误分支已离线验收；真实登录成功态待 QQ 账户联合验收。
+
+QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/account/following/artists?platform=qq&account=...` 从所选凭据取得目标加密 UIN，`GET /v1/users/qq:<encrypted-uin>/following/artists?account=...` 使用路径目标并强制显式登录查看者。两端固定调用 Android `music.concern.RelationList/GetFollowSingerList`，把统一 `offset/limit` 原样提交为 `HostUin/From/Size`，不会先换算参考接口的 `page`，上游 `LastPos` 只作为兼容元数据保留而不替代真实 offset。条目以歌手 MID 建立稳定 `Artist` 引用，同时保留关联歌手账户的加密 UIN、列表目标关注态、当前查看者关注态、粉丝数、描述、安全头像和完整原项；总数、更多标志、消息、隐私锁定和完整响应位于分页扩展。普通页会严格核对返回数、总数与续页，锁定目录允许显式空页，超出总数的 offset 也按空终页表达。请求、映射、账户隔离和 HTTP 边界已离线验收；真实登录成功态待 QQ 账户联合验收。
 
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用，保存后的平台凭据只通过账户别名引用；密码、验证码、Cookie 与上游事务标识不会写入普通响应。
 
