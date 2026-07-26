@@ -15353,6 +15353,7 @@ mod tests {
                 Capability::Lyrics,
                 Capability::UserMembership,
                 Capability::AlbumDetail,
+                Capability::ArtistDetail,
             ])
         }
 
@@ -15537,6 +15538,31 @@ mod tests {
                             "userinfo": {"expire": 1893456000, "music_level": 12}
                         }),
                     ),
+                ]),
+            })
+        }
+
+        async fn artist(&self, id: &str, account: Option<&str>) -> Result<Artist> {
+            Ok(Artist {
+                resource_ref: ResourceRef::new(Platform::Qq, id)
+                    .expect("valid QQ singer reference"),
+                platform: Platform::Qq,
+                id: id.to_owned(),
+                name: "周杰伦".to_owned(),
+                aliases: vec!["Jay Chou".to_owned()],
+                description: String::new(),
+                biography_sections: Vec::new(),
+                avatar_url: Some("https://example.test/qq-singer-avatar.jpg".to_owned()),
+                cover_url: Some("https://example.test/qq-singer-cover.jpg".to_owned()),
+                album_count: None,
+                track_count: None,
+                mv_count: None,
+                video_count: None,
+                identities: Vec::new(),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    ("numeric_id".to_owned(), json!(4558)),
+                    ("follower_count".to_owned(), json!(50_540_499)),
                 ]),
             })
         }
@@ -19226,6 +19252,24 @@ mod tests {
             tracks["meta"]["pagination"]["extensions"]["account"],
             "green-vip"
         );
+    }
+
+    #[tokio::test]
+    async fn qq_artist_detail_forwards_mid_and_named_account() {
+        let (status, artist) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/artists/qq:0025NhlN2yWrP4?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artist["data"]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(artist["data"]["id"], "0025NhlN2yWrP4");
+        assert_eq!(artist["data"]["name"], "周杰伦");
+        assert_eq!(artist["data"]["aliases"][0], "Jay Chou");
+        assert_eq!(artist["data"]["extensions"]["numeric_id"], 4558);
+        assert_eq!(artist["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(artist["meta"]["platform"], "qq");
+        assert_eq!(artist["meta"]["account"], "green-vip");
     }
 
     #[tokio::test]

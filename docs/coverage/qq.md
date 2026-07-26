@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=67`、`partial=0`、`implemented=21`、`verified=16`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=66`、`partial=0`、`implemented=21`、`verified=17`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -48,7 +48,7 @@
 | Q027 | 内容展示 | `AlbumApi.get_new_album` | 是 | `pending` | 新专辑目录 |
 | Q028 | 内容展示 | `SingerApi.get_singer_list` | 是 | `pending` | 歌手分类目录 |
 | Q029 | 内容展示 | `SingerApi.get_singer_list_index` | 是 | `pending` | 歌手索引分页 |
-| Q030 | 内容展示 | `SingerApi.get_info` | 是 | `pending` | 歌手基本资料 |
+| Q030 | 内容展示 | `SingerApi.get_info` | 是 | `verified` | `GET /v1/artists/{qq-ref}` 精确调用 Android `music.UnifiedHomepage.UnifiedHomepageSrv/GetHomepageHeader`，仅接受安全歌手 MID 并提交大小写精确的 `SingerMid`；命名账户只验证精确 `(qq, account)` 别名。响应强类型解析 `Status/Info.Singer/Info.BaseInfo/TabDetail/Prompt`，统一 `Artist` 使用服务端歌手 MID 和名称，保留外文名、数字 ID、歌手类型、关注态、粉丝/关注/好友/访客计数，以及主页全部未知字段；头像、头图与背景只接受无凭据的 HTTP(S) URL，协议相对头像规范化为 HTTPS。当前结构化 `SingerHeaderPic` 的裁剪坐标、高分辨率图、3D 图和图片 MID 全部建模，同时兼容参考模型中的旧字符串形态；带 `_11` 等版本后缀的 `SingerPMid` 使用独立安全字符集，不错误放宽资源 MID。`null` 的 `TabList` 与默认内容列表按上游语义归一为空列表，不伪造曲目/专辑/MV 总数；非零状态、身份冲突、非法关注标志、畸形已知字段或危险图片 URL 均拒绝为假成功。2026-07-26 Rust provider 与 release 统一 HTTP 真实验证周杰伦 MID `0025NhlN2yWrP4` 返回数字 ID `4558`、有效粉丝计数、QQ 头像/背景域名及结构化头图，上游 code 0 |
 | Q031 | 内容展示 | `SingerApi.get_tab_detail` | 是 | `pending` | 歌手主页标签内容 |
 | Q032 | 内容展示 | `SingerApi.get_desc` | 是 | `pending` | 歌手简介 |
 | Q033 | 内容展示 | `SingerApi.get_similar` | 是 | `pending` | 相似歌手 |

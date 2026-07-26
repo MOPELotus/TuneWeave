@@ -59,6 +59,8 @@ const ALBUM_DETAIL_MODULE: &str = "music.musichallAlbum.AlbumInfoServer";
 const ALBUM_DETAIL_METHOD: &str = "GetAlbumDetail";
 const ALBUM_SONG_MODULE: &str = "music.musichallAlbum.AlbumSongList";
 const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
+const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
+const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
@@ -1201,6 +1203,255 @@ enum QqAlbumIdentifier {
     Mid(String),
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageImageCrop {
+    #[serde(default, rename = "Height", deserialize_with = "deserialize_qq_i64")]
+    height: i64,
+    #[serde(
+        default,
+        rename = "OriginalImageHeight",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    original_height: i64,
+    #[serde(
+        default,
+        rename = "OriginalImageWidth",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    original_width: i64,
+    #[serde(default, rename = "Width", deserialize_with = "deserialize_qq_i64")]
+    width: i64,
+    #[serde(default, rename = "X", deserialize_with = "deserialize_qq_i64")]
+    x: i64,
+    #[serde(default, rename = "Y", deserialize_with = "deserialize_qq_i64")]
+    y: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageHeaderImage {
+    #[serde(
+        default,
+        rename = "BlockCarousel",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    block_carousel: i64,
+    #[serde(default, rename = "CutCoordinate")]
+    crop: QqHomepageImageCrop,
+    #[serde(default, rename = "HighResolutionImage")]
+    high_resolution_url: String,
+    #[serde(default, rename = "Image3D")]
+    image_3d_url: String,
+    #[serde(default, rename = "ImageMid")]
+    image_mid: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum QqHomepageHeaderPicture {
+    Url(String),
+    Detail(QqHomepageHeaderImage),
+}
+
+impl Default for QqHomepageHeaderPicture {
+    fn default() -> Self {
+        Self::Url(String::new())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageSinger {
+    #[serde(
+        default,
+        rename = "SingerID",
+        alias = "singerID",
+        alias = "singer_id",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    id: i64,
+    #[serde(
+        default,
+        rename = "SingerMid",
+        alias = "singerMid",
+        alias = "singer_mid"
+    )]
+    mid: String,
+    #[serde(default, rename = "Name", alias = "name", alias = "singerName")]
+    name: String,
+    #[serde(
+        default,
+        rename = "SingerType",
+        alias = "type",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    singer_type: i64,
+    #[serde(default, rename = "SingerPic")]
+    singer_pic: String,
+    #[serde(default, rename = "SingerPMid")]
+    singer_pmid: String,
+    #[serde(default, rename = "SingerHeaderPic")]
+    header_picture: QqHomepageHeaderPicture,
+    #[serde(default, rename = "ForeignName")]
+    foreign_name: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageBaseInfo {
+    #[serde(default, rename = "EncryptedUin")]
+    encrypted_uin: String,
+    #[serde(default, rename = "BackgroundImage")]
+    background_image: String,
+    #[serde(default, rename = "Avatar")]
+    avatar: String,
+    #[serde(default, rename = "Name")]
+    name: String,
+    #[serde(default, rename = "IsHost", deserialize_with = "deserialize_qq_i64")]
+    is_host: i64,
+    #[serde(default, rename = "IsSinger", deserialize_with = "deserialize_qq_i64")]
+    is_singer: i64,
+    #[serde(default, rename = "UserType", deserialize_with = "deserialize_qq_i64")]
+    user_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageCounter {
+    #[serde(default, rename = "Num", deserialize_with = "deserialize_qq_u64")]
+    count: u64,
+    #[serde(default, rename = "Add")]
+    change: String,
+    #[serde(default, rename = "HasEntry", deserialize_with = "deserialize_qq_i64")]
+    has_entry: i64,
+    #[serde(default, rename = "jumpURL")]
+    jump_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqHomepageInfo {
+    #[serde(rename = "Singer")]
+    singer: QqHomepageSinger,
+    #[serde(rename = "BaseInfo")]
+    base_info: QqHomepageBaseInfo,
+    #[serde(default, rename = "FansNum")]
+    fans: QqHomepageCounter,
+    #[serde(default, rename = "FollowNum")]
+    following: QqHomepageCounter,
+    #[serde(default, rename = "FriendsNum")]
+    friends: QqHomepageCounter,
+    #[serde(default, rename = "VisitorNum")]
+    visitors: QqHomepageCounter,
+    #[serde(
+        default,
+        rename = "IsFollowed",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    followed: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageTabMeta {
+    #[serde(default, rename = "TabID")]
+    id: String,
+    #[serde(default, rename = "TabName")]
+    name: String,
+    #[serde(default, rename = "Title")]
+    title: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageList {
+    #[serde(
+        default,
+        rename = "List",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    items: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageAlbumList {
+    #[serde(
+        default,
+        rename = "AlbumList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    items: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageVideoList {
+    #[serde(
+        default,
+        rename = "VideoList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    items: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqHomepageTabDetail {
+    #[serde(default, rename = "TabID")]
+    id: String,
+    #[serde(default, rename = "HasMore", deserialize_with = "deserialize_qq_i64")]
+    has_more: i64,
+    #[serde(
+        default,
+        rename = "NeedShowTab",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    need_show: i64,
+    #[serde(default, rename = "Order", deserialize_with = "deserialize_qq_i64")]
+    order: i64,
+    #[serde(
+        default,
+        rename = "TabList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    tabs: Vec<QqHomepageTabMeta>,
+    #[serde(default, rename = "IntroductionTab")]
+    introduction: QqHomepageList,
+    #[serde(default, rename = "SongTab")]
+    songs: QqHomepageList,
+    #[serde(default, rename = "AlbumTab")]
+    albums: QqHomepageAlbumList,
+    #[serde(default, rename = "VideoTab")]
+    videos: QqHomepageVideoList,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerHomepageResponse {
+    #[serde(rename = "Status", deserialize_with = "deserialize_qq_i64")]
+    status: i64,
+    #[serde(rename = "Info")]
+    info: QqHomepageInfo,
+    #[serde(rename = "TabDetail")]
+    tab_detail: QqHomepageTabDetail,
+    #[serde(default, rename = "Prompt")]
+    prompt: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
@@ -1320,6 +1571,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchTrending,
             Capability::UserMembership,
             Capability::AlbumDetail,
+            Capability::ArtistDetail,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -1527,6 +1779,19 @@ impl MusicProvider for QqProvider {
                 })
             })
             .collect()
+    }
+
+    async fn artist(&self, id: &str, account: Option<&str>) -> Result<Artist> {
+        self.validate_public_account(account)?;
+        let request = qq_singer_homepage_request(id)?;
+        let response = self
+            .client
+            .request_android(&[request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer homepage request returned no response"))?;
+        map_qq_singer_homepage(id.trim(), response)
     }
 
     async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
@@ -3497,6 +3762,16 @@ fn qq_album_songs_request(
     ))
 }
 
+fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    Ok(QqApiRequest::new(
+        SINGER_HOMEPAGE_MODULE,
+        SINGER_HOMEPAGE_METHOD,
+        json!({ "SingerMid": mid }),
+    ))
+}
+
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -3609,6 +3884,21 @@ fn validate_qq_media_id(value: &str, name: &str) -> Result<()> {
         return Err(TuneWeaveError::invalid_request(format!(
             "QQ {name} must contain 1 to 128 ASCII letters or digits"
         ))
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
+fn validate_qq_image_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 160
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ image MID must contain 1 to 160 ASCII letters, digits, underscores, or hyphens",
+        )
         .with_platform(Platform::Qq));
     }
     Ok(())
@@ -5004,6 +5294,166 @@ fn map_qq_vip_info(
             ("response".to_owned(), response.raw),
         ]),
     })
+}
+
+fn map_qq_singer_homepage(requested_mid: &str, response: QqApiResponse) -> Result<Artist> {
+    let homepage =
+        serde_json::from_value::<QqSingerHomepageResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ singer homepage response is malformed: {error}"))
+        })?;
+    if homepage.status != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ singer homepage failed with status {}", homepage.status),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_status": homepage.status })));
+    }
+
+    let singer = &homepage.info.singer;
+    let base_info = &homepage.info.base_info;
+    let singer_mid = singer.mid.trim();
+    validate_qq_media_id(singer_mid, "singer MID")
+        .map_err(|_| qq_data_error("QQ singer homepage returned an invalid singer MID"))?;
+    if singer_mid != requested_mid {
+        return Err(qq_data_error(
+            "QQ singer homepage returned a different singer MID",
+        ));
+    }
+    let name = [singer.name.as_str(), base_info.name.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| qq_data_error("QQ singer homepage is missing its display name"))?
+        .to_owned();
+
+    let mut aliases = Vec::new();
+    for alias in [singer.foreign_name.as_str(), base_info.name.as_str()] {
+        let alias = alias.trim();
+        if !alias.is_empty() && alias != name && !aliases.iter().any(|known| known == alias) {
+            aliases.push(alias.to_owned());
+        }
+    }
+
+    let (header_url, header_3d_url, header_image_mid) = match &singer.header_picture {
+        QqHomepageHeaderPicture::Url(url) => (url.as_str(), "", ""),
+        QqHomepageHeaderPicture::Detail(image) => (
+            image.high_resolution_url.as_str(),
+            image.image_3d_url.as_str(),
+            image.image_mid.as_str(),
+        ),
+    };
+    let image_mid = [singer.singer_pmid.as_str(), header_image_mid, singer_mid]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .expect("validated singer MID always provides an image fallback");
+    validate_qq_image_id(image_mid)
+        .map_err(|_| qq_data_error("QQ singer homepage returned an invalid image MID"))?;
+    let avatar_url = first_qq_display_url(&[
+        (singer.singer_pic.as_str(), "singer picture"),
+        (base_info.avatar.as_str(), "homepage avatar"),
+    ])?
+    .or_else(|| Some(qq_cover_url("T001", image_mid)));
+    let cover_url = first_qq_display_url(&[
+        (header_url, "singer header picture"),
+        (header_3d_url, "singer 3D header picture"),
+        (
+            base_info.background_image.as_str(),
+            "homepage background image",
+        ),
+    ])?
+    .or_else(|| avatar_url.clone());
+    let followed = match homepage.info.followed {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(qq_data_error(
+                "QQ singer homepage returned an invalid followed flag",
+            ));
+        }
+    };
+
+    let info_data = serde_json::to_value(&homepage.info)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer homepage info"))?;
+    let tab_data = serde_json::to_value(&homepage.tab_detail)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer homepage tabs"))?;
+    let prompt_data = serde_json::to_value(&homepage.prompt)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer homepage prompt"))?;
+    let mut extensions = Extensions::from([
+        ("singer_type".to_owned(), json!(singer.singer_type)),
+        ("followed".to_owned(), json!(followed)),
+        ("follower_count".to_owned(), json!(homepage.info.fans.count)),
+        (
+            "following_count".to_owned(),
+            json!(homepage.info.following.count),
+        ),
+        (
+            "friend_count".to_owned(),
+            json!(homepage.info.friends.count),
+        ),
+        (
+            "visitor_count".to_owned(),
+            json!(homepage.info.visitors.count),
+        ),
+        ("info".to_owned(), info_data),
+        ("tab_detail".to_owned(), tab_data),
+        ("prompt".to_owned(), prompt_data),
+        ("response".to_owned(), response.raw),
+    ]);
+    if singer.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(singer.id));
+    }
+    let encrypted_uin = base_info.encrypted_uin.trim();
+    if !encrypted_uin.is_empty() {
+        extensions.insert("encrypted_uin".to_owned(), json!(encrypted_uin));
+    }
+    if image_mid != singer_mid {
+        extensions.insert("image_mid".to_owned(), json!(image_mid));
+    }
+
+    Ok(Artist {
+        resource_ref: qq_ref(singer_mid, "singer")?,
+        platform: Platform::Qq,
+        id: singer_mid.to_owned(),
+        name,
+        aliases,
+        description: String::new(),
+        biography_sections: Vec::new(),
+        avatar_url,
+        cover_url,
+        album_count: None,
+        track_count: None,
+        mv_count: None,
+        video_count: None,
+        identities: Vec::new(),
+        extensions,
+    })
+}
+
+fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
+    for (value, context) in candidates {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let normalized = if value.starts_with("//") {
+            format!("https:{value}")
+        } else {
+            value.to_owned()
+        };
+        let url = reqwest::Url::parse(&normalized)
+            .map_err(|_| qq_data_error(format!("QQ {context} URL is malformed")))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(qq_data_error(format!("QQ {context} URL is unsafe")));
+        }
+        return Ok(Some(normalized));
+    }
+    Ok(None)
 }
 
 fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -> Result<Album> {
@@ -6611,6 +7061,14 @@ where
     value_as_string(Some(&value)).ok_or_else(|| D::Error::custom("expected a QQ scalar string"))
 }
 
+fn deserialize_qq_vec_or_empty<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 fn deserialize_qq_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -7845,6 +8303,61 @@ mod tests {
         })
     }
 
+    fn sample_singer_homepage(mid: &str) -> Value {
+        json!({
+            "Status": "0",
+            "Info": {
+                "Singer": {
+                    "SingerID": "4558",
+                    "SingerMid": mid,
+                    "Name": "周杰伦",
+                    "SingerType": "0",
+                    "SingerPic": "",
+                    "SingerPMid": format!("{mid}_11"),
+                    "SingerHeaderPic": {
+                        "BlockCarousel": 0,
+                        "CutCoordinate": {"Height": 0, "OriginalImageHeight": 0, "OriginalImageWidth": 0, "Width": 0, "X": 0, "Y": 0},
+                        "HighResolutionImage": "",
+                        "Image3D": "",
+                        "ImageMid": ""
+                    },
+                    "ForeignName": "Jay Chou",
+                    "futureSingerField": true
+                },
+                "BaseInfo": {
+                    "EncryptedUin": "opaque-public-user-id",
+                    "BackgroundImage": "https://y.gtimg.cn/singer/background.jpg",
+                    "Avatar": "//y.qq.com/singer/avatar.jpg",
+                    "Name": "周杰伦",
+                    "IsHost": 0,
+                    "IsSinger": 1,
+                    "UserType": 2,
+                    "futureBaseField": "kept"
+                },
+                "FansNum": {"Num": "50540499", "Add": "", "HasEntry": 1, "jumpURL": ""},
+                "FollowNum": {"Num": 3, "Add": "", "HasEntry": 1, "jumpURL": ""},
+                "FriendsNum": {"Num": 2, "Add": "", "HasEntry": 0, "jumpURL": ""},
+                "VisitorNum": {"Num": 9, "Add": "", "HasEntry": 0, "jumpURL": ""},
+                "IsFollowed": 1,
+                "futureInfoField": {"kept": true}
+            },
+            "TabDetail": {
+                "TabID": "",
+                "HasMore": 0,
+                "NeedShowTab": "0",
+                "Order": 0,
+                "TabList": null,
+                "IntroductionTab": {"List": null, "futureIntroField": true},
+                "SongTab": {"List": null, "SearchText": ""},
+                "AlbumTab": {"AlbumList": null, "TypeList": null},
+                "VideoTab": {"VideoList": null, "TagList": null},
+                "futureTabField": "kept"
+            },
+            "Prompt": {"Msg": "", "URL": "", "futurePromptField": true},
+            "futureHomepageField": 42
+        })
+    }
+
     fn search_query(kind: SearchKind, limit: u32, offset: u32) -> SearchQuery {
         SearchQuery {
             query: "周杰伦".to_owned(),
@@ -8934,6 +9447,131 @@ mod tests {
             let error = map_qq_album_detail(&QqAlbumIdentifier::Numeric(100), response(malformed))
                 .expect_err("malformed album detail");
             assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn singer_homepage_request_uses_the_android_mid_contract() {
+        let request = qq_singer_homepage_request(" 0025NhlN2yWrP4 ").expect("singer MID");
+        assert_eq!(request.module, SINGER_HOMEPAGE_MODULE);
+        assert_eq!(request.method, SINGER_HOMEPAGE_METHOD);
+        assert_eq!(request.param, json!({"SingerMid": "0025NhlN2yWrP4"}));
+
+        for invalid in ["", "unsafe/singer", "singer mid", "_singer"] {
+            let error = match qq_singer_homepage_request(invalid) {
+                Ok(_) => panic!("invalid singer MID was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+    }
+
+    #[test]
+    fn singer_homepage_mapping_preserves_identity_counts_tabs_and_unknown_fields() {
+        let data = sample_singer_homepage("0025NhlN2yWrP4");
+        let artist = map_qq_singer_homepage(
+            "0025NhlN2yWrP4",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "req_0": {"code": 0, "data": data}}),
+            },
+        )
+        .expect("map singer homepage");
+        assert_eq!(artist.resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(artist.id, "0025NhlN2yWrP4");
+        assert_eq!(artist.name, "周杰伦");
+        assert_eq!(artist.aliases, ["Jay Chou"]);
+        assert_eq!(
+            artist.avatar_url.as_deref(),
+            Some("https://y.qq.com/singer/avatar.jpg")
+        );
+        assert_eq!(
+            artist.cover_url.as_deref(),
+            Some("https://y.gtimg.cn/singer/background.jpg")
+        );
+        assert_eq!(artist.extensions["numeric_id"], 4558);
+        assert_eq!(artist.extensions["image_mid"], "0025NhlN2yWrP4_11");
+        assert_eq!(artist.extensions["singer_type"], 0);
+        assert_eq!(artist.extensions["followed"], true);
+        assert_eq!(artist.extensions["follower_count"], 50_540_499);
+        assert_eq!(artist.extensions["following_count"], 3);
+        assert_eq!(artist.extensions["friend_count"], 2);
+        assert_eq!(artist.extensions["visitor_count"], 9);
+        assert_eq!(artist.extensions["encrypted_uin"], "opaque-public-user-id");
+        assert_eq!(artist.extensions["info"]["futureInfoField"]["kept"], true);
+        assert_eq!(
+            artist.extensions["info"]["Singer"]["futureSingerField"],
+            true
+        );
+        assert_eq!(artist.extensions["tab_detail"]["TabList"], json!([]));
+        assert_eq!(
+            artist.extensions["tab_detail"]["IntroductionTab"]["List"],
+            json!([])
+        );
+        assert_eq!(artist.extensions["tab_detail"]["futureTabField"], "kept");
+        assert_eq!(artist.extensions["prompt"]["futurePromptField"], true);
+        assert_eq!(artist.extensions["response"]["code"], 0);
+
+        let mut legacy = sample_singer_homepage("0025NhlN2yWrP4");
+        legacy["Info"]["Singer"]["SingerHeaderPic"] =
+            json!("https://y.gtimg.cn/singer/legacy-header.jpg");
+        let legacy = map_qq_singer_homepage("0025NhlN2yWrP4", response(legacy))
+            .expect("legacy string singer header picture");
+        assert_eq!(
+            legacy.cover_url.as_deref(),
+            Some("https://y.gtimg.cn/singer/legacy-header.jpg")
+        );
+    }
+
+    #[test]
+    fn singer_homepage_mapping_rejects_failures_conflicts_and_malformed_known_fields() {
+        let mut status = sample_singer_homepage("0025NhlN2yWrP4");
+        status["Status"] = json!(1001);
+        let error = map_qq_singer_homepage("0025NhlN2yWrP4", response(status))
+            .expect_err("nonzero homepage status");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.details["platform_status"], 1001);
+
+        for data in [
+            sample_singer_homepage("differentMid"),
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["Singer"]["Name"] = json!("");
+                value["Info"]["BaseInfo"]["Name"] = json!("");
+                value
+            },
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["Singer"]["SingerID"] = json!([]);
+                value
+            },
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["IsFollowed"] = json!(2);
+                value
+            },
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["BaseInfo"]["Avatar"] = json!("javascript:alert(1)");
+                value
+            },
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["Singer"]["SingerPMid"] = json!("unsafe/image");
+                value
+            },
+            {
+                let mut value = sample_singer_homepage("0025NhlN2yWrP4");
+                value["Info"]["Singer"]["SingerHeaderPic"]["BlockCarousel"] = json!([]);
+                value
+            },
+            json!({"Status": 0, "Info": {}, "TabDetail": {}, "Prompt": {}}),
+        ] {
+            let error = map_qq_singer_homepage("0025NhlN2yWrP4", response(data))
+                .expect_err("malformed singer homepage response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert_eq!(error.platform, Some(Platform::Qq));
         }
     }
 
@@ -10808,6 +11446,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn singer_homepage_validates_mids_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::ArtistDetail));
+        for mid in ["", "unsafe/singer", "singer mid"] {
+            let error = provider
+                .artist(mid, None)
+                .await
+                .expect_err("invalid singer MID");
+            assert_eq!(error.code, ErrorCode::InvalidRequest, "{mid}");
+        }
+        let error = provider
+            .artist("0025NhlN2yWrP4", Some("missing-account"))
+            .await
+            .expect_err("missing singer account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn personal_playlists_require_the_selected_account_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         let error = provider
@@ -12012,6 +12668,41 @@ mod tests {
         assert_eq!(by_mid.resource_ref, numeric.resource_ref);
         assert_eq!(by_mid.name, numeric.name);
         assert_eq!(by_mid.artists, numeric.artists);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_homepage_returns_stable_identity_images_and_counts() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let artist = provider
+            .artist("0025NhlN2yWrP4", None)
+            .await
+            .expect("singer homepage");
+        assert_eq!(artist.resource_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(artist.name, "周杰伦");
+        assert_eq!(artist.extensions["numeric_id"], 4558);
+        assert!(
+            artist.extensions["follower_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert!(
+            artist
+                .avatar_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http"))
+        );
+        assert!(
+            artist
+                .cover_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http"))
+        );
+        assert_eq!(artist.extensions["response"]["code"], 0);
     }
 
     #[tokio::test]
