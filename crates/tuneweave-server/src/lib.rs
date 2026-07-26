@@ -560,7 +560,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/playlists/order", put(account_playlists_order))
         .route(
             "/account/library/albums",
-            get(account_albums).put(albums_subscribe),
+            get(account_albums)
+                .put(albums_subscribe)
+                .delete(albums_unsubscribe),
         )
         .route("/account/library/videos", get(account_videos))
         .route(
@@ -2776,6 +2778,21 @@ async fn albums_subscribe(
     State(state): State<AppState>,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
+    set_album_subscriptions(state, payload, true).await
+}
+
+async fn albums_unsubscribe(
+    State(state): State<AppState>,
+    payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
+    set_album_subscriptions(state, payload, false).await
+}
+
+async fn set_album_subscriptions(
+    state: AppState,
+    payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
+    subscribed: bool,
+) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
     let body = json_body(payload)?;
     let references = parse_batch_references(
         body.refs.map(StreamReferenceInput::into_values),
@@ -2805,7 +2822,7 @@ async fn albums_subscribe(
         .collect::<Vec<_>>();
     let provider = state.registry.require(platform)?;
     let results = provider
-        .set_album_subscriptions(&ids, true, Some(&account))
+        .set_album_subscriptions(&ids, subscribed, Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(results)
@@ -22064,27 +22081,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn album_library_batch_put_preserves_order_duplicates_platform_and_account() {
+    async fn album_library_batch_put_and_delete_preserve_order_duplicates_and_account() {
         let app = test_app_with_provider();
-        let (status, response) = json_request_from(
-            app.clone(),
-            Method::PUT,
-            "/v1/account/library/albums",
-            Some(json!({
-                "refs": ["netease:32311", "netease:7", "netease:32311"],
-                "account": "collector"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["data"].as_array().map(Vec::len), Some(3));
-        assert_eq!(response["data"][0]["resource_ref"], "netease:32311");
-        assert_eq!(response["data"][1]["resource_ref"], "netease:7");
-        assert_eq!(response["data"][2]["resource_ref"], "netease:32311");
-        assert_eq!(response["data"][0]["subscribed"], true);
-        assert_eq!(response["data"][1]["extensions"]["account"], "collector");
-        assert_eq!(response["meta"]["platform"], "netease");
-        assert_eq!(response["meta"]["account"], "collector");
+        for (method, subscribed) in [(Method::PUT, true), (Method::DELETE, false)] {
+            let (status, response) = json_request_from(
+                app.clone(),
+                method,
+                "/v1/account/library/albums",
+                Some(json!({
+                    "refs": ["netease:32311", "netease:7", "netease:32311"],
+                    "account": "collector"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["data"].as_array().map(Vec::len), Some(3));
+            assert_eq!(response["data"][0]["resource_ref"], "netease:32311");
+            assert_eq!(response["data"][1]["resource_ref"], "netease:7");
+            assert_eq!(response["data"][2]["resource_ref"], "netease:32311");
+            assert_eq!(response["data"][0]["subscribed"], subscribed);
+            assert_eq!(response["data"][1]["extensions"]["account"], "collector");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
 
         for body in [
             json!({
