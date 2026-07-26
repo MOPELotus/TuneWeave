@@ -15190,6 +15190,7 @@ mod tests {
                 Capability::AudioStream,
                 Capability::TrackSubscriptionWrite,
                 Capability::Lyrics,
+                Capability::UserMembership,
             ])
         }
 
@@ -15344,6 +15345,36 @@ mod tests {
                 extensions: Extensions::from([
                     ("numeric_id".to_owned(), json!(7_137_686)),
                     ("account".to_owned(), json!(account)),
+                ]),
+            })
+        }
+
+        async fn user_membership(
+            &self,
+            id: Option<&str>,
+            account: Option<&str>,
+        ) -> Result<MembershipSummary> {
+            Ok(MembershipSummary {
+                user_ref: Some(
+                    ResourceRef::new(Platform::Qq, id.unwrap_or("123456"))
+                        .expect("valid QQ membership user reference"),
+                ),
+                level: Some(7),
+                active: Some(true),
+                annual_count: None,
+                expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+                icon_url: Some("https://example.test/qq-vip.png".to_owned()),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    ("backend".to_owned(), json!("vip_login_base")),
+                    (
+                        "vip".to_owned(),
+                        json!({
+                            "svip": 1,
+                            "identity": {"vip": 1, "level": 7},
+                            "userinfo": {"expire": 1893456000, "music_level": 12}
+                        }),
+                    ),
                 ]),
             })
         }
@@ -23384,6 +23415,34 @@ mod tests {
         assert_eq!(current["data"]["icon_url"], "https://example.test/vip.png");
         assert_eq!(current["data"]["extensions"]["backend"], "client");
         assert_eq!(current["meta"]["account"], "vip-user");
+    }
+
+    #[tokio::test]
+    async fn qq_membership_uses_the_selected_current_account_and_preserves_vip_sections() {
+        let app = test_app_with_import_providers();
+        let (status, current) = json_response_from(
+            app.clone(),
+            "/v1/account/membership?platform=qq&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(current["data"]["user_ref"], "qq:123456");
+        assert_eq!(current["data"]["level"], 7);
+        assert_eq!(current["data"]["active"], true);
+        assert_eq!(current["data"]["expires_at"], "2030-01-01T00:00:00Z");
+        assert_eq!(current["data"]["extensions"]["vip"]["svip"], 1);
+        assert_eq!(
+            current["data"]["extensions"]["vip"]["userinfo"]["music_level"],
+            12
+        );
+        assert_eq!(current["meta"]["platform"], "qq");
+        assert_eq!(current["meta"]["account"], "green-vip");
+
+        let (status, selected) =
+            json_response_from(app, "/v1/users/qq:123456/membership?account=green-vip").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(selected["data"]["user_ref"], "qq:123456");
+        assert_eq!(selected["data"]["extensions"]["account"], "green-vip");
     }
 
     #[tokio::test]

@@ -14,17 +14,17 @@ use tuneweave_core::{
     AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
     AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, ErrorCode,
     Extensions, ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream,
-    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider, Page, PageMeta,
-    Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
-    PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
-    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
-    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential,
-    StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    MembershipSummary, MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider,
+    Page, PageMeta, Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
+    PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
+    ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
+    SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
 use crate::client::{
@@ -920,6 +920,142 @@ struct QqAiDictResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqVipIdentity {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    vip: u64,
+    #[serde(default, rename = "HugeVip", deserialize_with = "deserialize_qq_u64")]
+    huge_vip: u64,
+    #[serde(default, rename = "HugeVipStart")]
+    huge_vip_start: String,
+    #[serde(default, rename = "HugeVipEnd")]
+    huge_vip_end: String,
+    #[serde(default, rename = "yearflag", deserialize_with = "deserialize_qq_u64")]
+    year_flag: u64,
+    #[serde(
+        default,
+        rename = "HugeYearFlag",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    huge_year_flag: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    twelve: u64,
+    #[serde(default, rename = "twelveStart")]
+    twelve_start: String,
+    #[serde(default, rename = "twelveEnd")]
+    twelve_end: String,
+    #[serde(default, rename = "ChildVip", deserialize_with = "deserialize_qq_u64")]
+    child_vip: u64,
+    #[serde(default, rename = "ExpVip", deserialize_with = "deserialize_qq_u64")]
+    experience_vip: u64,
+    #[serde(
+        default,
+        rename = "GroupVipFlag",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    group_vip: u64,
+    #[serde(default, rename = "GroupVipStart")]
+    group_vip_start: String,
+    #[serde(default, rename = "GroupVipEnd")]
+    group_vip_end: String,
+    #[serde(
+        default,
+        rename = "CPLoverFlag",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    couple_vip: u64,
+    #[serde(default, rename = "CPLoverStart")]
+    couple_vip_start: String,
+    #[serde(default, rename = "CPLoverEnd")]
+    couple_vip_end: String,
+    #[serde(default, rename = "AdVipFlag", deserialize_with = "deserialize_qq_u64")]
+    ad_vip: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    eight: u64,
+    #[serde(default, rename = "eightStart")]
+    eight_start: String,
+    #[serde(default, rename = "eightEnd")]
+    eight_end: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    level: u64,
+    #[serde(default, rename = "nextlevel", deserialize_with = "deserialize_qq_u64")]
+    next_level: u64,
+    #[serde(default)]
+    icon: String,
+    #[serde(default, rename = "purchaseUrl")]
+    purchase_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqVipUserInfo {
+    #[serde(default, rename = "buy_url", alias = "buyurl")]
+    buy_url: String,
+    #[serde(default, rename = "my_vip_url", alias = "myvipurl")]
+    my_vip_url: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    score: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    expire: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    music_level: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqVipInfoResponse {
+    #[serde(
+        default,
+        rename = "auto_down",
+        alias = "autoDown",
+        alias = "autodown",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    auto_download: u64,
+    #[serde(default, rename = "canRenew", deserialize_with = "deserialize_qq_u64")]
+    can_renew: u64,
+    #[serde(
+        default,
+        rename = "max_dir_num",
+        alias = "maxDirNum",
+        alias = "maxdirnum",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    max_playlist_count: u64,
+    #[serde(
+        default,
+        rename = "max_song_num",
+        alias = "maxSongNum",
+        alias = "maxsongnum",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    max_track_count: u64,
+    #[serde(default, rename = "song_limit_msg", alias = "songLimitMsg")]
+    track_limit_message: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    svip: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    star: u64,
+    #[serde(default, rename = "starstart")]
+    star_start: String,
+    #[serde(default, rename = "starend")]
+    star_end: String,
+    #[serde(default, rename = "ystar", deserialize_with = "deserialize_qq_u64")]
+    yearly_star: u64,
+    #[serde(default, rename = "ystarstart")]
+    yearly_star_start: String,
+    #[serde(default, rename = "ystarend")]
+    yearly_star_end: String,
+    #[serde(default)]
+    identity: QqVipIdentity,
+    #[serde(default)]
+    userinfo: QqVipUserInfo,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -970,6 +1106,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchRingtones,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
+            Capability::UserMembership,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -1439,6 +1576,40 @@ impl MusicProvider for QqProvider {
             message: (!available).then(|| "QQ did not return a downloadable file".to_owned()),
             extensions,
         })
+    }
+
+    async fn user_membership(
+        &self,
+        id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<MembershipSummary> {
+        let requested_user = id
+            .map(|id| validate_qq_numeric_uin(id, "membership user UIN"))
+            .transpose()?;
+        let account = account.unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        if let Some(requested_user) = requested_user
+            && requested_user != credential.string_music_id()
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ VIP information is only available for the selected current account",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({
+                "requested_user_id": requested_user,
+                "account_user_id": credential.string_music_id()
+            })));
+        }
+        let response = self
+            .client
+            .request_android_with_credential(&[qq_vip_info_request()], Some(&credential))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ VIP information request returned no response"))?;
+        map_qq_vip_info(&credential, response)
     }
 
     async fn account_playlists(
@@ -2991,6 +3162,10 @@ fn ai_lyric_dictionary_request(song_id: u64) -> QqApiRequest {
     QqApiRequest::new(LYRIC_MODULE, "GetAIDictInfo", json!({"songID": song_id}))
 }
 
+fn qq_vip_info_request() -> QqApiRequest {
+    QqApiRequest::new("VipLogin.VipLoginInter", "vip_login_base", json!({}))
+}
+
 fn parse_qq_audio_file_spec(value: Option<&str>) -> Result<&'static QqAudioFileSpec> {
     let Some(value) = value else {
         return Ok(&QQ_AUDIO_FILE_SPECS[13]);
@@ -4397,6 +4572,63 @@ fn qq_created_playlists_request(uin: &str) -> QqApiRequest {
         "GetPlaylistByUin",
         json!({ "uin": uin }),
     )
+}
+
+fn map_qq_vip_info(
+    credential: &QqCredential,
+    response: QqApiResponse,
+) -> Result<MembershipSummary> {
+    let vip = serde_json::from_value::<QqVipInfoResponse>(response.data)
+        .map_err(|_| qq_data_error("QQ VIP information response is malformed"))?;
+    let level = u32::try_from(vip.identity.level)
+        .map_err(|_| qq_data_error("QQ VIP level exceeds the supported membership range"))?;
+    let active = [
+        vip.svip,
+        vip.star,
+        vip.yearly_star,
+        vip.identity.vip,
+        vip.identity.huge_vip,
+        vip.identity.year_flag,
+        vip.identity.huge_year_flag,
+        vip.identity.twelve,
+        vip.identity.child_vip,
+        vip.identity.experience_vip,
+        vip.identity.group_vip,
+        vip.identity.couple_vip,
+        vip.identity.ad_vip,
+        vip.identity.eight,
+    ]
+    .into_iter()
+    .any(|flag| flag > 0);
+    let expires_at = (vip.userinfo.expire > 0)
+        .then_some(vip.userinfo.expire)
+        .map(|timestamp| {
+            if timestamp > 10_000_000_000 {
+                timestamp / 1_000
+            } else {
+                timestamp
+            }
+        })
+        .and_then(qq_unix_rfc3339);
+    let icon_url =
+        (!vip.identity.icon.trim().is_empty()).then(|| vip.identity.icon.trim().to_owned());
+    let user_ref = qq_ref(credential.string_music_id(), "VIP user")?;
+    let vip_data = serde_json::to_value(&vip)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ VIP information"))?;
+
+    Ok(MembershipSummary {
+        user_ref: Some(user_ref),
+        level: Some(level),
+        active: Some(active),
+        annual_count: None,
+        expires_at,
+        icon_url,
+        extensions: Extensions::from([
+            ("backend".to_owned(), json!("vip_login_base")),
+            ("vip".to_owned(), vip_data),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
 }
 
 fn qq_favorite_playlists_request(encrypted_uin: &str, offset: u32, size: u32) -> QqApiRequest {
@@ -7652,6 +7884,141 @@ mod tests {
     }
 
     #[test]
+    fn vip_request_and_mapping_preserve_all_three_typed_sections() {
+        let request = qq_vip_info_request();
+        assert_eq!(request.module, "VipLogin.VipLoginInter");
+        assert_eq!(request.method, "vip_login_base");
+        assert_eq!(request.param, json!({}));
+
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let mapped = map_qq_vip_info(
+            &credential,
+            response(json!({
+                "autoDown": "1",
+                "canRenew": 1,
+                "maxDirNum": "1000",
+                "maxSongNum": 20000,
+                "songLimitMsg": "已扩容",
+                "svip": 1,
+                "star": 2,
+                "starstart": "2029-01-01",
+                "starend": "2030-01-01",
+                "ystar": 1,
+                "ystarstart": "2029-01-01",
+                "ystarend": "2030-01-01",
+                "identity": {
+                    "vip": 1,
+                    "HugeVip": "1",
+                    "HugeVipStart": "2029-01-01",
+                    "HugeVipEnd": "2030-01-01",
+                    "yearflag": 1,
+                    "HugeYearFlag": 1,
+                    "twelve": 1,
+                    "twelveStart": "2029-01-01",
+                    "twelveEnd": "2030-01-01",
+                    "ChildVip": 0,
+                    "ExpVip": 0,
+                    "GroupVipFlag": 1,
+                    "GroupVipStart": "2029-01-01",
+                    "GroupVipEnd": "2030-01-01",
+                    "CPLoverFlag": 1,
+                    "CPLoverStart": "2029-01-01",
+                    "CPLoverEnd": "2030-01-01",
+                    "AdVipFlag": 0,
+                    "eight": 1,
+                    "eightStart": "2029-01-01",
+                    "eightEnd": "2030-01-01",
+                    "level": "7",
+                    "nextlevel": 8,
+                    "icon": "https://example.test/qq-vip.png",
+                    "purchaseUrl": "https://example.test/buy",
+                    "futureIdentity": "kept"
+                },
+                "userinfo": {
+                    "buyurl": "https://example.test/subscribe",
+                    "myvipurl": "https://example.test/my-vip",
+                    "score": "88",
+                    "expire": 1893456000,
+                    "music_level": 12,
+                    "futureUserInfo": true
+                },
+                "futureTop": {"enabled": true}
+            })),
+        )
+        .expect("map QQ VIP information");
+        assert_eq!(
+            mapped.user_ref.expect("current user").to_string(),
+            "qq:123456"
+        );
+        assert_eq!(mapped.level, Some(7));
+        assert_eq!(mapped.active, Some(true));
+        assert_eq!(mapped.annual_count, None);
+        assert_eq!(mapped.expires_at.as_deref(), Some("2030-01-01T00:00:00Z"));
+        assert_eq!(
+            mapped.icon_url.as_deref(),
+            Some("https://example.test/qq-vip.png")
+        );
+        assert_eq!(mapped.extensions["backend"], "vip_login_base");
+        assert_eq!(mapped.extensions["vip"]["max_dir_num"], 1000);
+        assert_eq!(mapped.extensions["vip"]["identity"]["HugeVip"], 1);
+        assert_eq!(
+            mapped.extensions["vip"]["identity"]["futureIdentity"],
+            "kept"
+        );
+        assert_eq!(mapped.extensions["vip"]["userinfo"]["futureUserInfo"], true);
+        assert_eq!(mapped.extensions["vip"]["futureTop"]["enabled"], true);
+        assert_eq!(mapped.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn vip_mapping_keeps_reference_defaults_but_rejects_malformed_known_fields() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private"
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let defaults = map_qq_vip_info(&credential, response(json!({})))
+            .expect("missing QQ VIP fields follow reference defaults");
+        assert_eq!(defaults.level, Some(0));
+        assert_eq!(defaults.active, Some(false));
+        assert!(defaults.expires_at.is_none());
+        assert!(defaults.icon_url.is_none());
+
+        for malformed in [
+            json!({"svip": "active"}),
+            json!({"maxDirNum": []}),
+            json!({"identity": []}),
+            json!({"identity": {"level": -1}}),
+            json!({"identity": {"HugeVipStart": 1}}),
+            json!({"userinfo": false}),
+            json!({"userinfo": {"expire": {}}}),
+            json!({"userinfo": {"buyurl": []}}),
+        ] {
+            let error = map_qq_vip_info(&credential, response(malformed))
+                .expect_err("malformed QQ VIP field");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let overflow = map_qq_vip_info(
+            &credential,
+            response(json!({"identity": {"level": 4294967296_u64}})),
+        )
+        .expect_err("VIP level outside the unified range");
+        assert_eq!(overflow.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
     fn lyric_mapping_never_lets_line_sync_override_word_sync() {
         let requested = QqTrackIdentifier::Numeric(100);
         let options = LyricsRequest::default();
@@ -9108,6 +9475,47 @@ mod tests {
     async fn missing_logout_alias_is_idempotent_without_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(!provider.logout("missing-account").await.expect("logout"));
+    }
+
+    #[tokio::test]
+    async fn vip_information_requires_the_selected_account_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let error = provider
+            .user_membership(None, Some("missing-account"))
+            .await
+            .expect_err("missing QQ VIP account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(error.details["account"], "missing-account");
+
+        let invalid_user = provider
+            .user_membership(Some("not-a-uin"), Some("missing-account"))
+            .await
+            .expect_err("invalid QQ VIP user identity");
+        assert_eq!(invalid_user.code, ErrorCode::InvalidRequest);
+
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(Arc::new(RecordingCredentialStore::default())),
+            ..QqConfig::default()
+        })
+        .expect("provider with account storage");
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private"
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        provider
+            .persist_qq_credential("green-vip", &credential)
+            .expect("persist test credential");
+        let mismatch = provider
+            .user_membership(Some("654321"), Some("green-vip"))
+            .await
+            .expect_err("QQ VIP cannot impersonate another user");
+        assert_eq!(mismatch.code, ErrorCode::InvalidRequest);
+        assert_eq!(mismatch.details["requested_user_id"], "654321");
+        assert_eq!(mismatch.details["account_user_id"], "123456");
     }
 
     #[tokio::test]

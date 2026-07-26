@@ -1125,6 +1125,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 
 `backend=client`（也接受 `detail/v2`，字段名兼容 `variant/source`）通过独立 `user_membership_client_info` 能力精确对应参考 `/vip/info/v2`，固定使用 WeAPI `/api/music-vip-membership/client/vip/info`。该分支无论是否指定用户都要求 `account` 指向已登录会话，不会静默回退公开摘要；`redplus/musicPackage/associator/voiceBookVip/albumVip` 的最长有效期驱动稳定激活态和到期时间，等级、年费次数和非空动态图标映射到稳定字段，全部权益包及未来平台字段保留在 `extensions.response`。
 
+QQ 会员信息只支持当前登录账户：`GET /v1/account/membership?platform=qq&account=...` 固定调用 Android `VipLogin.VipLoginInter/vip_login_base`，空参数但同时在 `comm` 和 Cookie 中注入精确 `(qq, account)` 凭据。`/v1/users/{qq-uin}/membership` 仅在路径 UIN 与所选账户一致时复用该能力，不能查询任意用户；QQ 没有第二个 `client` 后端。统一摘要从 `identity.level`、全部会员标志、`userinfo.expire` 和非空等级图标提炼等级、激活态、RFC 3339 到期时间与图标，`annual_count` 不会拿年费布尔标志冒充次数。顶层容量/续费/星级字段、`identity` 的绿钻/豪华/年费/家庭/情侣等身份、`userinfo` 的积分/音乐等级/入口和未来字段均以强类型解析并保存在 `extensions.vip`，原始包装位于 `extensions.response`；已出现但类型错误的已知字段不会按默认值伪装成功。
+
 广告换听目录的 `type_ids` 缺省为 `400002_0`，既接受逗号列表，也兼容参考项目的 JSON 字符串数组；顺序与重复项保留，最多 100 项。网易云固定使用带实时 v3 checkToken 的 XEAPI `/api/ad/get`，精确把类型数组序列化进 `type_ids` 字符串。对象或数组广告包装统一为稳定条目，逐项解析 `extJson.contextInfo.req_id`；无效或空的前一项不会遮蔽后续有效请求 ID，无法解析的 `extJson` 仍随原广告完整保留。匿名设备可能合法返回空目录，不伪造成错误或虚构请求 ID。
 
 广告换听领取的 `creative_type/rights_gain_method` 均默认 2；曝光和点击时间都省略时使用同一次读取的当前 Unix 毫秒。参考 GET 的显式时间值原样保留为 JSON 字符串，统一 POST 同时接受整数毫秒和字符串，以免改变上游参考协议的类型分支。四个可选时长/方式、来源、权益扩展文本、任意 JSON `app_info` 和安装态都会进入 `reqParam` 内层 JSON；缺省字段不会伪造。省略或传空 `request_uid` 时，provider 先按同一 `platform/account/type_ids` 取广告目录；目录失败、无投放或无 `req_id` 时依照参考行为继续提交空 ID，并以扩展字段明确来源。网易云领取固定使用带 v3 checkToken 的 XEAPI `/api/ad/listening/rights/gain`；匿名真实请求当前返回业务码 2001，统一映射为 `authentication_required`，不会误报已领取。
