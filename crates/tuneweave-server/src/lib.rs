@@ -15354,6 +15354,7 @@ mod tests {
                 Capability::UserMembership,
                 Capability::AlbumDetail,
                 Capability::ArtistDetail,
+                Capability::ArtistAlbums,
                 Capability::ArtistTracks,
             ])
         }
@@ -15613,6 +15614,58 @@ mod tests {
                     extensions: Extensions::from([
                         ("singer_mid".to_owned(), json!(id)),
                         ("order".to_owned(), json!(request.order)),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                },
+            })
+        }
+
+        async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
+            let singer_ref = ResourceRef::new(Platform::Qq, id).expect("valid QQ singer reference");
+            let mut albums = [
+                ("000MkMni19ClKG", "叶惠美"),
+                ("0024bjiL2aocxT", "七里香"),
+                ("001uKKpF1RuJSd", "十一月的萧邦"),
+            ]
+            .into_iter()
+            .map(|(album_id, name)| Album {
+                resource_ref: ResourceRef::new(Platform::Qq, album_id)
+                    .expect("valid QQ singer album reference"),
+                platform: Platform::Qq,
+                id: album_id.to_owned(),
+                name: name.to_owned(),
+                aliases: Vec::new(),
+                artists: vec![ArtistSummary {
+                    resource_ref: Some(singer_ref.clone()),
+                    name: "周杰伦".to_owned(),
+                }],
+                description: String::new(),
+                cover_url: None,
+                published_at: None,
+                track_count: Some(11),
+                company: None,
+                kind: Some("录音室专辑".to_owned()),
+                extensions: Extensions::new(),
+            })
+            .collect::<Vec<_>>();
+            let start = usize::try_from(request.offset)
+                .unwrap_or(usize::MAX)
+                .min(albums.len());
+            let end = start
+                .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+                .min(albums.len());
+            let items = albums.drain(start..end).collect::<Vec<_>>();
+            let has_more = end < 3;
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset: has_more.then(|| u32::try_from(end).expect("small test offset")),
+                    has_more,
+                    extensions: Extensions::from([
+                        ("singer_mid".to_owned(), json!(id)),
                         ("account".to_owned(), json!(request.account)),
                     ]),
                 },
@@ -19285,7 +19338,7 @@ mod tests {
         assert_eq!(album["meta"]["account"], "green-vip");
 
         let (status, tracks) = json_response_from(
-            app,
+            app.clone(),
             "/v1/albums/qq:100/tracks?limit=2&offset=0&account=green-vip",
         )
         .await;
@@ -19302,6 +19355,27 @@ mod tests {
         );
         assert_eq!(
             tracks["meta"]["pagination"]["extensions"]["account"],
+            "green-vip"
+        );
+
+        let (status, albums) = json_response_from(
+            app,
+            "/v1/artists/qq:0025NhlN2yWrP4/albums?limit=2&offset=0&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(albums["data"].as_array().expect("singer albums").len(), 2);
+        assert_eq!(albums["data"][0]["ref"], "qq:000MkMni19ClKG");
+        assert_eq!(albums["data"][0]["artists"][0]["ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(albums["meta"]["pagination"]["limit"], 2);
+        assert_eq!(albums["meta"]["pagination"]["total"], 3);
+        assert_eq!(albums["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(
+            albums["meta"]["pagination"]["extensions"]["singer_mid"],
+            "0025NhlN2yWrP4"
+        );
+        assert_eq!(
+            albums["meta"]["pagination"]["extensions"]["account"],
             "green-vip"
         );
     }

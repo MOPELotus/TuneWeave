@@ -64,6 +64,8 @@ const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
+const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
+const SINGER_ALBUM_METHOD: &str = "GetAlbumList";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
@@ -1479,6 +1481,46 @@ struct QqSingerSongResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerAlbum {
+    #[serde(default, rename = "albumID", deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(default, rename = "albumMid")]
+    mid: String,
+    #[serde(default, rename = "albumName")]
+    name: String,
+    #[serde(default, rename = "albumTranName")]
+    subtitle: String,
+    #[serde(default, rename = "publishDate")]
+    published_at: String,
+    #[serde(default, rename = "totalNum", deserialize_with = "deserialize_qq_u64")]
+    track_count: u64,
+    #[serde(default, rename = "albumType")]
+    album_type: String,
+    #[serde(default, rename = "singerName")]
+    singer_name: String,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    tags: Vec<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSingerAlbumResponse {
+    #[serde(default, rename = "singerMid")]
+    singer_mid: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total: u64,
+    #[serde(
+        default,
+        rename = "albumList",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    albums: Vec<QqSingerAlbum>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
@@ -1599,6 +1641,7 @@ impl MusicProvider for QqProvider {
             Capability::UserMembership,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
+            Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
@@ -1850,6 +1893,29 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer song request returned no response"))?;
         map_qq_singer_songs(id.trim(), request.limit, request.offset, response)
+    }
+
+    async fn artist_albums(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Album>> {
+        self.validate_public_account(request.account.as_deref())?;
+        if !(1..=100).contains(&request.limit) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ singer album page size must be between 1 and 100",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let request_api = qq_singer_albums_request(id, request.limit, request.offset)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer album request returned no response"))?;
+        map_qq_singer_albums(id.trim(), request.limit, request.offset, response)
     }
 
     async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
@@ -3845,6 +3911,21 @@ fn qq_singer_songs_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRe
     ))
 }
 
+fn qq_singer_albums_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    Ok(QqApiRequest::new(
+        SINGER_ALBUM_MODULE,
+        SINGER_ALBUM_METHOD,
+        json!({
+            "singerMid": mid,
+            "order": 1,
+            "number": limit,
+            "begin": offset
+        }),
+    ))
+}
+
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
     let guid = hex::encode(rand::random::<[u8; 16]>());
     (
@@ -5594,6 +5675,135 @@ fn map_qq_singer_songs(
                 ("response".to_owned(), response.raw),
             ]),
         },
+    })
+}
+
+fn map_qq_singer_albums(
+    requested_mid: &str,
+    limit: u32,
+    offset: u32,
+    response: QqApiResponse,
+) -> Result<Page<Album>> {
+    let data = serde_json::from_value::<QqSingerAlbumResponse>(response.data).map_err(|error| {
+        qq_data_error(format!("QQ singer album response is malformed: {error}"))
+    })?;
+    let singer_mid = data.singer_mid.trim();
+    validate_qq_media_id(singer_mid, "singer MID")
+        .map_err(|_| qq_data_error("QQ singer album response contains an invalid singer MID"))?;
+    if singer_mid != requested_mid {
+        return Err(qq_data_error(
+            "QQ singer album response returned a different singer MID",
+        ));
+    }
+    let upstream_returned = u32::try_from(data.albums.len())
+        .map_err(|_| qq_data_error("QQ singer album page is too large"))?;
+    let upstream_end = offset.checked_add(upstream_returned).ok_or_else(|| {
+        qq_data_error("QQ singer album pagination exceeded the supported offset range")
+    })?;
+    if u64::from(upstream_end) > data.total
+        || (upstream_returned == 0 && u64::from(offset) < data.total)
+    {
+        return Err(qq_data_error(
+            "QQ singer album response has inconsistent pagination",
+        ));
+    }
+    let returned = upstream_returned.min(limit);
+    let next_offset = offset.checked_add(returned).ok_or_else(|| {
+        qq_data_error("QQ singer album pagination exceeded the supported offset range")
+    })?;
+
+    let response_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer album response"))?;
+    let returned = usize::try_from(returned)
+        .map_err(|_| qq_data_error("QQ singer album page exceeds this platform's capacity"))?;
+    let mut items = Vec::with_capacity(returned);
+    for album in data.albums.into_iter().take(returned) {
+        items.push(map_qq_singer_album(singer_mid, album)?);
+    }
+    let has_more = u64::from(next_offset) < data.total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(data.total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("singer_mid".to_owned(), json!(singer_mid)),
+                ("order".to_owned(), json!("hot")),
+                ("upstream_returned".to_owned(), json!(upstream_returned)),
+                ("limit_applied".to_owned(), json!(true)),
+                ("data".to_owned(), response_data),
+                ("response".to_owned(), response.raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_singer_album(singer_mid: &str, album: QqSingerAlbum) -> Result<Album> {
+    let album_mid = album.mid.trim();
+    if !album_mid.is_empty() {
+        validate_qq_media_id(album_mid, "album MID")
+            .map_err(|_| qq_data_error("QQ singer album response returned an invalid album MID"))?;
+    }
+    let id = if !album_mid.is_empty() {
+        album_mid.to_owned()
+    } else if album.id > 0 {
+        album.id.to_string()
+    } else {
+        return Err(qq_data_error(
+            "QQ singer album response is missing both album ID and MID",
+        ));
+    };
+    let name = album.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ singer album response contains an album without a name",
+        ));
+    }
+    let aliases = [album.subtitle.trim()]
+        .into_iter()
+        .filter(|alias| !alias.is_empty() && *alias != name)
+        .map(str::to_owned)
+        .collect();
+    let singer_name = album.singer_name.trim();
+    let artists = (!singer_name.is_empty())
+        .then(|| {
+            qq_ref(singer_mid, "singer").map(|resource_ref| ArtistSummary {
+                resource_ref: Some(resource_ref),
+                name: singer_name.to_owned(),
+            })
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
+    let album_data = serde_json::to_value(&album)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer album entry"))?;
+    let mut extensions = Extensions::from([
+        ("singer_mid".to_owned(), json!(singer_mid)),
+        ("tags".to_owned(), json!(album.tags)),
+        ("singer_album_entry".to_owned(), album_data),
+    ]);
+    if album.id > 0 {
+        extensions.insert("numeric_id".to_owned(), json!(album.id));
+    }
+
+    Ok(Album {
+        resource_ref: qq_ref(&id, "album")?,
+        platform: Platform::Qq,
+        id,
+        name: name.to_owned(),
+        aliases,
+        artists,
+        description: String::new(),
+        cover_url: (!album_mid.is_empty()).then(|| qq_cover_url("T002", album_mid)),
+        published_at: (!album.published_at.trim().is_empty())
+            .then(|| album.published_at.trim().to_owned()),
+        track_count: Some(album.track_count),
+        company: None,
+        kind: (!album.album_type.trim().is_empty()).then(|| album.album_type.trim().to_owned()),
+        extensions,
     })
 }
 
@@ -8499,6 +8709,21 @@ mod tests {
         })
     }
 
+    fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
+        json!({
+            "albumID": id,
+            "albumMid": mid,
+            "albumName": name,
+            "albumTranName": format!("{name} English"),
+            "publishDate": "2003-07-31",
+            "totalNum": "11",
+            "albumType": "录音室专辑",
+            "singerName": "周杰伦",
+            "tags": ["流行", "国语"],
+            "futureAlbumField": true
+        })
+    }
+
     fn search_query(kind: SearchKind, limit: u32, offset: u32) -> SearchQuery {
         SearchQuery {
             query: "周杰伦".to_owned(),
@@ -9841,6 +10066,131 @@ mod tests {
         ] {
             let error = map_qq_singer_songs("0025NhlN2yWrP4", limit, offset, response(data))
                 .expect_err("malformed singer song response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn singer_album_request_preserves_hot_order_and_exact_offset() {
+        let request =
+            qq_singer_albums_request(" 0025NhlN2yWrP4 ", 30, 7).expect("singer album request");
+        assert_eq!(request.module, SINGER_ALBUM_MODULE);
+        assert_eq!(request.method, SINGER_ALBUM_METHOD);
+        assert_eq!(
+            request.param,
+            json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "order": 1,
+                "number": 30,
+                "begin": 7
+            })
+        );
+    }
+
+    #[test]
+    fn singer_album_mapping_preserves_typed_items_overfetch_and_real_pagination() {
+        let page = map_qq_singer_albums(
+            "0025NhlN2yWrP4",
+            2,
+            0,
+            response(json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "total": "5",
+                "albumList": [
+                    sample_singer_album(8220, "000MkMni19ClKG", "叶惠美"),
+                    sample_singer_album(455833, "0024bjiL2aocxT", "七里香"),
+                    sample_singer_album(337199, "001uKKpF1RuJSd", "十一月的萧邦")
+                ],
+                "futurePageField": "kept"
+            })),
+        )
+        .expect("map singer album page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:000MkMni19ClKG");
+        assert_eq!(page.items[0].name, "叶惠美");
+        assert_eq!(page.items[0].aliases, ["叶惠美 English"]);
+        assert_eq!(
+            page.items[0].artists[0]
+                .resource_ref
+                .as_ref()
+                .expect("singer")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(page.items[0].track_count, Some(11));
+        assert_eq!(page.items[0].kind.as_deref(), Some("录音室专辑"));
+        assert_eq!(page.items[0].extensions["numeric_id"], 8220);
+        assert_eq!(page.items[0].extensions["tags"], json!(["流行", "国语"]));
+        assert_eq!(
+            page.items[0].extensions["singer_album_entry"]["futureAlbumField"],
+            true
+        );
+        assert_eq!(page.pagination.total, Some(5));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["singer_mid"], "0025NhlN2yWrP4");
+        assert_eq!(page.pagination.extensions["upstream_returned"], 3);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(
+            page.pagination.extensions["data"]["futurePageField"],
+            "kept"
+        );
+
+        let empty = map_qq_singer_albums(
+            "0025NhlN2yWrP4",
+            10,
+            0,
+            response(json!({
+                "singerMid": "0025NhlN2yWrP4",
+                "total": 0,
+                "albumList": null
+            })),
+        )
+        .expect("null album list follows the upstream empty-list contract");
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.total, Some(0));
+        assert!(!empty.pagination.has_more);
+    }
+
+    #[test]
+    fn singer_album_mapping_rejects_malformed_identity_items_and_pagination() {
+        for (offset, data) in [
+            (0, json!({"total": 0, "albumList": []})),
+            (
+                0,
+                json!({"singerMid": "differentMid", "total": 0, "albumList": []}),
+            ),
+            (
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": "many", "albumList": []}),
+            ),
+            (
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": 1, "albumList": {}}),
+            ),
+            (
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": 1, "albumList": [{}]}),
+            ),
+            (
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": 1, "albumList": [
+                    sample_singer_album(8220, "unsafe/album", "叶惠美")
+                ]}),
+            ),
+            (
+                0,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": 1, "albumList": []}),
+            ),
+            (
+                1,
+                json!({"singerMid": "0025NhlN2yWrP4", "total": 1, "albumList": [
+                    sample_singer_album(8220, "000MkMni19ClKG", "叶惠美")
+                ]}),
+            ),
+        ] {
+            let error = map_qq_singer_albums("0025NhlN2yWrP4", 10, offset, response(data))
+                .expect_err("malformed singer album response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
     }
@@ -11719,6 +12069,7 @@ mod tests {
     async fn singer_homepage_validates_mids_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::ArtistDetail));
+        assert!(provider.capabilities().contains(&Capability::ArtistAlbums));
         assert!(provider.capabilities().contains(&Capability::ArtistTracks));
         for mid in ["", "unsafe/singer", "singer mid"] {
             let error = provider
@@ -11753,6 +12104,24 @@ mod tests {
             .artist_tracks("0025NhlN2yWrP4", &request)
             .await
             .expect_err("missing singer song account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        let mut albums = tuneweave_core::PageRequest {
+            limit: 0,
+            offset: 0,
+            account: None,
+        };
+        let error = provider
+            .artist_albums("0025NhlN2yWrP4", &albums)
+            .await
+            .expect_err("invalid singer album page size");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        albums.limit = 10;
+        albums.account = Some("missing-account".to_owned());
+        let error = provider
+            .artist_albums("0025NhlN2yWrP4", &albums)
+            .await
+            .expect_err("missing singer album account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
@@ -13026,6 +13395,52 @@ mod tests {
             .artist_tracks("0025NhlN2yWrP4", &ArtistTrackListRequest::new(2, 2))
             .await
             .expect("continued singer song page");
+        assert!(!continuation.items.is_empty());
+        assert_eq!(
+            continuation.items[0].resource_ref,
+            shifted.items[1].resource_ref
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_album_pages_preserve_exact_offsets_and_continuation() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let request = |offset| tuneweave_core::PageRequest {
+            limit: 2,
+            offset,
+            account: None,
+        };
+        let first = provider
+            .artist_albums("0025NhlN2yWrP4", &request(0))
+            .await
+            .expect("first singer album page");
+        assert_eq!(first.items.len(), 2);
+        assert!(first.pagination.total.is_some_and(|total| total > 2));
+        assert_eq!(first.pagination.next_offset, Some(2));
+        assert_eq!(first.pagination.extensions["singer_mid"], "0025NhlN2yWrP4");
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|album| album.platform == Platform::Qq)
+        );
+
+        let shifted = provider
+            .artist_albums("0025NhlN2yWrP4", &request(1))
+            .await
+            .expect("non-aligned singer album page");
+        assert_eq!(shifted.items.len(), 2);
+        assert_eq!(shifted.items[0].resource_ref, first.items[1].resource_ref);
+
+        let continuation = provider
+            .artist_albums("0025NhlN2yWrP4", &request(2))
+            .await
+            .expect("continued singer album page");
         assert!(!continuation.items.is_empty());
         assert_eq!(
             continuation.items[0].resource_ref,
