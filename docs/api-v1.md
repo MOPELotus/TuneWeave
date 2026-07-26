@@ -179,6 +179,8 @@
 
 歌手主页标签使用 `ArtistHomepageTab`，以 `kind=wiki|album|composer|lyricist|producer|arranger|musician|song|video` 区分内容，并显式返回 `page/limit/has_more/next_page`，不把平台原生页码伪装成偏移量。已知音乐资源分别进入强类型 `tracks/albums/videos`；百科等异构介绍块提升为带 `item_type/titles/texts` 的 `introduction`，平台完整动态块仍保留在单项扩展。`tabs` 保存平台提供的标签导航元数据，`need_show/order` 保留页面展示语义。
 
+相似歌手使用 `SimilarArtistList`，明确分离来源 `artist_ref`、`requested_limit` 和推荐 `artists`。平台只提供固定数量快照时不伪造 offset、total 或续页；平台实际过取的数据保存在列表扩展，统一结果仍遵守调用方上限。
+
 ### ArtistStats
 
 ```json
@@ -1065,6 +1067,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET/POST | `/v1/artists/details` | `refs`，或 `ids/mids + platform?`；`account?`；POST 接受字符串或数组 | 批量 `Artist[]`；限制同平台 1–100 项，保留输入顺序与重复项；QQ 使用原生批量详情协议 |
 | GET | `/v1/artists/{ref}` | `account?` | `Artist`；身份详情与分段传记，平台原始附加信息保留在扩展字段；QQ 使用歌手 MID 并保留主页计数及头图结构 |
 | GET | `/v1/artists/{ref}/tabs/{tab}` | `page?`、`limit?`（兼容 `num/page_size`）、`account?` | `ArtistHomepageTab`；`tab` 接受 `wiki|album|composer|lyricist|producer|arranger|musician|song|video` 及平台常用别名，音乐资源强类型返回，异构介绍保留稳定摘要与完整扩展 |
+| GET | `/v1/artists/{ref}/similar` | `limit?`（兼容 `number/num`，默认 10）、`account?` | `SimilarArtistList`；保留来源、请求数量与推荐顺序，不伪造分页 |
 | GET | `/v1/artists/{ref}/overview` | `account?` | `ArtistOverview`；歌手摘要、精选 `Track[]` 与是否仍有更多曲目 |
 | GET | `/v1/artists/{ref}/stats` | `account?` | `ArtistStats`；关注态、视频分类计数与在线演出计数 |
 | GET | `/v1/artists/{ref}/tracks` | `order=hot|time`、分页、`account?` | `Track[]`；默认按热度排序，完整平台曲目字段保留在单项扩展；QQ 上游只提供 hot，time 会明确拒绝 |

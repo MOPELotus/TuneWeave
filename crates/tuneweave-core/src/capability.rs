@@ -73,6 +73,7 @@ pub enum Capability {
     DimensionCharts,
     ArtistDetail,
     ArtistHomepageTabs,
+    SimilarArtists,
     ArtistOverview,
     ArtistStats,
     ArtistList,

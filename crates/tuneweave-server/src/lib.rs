@@ -73,20 +73,20 @@ use tuneweave_core::{
     ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector,
     SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
-    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement,
-    TrackIdentifierKind, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
-    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
-    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
-    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
-    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
-    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, SimilarArtistList,
+    SimilarArtistRequest, SingingAnnotationsAvailability, StreamBatch, StreamOutcome,
+    StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
+    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
+    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
+    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
+    UniPlaylistItemStream, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -319,6 +319,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/artists/{reference}", get(artist))
         .route("/artists/{reference}/tabs/{tab}", get(artist_homepage_tab))
+        .route("/artists/{reference}/similar", get(similar_artists))
         .route("/artists/{reference}/overview", get(artist_overview))
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
@@ -7123,6 +7124,44 @@ async fn artist_homepage_tab(
         )
         .await?;
     let mut response = ApiResponse::new(tab).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SimilarArtistParams {
+    #[serde(alias = "number", alias = "num")]
+    limit: Option<String>,
+    account: Option<String>,
+}
+
+async fn similar_artists(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<SimilarArtistParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SimilarArtistList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .similar_artists(
+            reference.id(),
+            &SimilarArtistRequest {
+                limit,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(list).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -15737,6 +15776,7 @@ mod tests {
                 Capability::AlbumDetail,
                 Capability::ArtistDetail,
                 Capability::ArtistHomepageTabs,
+                Capability::SimilarArtists,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -16096,6 +16136,50 @@ mod tests {
                 tracks,
                 albums,
                 videos,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn similar_artists(
+            &self,
+            id: &str,
+            request: &SimilarArtistRequest,
+        ) -> Result<SimilarArtistList> {
+            let artists = [
+                ("001fNHEf1SFEFN", "G.E.M. 邓紫棋"),
+                ("003Nz2So3XXYek", "林俊杰"),
+                ("002azErJ0UcDN6", "王力宏"),
+            ]
+            .into_iter()
+            .take(usize::try_from(request.limit).unwrap_or(usize::MAX))
+            .enumerate()
+            .map(|(index, (artist_id, name))| Artist {
+                resource_ref: ResourceRef::new(Platform::Qq, artist_id)
+                    .expect("valid similar QQ singer reference"),
+                platform: Platform::Qq,
+                id: artist_id.to_owned(),
+                name: name.to_owned(),
+                aliases: Vec::new(),
+                description: String::new(),
+                biography_sections: Vec::new(),
+                avatar_url: Some("https://example.test/qq-similar-singer.jpg".to_owned()),
+                cover_url: None,
+                album_count: None,
+                track_count: None,
+                mv_count: None,
+                video_count: None,
+                identities: Vec::new(),
+                extensions: Extensions::from([
+                    ("similarity_index".to_owned(), json!(index)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
+            })
+            .collect();
+            Ok(SimilarArtistList {
+                artist_ref: ResourceRef::new(Platform::Qq, id)
+                    .expect("valid source QQ singer reference"),
+                requested_limit: request.limit,
+                artists,
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
@@ -20128,6 +20212,61 @@ mod tests {
             "/v1/artists/details?refs=qq:0025NhlN2yWrP4,netease:6452",
             "/v1/artists/details?ids=0025NhlN2yWrP4&platform=unknown",
             "/v1/artists/details?ids=0025NhlN2yWrP4&unknown=true",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_similar_artists_use_reference_limit_account_and_strict_inputs() {
+        let app = test_app_with_import_providers();
+        let (status, list) = json_response_from(
+            app.clone(),
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?limit=2&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["data"]["artist_ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(list["data"]["requested_limit"], 2);
+        assert_eq!(
+            list["data"]["artists"]
+                .as_array()
+                .expect("similar artists")
+                .len(),
+            2
+        );
+        assert_eq!(list["data"]["artists"][0]["ref"], "qq:001fNHEf1SFEFN");
+        assert_eq!(list["data"]["artists"][0]["name"], "G.E.M. 邓紫棋");
+        assert_eq!(
+            list["data"]["artists"][0]["extensions"]["similarity_index"],
+            0
+        );
+        assert_eq!(list["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(list["meta"]["platform"], "qq");
+        assert_eq!(list["meta"]["account"], "green-vip");
+
+        let (status, alias) = json_response_from(
+            app.clone(),
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?number=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(alias["data"]["requested_limit"], 1);
+        assert_eq!(
+            alias["data"]["artists"]
+                .as_array()
+                .expect("alias list")
+                .len(),
+            1
+        );
+
+        for path in [
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?limit=0",
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?limit=101",
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?limit=two",
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?unknown=true",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

@@ -43,9 +43,9 @@ use crate::{
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
     ResolutionStatus, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest,
-    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    SearchSuggestionRequest, SearchTrendingList, SearchTrendingRequest, SimilarArtistList,
+    SimilarArtistRequest, SingingAnnotationsAvailability, StreamBatch, StreamOutcome,
+    StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement, TuneWeaveError, User,
     UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
@@ -678,6 +678,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistHomepageTabs,
+        ))
+    }
+
+    async fn similar_artists(
+        &self,
+        _id: &str,
+        _request: &SimilarArtistRequest,
+    ) -> Result<SimilarArtistList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SimilarArtists,
         ))
     }
 

@@ -2355,6 +2355,30 @@ pub struct ArtistHomepageTab {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SimilarArtistRequest {
+    pub limit: u32,
+    pub account: Option<String>,
+}
+
+impl SimilarArtistRequest {
+    #[must_use]
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SimilarArtistList {
+    pub artist_ref: ResourceRef,
+    pub requested_limit: u32,
+    pub artists: Vec<Artist>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -5280,6 +5304,27 @@ mod tests {
         assert_eq!(value["introduction"][0]["item_type"], 2);
         assert_eq!(value["introduction"][0]["titles"][0], "简介");
         assert_eq!(value["next_page"], Value::Null);
+    }
+
+    #[test]
+    fn similar_artist_contract_keeps_source_limit_and_results_distinct() {
+        let mut request = SimilarArtistRequest::new(10);
+        request.account = Some("green-vip".to_owned());
+        let request = serde_json::to_value(request).expect("serialize similar artist request");
+        assert_eq!(request["limit"], 10);
+        assert_eq!(request["account"], "green-vip");
+
+        let list = SimilarArtistList {
+            artist_ref: ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                .expect("valid source artist reference"),
+            requested_limit: 10,
+            artists: Vec::new(),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize similar artist list");
+        assert_eq!(value["artist_ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(value["requested_limit"], 10);
+        assert_eq!(value["artists"], Value::Array(Vec::new()));
     }
 
     #[test]

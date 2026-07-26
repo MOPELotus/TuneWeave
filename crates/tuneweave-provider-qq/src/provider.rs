@@ -26,10 +26,10 @@ use tuneweave_core::{
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
-    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -68,6 +68,8 @@ const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
 const SINGER_DESCRIPTION_MODULE: &str = "music.musichallSinger.SingerInfoInter";
 const SINGER_DESCRIPTION_METHOD: &str = "GetSingerDetail";
+const SIMILAR_SINGER_MODULE: &str = "music.SimilarSingerSvr";
+const SIMILAR_SINGER_METHOD: &str = "GetSimilarSingerList";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
@@ -1553,6 +1555,40 @@ struct QqSingerDescriptionResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSimilarSinger {
+    #[serde(default, rename = "singerId", deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(default, rename = "singerMid")]
+    mid: String,
+    #[serde(default, rename = "singerName")]
+    name: String,
+    #[serde(default, rename = "pic_mid")]
+    image_mid: String,
+    #[serde(default, rename = "singerPic")]
+    image_url: String,
+    #[serde(default)]
+    trace: String,
+    #[serde(default)]
+    abt: String,
+    #[serde(default)]
+    tf: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSimilarSingerResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singerlist: Vec<QqSimilarSinger>,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(default, rename = "errMsg")]
+    error_message: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqSingerSongEntry {
     #[serde(rename = "songInfo")]
@@ -1892,6 +1928,7 @@ impl MusicProvider for QqProvider {
             Capability::AlbumDetail,
             Capability::ArtistDetail,
             Capability::ArtistHomepageTabs,
+            Capability::SimilarArtists,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -2171,6 +2208,23 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer homepage tab request returned no response"))?;
         map_qq_singer_homepage_tab(id.trim(), request, response)
+    }
+
+    async fn similar_artists(
+        &self,
+        id: &str,
+        request: &SimilarArtistRequest,
+    ) -> Result<SimilarArtistList> {
+        self.validate_public_account(request.account.as_deref())?;
+        let request_api = qq_similar_singers_request(id, request.limit)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ similar singer request returned no response"))?;
+        map_qq_similar_singers(id.trim(), request.limit, response)
     }
 
     async fn artist_tracks(
@@ -4336,6 +4390,22 @@ fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_similar_singers_request(mid: &str, limit: u32) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ similar singer limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        SIMILAR_SINGER_MODULE,
+        SIMILAR_SINGER_METHOD,
+        json!({ "singerMid": mid, "number": limit }),
+    ))
+}
+
 fn qq_singer_homepage_tab_request(
     mid: &str,
     request: &ArtistHomepageTabRequest,
@@ -6413,6 +6483,126 @@ fn merge_qq_singer_description(homepage: &mut Artist, description: Artist) -> Re
             .map_err(|_| qq_data_error("failed to preserve merged QQ singer description"))?,
     );
     Ok(())
+}
+
+fn map_qq_similar_singers(
+    requested_mid: &str,
+    requested_limit: u32,
+    response: QqApiResponse,
+) -> Result<SimilarArtistList> {
+    validate_qq_media_id(requested_mid, "singer MID")?;
+    let raw_singers = match response.data.get("singerlist") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items.clone(),
+        Some(_) => {
+            return Err(qq_data_error(
+                "QQ similar singer response contains a malformed singer list",
+            ));
+        }
+    };
+    let data =
+        serde_json::from_value::<QqSimilarSingerResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ similar singer response is malformed: {error}"))
+        })?;
+    if data.code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            if data.error_message.trim().is_empty() {
+                format!("QQ similar singer request failed with code {}", data.code)
+            } else {
+                data.error_message.trim().to_owned()
+            },
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_code": data.code })));
+    }
+    if data.singerlist.len() != raw_singers.len() {
+        return Err(qq_data_error(
+            "QQ similar singer response could not preserve every raw item",
+        ));
+    }
+    let mut artists = data
+        .singerlist
+        .into_iter()
+        .zip(raw_singers)
+        .enumerate()
+        .map(|(index, (singer, raw))| {
+            let mid = singer.mid.trim();
+            validate_qq_media_id(mid, "similar singer MID")
+                .map_err(|_| qq_data_error("QQ similar singer returned an invalid MID"))?;
+            if singer.id <= 0 {
+                return Err(qq_data_error(
+                    "QQ similar singer is missing a positive numeric ID",
+                ));
+            }
+            let name = singer.name.trim();
+            if name.is_empty() {
+                return Err(qq_data_error(
+                    "QQ similar singer is missing its display name",
+                ));
+            }
+            let image_mid = [singer.image_mid.as_str(), mid]
+                .into_iter()
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+                .expect("validated similar singer MID provides an image fallback");
+            validate_qq_image_id(image_mid)
+                .map_err(|_| qq_data_error("QQ similar singer returned an invalid image MID"))?;
+            let avatar_url =
+                first_qq_display_url(&[(singer.image_url.as_str(), "similar singer picture")])?
+                    .or_else(|| Some(qq_cover_url("T001", image_mid)));
+            let mut extensions = Extensions::from([
+                ("numeric_id".to_owned(), json!(singer.id)),
+                ("similarity_index".to_owned(), json!(index)),
+                ("similar_singer".to_owned(), raw),
+            ]);
+            for (key, value) in [
+                ("image_mid", image_mid),
+                ("trace", singer.trace.trim()),
+                ("about", singer.abt.trim()),
+                ("tf", singer.tf.trim()),
+            ] {
+                if !value.is_empty() {
+                    extensions.insert(key.to_owned(), json!(value));
+                }
+            }
+            Ok(Artist {
+                resource_ref: qq_ref(mid, "similar singer")?,
+                platform: Platform::Qq,
+                id: mid.to_owned(),
+                name: name.to_owned(),
+                aliases: Vec::new(),
+                description: String::new(),
+                biography_sections: Vec::new(),
+                avatar_url,
+                cover_url: None,
+                album_count: None,
+                track_count: None,
+                mv_count: None,
+                video_count: None,
+                identities: Vec::new(),
+                extensions,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let upstream_returned = artists.len();
+    let logical_limit = usize::try_from(requested_limit).unwrap_or(usize::MAX);
+    if artists.len() > logical_limit {
+        artists.truncate(logical_limit);
+    }
+    let limit_applied = upstream_returned > artists.len();
+    Ok(SimilarArtistList {
+        artist_ref: qq_ref(requested_mid, "singer")?,
+        requested_limit,
+        artists,
+        extensions: Extensions::from([
+            ("platform_code".to_owned(), json!(data.code)),
+            ("error_message".to_owned(), json!(data.error_message)),
+            ("upstream_returned".to_owned(), json!(upstream_returned)),
+            ("limit_applied".to_owned(), json!(limit_applied)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
 }
 
 fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
@@ -10216,6 +10406,20 @@ mod tests {
         })
     }
 
+    fn sample_similar_singer(mid: &str, name: &str, id: i64) -> Value {
+        json!({
+            "singerId": id,
+            "singerMid": mid,
+            "singerName": name,
+            "pic_mid": format!("{mid}_1"),
+            "singerPic": "https://y.gtimg.cn/music/photo_new/T001R300x300M000similar.jpg",
+            "trace": "similarity-trace",
+            "abt": "相似创作歌手",
+            "tf": "recommendation-tag",
+            "futureSimilarField": true
+        })
+    }
+
     fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
         json!({
             "albumID": id,
@@ -11555,6 +11759,124 @@ mod tests {
             homepage.extensions["description_detail"]["extensions"]["numeric_id"],
             4558
         );
+    }
+
+    #[test]
+    fn similar_singer_request_preserves_mid_number_and_reference_method() {
+        let request =
+            qq_similar_singers_request(" 0025NhlN2yWrP4 ", 12).expect("similar singer request");
+        assert_eq!(request.module, SIMILAR_SINGER_MODULE);
+        assert_eq!(request.method, SIMILAR_SINGER_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"singerMid": "0025NhlN2yWrP4", "number": 12})
+        );
+        for (mid, limit) in [
+            ("", 10),
+            ("unsafe/singer", 10),
+            ("0025NhlN2yWrP4", 0),
+            ("0025NhlN2yWrP4", 101),
+        ] {
+            assert!(qq_similar_singers_request(mid, limit).is_err());
+        }
+    }
+
+    #[test]
+    fn similar_singer_mapping_keeps_identity_images_traces_and_raw_response() {
+        let data = json!({
+            "singerlist": [
+                sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13948),
+                sample_similar_singer("003Nz2So3XXYek", "林俊杰", 4286)
+            ],
+            "code": 0,
+            "errMsg": "",
+            "futureResponseField": true
+        });
+        let list = map_qq_similar_singers(
+            "0025NhlN2yWrP4",
+            2,
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "req_0": {"code": 0, "data": data}}),
+            },
+        )
+        .expect("map similar singers");
+        assert_eq!(list.artist_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(list.requested_limit, 2);
+        assert_eq!(list.artists.len(), 2);
+        assert_eq!(
+            list.artists[0].resource_ref.to_string(),
+            "qq:001fNHEf1SFEFN"
+        );
+        assert_eq!(list.artists[0].name, "G.E.M. 邓紫棋");
+        assert_eq!(list.artists[0].extensions["numeric_id"], 13_948);
+        assert_eq!(list.artists[0].extensions["similarity_index"], 0);
+        assert_eq!(list.artists[0].extensions["trace"], "similarity-trace");
+        assert_eq!(list.artists[0].extensions["about"], "相似创作歌手");
+        assert_eq!(
+            list.artists[0].extensions["similar_singer"]["futureSimilarField"],
+            true
+        );
+        assert!(
+            list.artists[0]
+                .avatar_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://"))
+        );
+        assert_eq!(list.extensions["platform_code"], 0);
+        assert_eq!(list.extensions["response"]["code"], 0);
+
+        let limited = map_qq_similar_singers(
+            "0025NhlN2yWrP4",
+            1,
+            response(json!({
+                "singerlist": [
+                    sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13948),
+                    sample_similar_singer("003Nz2So3XXYek", "林俊杰", 4286)
+                ],
+                "code": 0,
+                "errMsg": ""
+            })),
+        )
+        .expect("limit over-returned similar singers");
+        assert_eq!(limited.artists.len(), 1);
+        assert_eq!(limited.extensions["upstream_returned"], 2);
+        assert_eq!(limited.extensions["limit_applied"], true);
+
+        let empty = map_qq_similar_singers(
+            "0025NhlN2yWrP4",
+            10,
+            response(json!({"singerlist": null, "code": 0, "errMsg": ""})),
+        )
+        .expect("empty similar singer list");
+        assert!(empty.artists.is_empty());
+    }
+
+    #[test]
+    fn similar_singer_mapping_rejects_business_errors_and_malformed_items() {
+        let mut invalid_id = sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        invalid_id["singerId"] = json!(0);
+        let mut invalid_mid = sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        invalid_mid["singerMid"] = json!("unsafe/singer");
+        let mut missing_name = sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        missing_name["singerName"] = json!("");
+        let mut invalid_image = sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        invalid_image["pic_mid"] = json!("unsafe/image");
+        let mut unsafe_url = sample_similar_singer("001fNHEf1SFEFN", "G.E.M. 邓紫棋", 13_948);
+        unsafe_url["singerPic"] = json!("javascript:alert(1)");
+        for data in [
+            json!({"singerlist": [], "code": 1001, "errMsg": "平台拒绝"}),
+            json!({"singerlist": {}, "code": 0, "errMsg": ""}),
+            json!({"singerlist": [invalid_id], "code": 0, "errMsg": ""}),
+            json!({"singerlist": [invalid_mid], "code": 0, "errMsg": ""}),
+            json!({"singerlist": [missing_name], "code": 0, "errMsg": ""}),
+            json!({"singerlist": [invalid_image], "code": 0, "errMsg": ""}),
+            json!({"singerlist": [unsafe_url], "code": 0, "errMsg": ""}),
+        ] {
+            let error = map_qq_similar_singers("0025NhlN2yWrP4", 10, response(data))
+                .expect_err("malformed similar singer response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
     }
 
     #[test]
@@ -14618,6 +14940,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn similar_singers_validate_mids_limits_accounts_and_capability_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SimilarArtists)
+        );
+        for (mid, limit) in [
+            ("unsafe/singer", 10),
+            ("0025NhlN2yWrP4", 0),
+            ("0025NhlN2yWrP4", 101),
+        ] {
+            let error = provider
+                .similar_artists(mid, &SimilarArtistRequest::new(limit))
+                .await
+                .expect_err("invalid similar singer request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let mut request = SimilarArtistRequest::new(10);
+        request.account = Some("missing-account".to_owned());
+        let error = provider
+            .similar_artists("0025NhlN2yWrP4", &request)
+            .await
+            .expect_err("missing similar singer account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn mv_catalog_validates_page_sizes_filters_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::VideoCatalog));
@@ -15943,6 +16293,48 @@ mod tests {
         }
         assert_eq!(artists[0].resource_ref, artists[2].resource_ref);
         assert_eq!(artists[0].name, artists[2].name);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_similar_singers_return_stable_identities_images_and_requested_limit() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let list = provider
+            .similar_artists("0025NhlN2yWrP4", &SimilarArtistRequest::new(3))
+            .await
+            .expect("similar singers");
+        assert_eq!(list.artist_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(list.requested_limit, 3);
+        assert!(!list.artists.is_empty());
+        assert!(list.artists.len() <= 3);
+        for (index, artist) in list.artists.iter().enumerate() {
+            assert_eq!(artist.platform, Platform::Qq);
+            assert!(!artist.id.is_empty());
+            assert!(!artist.name.is_empty());
+            assert_eq!(artist.extensions["similarity_index"], index);
+            assert!(
+                artist.extensions["numeric_id"]
+                    .as_i64()
+                    .is_some_and(|id| id > 0)
+            );
+            assert!(
+                artist
+                    .avatar_url
+                    .as_deref()
+                    .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"))
+            );
+        }
+        assert_eq!(list.extensions["platform_code"], 0);
+        assert!(
+            list.extensions["upstream_returned"]
+                .as_u64()
+                .is_some_and(|count| count > 3)
+        );
+        assert_eq!(list.extensions["limit_applied"], true);
     }
 
     #[tokio::test]
