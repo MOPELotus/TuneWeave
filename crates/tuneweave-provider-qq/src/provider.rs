@@ -61,6 +61,8 @@ const RECOMMENDATION_PLAYLIST_MODULE: &str = "music.playlist.PlaylistSquare";
 const RECOMMENDATION_PLAYLIST_METHOD: &str = "GetRecommendFeed";
 const RECOMMENDATION_NEW_TRACK_MODULE: &str = "newsong.NewSongServer";
 const RECOMMENDATION_NEW_TRACK_METHOD: &str = "get_new_song_info";
+const RECOMMENDATION_GUESS_MODULE: &str = "music.radioProxy.MbTrackRadioSvr";
+const RECOMMENDATION_GUESS_METHOD: &str = "get_radio_track";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -892,6 +894,67 @@ struct QqRecommendationNewTrackResponse {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     tags: Vec<QqRecommendationNewTrackTag>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationGuessReasonTag {
+    #[serde(rename = "RecReasonTemplate")]
+    template: String,
+    #[serde(
+        rename = "RecReasons",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    reasons: Vec<Value>,
+    #[serde(rename = "RecType", deserialize_with = "deserialize_qq_i64")]
+    type_code: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationGuessExtra {
+    #[serde(default)]
+    ext: BTreeMap<String, Value>,
+    reason: String,
+    rectag: QqRecommendationGuessReasonTag,
+    title: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationGuessCountdown {
+    #[serde(rename = "CountdownTime", deserialize_with = "deserialize_qq_i64")]
+    countdown_time: i64,
+    #[serde(rename = "Entrance", deserialize_with = "deserialize_qq_i64")]
+    entrance: i64,
+    #[serde(rename = "Ext")]
+    extension: Value,
+    #[serde(rename = "ISJoinExp", deserialize_with = "deserialize_qq_bool")]
+    joined_experiment: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationGuessResponse {
+    abt: String,
+    bg_pic_url: String,
+    bg_video_url: String,
+    count_down_time: QqRecommendationGuessCountdown,
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    extras: Vec<QqRecommendationGuessExtra>,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    name: String,
+    slogan: String,
+    tjreport: String,
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    tracks: Vec<Value>,
+    video_cards: BTreeMap<String, Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3192,16 +3255,37 @@ impl MusicProvider for QqProvider {
     }
 
     async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {
-        let api_request = qq_recommendation_new_track_request(request)?;
-        self.validate_public_account(request.account.as_deref())?;
-        let response = self
-            .client
-            .request_android(&[api_request])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ recommended new tracks returned no response"))?;
-        map_qq_recommendation_new_tracks(request, response)
+        match request.source {
+            RecommendationSource::Daily | RecommendationSource::NewReleases => {
+                let api_request = qq_recommendation_new_track_request(request)?;
+                self.validate_public_account(request.account.as_deref())?;
+                let response = self
+                    .client
+                    .request_android(&[api_request])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        qq_data_error("QQ recommended new tracks returned no response")
+                    })?;
+                map_qq_recommendation_new_tracks(request, response)
+            }
+            RecommendationSource::Personalized => {
+                let api_request = qq_recommendation_guess_request(request)?;
+                let credential =
+                    self.qq_optional_personalized_credential(request.account.as_deref())?;
+                let response = self
+                    .client
+                    .request_android_with_credential(&[api_request], credential.as_ref())
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        qq_data_error("QQ guess recommendations returned no response")
+                    })?;
+                map_qq_guess_recommendations(request, response)
+            }
+        }
     }
 
     async fn recommended_playlists(
@@ -4938,6 +5022,27 @@ impl QqProvider {
         Ok(Some(credential))
     }
 
+    fn qq_optional_personalized_credential(
+        &self,
+        account: Option<&str>,
+    ) -> Result<Option<QqCredential>> {
+        if let Some(account) = account {
+            let account = account.trim();
+            if account.is_empty() {
+                return Err(
+                    TuneWeaveError::invalid_request("QQ account alias cannot be empty")
+                        .with_platform(Platform::Qq),
+                );
+            }
+            return self.qq_credential(Some(account));
+        }
+        match self.qq_credential(Some("default")) {
+            Ok(credential) => Ok(credential),
+            Err(error) if error.code == ErrorCode::AuthenticationRequired => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn remove_qq_credential(&self, account: &str) -> Result<bool> {
         let account = account.trim();
         let store = self.credential_store.as_ref().ok_or_else(|| {
@@ -6069,6 +6174,201 @@ fn validate_qq_recommendation_new_track_metadata(
         }
         if !tag.link.trim().is_empty() {
             validate_qq_recommendation_scheme(&tag.link)?;
+        }
+    }
+    Ok(())
+}
+
+fn qq_recommendation_guess_request(request: &RecommendationRequest) -> Result<QqApiRequest> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ guess recommendation limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.source != RecommendationSource::Personalized {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ guess recommendations require the personalized source",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "source": request.source })));
+    }
+    if request.offset != 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ guess recommendations do not expose stable offset pagination",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.area_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ guess recommendations do not expose an area filter",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        RECOMMENDATION_GUESS_MODULE,
+        RECOMMENDATION_GUESS_METHOD,
+        json!({"id": 99, "num": 5, "from": 0, "scene": 0, "song_ids": []}),
+    ))
+}
+
+fn map_qq_guess_recommendations(
+    request: &RecommendationRequest,
+    response: QqApiResponse,
+) -> Result<Page<Track>> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqRecommendationGuessResponse>(response_data).map_err(
+        |error| {
+            qq_data_error(format!(
+                "QQ guess recommendation response is malformed: {error}"
+            ))
+        },
+    )?;
+    validate_qq_guess_recommendation_metadata(&parsed)?;
+    if parsed.tracks.len() > 5 {
+        return Err(qq_data_error(
+            "QQ guess recommendation response exceeded its fixed snapshot size",
+        ));
+    }
+    if !parsed.extras.is_empty() && parsed.extras.len() != parsed.tracks.len() {
+        return Err(qq_data_error(
+            "QQ guess recommendation reasons are not aligned with tracks",
+        ));
+    }
+
+    let total = parsed.tracks.len();
+    let take = total.min(usize::try_from(request.limit).unwrap_or(usize::MAX));
+    let mut items = Vec::with_capacity(take);
+    for (index, raw) in parsed.tracks.into_iter().take(take).enumerate() {
+        let published_at = nonempty_string(raw.get("time_public"));
+        let mut track = map_track(raw)?;
+        track.extensions.remove("search_item");
+        insert_some(&mut track.extensions, "published_at", published_at);
+        if let Some(reason) = parsed.extras.get(index) {
+            let reason_template = normalized_qq_text(&reason.rectag.template);
+            let general_reason = normalized_qq_text(&reason.reason);
+            let title = normalized_qq_text(&reason.title);
+            let preferred_reason = [&reason_template, &general_reason, &title]
+                .into_iter()
+                .find_map(|value| value.clone())
+                .unwrap_or_default();
+            track.extensions.insert(
+                "recommendation".to_owned(),
+                json!({
+                    "source": RecommendationSource::Personalized,
+                    "reason": preferred_reason,
+                    "reason_template": reason_template,
+                    "general_reason": general_reason,
+                    "title": title,
+                    "reason_type": reason.rectag.type_code,
+                    "reasons": reason.rectag.reasons,
+                    "metadata": reason,
+                }),
+            );
+        } else {
+            track.extensions.insert(
+                "recommendation".to_owned(),
+                json!({"source": RecommendationSource::Personalized}),
+            );
+        }
+        items.push(track);
+    }
+
+    let countdown = serde_json::to_value(&parsed.count_down_time)
+        .map_err(|_| qq_data_error("failed to preserve QQ guess recommendation countdown"))?;
+    let extras = serde_json::to_value(&parsed.extras)
+        .map_err(|_| qq_data_error("failed to preserve QQ guess recommendation reasons"))?;
+    let returned = items.len();
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: 0,
+            total: Some(
+                u64::try_from(total)
+                    .map_err(|_| qq_data_error("QQ guess recommendation total overflowed"))?,
+            ),
+            next_offset: None,
+            has_more: false,
+            extensions: Extensions::from([
+                (
+                    "source".to_owned(),
+                    json!(RecommendationSource::Personalized),
+                ),
+                ("snapshot_size".to_owned(), json!(total)),
+                ("limit_applied".to_owned(), Value::Bool(returned < total)),
+                ("continuation_supported".to_owned(), Value::Bool(false)),
+                ("refresh_requested".to_owned(), Value::Bool(request.refresh)),
+                ("catalog_id".to_owned(), json!(parsed.id)),
+                ("name".to_owned(), json!(parsed.name)),
+                ("slogan".to_owned(), json!(parsed.slogan)),
+                ("experiment".to_owned(), json!(parsed.abt)),
+                ("reporting".to_owned(), json!(parsed.tjreport)),
+                (
+                    "background_image_url".to_owned(),
+                    json!(first_qq_display_url(&[(
+                        &parsed.bg_pic_url,
+                        "guess recommendation background image",
+                    )])?),
+                ),
+                (
+                    "background_video_url".to_owned(),
+                    json!(first_qq_display_url(&[(
+                        &parsed.bg_video_url,
+                        "guess recommendation background video",
+                    )])?),
+                ),
+                ("countdown".to_owned(), countdown),
+                ("reasons".to_owned(), extras),
+                ("video_cards".to_owned(), json!(parsed.video_cards)),
+                ("extra".to_owned(), json!(parsed.extra)),
+                ("response".to_owned(), response_raw),
+            ]),
+        },
+    })
+}
+
+fn validate_qq_guess_recommendation_metadata(
+    response: &QqRecommendationGuessResponse,
+) -> Result<()> {
+    if response.id != 99 {
+        return Err(qq_data_error(
+            "QQ guess recommendation response returned a different catalog ID",
+        ));
+    }
+    if response.name.trim().is_empty()
+        || response.name.len() > 256
+        || response.name.chars().any(char::is_control)
+    {
+        return Err(qq_data_error(
+            "QQ guess recommendation response has an invalid catalog name",
+        ));
+    }
+    for (value, context, max_len) in [
+        (&response.slogan, "slogan", 8_192),
+        (&response.abt, "experiment metadata", 32_768),
+        (&response.tjreport, "reporting metadata", 8_192),
+    ] {
+        if value.len() > max_len || value.chars().any(char::is_control) {
+            return Err(qq_data_error(format!(
+                "QQ guess recommendation response has invalid {context}"
+            )));
+        }
+    }
+    for reason in &response.extras {
+        for (value, context) in [
+            (&reason.reason, "reason"),
+            (&reason.rectag.template, "reason template"),
+            (&reason.title, "reason title"),
+        ] {
+            if value.len() > 8_192 || value.chars().any(char::is_control) {
+                return Err(qq_data_error(format!(
+                    "QQ guess recommendation response has an invalid {context}"
+                )));
+            }
         }
     }
     Ok(())
@@ -23803,6 +24103,230 @@ mod tests {
     }
 
     #[test]
+    fn guess_recommendation_request_keeps_fixed_snapshot_and_rejects_fake_pagination() {
+        let request = qq_recommendation_guess_request(&RecommendationRequest {
+            source: RecommendationSource::Personalized,
+            refresh: true,
+            ..RecommendationRequest::new(3, 0)
+        })
+        .expect("QQ guess recommendation request");
+        assert_eq!(request.module, RECOMMENDATION_GUESS_MODULE);
+        assert_eq!(request.method, RECOMMENDATION_GUESS_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"id": 99, "num": 5, "from": 0, "scene": 0, "song_ids": []})
+        );
+
+        for request in [
+            RecommendationRequest::new(3, 0),
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(0, 0)
+            },
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(101, 0)
+            },
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(3, 1)
+            },
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                area_id: Some(5),
+                ..RecommendationRequest::new(3, 0)
+            },
+        ] {
+            let error = qq_recommendation_guess_request(&request)
+                .err()
+                .expect("unsupported QQ guess recommendation request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    fn guess_recommendation_fixture(tracks: Vec<Value>, extras: Vec<Value>) -> Value {
+        json!({
+            "abt": "experiment",
+            "bg_pic_url": "",
+            "bg_video_url": "",
+            "count_down_time": {
+                "CountdownTime": 0,
+                "Entrance": 0,
+                "Ext": null,
+                "ISJoinExp": false
+            },
+            "extras": extras,
+            "id": 99,
+            "name": "猜你喜欢",
+            "slogan": "为你推荐",
+            "tjreport": "report",
+            "tracks": tracks,
+            "video_cards": {},
+            "futureResponseField": true
+        })
+    }
+
+    #[test]
+    fn guess_recommendation_mapping_prefers_rich_reason_and_preserves_fixed_snapshot() {
+        let mut first = sample_track(101, "001guessTrack01", "第一首");
+        first["time_public"] = json!("2026-07-26");
+        let data = guess_recommendation_fixture(
+            vec![first, sample_track(102, "001guessTrack02", "第二首")],
+            vec![
+                json!({
+                    "ext": {"Pay_status": "0"},
+                    "reason": "普通推荐理由",
+                    "rectag": {
+                        "RecReasonTemplate": "更具体的推荐理由",
+                        "RecReasons": [{"kind": "genre", "name": "流行"}],
+                        "RecType": 1,
+                        "futureReasonTagField": true
+                    },
+                    "title": "备用标题",
+                    "futureReasonField": true
+                }),
+                json!({
+                    "ext": {},
+                    "reason": "第二首理由",
+                    "rectag": {
+                        "RecReasonTemplate": "",
+                        "RecReasons": [],
+                        "RecType": 2
+                    },
+                    "title": ""
+                }),
+            ],
+        );
+        let page = map_qq_guess_recommendations(
+            &RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                refresh: true,
+                ..RecommendationRequest::new(1, 0)
+            },
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ guess recommendations");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:001guessTrack01");
+        assert_eq!(page.items[0].extensions["published_at"], "2026-07-26");
+        assert_eq!(
+            page.items[0].extensions["recommendation"]["reason"],
+            "更具体的推荐理由"
+        );
+        assert_eq!(
+            page.items[0].extensions["recommendation"]["general_reason"],
+            "普通推荐理由"
+        );
+        assert_eq!(
+            page.items[0].extensions["recommendation"]["reasons"][0]["kind"],
+            "genre"
+        );
+        assert_eq!(page.pagination.total, Some(2));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["source"], "personalized");
+        assert_eq!(page.pagination.extensions["snapshot_size"], 2);
+        assert_eq!(page.pagination.extensions["limit_applied"], true);
+        assert_eq!(page.pagination.extensions["continuation_supported"], false);
+        assert_eq!(page.pagination.extensions["refresh_requested"], true);
+        assert_eq!(
+            page.pagination.extensions["reasons"][0]["rectag"]["futureReasonTagField"],
+            true
+        );
+        assert_eq!(
+            page.pagination.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn guess_recommendation_mapping_rejects_malformed_identity_alignment_and_urls() {
+        let track = || sample_track(101, "001guessTrack01", "歌曲");
+        let reason = || {
+            json!({
+                "ext": {},
+                "reason": "推荐",
+                "rectag": {
+                    "RecReasonTemplate": "具体推荐",
+                    "RecReasons": [],
+                    "RecType": 1
+                },
+                "title": ""
+            })
+        };
+        let mut fixtures = vec![json!({})];
+        let mut wrong_id = guess_recommendation_fixture(vec![track()], vec![reason()]);
+        wrong_id["id"] = json!(100);
+        fixtures.push(wrong_id);
+        let mismatched = guess_recommendation_fixture(
+            vec![track(), sample_track(102, "001guessTrack02", "第二首")],
+            vec![reason()],
+        );
+        fixtures.push(mismatched);
+        let oversized = guess_recommendation_fixture(
+            (0_u64..6)
+                .map(|index| sample_track(200 + index, &format!("001guessTrack{index:02}"), "歌曲"))
+                .collect(),
+            Vec::new(),
+        );
+        fixtures.push(oversized);
+        let mut unsafe_background = guess_recommendation_fixture(vec![track()], vec![reason()]);
+        unsafe_background["bg_pic_url"] = json!("javascript:alert(1)");
+        fixtures.push(unsafe_background);
+        let invalid_track =
+            guess_recommendation_fixture(vec![json!({"id": 101, "title": ""})], vec![reason()]);
+        fixtures.push(invalid_track);
+        let mut invalid_reason = guess_recommendation_fixture(vec![track()], vec![reason()]);
+        invalid_reason["extras"][0]["rectag"]["RecReasonTemplate"] = json!("bad\nreason");
+        fixtures.push(invalid_reason);
+
+        for fixture in fixtures {
+            let error = map_qq_guess_recommendations(
+                &RecommendationRequest {
+                    source: RecommendationSource::Personalized,
+                    ..RecommendationRequest::new(5, 0)
+                },
+                response(fixture),
+            )
+            .expect_err("invalid QQ guess recommendation response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn guess_recommendations_validate_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(5, 0)
+            })
+            .await
+            .expect_err("missing QQ guess recommendation account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(5, 1)
+            })
+            .await
+            .expect_err("invalid QQ guess recommendation request");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            provider
+                .qq_optional_personalized_credential(None)
+                .expect("implicit default can fall back to anonymous"),
+            None
+        );
+    }
+
+    #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
             "List": [{
@@ -24723,6 +25247,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_anonymous_guess_recommendations_preserve_rich_reasons() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let page = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                refresh: true,
+                ..RecommendationRequest::new(3, 0)
+            })
+            .await
+            .expect("live anonymous QQ guess recommendations");
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.pagination.total, Some(5));
+        assert_eq!(page.pagination.next_offset, None);
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["catalog_id"], 99);
+        assert_eq!(page.pagination.extensions["name"], "猜你喜欢");
+        assert_eq!(page.pagination.extensions["refresh_requested"], true);
+        assert!(page.items.iter().all(|track| {
+            !track.name.is_empty()
+                && track.extensions["recommendation"]["source"] == "personalized"
+                && track.extensions["recommendation"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty())
+        }));
+        assert!(
+            page.items.iter().all(|track| {
+                track.extensions["recommendation"]["reason"]
+                    == track.extensions["recommendation"]["reason_template"]
+                    || track.extensions["recommendation"]["reason_template"] == ""
+            }),
+            "the richer reason template must not be covered by the generic reason"
+        );
     }
 
     #[tokio::test]
