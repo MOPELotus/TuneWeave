@@ -2776,6 +2776,10 @@ impl MusicProvider for NeteaseProvider {
                 "NetEase track recommendations do not expose the new_releases source yet",
             )
             .with_platform(Platform::Netease)),
+            RecommendationSource::Radar => Err(TuneWeaveError::invalid_request(
+                "NetEase track recommendations do not support the radar source",
+            )
+            .with_platform(Platform::Netease)),
         }
     }
 
@@ -2797,6 +2801,10 @@ impl MusicProvider for NeteaseProvider {
             }
             RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
                 "NetEase playlist recommendations do not support the new_releases source",
+            )
+            .with_platform(Platform::Netease)),
+            RecommendationSource::Radar => Err(TuneWeaveError::invalid_request(
+                "NetEase playlist recommendations do not support the radar source",
             )
             .with_platform(Platform::Netease)),
         }
@@ -5263,6 +5271,10 @@ fn netease_track_recommendation_request(
             "NetEase track recommendations do not expose the new_releases source yet",
         )
         .with_platform(Platform::Netease)),
+        RecommendationSource::Radar => Err(TuneWeaveError::invalid_request(
+            "NetEase track recommendations do not support the radar source",
+        )
+        .with_platform(Platform::Netease)),
     }
 }
 
@@ -5278,6 +5290,10 @@ fn netease_playlist_recommendation_request(
         )),
         RecommendationSource::NewReleases => Err(TuneWeaveError::invalid_request(
             "NetEase playlist recommendations do not support the new_releases source",
+        )
+        .with_platform(Platform::Netease)),
+        RecommendationSource::Radar => Err(TuneWeaveError::invalid_request(
+            "NetEase playlist recommendations do not support the radar source",
         )
         .with_platform(Platform::Netease)),
     }

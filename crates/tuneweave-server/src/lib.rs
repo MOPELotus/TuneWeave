@@ -9059,6 +9059,9 @@ fn parse_recommendation_source(
         Some("new_releases" | "new-releases" | "new" | "latest") => {
             Ok(RecommendationSource::NewReleases)
         }
+        Some("radar" | "radar_recommendations" | "radar-recommendations") => {
+            Ok(RecommendationSource::Radar)
+        }
         Some(value) => Err(TuneWeaveError::invalid_request(format!(
             "unsupported recommendation source: {value}",
         ))),
@@ -26943,6 +26946,17 @@ mod tests {
         );
         assert_eq!(new_releases["data"][0]["extensions"]["area_id"], 5);
         assert!(new_releases["meta"]["account"].is_null());
+
+        let (status, radar) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/tracks?platform=netease&source=radar&limit=3&offset=8",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(radar["data"][0]["extensions"]["source"], "radar");
+        assert_eq!(radar["meta"]["pagination"]["limit"], 3);
+        assert_eq!(radar["meta"]["pagination"]["offset"], 8);
+        assert!(radar["meta"]["account"].is_null());
 
         let (status, playlists) = json_response_from(
             test_app_with_provider(),

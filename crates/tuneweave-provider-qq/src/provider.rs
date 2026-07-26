@@ -63,6 +63,9 @@ const RECOMMENDATION_NEW_TRACK_MODULE: &str = "newsong.NewSongServer";
 const RECOMMENDATION_NEW_TRACK_METHOD: &str = "get_new_song_info";
 const RECOMMENDATION_GUESS_MODULE: &str = "music.radioProxy.MbTrackRadioSvr";
 const RECOMMENDATION_GUESS_METHOD: &str = "get_radio_track";
+const RECOMMENDATION_RADAR_MODULE: &str = "music.recommend.TrackRelationServer";
+const RECOMMENDATION_RADAR_METHOD: &str = "GetRadarSong";
+const RECOMMENDATION_RADAR_PAGE_SIZE: u32 = 10;
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -957,6 +960,73 @@ struct QqRecommendationGuessResponse {
     video_cards: BTreeMap<String, Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct QqRecommendationRadarOtherResponse {
+    #[serde(rename = "BlockCountdownTime")]
+    countdown: QqRecommendationGuessCountdown,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationRadarTrack {
+    #[serde(rename = "Abt")]
+    experiment: String,
+    #[serde(rename = "Ext", default)]
+    ext: BTreeMap<String, Value>,
+    #[serde(rename = "RadioRecTag")]
+    reason: QqRecommendationGuessReasonTag,
+    #[serde(rename = "Tj")]
+    reporting: String,
+    #[serde(rename = "Trace")]
+    trace: String,
+    #[serde(rename = "Track")]
+    track: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationRadarResponse {
+    #[serde(
+        rename = "BaseSongIds",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    base_song_ids: Vec<u64>,
+    #[serde(rename = "Ext", default)]
+    ext: BTreeMap<String, Value>,
+    #[serde(rename = "HasMore", deserialize_with = "deserialize_qq_bool")]
+    has_more: bool,
+    #[serde(
+        rename = "RadarSongOtherRsps",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    other_responses: Vec<QqRecommendationRadarOtherResponse>,
+    #[serde(
+        rename = "RecommendSongIds",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    recommend_song_ids: Vec<u64>,
+    #[serde(rename = "TimeStamp", deserialize_with = "deserialize_qq_u64")]
+    timestamp: u64,
+    #[serde(rename = "Toast")]
+    toast: String,
+    #[serde(rename = "VecSongs", deserialize_with = "deserialize_qq_vec_or_empty")]
+    tracks: Vec<QqRecommendationRadarTrack>,
+    #[serde(rename = "VideoCards", default)]
+    video_cards: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug)]
+struct MappedQqRadarPage {
+    tracks: Vec<Track>,
+    has_more: bool,
+    context: Value,
+    response: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3273,7 +3343,7 @@ impl MusicProvider for QqProvider {
             RecommendationSource::Personalized => {
                 let api_request = qq_recommendation_guess_request(request)?;
                 let credential =
-                    self.qq_optional_personalized_credential(request.account.as_deref())?;
+                    self.qq_optional_recommendation_credential(request.account.as_deref())?;
                 let response = self
                     .client
                     .request_android_with_credential(&[api_request], credential.as_ref())
@@ -3285,6 +3355,7 @@ impl MusicProvider for QqProvider {
                     })?;
                 map_qq_guess_recommendations(request, response)
             }
+            RecommendationSource::Radar => self.qq_radar_recommendations(request).await,
         }
     }
 
@@ -5022,7 +5093,7 @@ impl QqProvider {
         Ok(Some(credential))
     }
 
-    fn qq_optional_personalized_credential(
+    fn qq_optional_recommendation_credential(
         &self,
         account: Option<&str>,
     ) -> Result<Option<QqCredential>> {
@@ -5041,6 +5112,105 @@ impl QqProvider {
             Err(error) if error.code == ErrorCode::AuthenticationRequired => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    async fn qq_radar_recommendations(
+        &self,
+        request: &RecommendationRequest,
+    ) -> Result<Page<Track>> {
+        let start_page = request
+            .offset
+            .checked_div(RECOMMENDATION_RADAR_PAGE_SIZE)
+            .and_then(|page| page.checked_add(1))
+            .ok_or_else(|| qq_data_error("QQ radar recommendation page overflowed"))?;
+        let mut api_request = qq_recommendation_radar_request(request, start_page)?;
+        let credential = self.qq_optional_recommendation_credential(request.account.as_deref())?;
+        let mut page_number = start_page;
+        let mut first_page_skip = usize::try_from(request.offset % RECOMMENDATION_RADAR_PAGE_SIZE)
+            .map_err(|_| qq_data_error("QQ radar recommendation offset overflowed"))?;
+        let mut remaining = usize::try_from(request.limit)
+            .map_err(|_| qq_data_error("QQ radar recommendation limit overflowed"))?;
+        let mut items = Vec::with_capacity(remaining);
+        let mut contexts = Vec::new();
+        let mut responses = Vec::new();
+        let has_more = loop {
+            let response = self
+                .client
+                .request_android_with_credential(&[api_request], credential.as_ref())
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| qq_data_error("QQ radar recommendations returned no response"))?;
+            let mapped = map_qq_radar_recommendation_page(page_number, response)?;
+            let page_len = mapped.tracks.len();
+            let start = first_page_skip.min(page_len);
+            let available = page_len.saturating_sub(start);
+            let take = available.min(remaining);
+            let end = start
+                .checked_add(take)
+                .ok_or_else(|| qq_data_error("QQ radar recommendation window overflowed"))?;
+            let has_unconsumed_tracks = end < page_len;
+            items.extend(mapped.tracks.into_iter().skip(start).take(take));
+            remaining = remaining.saturating_sub(take);
+            contexts.push(mapped.context);
+            responses.push(mapped.response);
+
+            if remaining == 0 {
+                break has_unconsumed_tracks || mapped.has_more;
+            }
+            if !mapped.has_more {
+                break false;
+            }
+            page_number = page_number
+                .checked_add(1)
+                .ok_or_else(|| qq_data_error("QQ radar recommendation page overflowed"))?;
+            first_page_skip = 0;
+            api_request = qq_recommendation_radar_request(request, page_number)?;
+        };
+
+        let returned = u32::try_from(items.len())
+            .map_err(|_| qq_data_error("QQ radar recommendation result count overflowed"))?;
+        if has_more && returned == 0 {
+            return Err(qq_data_error(
+                "QQ radar recommendation pagination did not make progress",
+            ));
+        }
+        let next_offset = if has_more {
+            Some(
+                request
+                    .offset
+                    .checked_add(returned)
+                    .ok_or_else(|| qq_data_error("QQ radar recommendation offset overflowed"))?,
+            )
+        } else {
+            None
+        };
+        let pages_fetched = u32::try_from(contexts.len())
+            .map_err(|_| qq_data_error("QQ radar recommendation page count overflowed"))?;
+
+        Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: None,
+                next_offset,
+                has_more,
+                extensions: Extensions::from([
+                    ("source".to_owned(), json!(RecommendationSource::Radar)),
+                    (
+                        "upstream_page_size".to_owned(),
+                        json!(RECOMMENDATION_RADAR_PAGE_SIZE),
+                    ),
+                    ("start_page".to_owned(), json!(start_page)),
+                    ("end_page".to_owned(), json!(page_number)),
+                    ("pages_fetched".to_owned(), json!(pages_fetched)),
+                    ("continuation_supported".to_owned(), Value::Bool(true)),
+                    ("contexts".to_owned(), Value::Array(contexts)),
+                    ("responses".to_owned(), Value::Array(responses)),
+                ]),
+            },
+        })
     }
 
     fn remove_qq_credential(&self, account: &str) -> Result<bool> {
@@ -6367,6 +6537,203 @@ fn validate_qq_guess_recommendation_metadata(
             if value.len() > 8_192 || value.chars().any(char::is_control) {
                 return Err(qq_data_error(format!(
                     "QQ guess recommendation response has an invalid {context}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn qq_recommendation_radar_request(
+    request: &RecommendationRequest,
+    page: u32,
+) -> Result<QqApiRequest> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ radar recommendation limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.source != RecommendationSource::Radar {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ radar recommendations require the radar source",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "source": request.source })));
+    }
+    if request.refresh {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ radar recommendations do not expose a refresh branch",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.area_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ radar recommendations do not expose an area filter",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if page == 0 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ radar recommendation page must be positive",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        RECOMMENDATION_RADAR_MODULE,
+        RECOMMENDATION_RADAR_METHOD,
+        json!({
+            "Page": page,
+            "ReqType": 0,
+            "FavSongs": [],
+            "EntranceSongs": []
+        }),
+    ))
+}
+
+fn map_qq_radar_recommendation_page(
+    page: u32,
+    response: QqApiResponse,
+) -> Result<MappedQqRadarPage> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqRecommendationRadarResponse>(response_data).map_err(
+        |error| {
+            qq_data_error(format!(
+                "QQ radar recommendation response is malformed: {error}"
+            ))
+        },
+    )?;
+    validate_qq_radar_recommendation_metadata(page, &parsed)?;
+
+    let QqRecommendationRadarResponse {
+        base_song_ids,
+        ext,
+        has_more,
+        other_responses,
+        recommend_song_ids,
+        timestamp,
+        toast,
+        tracks: raw_tracks,
+        video_cards,
+        extra,
+    } = parsed;
+    let mut tracks = Vec::with_capacity(raw_tracks.len());
+    for (index, wrapper) in raw_tracks.into_iter().enumerate() {
+        let QqRecommendationRadarTrack {
+            experiment,
+            ext,
+            reason,
+            reporting,
+            trace,
+            track: raw_track,
+            extra,
+        } = wrapper;
+        let published_at = nonempty_string(raw_track.get("time_public"));
+        let mut track = map_track(raw_track)?;
+        track.extensions.remove("search_item");
+        let numeric_id = qq_track_numeric_id(&track)?;
+        if recommend_song_ids.get(index).copied() != Some(numeric_id) {
+            return Err(qq_data_error(
+                "QQ radar recommendation song IDs are not aligned with tracks",
+            ));
+        }
+        insert_some(&mut track.extensions, "published_at", published_at);
+        let reason_template = normalized_qq_text(&reason.template);
+        track.extensions.insert(
+            "recommendation".to_owned(),
+            json!({
+                "source": RecommendationSource::Radar,
+                "reason": reason_template.clone().unwrap_or_default(),
+                "reason_template": reason_template,
+                "reason_type": reason.type_code,
+                "reasons": reason.reasons,
+                "reason_metadata": reason.extra,
+                "experiment": experiment,
+                "reporting": reporting,
+                "trace": trace,
+                "ext": ext,
+                "extra": extra
+            }),
+        );
+        tracks.push(track);
+    }
+
+    let context = json!({
+        "page": page,
+        "base_song_ids": base_song_ids,
+        "recommend_song_ids": recommend_song_ids,
+        "has_more": has_more,
+        "timestamp": timestamp,
+        "toast": toast,
+        "other_responses": other_responses,
+        "video_cards": video_cards,
+        "ext": ext,
+        "extra": extra
+    });
+    Ok(MappedQqRadarPage {
+        tracks,
+        has_more,
+        context,
+        response: response_raw,
+    })
+}
+
+fn validate_qq_radar_recommendation_metadata(
+    page: u32,
+    response: &QqRecommendationRadarResponse,
+) -> Result<()> {
+    if page == 0 {
+        return Err(qq_data_error(
+            "QQ radar recommendation response used an invalid page",
+        ));
+    }
+    if response.tracks.len() > usize::try_from(RECOMMENDATION_RADAR_PAGE_SIZE).unwrap_or(usize::MAX)
+    {
+        return Err(qq_data_error(
+            "QQ radar recommendation response exceeded its fixed page size",
+        ));
+    }
+    if response.recommend_song_ids.len() != response.tracks.len() {
+        return Err(qq_data_error(
+            "QQ radar recommendation song IDs are not aligned with tracks",
+        ));
+    }
+    if response.has_more
+        && response.tracks.len()
+            != usize::try_from(RECOMMENDATION_RADAR_PAGE_SIZE).unwrap_or(usize::MAX)
+    {
+        return Err(qq_data_error(
+            "QQ radar recommendation continuation page has an unstable size",
+        ));
+    }
+    if response
+        .recommend_song_ids
+        .iter()
+        .chain(&response.base_song_ids)
+        .any(|song_id| *song_id == 0)
+    {
+        return Err(qq_data_error(
+            "QQ radar recommendation response contains a zero song ID",
+        ));
+    }
+    if response.toast.len() > 8_192 || response.toast.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ radar recommendation response has an invalid toast",
+        ));
+    }
+    for wrapper in &response.tracks {
+        for (value, context, max_len) in [
+            (&wrapper.experiment, "experiment metadata", 32_768),
+            (&wrapper.reporting, "reporting metadata", 8_192),
+            (&wrapper.trace, "trace metadata", 65_536),
+            (&wrapper.reason.template, "reason template", 8_192),
+        ] {
+            if value.len() > max_len || value.chars().any(char::is_control) {
+                return Err(qq_data_error(format!(
+                    "QQ radar recommendation response has invalid {context}"
                 )));
             }
         }
@@ -24320,10 +24687,224 @@ mod tests {
         assert_eq!(invalid.code, ErrorCode::InvalidRequest);
         assert_eq!(
             provider
-                .qq_optional_personalized_credential(None)
+                .qq_optional_recommendation_credential(None)
                 .expect("implicit default can fall back to anonymous"),
             None
         );
+    }
+
+    #[test]
+    fn radar_recommendation_request_preserves_native_page_and_rejects_unsupported_branches() {
+        let request = RecommendationRequest {
+            source: RecommendationSource::Radar,
+            ..RecommendationRequest::new(25, 17)
+        };
+        let api_request =
+            qq_recommendation_radar_request(&request, 2).expect("QQ radar recommendation request");
+        assert_eq!(api_request.module, RECOMMENDATION_RADAR_MODULE);
+        assert_eq!(api_request.method, RECOMMENDATION_RADAR_METHOD);
+        assert_eq!(
+            api_request.param,
+            json!({
+                "Page": 2,
+                "ReqType": 0,
+                "FavSongs": [],
+                "EntranceSongs": []
+            })
+        );
+
+        for (request, page) in [
+            (RecommendationRequest::new(10, 0), 1),
+            (
+                RecommendationRequest {
+                    source: RecommendationSource::Radar,
+                    ..RecommendationRequest::new(0, 0)
+                },
+                1,
+            ),
+            (
+                RecommendationRequest {
+                    source: RecommendationSource::Radar,
+                    ..RecommendationRequest::new(101, 0)
+                },
+                1,
+            ),
+            (
+                RecommendationRequest {
+                    source: RecommendationSource::Radar,
+                    refresh: true,
+                    ..RecommendationRequest::new(10, 0)
+                },
+                1,
+            ),
+            (
+                RecommendationRequest {
+                    source: RecommendationSource::Radar,
+                    area_id: Some(5),
+                    ..RecommendationRequest::new(10, 0)
+                },
+                1,
+            ),
+            (
+                RecommendationRequest {
+                    source: RecommendationSource::Radar,
+                    ..RecommendationRequest::new(10, 0)
+                },
+                0,
+            ),
+        ] {
+            let error = qq_recommendation_radar_request(&request, page)
+                .err()
+                .expect("unsupported QQ radar recommendation request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    fn radar_recommendation_fixture(
+        tracks: Vec<Value>,
+        recommend_song_ids: Vec<u64>,
+        has_more: bool,
+    ) -> Value {
+        json!({
+            "BaseSongIds": [11, 12],
+            "Ext": {"experiment": "radar"},
+            "HasMore": has_more,
+            "RadarSongOtherRsps": [{
+                "BlockCountdownTime": {
+                    "CountdownTime": 0,
+                    "Entrance": 0,
+                    "Ext": null,
+                    "ISJoinExp": false
+                },
+                "futureOtherField": true
+            }],
+            "RecommendSongIds": recommend_song_ids,
+            "TimeStamp": 1_753_524_000,
+            "Toast": "根据您的收藏发现了歌曲",
+            "VecSongs": tracks.into_iter().enumerate().map(|(index, track)| {
+                json!({
+                    "Abt": format!("experiment-{index}"),
+                    "Ext": {"position": index},
+                    "RadioRecTag": {
+                        "RecReasonTemplate": format!("推荐理由 {index}"),
+                        "RecReasons": [{"kind": "favorite"}],
+                        "RecType": 1,
+                        "futureReasonField": true
+                    },
+                    "Tj": format!("report-{index}"),
+                    "Trace": format!("trace-{index}"),
+                    "Track": track,
+                    "futureTrackWrapperField": true
+                })
+            }).collect::<Vec<_>>(),
+            "VideoCards": {},
+            "futureResponseField": true
+        })
+    }
+
+    #[test]
+    fn radar_recommendation_mapping_keeps_identity_reason_and_page_context() {
+        let mut first = sample_track(101, "001radarTrack01", "第一首");
+        first["time_public"] = json!("2026-07-26");
+        let data = radar_recommendation_fixture(
+            vec![first, sample_track(102, "001radarTrack02", "第二首")],
+            vec![101, 102],
+            false,
+        );
+        let mapped = map_qq_radar_recommendation_page(
+            3,
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ radar recommendations");
+        assert_eq!(mapped.tracks.len(), 2);
+        assert!(!mapped.has_more);
+        assert_eq!(
+            mapped.tracks[0].resource_ref.to_string(),
+            "qq:001radarTrack01"
+        );
+        assert_eq!(mapped.tracks[0].extensions["published_at"], "2026-07-26");
+        assert_eq!(
+            mapped.tracks[0].extensions["recommendation"]["source"],
+            "radar"
+        );
+        assert_eq!(
+            mapped.tracks[0].extensions["recommendation"]["reason"],
+            "推荐理由 0"
+        );
+        assert_eq!(
+            mapped.tracks[0].extensions["recommendation"]["reason_metadata"]["futureReasonField"],
+            true
+        );
+        assert_eq!(
+            mapped.tracks[0].extensions["recommendation"]["extra"]["futureTrackWrapperField"],
+            true
+        );
+        assert!(!mapped.tracks[0].extensions.contains_key("search_item"));
+        assert_eq!(mapped.context["page"], 3);
+        assert_eq!(mapped.context["recommend_song_ids"], json!([101, 102]));
+        assert_eq!(mapped.context["base_song_ids"], json!([11, 12]));
+        assert_eq!(
+            mapped.context["other_responses"][0]["futureOtherField"],
+            true
+        );
+        assert_eq!(mapped.response["data"]["futureResponseField"], true);
+    }
+
+    #[test]
+    fn radar_recommendation_mapping_rejects_unstable_or_misaligned_pages() {
+        let track = || sample_track(101, "001radarTrack01", "歌曲");
+        let mut fixtures = vec![json!({})];
+        fixtures.push(radar_recommendation_fixture(vec![track()], vec![101], true));
+        fixtures.push(radar_recommendation_fixture(
+            vec![track()],
+            Vec::new(),
+            false,
+        ));
+        fixtures.push(radar_recommendation_fixture(
+            vec![track()],
+            vec![102],
+            false,
+        ));
+        let mut zero_id = radar_recommendation_fixture(vec![track()], vec![0], false);
+        zero_id["BaseSongIds"] = json!([]);
+        fixtures.push(zero_id);
+        let mut invalid_reason = radar_recommendation_fixture(vec![track()], vec![101], false);
+        invalid_reason["VecSongs"][0]["RadioRecTag"]["RecReasonTemplate"] = json!("bad\nreason");
+        fixtures.push(invalid_reason);
+
+        for fixture in fixtures {
+            let error = map_qq_radar_recommendation_page(1, response(fixture))
+                .expect_err("invalid QQ radar recommendation response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn radar_recommendations_validate_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Radar,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(10, 0)
+            })
+            .await
+            .expect_err("missing QQ radar recommendation account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Radar,
+                limit: 0,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(10, 0)
+            })
+            .await
+            .expect_err("invalid QQ radar recommendation request");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -25287,6 +25868,53 @@ mod tests {
             }),
             "the richer reason template must not be covered by the generic reason"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_anonymous_radar_recommendations_cross_native_page_boundary() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let page = provider
+            .recommended_tracks(&RecommendationRequest {
+                source: RecommendationSource::Radar,
+                ..RecommendationRequest::new(3, 8)
+            })
+            .await
+            .expect("live anonymous QQ radar recommendations");
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.pagination.offset, 8);
+        assert_eq!(page.pagination.next_offset, Some(11));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["source"], "radar");
+        assert_eq!(page.pagination.extensions["start_page"], 1);
+        assert_eq!(page.pagination.extensions["end_page"], 2);
+        assert_eq!(page.pagination.extensions["pages_fetched"], 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            page.items.len()
+        );
+        assert!(
+            page.items.iter().all(|track| {
+                !track.name.is_empty()
+                    && track.extensions["recommendation"]["source"] == "radar"
+                    && track.extensions["recommendation"]["reason"]
+                        == track.extensions["recommendation"]["reason_template"]
+            }),
+            "the radar reason template must be preserved without a lower-priority override"
+        );
+        assert!(page.items.iter().any(|track| {
+            track.extensions["recommendation"]["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        }));
     }
 
     #[tokio::test]
