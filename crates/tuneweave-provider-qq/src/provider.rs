@@ -39,8 +39,9 @@ use tuneweave_core::{
     SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SimilarTrackSection,
     SimilarTrackSectionKind, SingingAnnotationsAvailability, StoredAccountCredential,
     StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    TrackIdentifierKind, TrackLabel, TrackLabelList, TrialWindow, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -69,6 +70,7 @@ const RECOMMENDATION_RADAR_METHOD: &str = "GetRadarSong";
 const RECOMMENDATION_RADAR_PAGE_SIZE: u32 = 10;
 const SIMILAR_TRACK_MODULE: &str = "music.recommend.TrackRelationServer";
 const SIMILAR_TRACK_METHOD: &str = "GetSimilarSongs";
+const TRACK_LABEL_METHOD: &str = "GetSongLabels";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1077,6 +1079,34 @@ struct QqSimilarTrackResponse {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     groups: Vec<QqSimilarTrackGroup>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTrackLabel {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(rename = "tagTxt")]
+    text: String,
+    #[serde(rename = "tagIcon")]
+    icon_url: String,
+    #[serde(rename = "tagUrl")]
+    action_url: String,
+    #[serde(rename = "tagType", deserialize_with = "deserialize_qq_u64")]
+    label_type: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    species: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqTrackLabelResponse {
+    #[serde(default)]
+    abt: String,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    labels: Vec<QqTrackLabel>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3259,6 +3289,7 @@ impl MusicProvider for QqProvider {
             Capability::ArtistHomepageTabs,
             Capability::SimilarArtists,
             Capability::SimilarTracks,
+            Capability::TrackLabels,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3704,6 +3735,18 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ similar track request returned no response"))?;
         map_qq_similar_tracks(id.trim(), song_id, request.limit_per_section, response)
+    }
+
+    async fn track_labels(&self, id: &str, account: Option<&str>) -> Result<TrackLabelList> {
+        let (_, song_id) = self.resolve_lyric_song_id(id, account).await?;
+        let response = self
+            .client
+            .request_android(&[qq_track_labels_request(song_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ track label request returned no response"))?;
+        map_qq_track_labels(id.trim(), song_id, response)
     }
 
     async fn artist_tracks(
@@ -7035,6 +7078,108 @@ fn validate_qq_similar_track_metadata(response: &QqSimilarTrackResponse) -> Resu
                     "QQ similar track response has invalid {context}"
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+fn qq_track_labels_request(song_id: u64) -> QqApiRequest {
+    QqApiRequest::new(
+        SIMILAR_TRACK_MODULE,
+        TRACK_LABEL_METHOD,
+        json!({"songid": song_id}),
+    )
+}
+
+fn map_qq_track_labels(
+    requested_id: &str,
+    song_id: u64,
+    response: QqApiResponse,
+) -> Result<TrackLabelList> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqTrackLabelResponse>(response_data)
+        .map_err(|error| qq_data_error(format!("QQ track label response is malformed: {error}")))?;
+    validate_qq_track_label_response(&parsed)?;
+    let QqTrackLabelResponse { abt, labels, extra } = parsed;
+    let labels = labels
+        .into_iter()
+        .map(|label| {
+            let raw = serde_json::to_value(&label)
+                .map_err(|_| qq_data_error("failed to preserve QQ track label"))?;
+            let QqTrackLabel {
+                id,
+                text,
+                icon_url,
+                action_url,
+                label_type,
+                species,
+                extra,
+            } = label;
+            let text = normalized_qq_text(&text);
+            let icon_url = first_qq_display_url(&[(&icon_url, "track label icon")])?;
+            let action_url = normalized_qq_text(&action_url)
+                .map(|action| validate_qq_recommendation_scheme(&action))
+                .transpose()?;
+            Ok(TrackLabel {
+                id: id.to_string(),
+                text,
+                icon_url,
+                action_url,
+                platform_type: Some(label_type.to_string()),
+                platform_category: Some(species.to_string()),
+                extensions: Extensions::from([
+                    ("numeric_id".to_owned(), json!(id)),
+                    ("numeric_type".to_owned(), json!(label_type)),
+                    ("numeric_category".to_owned(), json!(species)),
+                    ("extra".to_owned(), json!(extra)),
+                    ("raw".to_owned(), raw),
+                ]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TrackLabelList {
+        track_ref: qq_ref(requested_id, "track label source")?,
+        labels,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("experiment".to_owned(), json!(abt)),
+            ("continuation_supported".to_owned(), Value::Bool(false)),
+            ("extra".to_owned(), json!(extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn validate_qq_track_label_response(response: &QqTrackLabelResponse) -> Result<()> {
+    if response.labels.len() > 100 {
+        return Err(qq_data_error(
+            "QQ track label response exceeded its safe item bound",
+        ));
+    }
+    if response.abt.len() > 65_536 || response.abt.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ track label response has invalid experiment metadata",
+        ));
+    }
+    for label in &response.labels {
+        if label.text.len() > 32_768
+            || label
+                .text
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err(qq_data_error(
+                "QQ track label response has invalid display text",
+            ));
+        }
+        if !label.icon_url.trim().is_empty() {
+            first_qq_display_url(&[(&label.icon_url, "track label icon")])?;
+        }
+        if !label.action_url.trim().is_empty() {
+            validate_qq_recommendation_scheme(&label.action_url)?;
         }
     }
     Ok(())
@@ -25394,6 +25539,135 @@ mod tests {
     }
 
     #[test]
+    fn track_label_request_and_mapping_preserve_zero_ids_multiline_text_and_empty_display_fields() {
+        let request = qq_track_labels_request(97773);
+        assert_eq!(request.module, SIMILAR_TRACK_MODULE);
+        assert_eq!(request.method, TRACK_LABEL_METHOD);
+        assert_eq!(request.param, json!({"songid": 97773}));
+
+        let data = json!({
+            "abt": "label-experiment",
+            "labels": [
+                {
+                    "id": 2400,
+                    "species": 3,
+                    "tagIcon": "https://y.qq.com/icon.png",
+                    "tagTxt": "",
+                    "tagType": 24,
+                    "tagUrl": "",
+                    "futureLabelField": true
+                },
+                {
+                    "id": 0,
+                    "species": 2,
+                    "tagIcon": "",
+                    "tagTxt": "奖项一（2003）\n奖项二（2005）",
+                    "tagType": 0,
+                    "tagUrl": "https://y.qq.com/award"
+                },
+                {
+                    "id": 195,
+                    "species": 1,
+                    "tagIcon": "",
+                    "tagTxt": "QQ音乐巅峰榜获奖",
+                    "tagType": 6,
+                    "tagUrl": "qqmusic://qq.com/ui/toplist?p=%7B%22id%22%3A%2262%22%7D"
+                }
+            ],
+            "futureResponseField": true
+        });
+        let list = map_qq_track_labels(
+            "0039MnYb0qxYhV",
+            97773,
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ track labels");
+        assert_eq!(list.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(list.labels.len(), 3);
+        assert_eq!(list.labels[0].id, "2400");
+        assert_eq!(list.labels[0].text, None);
+        assert_eq!(
+            list.labels[0].icon_url.as_deref(),
+            Some("https://y.qq.com/icon.png")
+        );
+        assert_eq!(list.labels[0].extensions["raw"]["futureLabelField"], true);
+        assert_eq!(list.labels[1].id, "0");
+        assert_eq!(
+            list.labels[1].text.as_deref(),
+            Some("奖项一（2003）\n奖项二（2005）")
+        );
+        assert_eq!(list.labels[1].platform_type.as_deref(), Some("0"));
+        assert_eq!(list.labels[1].platform_category.as_deref(), Some("2"));
+        assert_eq!(
+            list.labels[2].action_url.as_deref(),
+            Some("qqmusic://qq.com/ui/toplist?p=%7B%22id%22%3A%2262%22%7D")
+        );
+        assert_eq!(list.extensions["numeric_id"], 97773);
+        assert_eq!(list.extensions["experiment"], "label-experiment");
+        assert_eq!(list.extensions["continuation_supported"], false);
+        assert_eq!(
+            list.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+
+        let empty = map_qq_track_labels("97773", 97773, response(json!({})))
+            .expect("missing labels follow the reference empty-list behavior");
+        assert!(empty.labels.is_empty());
+    }
+
+    #[test]
+    fn track_label_mapping_rejects_malformed_fields_unsafe_urls_and_disallowed_controls() {
+        let valid = || {
+            json!({
+                "labels": [{
+                    "id": 0,
+                    "species": 8,
+                    "tagIcon": "",
+                    "tagTxt": "传唱TOP100",
+                    "tagType": 0,
+                    "tagUrl": ""
+                }]
+            })
+        };
+        let mut fixtures = vec![json!({"labels": {}})];
+        let mut missing_species = valid();
+        missing_species["labels"][0]
+            .as_object_mut()
+            .expect("label object")
+            .remove("species");
+        fixtures.push(missing_species);
+        let mut unsafe_icon = valid();
+        unsafe_icon["labels"][0]["tagIcon"] = json!("javascript:alert(1)");
+        fixtures.push(unsafe_icon);
+        let mut unsafe_action = valid();
+        unsafe_action["labels"][0]["tagUrl"] = json!("file:///secret");
+        fixtures.push(unsafe_action);
+        let mut invalid_text = valid();
+        invalid_text["labels"][0]["tagTxt"] = json!("bad\u{0}label");
+        fixtures.push(invalid_text);
+
+        for fixture in fixtures {
+            let error = map_qq_track_labels("97773", 97773, response(fixture))
+                .expect_err("invalid QQ track label response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn track_labels_require_an_exact_named_account_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::TrackLabels));
+        let missing = provider
+            .track_labels("97773", Some("missing-account"))
+            .await
+            .expect_err("missing QQ track label account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
             "List": [{
@@ -26457,6 +26731,35 @@ mod tests {
                             && track.extensions["similarity"]["source_song_id"] == 97773
                     })
             );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_track_labels_preserve_display_only_and_taxonomy_only_items_for_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let list = provider
+                .track_labels(id, None)
+                .await
+                .unwrap_or_else(|error| panic!("live QQ track labels for {id}: {error}"));
+            assert_eq!(list.track_ref.to_string(), format!("qq:{id}"));
+            assert_eq!(list.extensions["numeric_id"], 97773);
+            assert_eq!(list.extensions["continuation_supported"], false);
+            assert!(!list.labels.is_empty());
+            assert!(list.labels.iter().any(|label| label.id == "0"));
+            assert!(list.labels.iter().any(|label| {
+                label.text.is_none() && label.icon_url.as_deref().is_some_and(|url| !url.is_empty())
+            }));
+            assert!(list.labels.iter().all(|label| {
+                label.platform_type.is_some()
+                    && label.platform_category.is_some()
+                    && label.extensions["raw"].is_object()
+            }));
         }
     }
 

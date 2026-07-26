@@ -82,7 +82,7 @@ use tuneweave_core::{
     StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement,
-    TrackIdentifierKind, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
+    TrackIdentifierKind, TrackLabelList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
     UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
     UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
     UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
@@ -283,6 +283,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks", get(tracks_get).post(tracks_post))
         .route("/tracks/{reference}", get(track))
         .route("/tracks/{reference}/similar", get(similar_tracks))
+        .route("/tracks/{reference}/labels", get(track_labels))
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7421,6 +7422,12 @@ struct SimilarTrackParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackLabelParams {
+    account: Option<String>,
+}
+
 async fn similar_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -7445,6 +7452,26 @@ async fn similar_tracks(
         )
         .await?;
     let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_labels(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackLabelParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<TrackLabelList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let labels = provider
+        .track_labels(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(labels).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -13391,7 +13418,7 @@ mod tests {
         DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
         PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
         RadioPlaybackItem, RadioStyle, RadioStyleSource, Result, SearchQuery, SimilarTrackSection,
-        SimilarTrackSectionKind, StreamRequest, VideoResolution,
+        SimilarTrackSectionKind, StreamRequest, TrackLabel, VideoResolution,
     };
 
     use super::*;
@@ -16957,6 +16984,7 @@ mod tests {
                 Capability::ArtistHomepageTabs,
                 Capability::SimilarArtists,
                 Capability::SimilarTracks,
+                Capability::TrackLabels,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17398,6 +17426,34 @@ mod tests {
                     },
                 ],
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn track_labels(&self, id: &str, account: Option<&str>) -> Result<TrackLabelList> {
+            Ok(TrackLabelList {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid QQ track label source reference"),
+                labels: vec![
+                    TrackLabel {
+                        id: "0".to_owned(),
+                        text: Some("传唱TOP100".to_owned()),
+                        icon_url: None,
+                        action_url: Some("https://y.qq.com/toplist".to_owned()),
+                        platform_type: Some("0".to_owned()),
+                        platform_category: Some("8".to_owned()),
+                        extensions: Extensions::new(),
+                    },
+                    TrackLabel {
+                        id: "2400".to_owned(),
+                        text: None,
+                        icon_url: Some("https://y.qq.com/icon.png".to_owned()),
+                        action_url: None,
+                        platform_type: Some("24".to_owned()),
+                        platform_category: Some("3".to_owned()),
+                        extensions: Extensions::new(),
+                    },
+                ],
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
 
@@ -21582,6 +21638,36 @@ mod tests {
             "/v1/tracks/qq:97773/similar?limit=two",
             "/v1/tracks/qq:97773/similar?unknown=true",
             "/v1/tracks/not-a-reference/similar",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_track_labels_preserve_zero_ids_optional_display_fields_and_strict_inputs() {
+        let app = test_app_with_import_providers();
+        let (status, labels) =
+            json_response_from(app.clone(), "/v1/tracks/qq:97773/labels?account=green-vip").await;
+        assert_eq!(status, StatusCode::OK, "{labels}");
+        assert_eq!(labels["data"]["track_ref"], "qq:97773");
+        assert_eq!(labels["data"]["labels"][0]["id"], "0");
+        assert_eq!(labels["data"]["labels"][0]["text"], "传唱TOP100");
+        assert_eq!(labels["data"]["labels"][0]["platform_type"], "0");
+        assert_eq!(labels["data"]["labels"][0]["platform_category"], "8");
+        assert_eq!(labels["data"]["labels"][1]["text"], Value::Null);
+        assert_eq!(
+            labels["data"]["labels"][1]["icon_url"],
+            "https://y.qq.com/icon.png"
+        );
+        assert_eq!(labels["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(labels["meta"]["platform"], "qq");
+        assert_eq!(labels["meta"]["account"], "green-vip");
+
+        for path in [
+            "/v1/tracks/qq:97773/labels?unknown=true",
+            "/v1/tracks/not-a-reference/labels",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

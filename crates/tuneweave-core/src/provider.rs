@@ -50,9 +50,9 @@ use crate::{
     SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
     StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest, VideoTaxonomyRequest,
+    TrackLabelList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -735,6 +735,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SimilarTracks,
+        ))
+    }
+
+    async fn track_labels(&self, _id: &str, _account: Option<&str>) -> Result<TrackLabelList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::TrackLabels,
         ))
     }
 

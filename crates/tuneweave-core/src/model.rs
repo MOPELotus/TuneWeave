@@ -2741,6 +2741,24 @@ pub struct SimilarTrackList {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackLabel {
+    pub id: String,
+    pub text: Option<String>,
+    pub icon_url: Option<String>,
+    pub action_url: Option<String>,
+    pub platform_type: Option<String>,
+    pub platform_category: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackLabelList {
+    pub track_ref: ResourceRef,
+    pub labels: Vec<TrackLabel>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
     pub count: u64,
@@ -5839,6 +5857,41 @@ mod tests {
             value["sections"][1]["title_template"],
             "听「{String}」的也在听"
         );
+    }
+
+    #[test]
+    fn track_label_contract_keeps_platform_taxonomy_and_optional_display_fields_distinct() {
+        let list = TrackLabelList {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid source track reference"),
+            labels: vec![
+                TrackLabel {
+                    id: "0".to_owned(),
+                    text: Some("传唱TOP100".to_owned()),
+                    icon_url: None,
+                    action_url: Some("https://y.qq.com/toplist".to_owned()),
+                    platform_type: Some("0".to_owned()),
+                    platform_category: Some("8".to_owned()),
+                    extensions: Extensions::new(),
+                },
+                TrackLabel {
+                    id: "2400".to_owned(),
+                    text: None,
+                    icon_url: Some("https://y.qq.com/icon.png".to_owned()),
+                    action_url: None,
+                    platform_type: Some("24".to_owned()),
+                    platform_category: Some("3".to_owned()),
+                    extensions: Extensions::new(),
+                },
+            ],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize track label list");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["labels"][0]["id"], "0");
+        assert_eq!(value["labels"][0]["platform_category"], "8");
+        assert_eq!(value["labels"][1]["text"], Value::Null);
+        assert_eq!(value["labels"][1]["icon_url"], "https://y.qq.com/icon.png");
     }
 
     #[test]
