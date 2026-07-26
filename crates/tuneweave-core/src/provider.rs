@@ -595,6 +595,19 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn set_album_subscriptions(
+        &self,
+        ids: &[String],
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<Vec<SubscriptionResult>> {
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.set_album_subscription(id, subscribed, account).await?);
+        }
+        Ok(results)
+    }
+
     async fn digital_album(&self, _id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

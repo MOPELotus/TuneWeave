@@ -1321,6 +1321,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 | GET | `/v1/account` | `platform`、`account?` | 脱敏账户资料与权益摘要 |
 | GET | `/v1/account/playlists` | `platform`、`account?`、分页 | `Playlist[]` |
 | GET | `/v1/account/library/albums` | `platform`、`account?`、分页 | 已收藏的 `Album[]`；收藏时间保留在条目扩展，付费专辑计数等保留在分页扩展 |
+| PUT | `/v1/account/library/albums` | JSON `{refs|ids, platform?, account?}`；`refs` 接完整专辑引用，`ids` 与 `platform` 配合，单项、数组和逗号列表均可 | 批量收藏 `SubscriptionResult[]`；顺序与重复项不丢失，同一批次只允许一个平台 |
 | GET | `/v1/account/library/radio-stations` | `platform`、`account?`、分页；`catalog=broadcast|styled`、`sources?` | 已收藏的 `RadioStation[]`；缺省为普通广播，`styled`/`difm` 返回 DiFM 风格频道收藏 |
 | GET | `/v1/account/library/podcasts` | `platform`、`account?`、分页 | 已订阅的 `Podcast[]`；列表身份明确使 `subscribed=true`，完整平台条目与分页响应保留在扩展 |
 | GET | `/v1/account/following/artists` | `platform`、`account?`、分页 | 已关注的 `Artist[]`；关注时间和平台原始资料保留在条目扩展 |
@@ -1390,6 +1391,8 @@ QQ 喜欢歌曲使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET
 QQ 的公开用户歌单目录保持两种身份边界：`GET /v1/users/qq:<numeric-uin>/playlists/created` 调用 `PlaylistBaseRead/GetPlaylistByUin`，只接受正整数 UIN，并在完整取得上游创建目录后应用统一 offset/limit；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 调用 `PlaylistFavRead/CgiGetPlaylistFavInfo`，把目标加密 UIN、offset 和 size 原样提交。两端的 `account` 都只是可选查看者会话，省略时不会被改写为 `default` 或强制要求本地账户。条目明确标记 created/favorite 与 subscribed 状态，删除/失败 ID、隐藏/完成标记、总数和完整响应均保留。2026-07-26 已从公开歌单 `qq:7039749142` 动态取得其创建者两类标识，并通过 provider 与 release HTTP 真实验证两个匿名目录分支：创建目录总数 6137，收藏目录合法返回空目录。
 
 QQ 收藏专辑统一为当前账户与指定用户两个视图：`GET /v1/account/library/albums?platform=qq&account=...` 从精确 `(qq, account)` 凭据读取加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/albums` 直接使用目标用户标识，并允许独立的可选查看者 `account`。两端都固定调用 Android `music.musicasset.AlbumFavRead/CgiGetAlbumFavInfo`，把 `offset/limit` 原样提交为 `offset/size`，不会先换算整页。专辑优先以 MID 建立稳定引用并保留数字 ID、名称/标题/译名、封面 MID、曲数、发行/收藏时间戳、状态、位置、完整歌手和未知字段；平台 `hasmore/total` 同时驱动真实续页，矛盾标志、零进度、超页、畸形身份或必需字段会明确失败。目标加密 UIN 不会被参考项目的占位凭据替换。2026-07-26 provider 已真实验证匿名公开用户的合法空目录响应；当前账户非空成功态待登录账户联合验收。
+
+QQ 专辑收藏写入通过普通 Android `music.musicasset.AlbumFavWrite/FavAlbum` 完成。单项 `PUT /v1/account/library/albums/qq:<numeric-id>` 与批量 `PUT /v1/account/library/albums` 使用同一批量实现；批量体可提交完整 `refs`，也可提交 `platform=qq` 与 `ids`，保留原始顺序和重复项并一次发送 `v_albumId`。专辑 ID 必须是正整数，输入在账户读取和网络访问前完成校验；凭据严格取自所选 `(qq, account)`。只有包络码与强类型 `result` 同时为零且 `v_failedAlbumId` 为空才返回成功，部分失败、未知失败 ID、缺字段或畸形响应不会被误报为已收藏。取消收藏仍由独立 Q052 收口后启用，避免半完成的写能力被能力目录提前宣告。
 
 QQ 收藏 MV 同样保留当前账户和指定用户两种视图：`GET /v1/account/library/videos?platform=qq&account=...` 使用所选账户自身的加密 UIN；`GET /v1/users/qq:<encrypted-uin>/favorites/videos?account=...` 使用路径中的目标用户，但因上游明确要求登录，查看者 `account` 必须显式给出。两端固定调用 Android `music.musicasset.MVFavRead/getMyFavMV_v2`，精确提交 `encuin/pagesize/num`，其中 `num` 是零基页。统一任意 `offset/limit` 会用相同物理页宽读取至多两个连续页并裁出逻辑窗口，不要求调用方按页对齐。响应没有可靠 `total/hasmore`，因此 `total=null`，只在已读缓冲区仍有项目或末个真实页恰好满页时推断 `has_more`；完整页数据、计数和原响应保留在分页扩展。每项优先以 VID 建立稳定引用，正数 MV ID 仅作回退；标题、名称、安全封面、播放量、发布时间、歌手、状态和未知字段全部保留并标记已收藏。参考模型允许用 `singerId` 填补 MV ID，可能把歌手身份误当视频身份，TuneWeave 明确拒绝该歧义。当前请求、映射、跨页、账户及错误分支已离线验收；真实登录成功态待 QQ 账户联合验收。
 

@@ -558,7 +558,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/cloud/matches", post(cloud_match))
         .route("/account/playlists", get(account_playlists))
         .route("/account/playlists/order", put(account_playlists_order))
-        .route("/account/library/albums", get(account_albums))
+        .route(
+            "/account/library/albums",
+            get(account_albums).put(albums_subscribe),
+        )
         .route("/account/library/videos", get(account_videos))
         .route(
             "/account/library/radio-stations",
@@ -2754,26 +2757,83 @@ fn dimension_chart_request(
     Ok((platform, account, request))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlbumSubscriptionParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlbumSubscriptionBatchBody {
+    refs: Option<StreamReferenceInput>,
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn albums_subscribe(
+    State(state): State<AppState>,
+    payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
+    let body = json_body(payload)?;
+    let references = parse_batch_references(
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        state.default_platform,
+        "album subscription",
+    )?;
+    let platform = references
+        .first()
+        .map(ResourceRef::platform)
+        .expect("batch reference parsing rejects empty input");
+    if references
+        .iter()
+        .any(|reference| reference.platform() != platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "album subscription batch must use one platform",
+        )
+        .with_details(json!({ "refs": references }))
+        .into());
+    }
+    let account = account_alias(body.account.as_deref())?;
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let provider = state.registry.require(platform)?;
+    let results = provider
+        .set_album_subscriptions(&ids, true, Some(&account))
+        .await?;
+    Ok(Json(
+        ApiResponse::new(results)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 async fn album_subscribe(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<AccountParams>,
+    params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, reference, params, true).await
+    set_album_subscription(state, reference, query_params(params)?, true).await
 }
 
 async fn album_unsubscribe(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<AccountParams>,
+    params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, reference, params, false).await
+    set_album_subscription(state, reference, query_params(params)?, false).await
 }
 
 async fn set_album_subscription(
     state: AppState,
     reference: String,
-    params: AccountParams,
+    params: AlbumSubscriptionParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
@@ -22001,6 +22061,61 @@ mod tests {
         assert_eq!(unsubscribed["data"]["resource_ref"], "netease:32311");
         assert_eq!(unsubscribed["data"]["subscribed"], false);
         assert_eq!(unsubscribed["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn album_library_batch_put_preserves_order_duplicates_platform_and_account() {
+        let app = test_app_with_provider();
+        let (status, response) = json_request_from(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/library/albums",
+            Some(json!({
+                "refs": ["netease:32311", "netease:7", "netease:32311"],
+                "account": "collector"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"].as_array().map(Vec::len), Some(3));
+        assert_eq!(response["data"][0]["resource_ref"], "netease:32311");
+        assert_eq!(response["data"][1]["resource_ref"], "netease:7");
+        assert_eq!(response["data"][2]["resource_ref"], "netease:32311");
+        assert_eq!(response["data"][0]["subscribed"], true);
+        assert_eq!(response["data"][1]["extensions"]["account"], "collector");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "collector");
+
+        for body in [
+            json!({
+                "refs": ["netease:32311"],
+                "ids": ["32311"],
+                "platform": "netease"
+            }),
+            json!({"refs": ["netease:32311", "qq:100"]}),
+            json!({"refs": []}),
+            json!({"ids": ["32311"], "platform": "netease", "unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                app.clone(),
+                Method::PUT,
+                "/v1/account/library/albums",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+
+        let (status, response) = json_request_from(
+            app,
+            Method::PUT,
+            "/v1/account/library/albums/netease:32311?unknown=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

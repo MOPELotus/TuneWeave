@@ -73,6 +73,8 @@ const NEW_ALBUM_MODULE: &str = "newalbum.NewAlbumServer";
 const NEW_ALBUM_METHOD: &str = "get_new_album_info";
 const FAVORITE_ALBUM_MODULE: &str = "music.musicasset.AlbumFavRead";
 const FAVORITE_ALBUM_METHOD: &str = "CgiGetAlbumFavInfo";
+const FAVORITE_ALBUM_WRITE_MODULE: &str = "music.musicasset.AlbumFavWrite";
+const FAVORITE_ALBUM_ADD_METHOD: &str = "FavAlbum";
 const FAVORITE_MV_MODULE: &str = "music.musicasset.MVFavRead";
 const FAVORITE_MV_METHOD: &str = "getMyFavMV_v2";
 const FOLLOWED_SINGER_MODULE: &str = "music.concern.RelationList";
@@ -981,6 +983,16 @@ struct QqPlaylistSubscriptionResponse {
     result: i64,
     #[serde(default, rename = "v_failedPlaylistId")]
     failed_playlist_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAlbumSubscriptionResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    result: i64,
+    #[serde(default, rename = "v_failedAlbumId")]
+    failed_album_ids: Vec<u64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3225,6 +3237,44 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ new album request returned no response"))?;
         map_qq_new_albums(request.limit, request.offset, selection, response)
+    }
+
+    async fn set_album_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let mut results = self
+            .set_album_subscriptions(&[id.to_owned()], subscribed, account)
+            .await?;
+        results
+            .pop()
+            .ok_or_else(|| qq_data_error("QQ album subscription returned no result"))
+    }
+
+    async fn set_album_subscriptions(
+        &self,
+        ids: &[String],
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<Vec<SubscriptionResult>> {
+        if !subscribed {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Qq,
+                Capability::AlbumSubscriptionWrite,
+            ));
+        }
+        let (request, album_ids) = qq_album_favorite_request(ids)?;
+        let account = account.unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let response = self
+            .client
+            .request_android_business_with_credential(request, &[], Some(&credential))
+            .await?;
+        map_qq_album_subscriptions(&album_ids, subscribed, response)
     }
 
     async fn set_track_subscription(
@@ -11398,6 +11448,114 @@ fn qq_playlist_write_track(track: &Track) -> Result<QqPlaylistWriteTrack> {
         .filter(|value| *value >= 0)
         .ok_or_else(|| qq_data_error("QQ track detail is missing a valid song type"))?;
     Ok(QqPlaylistWriteTrack { song_id, song_type })
+}
+
+fn qq_album_favorite_request(ids: &[String]) -> Result<(QqApiRequest, Vec<u64>)> {
+    if ids.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ album favorite request must not be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    let album_ids = ids
+        .iter()
+        .map(|id| parse_qq_playlist_number(id, "album ID"))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        QqApiRequest::new(
+            FAVORITE_ALBUM_WRITE_MODULE,
+            FAVORITE_ALBUM_ADD_METHOD,
+            json!({"v_albumId": album_ids}),
+        ),
+        album_ids,
+    ))
+}
+
+fn map_qq_album_subscriptions(
+    album_ids: &[u64],
+    subscribed: bool,
+    response: QqBusinessResponse,
+) -> Result<Vec<SubscriptionResult>> {
+    if response.code != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ album subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "subscribed": subscribed,
+            "album_ids": album_ids
+        })));
+    }
+    let parsed = serde_json::from_value::<QqAlbumSubscriptionResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ album subscription response is malformed"))?;
+    if parsed.result != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ album subscription was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "result": parsed.result,
+            "subscribed": subscribed,
+            "album_ids": album_ids,
+            "failed_album_ids": parsed.failed_album_ids
+        })));
+    }
+    if parsed
+        .failed_album_ids
+        .iter()
+        .any(|failed_id| *failed_id == 0 || !album_ids.contains(failed_id))
+    {
+        return Err(qq_data_error(
+            "QQ album subscription returned an unknown failed album ID",
+        ));
+    }
+    if !parsed.failed_album_ids.is_empty() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::Conflict,
+            "QQ album subscription did not change every requested album",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "result": parsed.result,
+            "subscribed": subscribed,
+            "album_ids": album_ids,
+            "failed_album_ids": parsed.failed_album_ids
+        })));
+    }
+    let data = serde_json::to_value(&parsed)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ album subscription response"))?;
+    album_ids
+        .iter()
+        .enumerate()
+        .map(|(index, album_id)| {
+            Ok(SubscriptionResult {
+                resource_ref: qq_ref(&album_id.to_string(), "album subscription")?,
+                subscribed,
+                extensions: Extensions::from([
+                    (
+                        "action".to_owned(),
+                        json!(if subscribed { "favorite" } else { "unfavorite" }),
+                    ),
+                    ("numeric_id".to_owned(), json!(album_id)),
+                    ("batch_index".to_owned(), json!(index)),
+                    ("requested_album_ids".to_owned(), json!(album_ids)),
+                    (
+                        "failed_album_ids".to_owned(),
+                        json!(parsed.failed_album_ids),
+                    ),
+                    ("platform_code".to_owned(), json!(response.code)),
+                    ("result".to_owned(), json!(parsed.result)),
+                    ("data".to_owned(), data.clone()),
+                    ("response".to_owned(), response.raw.clone()),
+                ]),
+            })
+        })
+        .collect()
 }
 
 fn qq_track_numeric_id(track: &Track) -> Result<u64> {
@@ -19624,6 +19782,111 @@ mod tests {
     }
 
     #[test]
+    fn album_favorite_request_preserves_numeric_order_duplicates_and_batch_shape() {
+        let (request, ids) =
+            qq_album_favorite_request(&["100".to_owned(), "0007".to_owned(), "100".to_owned()])
+                .expect("QQ album favorite request");
+        assert_eq!(request.module, FAVORITE_ALBUM_WRITE_MODULE);
+        assert_eq!(request.method, FAVORITE_ALBUM_ADD_METHOD);
+        assert_eq!(ids, vec![100, 7, 100]);
+        assert_eq!(request.param, json!({"v_albumId": [100, 7, 100]}));
+
+        for ids in [
+            Vec::new(),
+            vec!["".to_owned()],
+            vec!["0".to_owned()],
+            vec!["-1".to_owned()],
+            vec!["not-numeric".to_owned()],
+            vec!["18446744073709551616".to_owned()],
+        ] {
+            let Err(error) = qq_album_favorite_request(&ids) else {
+                panic!("invalid QQ album favorite identity");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn album_favorite_mapping_preserves_batch_results_and_rejects_failed_ids() {
+        let ids = vec![100, 7, 100];
+        let results = map_qq_album_subscriptions(
+            &ids,
+            true,
+            QqBusinessResponse {
+                code: 0,
+                data: json!({
+                    "result": 0,
+                    "v_failedAlbumId": [],
+                    "futureWriteField": {"kept": true}
+                }),
+                raw: json!({"code": 0, "data": {"result": 0}}),
+            },
+        )
+        .expect("QQ album favorite result");
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].resource_ref.to_string(), "qq:100");
+        assert_eq!(results[1].resource_ref.to_string(), "qq:7");
+        assert_eq!(results[2].resource_ref.to_string(), "qq:100");
+        assert!(results.iter().all(|result| result.subscribed));
+        assert_eq!(results[1].extensions["batch_index"], 1);
+        assert_eq!(
+            results[0].extensions["requested_album_ids"],
+            json!([100, 7, 100])
+        );
+        assert_eq!(
+            results[0].extensions["data"]["futureWriteField"]["kept"],
+            true
+        );
+
+        let conflict = map_qq_album_subscriptions(
+            &ids,
+            true,
+            QqBusinessResponse {
+                code: 0,
+                data: json!({"result": 0, "v_failedAlbumId": [7]}),
+                raw: json!({"code": 0}),
+            },
+        )
+        .expect_err("partial QQ album favorite result");
+        assert_eq!(conflict.code, ErrorCode::Conflict);
+        assert_eq!(conflict.details["failed_album_ids"], json!([7]));
+
+        let unknown = map_qq_album_subscriptions(
+            &ids,
+            true,
+            QqBusinessResponse {
+                code: 0,
+                data: json!({"result": 0, "v_failedAlbumId": [999]}),
+                raw: json!({"code": 0}),
+            },
+        )
+        .expect_err("unknown QQ failed album ID");
+        assert_eq!(unknown.code, ErrorCode::UpstreamError);
+
+        for response in [
+            QqBusinessResponse {
+                code: 1000,
+                data: json!({}),
+                raw: json!({"code": 1000}),
+            },
+            QqBusinessResponse {
+                code: 0,
+                data: json!({"result": 1000, "v_failedAlbumId": []}),
+                raw: json!({"code": 0}),
+            },
+            QqBusinessResponse {
+                code: 0,
+                data: json!({}),
+                raw: json!({"code": 0}),
+            },
+        ] {
+            let error = map_qq_album_subscriptions(&ids, true, response)
+                .expect_err("rejected or malformed QQ album favorite result");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn playlist_track_mutations_preserve_target_song_identity_order_and_boolean_branch() {
         let playlist_ref =
             ResourceRef::new(Platform::Qq, "7039749142").expect("playlist reference");
@@ -20797,6 +21060,41 @@ mod tests {
             .expect_err("missing optional viewer account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["account"], "missing-account");
+    }
+
+    #[tokio::test]
+    async fn album_favorite_validates_batch_and_exact_account_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            !provider
+                .capabilities()
+                .contains(&Capability::AlbumSubscriptionWrite)
+        );
+
+        let missing = provider
+            .set_album_subscriptions(
+                &["100".to_owned(), "7".to_owned(), "100".to_owned()],
+                true,
+                Some("missing-account"),
+            )
+            .await
+            .expect_err("missing exact QQ album favorite account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing-account");
+
+        for ids in [Vec::new(), vec!["not-numeric".to_owned()]] {
+            let invalid = provider
+                .set_album_subscriptions(&ids, true, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ album favorite batch");
+            assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+        }
+
+        let pending_cancel = provider
+            .set_album_subscription("100", false, Some("missing-account"))
+            .await
+            .expect_err("album cancel remains a separate implementation");
+        assert_eq!(pending_cancel.code, ErrorCode::CapabilityNotSupported);
     }
 
     #[tokio::test]
