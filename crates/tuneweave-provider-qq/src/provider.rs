@@ -15,7 +15,8 @@ use tuneweave_core::{
     ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistSummary, ArtistTrackListRequest,
     ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
     AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
+    Capability, ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartGroup,
+    ChartTrackPreview, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
     LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
     MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
     MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
@@ -70,6 +71,8 @@ const SINGER_DESCRIPTION_MODULE: &str = "music.musichallSinger.SingerInfoInter";
 const SINGER_DESCRIPTION_METHOD: &str = "GetSingerDetail";
 const SIMILAR_SINGER_MODULE: &str = "music.SimilarSingerSvr";
 const SIMILAR_SINGER_METHOD: &str = "GetSimilarSingerList";
+const TOPLIST_MODULE: &str = "music.musicToplist.Toplist";
+const TOPLIST_CATALOG_METHOD: &str = "GetAll";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
@@ -1589,6 +1592,146 @@ struct QqSimilarSingerResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqTopCatalogResponse {
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    group: Vec<Value>,
+    #[serde(
+        default,
+        rename = "refreshInterval",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    refresh_interval: u64,
+    #[serde(default)]
+    abt: String,
+    #[serde(default)]
+    location: QqTopLocation,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqTopLocation {
+    #[serde(default)]
+    province: QqTopProvince,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqTopProvince {
+    #[serde(
+        default,
+        rename = "provinceID",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    pinyin: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTopGroup {
+    #[serde(rename = "groupId", deserialize_with = "deserialize_qq_i64")]
+    id: i64,
+    #[serde(rename = "groupName")]
+    name: String,
+    #[serde(rename = "type", deserialize_with = "deserialize_qq_i64")]
+    group_type: i64,
+    #[serde(deserialize_with = "deserialize_qq_vec_or_empty")]
+    toplist: Vec<Value>,
+    #[serde(default, rename = "myFeatureButtonText")]
+    feature_button_text: String,
+    #[serde(default, rename = "myFeatureButtonScheme")]
+    feature_button_scheme: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTopSummary {
+    #[serde(rename = "topId", deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    title: String,
+    #[serde(default, rename = "titleDetail")]
+    title_detail: String,
+    #[serde(default, rename = "titleSub")]
+    title_subtitle: String,
+    #[serde(default)]
+    intro: String,
+    #[serde(default)]
+    period: String,
+    #[serde(default, rename = "updateTime")]
+    update_time: String,
+    #[serde(default, rename = "listenNum", deserialize_with = "deserialize_qq_u64")]
+    listen_count: u64,
+    #[serde(default, rename = "totalNum", deserialize_with = "deserialize_qq_u64")]
+    total_count: u64,
+    #[serde(
+        default,
+        rename = "song",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    songs: Vec<Value>,
+    #[serde(default, rename = "frontPicUrl")]
+    front_picture_url: String,
+    #[serde(default, rename = "headPicUrl")]
+    head_picture_url: String,
+    #[serde(default, rename = "mbFrontPicUrl")]
+    mobile_front_picture_url: String,
+    #[serde(default, rename = "mbHeadPicUrl")]
+    mobile_head_picture_url: String,
+    #[serde(default, rename = "musichallPicUrl")]
+    musichall_picture_url: String,
+    #[serde(default, rename = "topAlbumURL")]
+    top_album_url: String,
+    #[serde(default, rename = "logoImgURL")]
+    logo_url: String,
+    #[serde(default, rename = "h5JumpUrl")]
+    h5_jump_url: String,
+    #[serde(default, rename = "specialScheme")]
+    special_scheme: String,
+    #[serde(default, rename = "adJumpUrl")]
+    ad_jump_url: String,
+    #[serde(default, rename = "updateTips")]
+    update_tips: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTopPreview {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    rank: u64,
+    #[serde(rename = "rankType", deserialize_with = "deserialize_qq_i64")]
+    rank_type: i64,
+    #[serde(default, rename = "rankValue")]
+    rank_value: String,
+    #[serde(rename = "songId", deserialize_with = "deserialize_qq_u64")]
+    song_id: u64,
+    title: String,
+    #[serde(default, rename = "singerName")]
+    singer_name: String,
+    #[serde(default, rename = "singerMid")]
+    singer_mid: String,
+    #[serde(default, rename = "albumMid")]
+    album_mid: String,
+    #[serde(default)]
+    cover: String,
+    #[serde(default, rename = "mvid", deserialize_with = "deserialize_qq_u64")]
+    mv_id: u64,
+    #[serde(default, rename = "songType", deserialize_with = "deserialize_qq_i64")]
+    song_type: i64,
+    #[serde(default)]
+    vid: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqSingerSongEntry {
     #[serde(rename = "songInfo")]
@@ -1924,6 +2067,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchRingtones,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
+            Capability::ChartCatalog,
             Capability::UserMembership,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
@@ -2063,6 +2207,18 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ hotkey service returned no response"))?;
         map_hotkey_response(request.detail, &search_id, response)
+    }
+
+    async fn chart_catalog(&self, request: &ChartCatalogRequest) -> Result<ChartCatalog> {
+        self.validate_public_account(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android(&[qq_top_catalog_request()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ toplist catalog request returned no response"))?;
+        map_qq_top_catalog(request, response)
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -4406,6 +4562,10 @@ fn qq_similar_singers_request(mid: &str, limit: u32) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_top_catalog_request() -> QqApiRequest {
+    QqApiRequest::new(TOPLIST_MODULE, TOPLIST_CATALOG_METHOD, json!({}))
+}
+
 fn qq_singer_homepage_tab_request(
     mid: &str,
     request: &ArtistHomepageTabRequest,
@@ -6603,6 +6763,201 @@ fn map_qq_similar_singers(
             ("response".to_owned(), response.raw),
         ]),
     })
+}
+
+fn map_qq_top_catalog(
+    request: &ChartCatalogRequest,
+    response: QqApiResponse,
+) -> Result<ChartCatalog> {
+    let data = serde_json::from_value::<QqTopCatalogResponse>(response.data).map_err(|error| {
+        qq_data_error(format!("QQ toplist catalog response is malformed: {error}"))
+    })?;
+    let location = serde_json::to_value(&data.location)
+        .map_err(|_| qq_data_error("failed to preserve QQ toplist location metadata"))?;
+    let groups = data
+        .group
+        .into_iter()
+        .map(map_qq_top_group)
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = Extensions::from([
+        ("refresh_interval".to_owned(), json!(data.refresh_interval)),
+        ("location".to_owned(), location),
+        ("response".to_owned(), response.raw),
+    ]);
+    let about = data.abt.trim();
+    if !about.is_empty() {
+        extensions.insert("about".to_owned(), json!(about));
+    }
+    Ok(ChartCatalog {
+        platform: Platform::Qq,
+        view: request.view,
+        groups,
+        extensions,
+    })
+}
+
+fn map_qq_top_group(raw: Value) -> Result<ChartGroup> {
+    let group = serde_json::from_value::<QqTopGroup>(raw.clone())
+        .map_err(|error| qq_data_error(format!("QQ toplist group is malformed: {error}")))?;
+    let name = group.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ toplist group is missing its display name",
+        ));
+    }
+    let charts = group
+        .toplist
+        .into_iter()
+        .map(map_qq_top_summary)
+        .collect::<Result<Vec<_>>>()?;
+    let target_url = normalized_qq_text(&group.feature_button_scheme);
+    let mut extensions = Extensions::from([
+        ("group_type".to_owned(), json!(group.group_type)),
+        ("group".to_owned(), raw),
+    ]);
+    if let Some(text) = normalized_qq_text(&group.feature_button_text) {
+        extensions.insert("feature_button_text".to_owned(), json!(text));
+    }
+    Ok(ChartGroup {
+        code: Some(group.id.to_string()),
+        name: name.to_owned(),
+        display_type: Some(group.group_type.to_string()),
+        target_url,
+        charts,
+        extensions,
+    })
+}
+
+fn map_qq_top_summary(raw: Value) -> Result<Chart> {
+    let summary = serde_json::from_value::<QqTopSummary>(raw.clone())
+        .map_err(|error| qq_data_error(format!("QQ toplist summary is malformed: {error}")))?;
+    if summary.id == 0 {
+        return Err(qq_data_error("QQ toplist summary is missing a positive ID"));
+    }
+    let name = summary.title.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ toplist summary is missing its display name",
+        ));
+    }
+    let previews = summary
+        .songs
+        .into_iter()
+        .map(map_qq_top_preview)
+        .collect::<Result<Vec<_>>>()?;
+    let cover_url = first_qq_display_url(&[
+        (summary.front_picture_url.as_str(), "toplist front picture"),
+        (
+            summary.mobile_front_picture_url.as_str(),
+            "toplist mobile front picture",
+        ),
+        (summary.head_picture_url.as_str(), "toplist head picture"),
+        (
+            summary.mobile_head_picture_url.as_str(),
+            "toplist mobile head picture",
+        ),
+        (
+            summary.musichall_picture_url.as_str(),
+            "toplist music hall picture",
+        ),
+        (summary.top_album_url.as_str(), "toplist album picture"),
+        (summary.logo_url.as_str(), "toplist logo"),
+    ])?;
+    let target_url = [
+        summary.h5_jump_url.as_str(),
+        summary.special_scheme.as_str(),
+        summary.ad_jump_url.as_str(),
+    ]
+    .into_iter()
+    .find_map(normalized_qq_text);
+    let update_frequency = normalized_qq_text(&summary.update_tips);
+    let chart_id = summary.id.to_string();
+    let resource_id = format!("chart:{}", summary.id);
+    let mut extensions = Extensions::from([
+        ("numeric_id".to_owned(), json!(summary.id)),
+        ("chart".to_owned(), raw),
+    ]);
+    for (key, value) in [
+        ("title_detail", summary.title_detail),
+        ("title_subtitle", summary.title_subtitle),
+        ("period", summary.period),
+        ("update_time", summary.update_time),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            extensions.insert(key.to_owned(), json!(value));
+        }
+    }
+    Ok(Chart {
+        resource_ref: Some(qq_ref(&resource_id, "toplist")?),
+        platform: Platform::Qq,
+        id: Some(chart_id),
+        name: name.to_owned(),
+        description: summary.intro.trim().to_owned(),
+        cover_url,
+        update_frequency,
+        updated_at_ms: None,
+        track_count: Some(summary.total_count),
+        play_count: Some(summary.listen_count),
+        subscribed: None,
+        playable: None,
+        target_kind: Some("chart".to_owned()),
+        target_url,
+        previews,
+        extensions,
+    })
+}
+
+fn map_qq_top_preview(raw: Value) -> Result<ChartTrackPreview> {
+    let preview = serde_json::from_value::<QqTopPreview>(raw.clone())
+        .map_err(|error| qq_data_error(format!("QQ toplist preview is malformed: {error}")))?;
+    let rank = u32::try_from(preview.rank)
+        .ok()
+        .filter(|rank| *rank > 0)
+        .ok_or_else(|| qq_data_error("QQ toplist preview contains an invalid rank"))?;
+    let name = preview.title.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ toplist preview is missing its track name",
+        ));
+    }
+    let track_ref = (preview.song_id > 0)
+        .then(|| qq_ref(&preview.song_id.to_string(), "toplist preview track"))
+        .transpose()?;
+    let cover_url = first_qq_display_url(&[(preview.cover.as_str(), "toplist preview cover")])?;
+    let mut extensions = Extensions::from([
+        ("rank_type".to_owned(), json!(preview.rank_type)),
+        ("rank_value".to_owned(), json!(preview.rank_value)),
+        ("numeric_id".to_owned(), json!(preview.song_id)),
+        ("song_type".to_owned(), json!(preview.song_type)),
+        ("mv_id".to_owned(), json!(preview.mv_id)),
+        ("preview".to_owned(), raw),
+    ]);
+    for (key, value) in [
+        ("singer_mid", preview.singer_mid),
+        ("album_mid", preview.album_mid),
+        ("video_id", preview.vid),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            extensions.insert(key.to_owned(), json!(value));
+        }
+    }
+    Ok(ChartTrackPreview {
+        rank: Some(rank),
+        previous_rank: None,
+        rank_change: None,
+        track_ref,
+        name: name.to_owned(),
+        byline: normalized_qq_text(&preview.singer_name),
+        cover_url,
+        extensions,
+    })
+}
+
+fn normalized_qq_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
@@ -10420,6 +10775,64 @@ mod tests {
         })
     }
 
+    fn sample_top_catalog() -> Value {
+        json!({
+            "group": [{
+                "groupId": 0,
+                "groupName": "巅峰榜",
+                "type": 0,
+                "toplist": [{
+                    "topId": 62,
+                    "title": "飙升榜",
+                    "titleDetail": "飙升榜 第206天",
+                    "titleSub": "",
+                    "intro": "站内播放热度飙升最快的前100首歌曲。",
+                    "period": "2026-07-25",
+                    "updateTime": "2026-07-25",
+                    "listenNum": 18_633_712,
+                    "totalNum": 100,
+                    "song": [{
+                        "rank": 1,
+                        "rankType": 6,
+                        "rankValue": "100%",
+                        "songId": 709_877_824,
+                        "title": "Less than a Lover",
+                        "singerName": "JENNIE (제니)",
+                        "singerMid": "004QK4Dt0N2OX9",
+                        "albumMid": "0020Qh2y3qVF9M",
+                        "cover": "https://y.gtimg.cn/music/photo_new/preview.jpg",
+                        "mvid": 0,
+                        "songType": 0,
+                        "vid": "",
+                        "futurePreviewField": true
+                    }],
+                    "frontPicUrl": "http://y.gtimg.cn/music/photo_new/front.jpg",
+                    "headPicUrl": "http://y.gtimg.cn/music/photo_new/head.jpg",
+                    "mbFrontPicUrl": "",
+                    "mbHeadPicUrl": "",
+                    "musichallPicUrl": "",
+                    "topAlbumURL": "",
+                    "logoImgURL": "",
+                    "h5JumpUrl": "",
+                    "specialScheme": "qqmusic://toplist/62",
+                    "adJumpUrl": "",
+                    "updateTips": "每日更新",
+                    "futureChartField": 42
+                }],
+                "myFeatureButtonText": "全部榜单",
+                "myFeatureButtonScheme": "qqmusic://toplist/all",
+                "futureGroupField": true
+            }],
+            "refreshInterval": 3600,
+            "abt": "toplist-catalog",
+            "location": {
+                "province": {"provinceID": 0, "name": "", "pinyin": ""},
+                "futureLocationField": true
+            },
+            "futureCatalogField": true
+        })
+    }
+
     fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
         json!({
             "albumID": id,
@@ -11876,6 +12289,116 @@ mod tests {
             let error = map_qq_similar_singers("0025NhlN2yWrP4", 10, response(data))
                 .expect_err("malformed similar singer response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn toplist_catalog_request_uses_the_reference_module_method_and_empty_payload() {
+        let request = qq_top_catalog_request();
+        assert_eq!(request.module, TOPLIST_MODULE);
+        assert_eq!(request.method, TOPLIST_CATALOG_METHOD);
+        assert_eq!(request.param, json!({}));
+    }
+
+    #[test]
+    fn toplist_catalog_mapping_preserves_groups_previews_and_raw_fields() {
+        let data = sample_top_catalog();
+        let catalog = map_qq_top_catalog(
+            &ChartCatalogRequest::new(tuneweave_core::ChartCatalogView::Modern),
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ toplist catalog");
+        assert_eq!(catalog.platform, Platform::Qq);
+        assert_eq!(catalog.view, tuneweave_core::ChartCatalogView::Modern);
+        assert_eq!(catalog.groups.len(), 1);
+        let group = &catalog.groups[0];
+        assert_eq!(group.code.as_deref(), Some("0"));
+        assert_eq!(group.name, "巅峰榜");
+        assert_eq!(group.display_type.as_deref(), Some("0"));
+        assert_eq!(group.extensions["group"]["futureGroupField"], true);
+        let chart = &group.charts[0];
+        assert_eq!(
+            chart.resource_ref.as_ref().map(ToString::to_string),
+            Some("qq:chart:62".to_owned())
+        );
+        assert_eq!(chart.id.as_deref(), Some("62"));
+        assert_eq!(chart.name, "飙升榜");
+        assert_eq!(chart.track_count, Some(100));
+        assert_eq!(chart.play_count, Some(18_633_712));
+        assert_eq!(chart.update_frequency.as_deref(), Some("每日更新"));
+        assert_eq!(chart.target_kind.as_deref(), Some("chart"));
+        assert_eq!(chart.extensions["period"], "2026-07-25");
+        assert_eq!(chart.extensions["chart"]["futureChartField"], 42);
+        assert!(
+            chart
+                .cover_url
+                .as_deref()
+                .is_some_and(|url| url.contains("front.jpg"))
+        );
+        let preview = &chart.previews[0];
+        assert_eq!(preview.rank, Some(1));
+        assert_eq!(preview.previous_rank, None);
+        assert_eq!(preview.rank_change, None);
+        assert_eq!(
+            preview.track_ref.as_ref().map(ToString::to_string),
+            Some("qq:709877824".to_owned())
+        );
+        assert_eq!(preview.name, "Less than a Lover");
+        assert_eq!(preview.byline.as_deref(), Some("JENNIE (제니)"));
+        assert_eq!(preview.extensions["rank_type"], 6);
+        assert_eq!(preview.extensions["rank_value"], "100%");
+        assert_eq!(preview.extensions["song_type"], 0);
+        assert_eq!(preview.extensions["preview"]["futurePreviewField"], true);
+        assert_eq!(catalog.extensions["refresh_interval"], 3600);
+        assert_eq!(catalog.extensions["location"]["futureLocationField"], true);
+        assert_eq!(catalog.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn toplist_catalog_mapping_rejects_missing_or_malformed_known_fields() {
+        let request = ChartCatalogRequest::new(tuneweave_core::ChartCatalogView::Summary);
+        let mut missing_group = sample_top_catalog();
+        missing_group
+            .as_object_mut()
+            .expect("catalog object")
+            .remove("group");
+        let mut missing_toplist = sample_top_catalog();
+        missing_toplist["group"][0]
+            .as_object_mut()
+            .expect("group object")
+            .remove("toplist");
+        let mut blank_group = sample_top_catalog();
+        blank_group["group"][0]["groupName"] = json!(" ");
+        let mut zero_chart = sample_top_catalog();
+        zero_chart["group"][0]["toplist"][0]["topId"] = json!(0);
+        let mut blank_chart = sample_top_catalog();
+        blank_chart["group"][0]["toplist"][0]["title"] = json!("");
+        let mut malformed_previews = sample_top_catalog();
+        malformed_previews["group"][0]["toplist"][0]["song"] = json!({});
+        let mut zero_rank = sample_top_catalog();
+        zero_rank["group"][0]["toplist"][0]["song"][0]["rank"] = json!(0);
+        let mut blank_track = sample_top_catalog();
+        blank_track["group"][0]["toplist"][0]["song"][0]["title"] = json!("");
+        let mut unsafe_cover = sample_top_catalog();
+        unsafe_cover["group"][0]["toplist"][0]["frontPicUrl"] = json!("javascript:alert(1)");
+        for data in [
+            missing_group,
+            missing_toplist,
+            blank_group,
+            zero_chart,
+            blank_chart,
+            malformed_previews,
+            zero_rank,
+            blank_track,
+            unsafe_cover,
+        ] {
+            let error = map_qq_top_catalog(&request, response(data))
+                .expect_err("malformed QQ toplist catalog");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert_eq!(error.platform, Some(Platform::Qq));
         }
     }
 
@@ -14748,6 +15271,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn toplist_catalog_exposes_capability_and_validates_named_accounts_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::ChartCatalog));
+        let mut request = ChartCatalogRequest::new(tuneweave_core::ChartCatalogView::Summary);
+        request.account = Some("missing-account".to_owned());
+        let error = provider
+            .chart_catalog(&request)
+            .await
+            .expect_err("missing toplist account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn album_detail_validates_identifiers_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::AlbumDetail));
@@ -16181,6 +16717,43 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_toplist_catalog_returns_grouped_charts_and_preview_tracks() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for view in [
+            tuneweave_core::ChartCatalogView::Overview,
+            tuneweave_core::ChartCatalogView::Summary,
+            tuneweave_core::ChartCatalogView::Modern,
+        ] {
+            let catalog = provider
+                .chart_catalog(&ChartCatalogRequest::new(view))
+                .await
+                .expect("live QQ toplist catalog");
+            assert_eq!(catalog.view, view);
+            assert!(!catalog.groups.is_empty());
+            assert!(catalog.groups.iter().all(|group| !group.name.is_empty()));
+            let charts = catalog
+                .groups
+                .iter()
+                .flat_map(|group| &group.charts)
+                .collect::<Vec<_>>();
+            assert!(charts.len() >= 20);
+            assert!(charts.iter().all(|chart| {
+                chart
+                    .resource_ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.id().starts_with("chart:"))
+                    && !chart.name.is_empty()
+            }));
+            assert!(charts.iter().any(|chart| !chart.previews.is_empty()));
+        }
     }
 
     #[tokio::test]
