@@ -741,6 +741,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn video_streams(
+        &self,
+        ids: &[String],
+        request: &VideoStreamRequest,
+    ) -> Result<Vec<VideoStream>> {
+        let mut streams = Vec::with_capacity(ids.len());
+        for id in ids {
+            streams.push(self.video_stream(id, request).await?);
+        }
+        Ok(streams)
+    }
+
     async fn set_video_subscription(
         &self,
         _id: &str,

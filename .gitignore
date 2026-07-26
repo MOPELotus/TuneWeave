@@ -1,6 +1,7 @@
 /target/
 /.reference/
 /.local/
+**/.local/
 
 .env
 .env.*

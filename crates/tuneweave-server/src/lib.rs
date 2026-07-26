@@ -323,6 +323,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
         .route("/videos", get(music_videos))
         .route("/videos/taxonomy", get(video_taxonomy))
+        .route(
+            "/videos/streams",
+            get(video_streams_get).post(video_streams_post),
+        )
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
@@ -7189,6 +7193,34 @@ struct VideoStreamParams {
     resolution: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoStreamBatchParams {
+    refs: Option<String>,
+    #[serde(alias = "vids")]
+    ids: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    #[serde(alias = "res")]
+    resolution: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoStreamBatchBody {
+    refs: Option<StreamReferenceInput>,
+    #[serde(alias = "id", alias = "vids")]
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    #[serde(alias = "res")]
+    resolution: Option<StreamUnsignedInput>,
+}
+
 async fn video_detail(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -7236,10 +7268,133 @@ async fn video_stream(
 ) -> Result<Json<ApiResponse<VideoStream>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let (account, request) = video_stream_request(&params, reference.id())?;
+    let (account, request) = video_stream_request(&params, reference.platform(), reference.id())?;
     let provider = state.registry.require(reference.platform())?;
     let stream = provider.video_stream(reference.id(), &request).await?;
     let mut response = ApiResponse::new(stream).with_platform(reference.platform());
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn video_streams_get(
+    State(state): State<AppState>,
+    params: Result<Query<VideoStreamBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
+    let params = query_params(params)?;
+    video_streams_response(
+        &state,
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        params.account,
+        params.kind.as_deref(),
+        params.resolution.as_deref(),
+    )
+    .await
+}
+
+async fn video_streams_post(
+    State(state): State<AppState>,
+    body: Result<Json<VideoStreamBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
+    let body = json_body(body)?;
+    let resolution = body.resolution.map(StreamUnsignedInput::into_parameter);
+    video_streams_response(
+        &state,
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        body.account,
+        body.kind.as_deref(),
+        resolution.as_deref(),
+    )
+    .await
+}
+
+async fn video_streams_response(
+    state: &AppState,
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    account: Option<String>,
+    kind: Option<&str>,
+    resolution: Option<&str>,
+) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
+    let references = parse_stream_batch_references(refs, ids, platform, state.default_platform)?;
+    if references.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "video stream batch cannot contain more than 100 references",
+        )
+        .into());
+    }
+    let selected_platform = references[0].platform();
+    if references
+        .iter()
+        .any(|reference| reference.platform() != selected_platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "video stream batch references must use one platform",
+        )
+        .with_details(json!({
+            "platforms": references
+                .iter()
+                .map(ResourceRef::platform)
+                .collect::<BTreeSet<_>>()
+        }))
+        .into());
+    }
+    let kind = if selected_platform == Platform::Qq && kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(kind, references[0].id())?
+    };
+    let resolution = parse_u32_parameter(
+        "resolution",
+        resolution,
+        VideoStreamRequest::DEFAULT_RESOLUTION,
+    )?;
+    if !(1..=4_320).contains(&resolution) {
+        return Err(
+            TuneWeaveError::invalid_request("resolution must be between 1 and 4320").into(),
+        );
+    }
+    let account = optional_trimmed(account);
+    let mut request = VideoStreamRequest::new(kind, resolution);
+    request.account.clone_from(&account);
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let provider = state.registry.require(selected_platform)?;
+    let streams = provider.video_streams(&ids, &request).await?;
+    if streams.len() != references.len() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "video provider returned an inconsistent stream batch",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({
+            "requested": references.len(),
+            "returned": streams.len()
+        }))
+        .into());
+    }
+    if let Some(index) = streams
+        .iter()
+        .zip(&references)
+        .position(|(stream, reference)| stream.video_ref != *reference)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "video provider returned a stream for the wrong reference",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({ "index": index }))
+        .into());
+    }
+    let mut response = ApiResponse::new(streams).with_platform(selected_platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -7253,7 +7408,7 @@ async fn video_stream_redirect(
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let (_, request) = video_stream_request(&params, reference.id())?;
+    let (_, request) = video_stream_request(&params, reference.platform(), reference.id())?;
     let provider = state.registry.require(reference.platform())?;
     let stream = provider.video_stream(reference.id(), &request).await?;
     if let Some(url) = stream.url.as_deref() {
@@ -7269,10 +7424,15 @@ async fn video_stream_redirect(
 
 fn video_stream_request(
     params: &VideoStreamParams,
+    platform: Platform,
     id: &str,
 ) -> Result<(Option<String>, VideoStreamRequest), TuneWeaveError> {
     let account = optional_trimmed(params.account.clone());
-    let kind = parse_video_resource_kind(params.kind.as_deref(), id)?;
+    let kind = if platform == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), id)?
+    };
     let resolution = parse_u32_parameter(
         "resolution",
         params.resolution.as_deref(),
@@ -15188,6 +15348,7 @@ mod tests {
                 Capability::PlaylistSubscriptionWrite,
                 Capability::SearchTracks,
                 Capability::AudioStream,
+                Capability::VideoStream,
                 Capability::TrackSubscriptionWrite,
                 Capability::Lyrics,
                 Capability::UserMembership,
@@ -15377,6 +15538,35 @@ mod tests {
                     ),
                 ]),
             })
+        }
+
+        async fn video_stream(
+            &self,
+            id: &str,
+            request: &VideoStreamRequest,
+        ) -> Result<VideoStream> {
+            if request.kind != VideoResourceKind::Mv {
+                return Err(TuneWeaveError::invalid_request(
+                    "test QQ provider accepts MV resources only",
+                ));
+            }
+            Ok(sample_qq_video_stream(id, request))
+        }
+
+        async fn video_streams(
+            &self,
+            ids: &[String],
+            request: &VideoStreamRequest,
+        ) -> Result<Vec<VideoStream>> {
+            if request.kind != VideoResourceKind::Mv {
+                return Err(TuneWeaveError::invalid_request(
+                    "test QQ provider accepts MV resources only",
+                ));
+            }
+            Ok(ids
+                .iter()
+                .map(|id| sample_qq_video_stream(id, request))
+                .collect())
         }
 
         async fn create_playlist(
@@ -15836,6 +16026,34 @@ mod tests {
             }],
             ip_location: Some("上海".to_owned()),
             extensions: Extensions::new(),
+        }
+    }
+
+    fn sample_qq_video_stream(id: &str, request: &VideoStreamRequest) -> VideoStream {
+        VideoStream {
+            video_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ MV reference"),
+            platform: Platform::Qq,
+            available: true,
+            url: Some(format!("https://example.test/qq/{id}.mp4")),
+            backup_urls: vec![format!("https://backup.example.test/qq/{id}.mp4")],
+            headers: BTreeMap::new(),
+            expires_at: Some("2030-01-01T00:00:00Z".to_owned()),
+            format: Some("mp4".to_owned()),
+            codec: Some("h264".to_owned()),
+            width: None,
+            height: Some(480),
+            size: Some(4_096),
+            duration_ms: Some(15_000),
+            requested_resolution: request.resolution,
+            actual_resolution: Some(480),
+            platform_code: Some(0),
+            fee: None,
+            message: None,
+            extensions: Extensions::from([
+                ("kind".to_owned(), json!(request.kind)),
+                ("account".to_owned(), json!(request.account)),
+                ("batch_provider".to_owned(), json!(true)),
+            ]),
         }
     }
 
@@ -19110,6 +19328,92 @@ mod tests {
         assert_eq!(stream["data"]["actual_resolution"], 720);
         assert_eq!(stream["data"]["extensions"]["account"], "collector");
         assert_eq!(stream["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn video_stream_batches_preserve_qq_duplicates_and_batch_controls() {
+        let app = test_app_with_import_providers();
+        let (status, single) = json_response_from(
+            app.clone(),
+            "/v1/videos/qq:013xscuH0xlbie/stream?resolution=720",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["video_ref"], "qq:013xscuH0xlbie");
+        assert_eq!(single["data"]["extensions"]["kind"], "mv");
+
+        let (status, streams) = json_response_from(
+            app.clone(),
+            "/v1/videos/streams?ids=013xscuH0xlbie,013xscuH0xlbie&platform=qq&res=1080&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(streams["data"].as_array().expect("stream batch").len(), 2);
+        for stream in streams["data"].as_array().expect("stream batch") {
+            assert_eq!(stream["video_ref"], "qq:013xscuH0xlbie");
+            assert_eq!(stream["platform"], "qq");
+            assert_eq!(stream["available"], true);
+            assert_eq!(stream["requested_resolution"], 1080);
+            assert_eq!(stream["actual_resolution"], 480);
+            assert_eq!(stream["extensions"]["kind"], "mv");
+            assert_eq!(stream["extensions"]["account"], "green-vip");
+            assert_eq!(stream["extensions"]["batch_provider"], true);
+        }
+        assert_eq!(streams["meta"]["platform"], "qq");
+        assert_eq!(streams["meta"]["account"], "green-vip");
+
+        let (status, streams) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/videos/streams",
+            Some(json!({
+                "refs": ["qq:013xscuH0xlbie", "qq:002abcXYZ"],
+                "type": "mv",
+                "resolution": "720"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(streams["data"][0]["video_ref"], "qq:013xscuH0xlbie");
+        assert_eq!(streams["data"][1]["video_ref"], "qq:002abcXYZ");
+        assert_eq!(streams["data"][0]["requested_resolution"], 720);
+    }
+
+    #[tokio::test]
+    async fn video_stream_batches_reject_ambiguous_mixed_and_invalid_requests() {
+        let app = test_app_with_import_providers();
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/v1/videos/streams",
+                Some(json!({"refs": ["qq:013xscuH0xlbie"], "ids": ["013xscuH0xlbie"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/streams",
+                Some(json!({"refs": ["qq:013xscuH0xlbie", "netease:22695250"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/streams",
+                Some(json!({"vids": ["013xscuH0xlbie"], "platform": "qq", "kind": "video"})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/streams",
+                Some(json!({"ids": ["013xscuH0xlbie"], "platform": "qq", "resolution": 0})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/streams",
+                Some(json!({"ids": ["013xscuH0xlbie"], "platform": "qq", "unknown": true})),
+            ),
+            (Method::GET, "/v1/videos/streams?platform=qq", None),
+        ] {
+            let (status, response) = json_request_from(app.clone(), method, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

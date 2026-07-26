@@ -25,6 +25,7 @@ use tuneweave_core::{
     SearchTrendingList, SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability,
     StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
     TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
+    VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -54,8 +55,11 @@ const SONG_URL_MODULE: &str = "music.vkey.GetVkey";
 const SONG_URL_METHOD: &str = "UrlGetVkey";
 const ENCRYPTED_SONG_URL_MODULE: &str = "music.vkey.GetEVkey";
 const ENCRYPTED_SONG_URL_METHOD: &str = "CgiGetEVkey";
+const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
+const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
 const MAX_SONG_URL_ITEMS: usize = 100;
+const MAX_MV_URL_ITEMS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QqAudioFileSpec {
@@ -1056,6 +1060,73 @@ struct QqVipInfoResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMvUrlItem {
+    url: Vec<String>,
+    freeflow_url: Vec<String>,
+    comm_url: Vec<String>,
+    cn: String,
+    vkey: String,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    expire: u64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    code: i64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    filetype: u64,
+    m3u8: String,
+    #[serde(rename = "newFileType", deserialize_with = "deserialize_qq_u64")]
+    new_file_type: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    format: u64,
+    #[serde(rename = "fileSize", deserialize_with = "deserialize_qq_u64")]
+    file_size: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMvUrlSet {
+    mp4: Vec<QqMvUrlItem>,
+    hls: Vec<QqMvUrlItem>,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    svp_flag: u64,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    duration: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QqMvProtocol {
+    Mp4,
+    Hls,
+}
+
+impl QqMvProtocol {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Hls => "hls",
+        }
+    }
+
+    const fn preference(self) -> u8 {
+        match self {
+            Self::Mp4 => 0,
+            Self::Hls => 1,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QqMvCandidate<'a> {
+    protocol: QqMvProtocol,
+    item: &'a QqMvUrlItem,
+    resolution: Option<u32>,
+    urls: Vec<String>,
+    url_source: &'static str,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -1114,6 +1185,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioDownload,
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
+            Capability::VideoStream,
             Capability::PlaylistRead,
             Capability::PlaylistWrite,
             Capability::PlaylistSubscriptionWrite,
@@ -1610,6 +1682,58 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ VIP information request returned no response"))?;
         map_qq_vip_info(&credential, response)
+    }
+
+    async fn video_stream(&self, id: &str, request: &VideoStreamRequest) -> Result<VideoStream> {
+        self.video_streams(&[id.to_owned()], request)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ MV URL request returned no stream"))
+    }
+
+    async fn video_streams(
+        &self,
+        ids: &[String],
+        request: &VideoStreamRequest,
+    ) -> Result<Vec<VideoStream>> {
+        if request.kind != VideoResourceKind::Mv {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ video streaming currently accepts MV resources only",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "allowed": ["mv"] })));
+        }
+        if !(1..=4_320).contains(&request.resolution) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ MV resolution must be between 1 and 4320",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if ids.is_empty() || ids.len() > MAX_MV_URL_ITEMS {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "QQ MV URL batch must contain between 1 and {MAX_MV_URL_ITEMS} VIDs"
+            ))
+            .with_platform(Platform::Qq));
+        }
+        self.validate_public_account(request.account.as_deref())?;
+        let vids = ids
+            .iter()
+            .map(|vid| {
+                let vid = vid.trim();
+                validate_qq_media_id(vid, "MV VID")?;
+                Ok(vid.to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (api_request, guid) = qq_mv_urls_request(&vids);
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ MV URL request returned no response"))?;
+        map_qq_mv_url_response(&vids, request, &guid, response)
     }
 
     async fn account_playlists(
@@ -3166,6 +3290,27 @@ fn qq_vip_info_request() -> QqApiRequest {
     QqApiRequest::new("VipLogin.VipLoginInter", "vip_login_base", json!({}))
 }
 
+fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
+    let guid = hex::encode(rand::random::<[u8; 16]>());
+    (
+        QqApiRequest::new(
+            MV_URL_MODULE,
+            MV_URL_METHOD,
+            json!({
+                "vids": vids,
+                "request_type": 10003,
+                "guid": guid,
+                "videoformat": 1,
+                "format": 265,
+                "dolby": 1,
+                "use_new_domain": 1,
+                "use_ipv6": 1
+            }),
+        ),
+        guid,
+    )
+}
+
 fn parse_qq_audio_file_spec(value: Option<&str>) -> Result<&'static QqAudioFileSpec> {
     let Some(value) = value else {
         return Ok(&QQ_AUDIO_FILE_SPECS[13]);
@@ -4629,6 +4774,222 @@ fn map_qq_vip_info(
             ("response".to_owned(), response.raw),
         ]),
     })
+}
+
+fn map_qq_mv_url_response(
+    requested: &[String],
+    request: &VideoStreamRequest,
+    guid: &str,
+    response: QqApiResponse,
+) -> Result<Vec<VideoStream>> {
+    let groups = serde_json::from_value::<BTreeMap<String, QqMvUrlSet>>(response.data)
+        .map_err(|_| qq_data_error("QQ MV URL response is malformed"))?;
+    let mut streams = Vec::with_capacity(requested.len());
+    for vid in requested {
+        let group = groups.get(vid).ok_or_else(|| {
+            qq_data_error(format!("QQ MV URL response is missing requested VID {vid}"))
+        })?;
+        streams.push(map_qq_mv_url_group(
+            vid,
+            request,
+            guid,
+            group,
+            &response.raw,
+        )?);
+    }
+    Ok(streams)
+}
+
+fn map_qq_mv_url_group(
+    vid: &str,
+    request: &VideoStreamRequest,
+    guid: &str,
+    group: &QqMvUrlSet,
+    raw_response: &Value,
+) -> Result<VideoStream> {
+    let mut candidates = Vec::new();
+    for (protocol, items) in [
+        (QqMvProtocol::Mp4, group.mp4.as_slice()),
+        (QqMvProtocol::Hls, group.hls.as_slice()),
+    ] {
+        for item in items {
+            let (urls, url_source) = qq_mv_item_urls(item)?;
+            if item.code == 0 && !urls.is_empty() {
+                candidates.push(QqMvCandidate {
+                    protocol,
+                    item,
+                    resolution: qq_mv_filetype_resolution(item.filetype),
+                    urls,
+                    url_source,
+                });
+            }
+        }
+    }
+    let selected = candidates
+        .iter()
+        .min_by_key(|candidate| qq_mv_candidate_key(candidate, request.resolution));
+    let platform_code = selected.map_or_else(
+        || {
+            group
+                .mp4
+                .iter()
+                .chain(&group.hls)
+                .map(|item| item.code)
+                .find(|code| *code != 0)
+        },
+        |candidate| Some(candidate.item.code),
+    );
+    let group_value = serde_json::to_value(group)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ MV URL response"))?;
+    let raw_object = raw_response
+        .as_object()
+        .ok_or_else(|| qq_data_error("QQ MV URL response envelope is not an object"))?;
+    let mut item_response = raw_object
+        .iter()
+        .filter(|(key, _)| key.as_str() != "data")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut item_data = serde_json::Map::new();
+    item_data.insert(vid.to_owned(), group_value.clone());
+    item_response.insert("data".to_owned(), Value::Object(item_data));
+    let mut extensions = Extensions::from([
+        ("request_guid".to_owned(), json!(guid)),
+        ("svp_flag".to_owned(), json!(group.svp_flag)),
+        ("urls".to_owned(), group_value),
+        ("response".to_owned(), Value::Object(item_response)),
+    ]);
+    if let Some(candidate) = selected {
+        extensions.insert(
+            "selected_protocol".to_owned(),
+            json!(candidate.protocol.name()),
+        );
+        extensions.insert(
+            "selected_filetype".to_owned(),
+            json!(candidate.item.filetype),
+        );
+        extensions.insert(
+            "selected_new_file_type".to_owned(),
+            json!(candidate.item.new_file_type),
+        );
+        extensions.insert(
+            "selected_url_source".to_owned(),
+            json!(candidate.url_source),
+        );
+        extensions.insert("selected_filename".to_owned(), json!(candidate.item.cn));
+        extensions.insert("selected_vkey".to_owned(), json!(candidate.item.vkey));
+        extensions.insert(
+            "selected_format_code".to_owned(),
+            json!(candidate.item.format),
+        );
+    }
+    let url = selected.and_then(|candidate| candidate.urls.first().cloned());
+    let backup_urls = selected.map_or_else(Vec::new, |candidate| {
+        candidate.urls.iter().skip(1).cloned().collect()
+    });
+    let available = url.is_some();
+    Ok(VideoStream {
+        video_ref: qq_ref(vid, "MV")?,
+        platform: Platform::Qq,
+        available,
+        url,
+        backup_urls,
+        headers: BTreeMap::new(),
+        expires_at: selected
+            .filter(|candidate| candidate.item.expire > 0)
+            .and_then(|candidate| qq_expiration_rfc3339(candidate.item.expire)),
+        format: selected.map(|candidate| candidate.protocol.name().to_owned()),
+        codec: selected.and_then(|candidate| qq_mv_codec(candidate.item.format)),
+        width: None,
+        height: selected.and_then(|candidate| candidate.resolution),
+        size: selected.and_then(|candidate| {
+            (candidate.item.file_size > 0).then_some(candidate.item.file_size)
+        }),
+        duration_ms: (group.duration > 0)
+            .then(|| group.duration.checked_mul(1_000))
+            .flatten(),
+        requested_resolution: request.resolution,
+        actual_resolution: selected.and_then(|candidate| candidate.resolution),
+        platform_code,
+        fee: None,
+        message: (!available).then(|| "QQ did not return a playable MV URL".to_owned()),
+        extensions,
+    })
+}
+
+fn qq_mv_item_urls(item: &QqMvUrlItem) -> Result<(Vec<String>, &'static str)> {
+    let mut urls = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut source = None;
+    for (name, values) in [
+        ("url", item.url.as_slice()),
+        ("comm_url", item.comm_url.as_slice()),
+        ("freeflow_url", item.freeflow_url.as_slice()),
+    ] {
+        for value in values {
+            let value = validate_qq_mv_url(value)?;
+            if seen.insert(value.clone()) {
+                source.get_or_insert(name);
+                urls.push(value);
+            }
+        }
+    }
+    if !item.m3u8.trim().is_empty() {
+        let value = validate_qq_mv_url(&item.m3u8)?;
+        if seen.insert(value.clone()) {
+            source.get_or_insert("m3u8");
+            urls.push(value);
+        }
+    }
+    Ok((urls, source.unwrap_or("none")))
+}
+
+fn validate_qq_mv_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| qq_data_error("QQ MV service returned an invalid media URL"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| qq_data_error("QQ MV service returned a media URL without a host"))?;
+    let trusted_host = ["qq.com", "tencentmusic.com", "gtimg.cn", "qpic.cn"]
+        .into_iter()
+        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")));
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !trusted_host
+    {
+        return Err(qq_data_error("QQ MV service returned an unsafe media URL"));
+    }
+    Ok(value.to_owned())
+}
+
+const fn qq_mv_filetype_resolution(filetype: u64) -> Option<u32> {
+    match filetype {
+        10 => Some(360),
+        20 => Some(480),
+        30 => Some(720),
+        40 => Some(1080),
+        50 => Some(1440),
+        60 => Some(2160),
+        _ => None,
+    }
+}
+
+fn qq_mv_candidate_key(candidate: &QqMvCandidate<'_>, requested: u32) -> (u8, u32, u8) {
+    let (class, distance) = match candidate.resolution {
+        Some(resolution) if resolution <= requested => (0, u32::MAX - resolution),
+        Some(resolution) => (1, resolution - requested),
+        None => (2, 0),
+    };
+    (class, distance, candidate.protocol.preference())
+}
+
+fn qq_mv_codec(format: u64) -> Option<String> {
+    match format {
+        264 => Some("h264".to_owned()),
+        265 => Some("h265".to_owned()),
+        _ => None,
+    }
 }
 
 fn qq_favorite_playlists_request(encrypted_uin: &str, offset: u32, size: u32) -> QqApiRequest {
@@ -8019,6 +8380,177 @@ mod tests {
     }
 
     #[test]
+    fn mv_url_request_and_mapping_preserve_batches_and_choose_the_best_mp4() {
+        let vids = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
+        let (api_request, guid) = qq_mv_urls_request(&vids);
+        assert_eq!(api_request.module, MV_URL_MODULE);
+        assert_eq!(api_request.method, MV_URL_METHOD);
+        assert_eq!(guid.len(), 32);
+        assert!(guid.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(api_request.param["vids"], json!(vids));
+        assert_eq!(api_request.param["request_type"], 10003);
+        assert_eq!(api_request.param["videoformat"], 1);
+        assert_eq!(api_request.param["format"], 265);
+        assert_eq!(api_request.param["dolby"], 1);
+        assert_eq!(api_request.param["use_new_domain"], 1);
+        assert_eq!(api_request.param["use_ipv6"], 1);
+
+        let item = |filetype: u64, code: i64, url: Value, freeflow_url: Value| {
+            json!({
+                "url": url,
+                "freeflow_url": freeflow_url,
+                "comm_url": [],
+                "cn": format!("M500{filetype}.mp4"),
+                "vkey": "ephemeral-vkey",
+                "expire": "3600",
+                "code": code,
+                "filetype": filetype,
+                "m3u8": "",
+                "newFileType": filetype,
+                "format": 264,
+                "fileSize": filetype * 1000,
+                "videoType": 8
+            })
+        };
+        let group = json!({
+            "mp4": [
+                item(10, 0, json!([]), json!(["https://opi.stream.tencentmusic.com/360.mp4"])),
+                item(20, 0, json!(["https://isure.stream.qqmusic.qq.com/480.mp4", "https://isure.stream.qqmusic.qq.com/480-backup.mp4"]), json!([])),
+                item(40, 2000, json!([]), json!([]))
+            ],
+            "hls": [
+                item(20, 0, json!(["https://opi.stream.tencentmusic.com/480.m3u8"]), json!([]))
+            ],
+            "svp_flag": "1",
+            "duration": 15,
+            "testCdn": 0
+        });
+        let streams = map_qq_mv_url_response(
+            &vids,
+            &VideoStreamRequest::new(VideoResourceKind::Mv, 1080),
+            &guid,
+            response(json!({"013xscuH0xlbie": group})),
+        )
+        .expect("map duplicate QQ MV streams");
+        assert_eq!(streams.len(), 2);
+        for stream in streams {
+            assert_eq!(stream.video_ref.to_string(), "qq:013xscuH0xlbie");
+            assert!(stream.available);
+            assert_eq!(
+                stream.url.as_deref(),
+                Some("https://isure.stream.qqmusic.qq.com/480.mp4")
+            );
+            assert_eq!(
+                stream.backup_urls,
+                ["https://isure.stream.qqmusic.qq.com/480-backup.mp4"]
+            );
+            assert_eq!(stream.format.as_deref(), Some("mp4"));
+            assert_eq!(stream.codec.as_deref(), Some("h264"));
+            assert_eq!(stream.height, Some(480));
+            assert_eq!(stream.actual_resolution, Some(480));
+            assert_eq!(stream.size, Some(20_000));
+            assert_eq!(stream.duration_ms, Some(15_000));
+            assert_eq!(stream.platform_code, Some(0));
+            assert!(stream.expires_at.is_some());
+            assert_eq!(stream.extensions["selected_protocol"], "mp4");
+            assert_eq!(stream.extensions["selected_url_source"], "url");
+            assert_eq!(stream.extensions["urls"]["testCdn"], 0);
+            assert_eq!(stream.extensions["urls"]["mp4"][0]["videoType"], 8);
+        }
+    }
+
+    #[test]
+    fn mv_url_mapping_reports_unavailable_slots_without_faking_a_url() {
+        let vid = "013xscuH0xlbie".to_owned();
+        let unavailable = json!({
+            "url": [],
+            "freeflow_url": [],
+            "comm_url": [],
+            "cn": "M500.mp4",
+            "vkey": "",
+            "expire": 0,
+            "code": 2000,
+            "filetype": 40,
+            "m3u8": "",
+            "newFileType": 40,
+            "format": 264,
+            "fileSize": 0
+        });
+        let streams = map_qq_mv_url_response(
+            std::slice::from_ref(&vid),
+            &VideoStreamRequest::new(VideoResourceKind::Mv, 1080),
+            "0123456789abcdef0123456789abcdef",
+            response(json!({
+                "013xscuH0xlbie": {
+                    "mp4": [unavailable],
+                    "hls": [],
+                    "svp_flag": 0,
+                    "duration": 15
+                }
+            })),
+        )
+        .expect("map unavailable QQ MV");
+        let stream = &streams[0];
+        assert!(!stream.available);
+        assert!(stream.url.is_none());
+        assert!(stream.backup_urls.is_empty());
+        assert_eq!(stream.platform_code, Some(2000));
+        assert!(stream.message.is_some());
+    }
+
+    #[test]
+    fn mv_url_mapping_rejects_missing_items_malformed_fields_and_unsafe_urls() {
+        let vid = "013xscuH0xlbie".to_owned();
+        let request = VideoStreamRequest::new(VideoResourceKind::Mv, 1080);
+        let missing = map_qq_mv_url_response(
+            std::slice::from_ref(&vid),
+            &request,
+            "guid",
+            response(json!({})),
+        )
+        .expect_err("missing requested VID");
+        assert_eq!(missing.code, ErrorCode::UpstreamError);
+
+        let malformed = map_qq_mv_url_response(
+            std::slice::from_ref(&vid),
+            &request,
+            "guid",
+            response(json!({"013xscuH0xlbie": {"mp4": {}, "hls": []}})),
+        )
+        .expect_err("malformed typed MV URL response");
+        assert_eq!(malformed.code, ErrorCode::UpstreamError);
+
+        let unsafe_url = map_qq_mv_url_response(
+            std::slice::from_ref(&vid),
+            &request,
+            "guid",
+            response(json!({
+                "013xscuH0xlbie": {
+                    "mp4": [{
+                        "url": ["https://attacker.example/video.mp4"],
+                        "freeflow_url": [],
+                        "comm_url": [],
+                        "cn": "M500.mp4",
+                        "vkey": "token",
+                        "expire": 300,
+                        "code": 0,
+                        "filetype": 40,
+                        "m3u8": "",
+                        "newFileType": 40,
+                        "format": 264,
+                        "fileSize": 1
+                    }],
+                    "hls": [],
+                    "svp_flag": 0,
+                    "duration": 15
+                }
+            })),
+        )
+        .expect_err("untrusted media host");
+        assert_eq!(unsafe_url.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
     fn lyric_mapping_never_lets_line_sync_override_word_sync() {
         let requested = QqTrackIdentifier::Numeric(100);
         let options = LyricsRequest::default();
@@ -9516,6 +10048,45 @@ mod tests {
         assert_eq!(mismatch.code, ErrorCode::InvalidRequest);
         assert_eq!(mismatch.details["requested_user_id"], "654321");
         assert_eq!(mismatch.details["account_user_id"], "123456");
+    }
+
+    #[tokio::test]
+    async fn mv_streams_validate_batches_kinds_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::VideoStream));
+        let request = VideoStreamRequest::new(VideoResourceKind::Mv, 1080);
+        let empty = provider
+            .video_streams(&[], &request)
+            .await
+            .expect_err("empty MV batch");
+        assert_eq!(empty.code, ErrorCode::InvalidRequest);
+
+        let invalid = provider
+            .video_stream("unsafe/vid", &request)
+            .await
+            .expect_err("invalid MV VID");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+
+        let unsupported = provider
+            .video_stream(
+                "013xscuH0xlbie",
+                &VideoStreamRequest::new(VideoResourceKind::Video, 1080),
+            )
+            .await
+            .expect_err("QQ cloud video kind");
+        assert_eq!(unsupported.code, ErrorCode::InvalidRequest);
+
+        let account = provider
+            .video_stream(
+                "013xscuH0xlbie",
+                &VideoStreamRequest {
+                    account: Some("missing-account".to_owned()),
+                    ..request
+                },
+            )
+            .await
+            .expect_err("missing account alias");
+        assert_eq!(account.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -11128,6 +11699,42 @@ mod tests {
         assert_eq!(by_mid.track_ref, track.resource_ref);
         assert_eq!(by_mid.extensions["numeric_id"], 7_137_686);
         assert_eq!(by_mid.entries, numeric.entries);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_mv_urls_preserve_duplicate_vids_and_select_a_playable_resolution() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let vids = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
+        let streams = provider
+            .video_streams(&vids, &VideoStreamRequest::new(VideoResourceKind::Mv, 1080))
+            .await
+            .expect("live QQ MV URL batch");
+        assert_eq!(streams.len(), vids.len());
+        assert_eq!(streams[0].video_ref.to_string(), "qq:013xscuH0xlbie");
+        assert_eq!(streams[1].video_ref, streams[0].video_ref);
+        assert!(streams.iter().all(|stream| stream.available));
+        assert!(streams.iter().all(|stream| stream.url.is_some()));
+        assert!(
+            streams
+                .iter()
+                .all(|stream| stream.actual_resolution.is_some())
+        );
+        assert_eq!(streams[0].url, streams[1].url);
+        assert!(
+            streams[0].extensions["urls"]["mp4"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
+        assert!(
+            streams[0].extensions["urls"]["hls"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
     }
 
     #[tokio::test]

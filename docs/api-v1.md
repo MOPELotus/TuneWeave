@@ -304,7 +304,7 @@
 
 视频详情端点返回 `VideoDetail`，以 `kind=mv|video` 明确资源类型，`video` 承载统一元数据，`resolutions` 列出平台实际公布的清晰度及可用的宽高、大小和格式。网易云数值 ID 默认推断为 MV，不透明字符串 ID 默认推断为站内视频；调用方也可通过 `kind`（兼容 `type`）显式指定，避免依赖推断。
 
-`VideoStats` 独立返回点赞态以及点赞、评论和分享计数。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。
+`VideoStats` 独立返回点赞态以及点赞、评论和分享计数。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云与 QQ 接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。批量视频流使用 `GET/POST /v1/videos/streams`，保留输入顺序和重复项，但一个请求只接受同一平台，以便支持平台原生批量协议。
 
 已关注歌手的新视频与新曲时间线分别返回 `Video[]` 和 `Track[]`，但都属于账户资源。它们以毫秒时间戳 `before` 翻页，并在 `meta.pagination.extensions.next_before_ms` 返回下一页起点；`account` 只选择登录态，不改变内容平台。
 
@@ -1202,6 +1202,8 @@ QQ 会员信息只支持当前登录账户：`GET /v1/account/membership?platfor
 | GET | `/v1/videos/{ref}` | `kind/type=mv|video`、`account?` | `VideoDetail`，含统一视频信息和平台公布的清晰度 |
 | GET | `/v1/videos/{ref}/stats` | `kind/type=mv|video`、`account?` | `VideoStats` |
 | GET | `/v1/videos/{ref}/stream` | `kind/type=mv|video`、`resolution/res?`、`account?` | `VideoStream`；默认请求 1080，允许无可用 URL 的业务成功态 |
+| GET | `/v1/videos/streams` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`resolution/res?`、`account?` | `VideoStream[]`；1–100 项，同平台、保序且保留重复项 |
+| POST | `/v1/videos/streams` | JSON `{refs?|ids/vids?, platform?, kind/type?, resolution/res?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoStream[]`；使用 provider 原生批量能力或统一逐项默认实现 |
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
 | GET | `/v1/videos/{ref}/parts` | 分页；B 站 Basic 阶段接入 | `VideoPart[]` |
 
@@ -1248,6 +1250,8 @@ Uni Playlist 项流复用同一音质与路由参数，并额外以 `accounts` �
 下载端点复用同一套音质、后端、精确码率和账户参数，但不会把播放 URL 冒充不存在的专用下载能力。`MediaDownload.available` 与可空 `url` 明确表达下载能力，平台返回的实际音质、码率、大小、时长、业务码、费用和完整原文均保留；空白编码不会遮住有效容器格式，零响应时长不会遮住歌曲元数据时长。网易云新版下载即使顶层 `code=200`，单档 `code=-110/url=null` 仍返回 `available=false`；其 `/download/redirect` 先取专用下载地址，缺失时才以同音质播放 URL 兜底。QQ 的参考协议本身以同一文件授权取得可下载媒体，因此统一下载直接使用所选完整文件的授权 URL，但排除 `trial/trial_ogg_640`；真实文件不存在或无权限时仍返回可检查的 `available=false`，不会把试听片段标成下载成功。只有取得非空安全 URL 才发出 302 `Location`，客户端账户凭据和上游 Cookie不会进入重定向响应。
 
 网易云的 `/v1/videos/{ref}`、`/stats` 和 `/stream` 分别精确覆盖 `mv_detail/video_detail`、`mv_detail_info/video_detail_info` 与 `mv_url/video_url`。MV 详情、统计和平台公布的 240/480/720/1080 四档播放地址已经完成真实 HTTP 验收；站内视频 ID 是不透明字符串，失效资源的 404 以及 `code=200` 但空 URL 列表都保持原始业务语义。2026-07-22 又以账户收藏中的当前有效普通视频真实验证详情、4 档资源、统计、480p 非空播放 URL 与统一 302 重定向。
+
+QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共用同一强类型映射。QQ 的字母数字 VID 在省略 `kind` 时默认解释为 `mv`；显式 `video` 会被拒绝，避免把尚未支持的普通视频伪装成 MV。平台返回的 MP4/HLS 各档、直连/通用/免流/m3u8 地址、文件类型、编码、大小、令牌、有效期和业务码全部保留；选择时先取不高于请求值的最高已知清晰度，同档优先直接 MP4，只有没有低档时才向上选择。常规 `url` 为空不会遮住可用的 `comm_url/freeflow_url/m3u8`；所有可输出或重定向的地址都必须属于固定 QQ/Tencent Music 媒体域且不得嵌入用户凭据。重复 VID 在单次上游请求后按输入位置恢复，平台以 VID 为键的响应不会使重复项消失。
 
 `POST /v1/resolve` 同时接受已有引用或纯元数据：
 
