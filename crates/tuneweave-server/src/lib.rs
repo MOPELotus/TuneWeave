@@ -1078,7 +1078,7 @@ async fn general_search(
         })
         .transpose()?;
     let platform = search_platform(&state, params.platform.as_deref())?;
-    let account = optional_trimmed(params.account);
+    let account = optional_trimmed(params.account.clone());
     let provider = state.registry.require(platform)?;
     let result = provider
         .general_search(&GeneralSearchRequest {
@@ -8997,7 +8997,7 @@ async fn recommended_tracks(
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = account_alias(params.account.as_deref())?;
-    let request = recommendation_request(&params, account.clone())?;
+    let request = recommendation_request(&params, Some(account.clone()))?;
     let provider = state.registry.require(platform)?;
     let page = provider.recommended_tracks(&request).await?;
     Ok(Json(
@@ -9014,21 +9014,22 @@ async fn recommended_playlists(
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let account = optional_trimmed(params.account.clone());
     let request = recommendation_request(&params, account.clone())?;
     let provider = state.registry.require(platform)?;
     let page = provider.recommended_playlists(&request).await?;
-    Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
-            .with_pagination(page.pagination),
-    ))
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 fn recommendation_request(
     params: &RecommendationParams,
-    account: String,
+    account: Option<String>,
 ) -> Result<RecommendationRequest, TuneWeaveError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -9039,7 +9040,7 @@ fn recommendation_request(
     Ok(RecommendationRequest {
         limit,
         offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
-        account: Some(account),
+        account,
         refresh: parse_bool_parameter("refresh", params.refresh.as_deref(), false)?,
         source: parse_recommendation_source(params.source.as_deref())?,
         area_id: parse_optional_u64_parameter("area_id", params.area_id.as_deref())?,

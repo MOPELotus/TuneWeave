@@ -1244,6 +1244,8 @@ QQ 综合搜索固定使用 Android `music.adaptor.SearchAdaptor/do_search_v2` �
 
 QQ 首页推荐固定使用 Android `music.recommend.RecommendFeed/get_recommend_feed`，首屏默认提交 `direction=0/page=1/s_num=0`，后续页把返回楼层数累加进 `s_num`，以 `direction=1` 推进，并把所有已曝光楼层 ID 放入 `v_cache`。TuneWeave 保留重复楼层及卡片原序，但对缓存 ID 做稳定去重；非空响应若没有新增楼层 ID 会停止生成 `next`，修正参考分页器可能无限重复请求的风险。楼层、细分组、更多动作和卡片均为强类型；当前 `type=200/400/500/1000` 分别提供歌曲/专辑/歌单/榜单统一引用，`700/900` 功能入口和未知类型不会猜测资源身份。封面只接受无凭据 HTTP(S)，动作只接受安全的 QQ Music 或 HTTP(S) scheme，完整实验、布局、反馈、内嵌歌曲和未来字段保留于扩展。2026-07-26 provider 与 release 统一 HTTP 匿名真实验收首屏与下一页，包含重复楼层、多种资源卡片和防重复续页状态。
 
+QQ 推荐歌单固定使用 Android `music.playlist.PlaylistSquare/GetRecommendFeed`，统一 `offset/limit` 原样映射为平台 `From/Size`，不先换成可能丢失游标语义的页码。响应 `List[*].Playlist.basic` 强类型映射歌单 ID、标题、简介、封面、歌曲数、播放量和创建者；`HasMore/FromLimit` 生成下一统一 offset，总数保持未知。非默认推荐来源、刷新和地区筛选会明确拒绝，不会静默忽略；命名账户只验证精确别名，省略账户可匿名读取公开推荐。平台声称有下一页但返回空列表、游标不前进、返回数量超限或资源字段畸形时均拒绝为假成功。2026-07-26 provider 与 release 统一 HTTP 匿名真实验收连续两页，每页 5 项且身份不重复。
+
 默认搜索词与搜索结果分离：`keyword` 是应提交给搜索端点的真实词，`display_text` 是可直接展示的文案，`kind` 仅在平台类型可映射时返回，图片允许为空。网易云固定使用 EAPI `/api/search/defaultkeyword/get`；空白 `showKeyword` 会继续回退 `styleKeyword.keyWord`，算法、样式词和业务意图等动态字段完整保留在 `extensions.response`，调用方不应解析它们来替代稳定字段。
 
 热搜目录按 `rank` 从 1 开始排序，`keyword` 必填，说明、分数、图标类型、图标 URL 和目标 URL 均按平台实际返回可空。`detail` 缺省为 `full`，也接受 `brief`，并兼容 `mode` 查询名及 `simple/detail/detailed` 值。网易云简略榜固定使用 EAPI `/api/search/hot` 和 `type=1111`，详细榜固定使用 WeAPI `/api/hotsearchlist/get`；两套响应不会互相补造缺失字段，完整原文位于列表与条目扩展。

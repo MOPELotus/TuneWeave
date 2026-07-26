@@ -31,15 +31,15 @@ use tuneweave_core::{
     PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
     RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
     RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
-    RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf, ResourceRef,
-    Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
-    VideoStream, VideoStreamRequest,
+    RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
+    RecommendationRequest, RecommendationSource, ResourceRef, Result, SearchItem, SearchKind,
+    SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
+    SearchTrendingList, SearchTrendingRequest, SearchVariant, SimilarArtistList,
+    SimilarArtistRequest, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
+    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -57,6 +57,8 @@ const GENERAL_SEARCH_MODULE: &str = "music.adaptor.SearchAdaptor";
 const GENERAL_SEARCH_METHOD: &str = "do_search_v2";
 const RECOMMENDATION_FEED_MODULE: &str = "music.recommend.RecommendFeed";
 const RECOMMENDATION_FEED_METHOD: &str = "get_recommend_feed";
+const RECOMMENDATION_PLAYLIST_MODULE: &str = "music.playlist.PlaylistSquare";
+const RECOMMENDATION_PLAYLIST_METHOD: &str = "GetRecommendFeed";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -758,6 +760,92 @@ struct QqRecommendationFeedResponse {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     shelves: Vec<QqRecommendationFeedShelf>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct QqRecommendationPlaylistCover {
+    #[serde(default)]
+    default_url: String,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct QqRecommendationPlaylistCreator {
+    #[serde(default)]
+    nick: String,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    uin: Option<String>,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationPlaylistBasic {
+    #[serde(
+        default,
+        alias = "tid",
+        alias = "dissid",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    id: u64,
+    #[serde(default, alias = "dissname", alias = "name")]
+    title: String,
+    #[serde(default, alias = "description")]
+    desc: String,
+    #[serde(
+        default,
+        alias = "songnum",
+        alias = "songNum",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    song_cnt: u64,
+    #[serde(
+        default,
+        alias = "listennum",
+        alias = "playCnt",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    play_cnt: u64,
+    #[serde(default)]
+    cover: QqRecommendationPlaylistCover,
+    #[serde(default)]
+    creator: QqRecommendationPlaylistCreator,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationPlaylistPayload {
+    basic: QqRecommendationPlaylistBasic,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationPlaylistEntry {
+    #[serde(rename = "Playlist")]
+    playlist: QqRecommendationPlaylistPayload,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRecommendationPlaylistResponse {
+    #[serde(
+        rename = "List",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    entries: Vec<QqRecommendationPlaylistEntry>,
+    #[serde(rename = "HasMore", deserialize_with = "deserialize_qq_bool")]
+    has_more: bool,
+    #[serde(rename = "FromLimit", deserialize_with = "deserialize_qq_i64")]
+    from_limit: i64,
+    #[serde(rename = "Msg")]
+    message: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2926,6 +3014,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::RecommendationFeed,
+            Capability::Recommendations,
             Capability::UserProfileModern,
             Capability::ChartCatalog,
             Capability::ChartTracks,
@@ -3054,6 +3143,22 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ recommendation feed returned no response"))?;
         map_qq_recommendation_feed(request, seen_ids, response)
+    }
+
+    async fn recommended_playlists(
+        &self,
+        request: &RecommendationRequest,
+    ) -> Result<Page<Playlist>> {
+        let api_request = qq_recommendation_playlist_request(request)?;
+        self.validate_public_account(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ recommended playlists returned no response"))?;
+        map_qq_recommendation_playlists(request, response)
     }
 
     async fn search_suggestions(
@@ -5718,6 +5823,149 @@ fn validate_qq_recommendation_scheme(scheme: &str) -> Result<String> {
         }
     }
     Ok(scheme.to_owned())
+}
+
+fn qq_recommendation_playlist_request(request: &RecommendationRequest) -> Result<QqApiRequest> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended playlist limit must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.source != RecommendationSource::Daily {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended playlists only support the default recommendation source",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "source": request.source })));
+    }
+    if request.refresh {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended playlists do not expose a refresh branch",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if request.area_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommended playlists do not expose an area filter",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        RECOMMENDATION_PLAYLIST_MODULE,
+        RECOMMENDATION_PLAYLIST_METHOD,
+        json!({"From": request.offset, "Size": request.limit}),
+    ))
+}
+
+fn map_qq_recommendation_playlists(
+    request: &RecommendationRequest,
+    response: QqApiResponse,
+) -> Result<Page<Playlist>> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqRecommendationPlaylistResponse>(response_data)
+        .map_err(|error| {
+            qq_data_error(format!(
+                "QQ recommended playlist response is malformed: {error}"
+            ))
+        })?;
+    if parsed.entries.len() > usize::try_from(request.limit).unwrap_or(usize::MAX) {
+        return Err(qq_data_error(
+            "QQ recommended playlist response exceeded the requested page size",
+        ));
+    }
+    let next_offset = if parsed.has_more {
+        if parsed.entries.is_empty() {
+            return Err(qq_data_error(
+                "QQ recommended playlist pagination made no progress",
+            ));
+        }
+        let cursor = u32::try_from(parsed.from_limit)
+            .map_err(|_| qq_data_error("QQ recommended playlist cursor is invalid"))?;
+        if cursor <= request.offset {
+            return Err(qq_data_error(
+                "QQ recommended playlist cursor did not advance",
+            ));
+        }
+        Some(cursor)
+    } else {
+        None
+    };
+    let items = parsed
+        .entries
+        .into_iter()
+        .map(|entry| map_qq_recommendation_playlist(entry.playlist.basic))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: None,
+            next_offset,
+            has_more: parsed.has_more,
+            extensions: Extensions::from([
+                ("cursor".to_owned(), json!(parsed.from_limit)),
+                ("message".to_owned(), json!(parsed.message)),
+                ("extra".to_owned(), json!(parsed.extra)),
+                ("response".to_owned(), response_raw),
+            ]),
+        },
+    })
+}
+
+fn map_qq_recommendation_playlist(basic: QqRecommendationPlaylistBasic) -> Result<Playlist> {
+    if basic.id == 0 {
+        return Err(qq_data_error(
+            "QQ recommended playlist is missing a positive ID",
+        ));
+    }
+    let name = basic.title.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ recommended playlist is missing its title",
+        ));
+    }
+    let creator_name = basic.creator.nick.trim();
+    let creator = (!creator_name.is_empty())
+        .then(|| {
+            let resource_ref = basic
+                .creator
+                .uin
+                .as_deref()
+                .filter(|uin| *uin != "0")
+                .map(|uin| qq_ref(uin, "recommended playlist creator"))
+                .transpose()?;
+            Ok::<_, TuneWeaveError>(ArtistSummary {
+                resource_ref,
+                name: creator_name.to_owned(),
+            })
+        })
+        .transpose()?;
+    Ok(Playlist {
+        resource_ref: qq_ref(&basic.id.to_string(), "recommended playlist")?,
+        platform: Platform::Qq,
+        id: basic.id.to_string(),
+        name: name.to_owned(),
+        description: basic.desc.trim().to_owned(),
+        cover_url: first_qq_display_url(&[(
+            &basic.cover.default_url,
+            "recommended playlist cover",
+        )])?,
+        creator,
+        track_count: Some(basic.song_cnt),
+        tags: Vec::new(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions: Extensions::from([
+            ("play_count".to_owned(), json!(basic.play_cnt)),
+            ("recommended".to_owned(), Value::Bool(true)),
+        ]),
+    })
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<&str> {
@@ -23086,6 +23334,170 @@ mod tests {
     }
 
     #[test]
+    fn recommended_playlist_request_preserves_offset_and_rejects_unsupported_branches() {
+        let request = qq_recommendation_playlist_request(&RecommendationRequest::new(25, 50))
+            .expect("QQ recommended playlist request");
+        assert_eq!(request.module, RECOMMENDATION_PLAYLIST_MODULE);
+        assert_eq!(request.method, RECOMMENDATION_PLAYLIST_METHOD);
+        assert_eq!(request.param["From"], 50);
+        assert_eq!(request.param["Size"], 25);
+
+        for request in [
+            RecommendationRequest::new(0, 0),
+            RecommendationRequest::new(101, 0),
+            RecommendationRequest {
+                source: RecommendationSource::Personalized,
+                ..RecommendationRequest::new(25, 0)
+            },
+            RecommendationRequest {
+                refresh: true,
+                ..RecommendationRequest::new(25, 0)
+            },
+            RecommendationRequest {
+                area_id: Some(1),
+                ..RecommendationRequest::new(25, 0)
+            },
+        ] {
+            let error = qq_recommendation_playlist_request(&request)
+                .err()
+                .expect("unsupported recommended playlist request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
+    fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
+        let data = json!({
+            "List": [{
+                "Playlist": {
+                    "basic": {
+                        "tid": 211111,
+                        "title": "百万收藏",
+                        "desc": "热门歌单",
+                        "song_cnt": 30,
+                        "play_cnt": 123456,
+                        "cover": {"default_url": "https://y.gtimg.cn/playlist.jpg"},
+                        "creator": {"nick": "推荐君", "uin": "12345"},
+                        "futureBasicField": true
+                    },
+                    "futurePlaylistField": "kept"
+                },
+                "futureEntryField": "kept"
+            }],
+            "HasMore": true,
+            "FromLimit": 25,
+            "Msg": "ok",
+            "futureResponseField": "kept"
+        });
+        let page = map_qq_recommendation_playlists(
+            &RecommendationRequest::new(25, 0),
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ recommended playlists");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:211111");
+        assert_eq!(page.items[0].name, "百万收藏");
+        assert_eq!(page.items[0].description, "热门歌单");
+        assert_eq!(page.items[0].track_count, Some(30));
+        assert_eq!(page.items[0].extensions["play_count"], 123456);
+        assert_eq!(
+            page.items[0]
+                .creator
+                .as_ref()
+                .and_then(|creator| creator.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("qq:12345")
+        );
+        assert_eq!(page.pagination.total, None);
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, Some(25));
+        assert_eq!(page.pagination.extensions["message"], "ok");
+        assert_eq!(
+            page.pagination.extensions["response"]["data"]["List"][0]["Playlist"]["basic"]["futureBasicField"],
+            true
+        );
+    }
+
+    #[test]
+    fn recommended_playlist_mapping_rejects_malformed_items_and_nonprogressing_pages() {
+        let fixture = |entries: Value, has_more: bool, cursor: i64| {
+            json!({
+                "List": entries,
+                "HasMore": has_more,
+                "FromLimit": cursor,
+                "Msg": ""
+            })
+        };
+        for fixture in [
+            json!({}),
+            fixture(json!([]), true, 25),
+            fixture(
+                json!([{"Playlist": {"basic": {"tid": 1, "title": "歌单"}}}]),
+                true,
+                0,
+            ),
+            fixture(
+                json!([{"Playlist": {"basic": {"tid": 0, "title": "歌单"}}}]),
+                false,
+                0,
+            ),
+            fixture(
+                json!([{"Playlist": {"basic": {"tid": 1, "title": ""}}}]),
+                false,
+                0,
+            ),
+            fixture(
+                json!([{"Playlist": {"basic": {
+                    "tid": 1,
+                    "title": "歌单",
+                    "cover": {"default_url": "javascript:alert(1)"}
+                }}}]),
+                false,
+                0,
+            ),
+        ] {
+            let error = map_qq_recommendation_playlists(
+                &RecommendationRequest::new(25, 0),
+                response(fixture),
+            )
+            .expect_err("invalid QQ recommended playlist response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn recommended_playlists_validate_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::Recommendations)
+        );
+        let missing = provider
+            .recommended_playlists(&RecommendationRequest {
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(25, 0)
+            })
+            .await
+            .expect_err("missing optional recommended playlist account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .recommended_playlists(&RecommendationRequest {
+                limit: 0,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationRequest::new(25, 0)
+            })
+            .await
+            .expect_err("invalid recommended playlist request");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
     fn selector_mapping_preserves_two_dimensional_catalogs_and_extra_fields() {
         let page = map_track_search_response(
             0,
@@ -23780,6 +24192,46 @@ mod tests {
                 .next
                 .as_ref()
                 .is_none_or(|cursor| cursor.seen_ids.starts_with(&next.seen_ids))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_recommended_playlists_preserve_cursor_and_metadata() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .recommended_playlists(&RecommendationRequest::new(5, 0))
+            .await
+            .expect("live QQ recommended playlists first page");
+        assert_eq!(first.items.len(), 5);
+        assert!(first.items.iter().all(|playlist| !playlist.name.is_empty()));
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|playlist| playlist.cover_url.is_some())
+        );
+        assert_eq!(first.pagination.total, None);
+        assert!(first.pagination.has_more);
+        let next_offset = first
+            .pagination
+            .next_offset
+            .expect("recommended playlists have another page");
+        let second = provider
+            .recommended_playlists(&RecommendationRequest::new(5, next_offset))
+            .await
+            .expect("live QQ recommended playlists continuation");
+        assert_eq!(second.items.len(), 5);
+        assert_eq!(second.pagination.offset, next_offset);
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|first| second.items.iter().all(|second| second.id != first.id))
         );
     }
 
