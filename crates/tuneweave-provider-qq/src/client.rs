@@ -2,11 +2,14 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::{Client, Proxy, StatusCode, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha1::{Digest, Sha1};
 use tokio::sync::Mutex as AsyncMutex;
 use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
 
@@ -16,6 +19,7 @@ use crate::{
 };
 
 const API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const SIGNED_API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const QUICK_SEARCH_ENDPOINT: &str = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
 const ANDROID_USER_AGENT: &str = "QQMusic 14090008(android 10)";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -277,6 +281,23 @@ impl QqClient {
         response
     }
 
+    pub(crate) async fn request_android_signed_with_credential(
+        &self,
+        requests: &[QqApiRequest],
+        credential: &QqCredential,
+    ) -> Result<Vec<QqApiResponse>> {
+        if requests.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ signed API batch must contain at least one request",
+            )
+            .with_platform(Platform::Qq));
+        }
+        self.ensure_android_session().await?;
+        let device = self.lock_device()?.device().clone();
+        let comm = android_comm(&device, Some(credential));
+        self.post_api_signed(&comm, requests, credential).await
+    }
+
     pub(crate) async fn request_android_login(
         &self,
         request: QqApiRequest,
@@ -535,7 +556,7 @@ impl QqClient {
         requests: &[QqApiRequest],
         credential: Option<&QqCredential>,
     ) -> Result<Vec<QqApiResponse>> {
-        self.post_api_with_user_agent_options(comm, requests, None, credential, true)
+        self.post_api_with_user_agent_options(comm, requests, None, credential, true, false)
             .await
     }
 
@@ -546,7 +567,17 @@ impl QqClient {
         user_agent: Option<&str>,
         credential: Option<&QqCredential>,
     ) -> Result<Vec<QqApiResponse>> {
-        self.post_api_with_user_agent_options(comm, requests, user_agent, credential, false)
+        self.post_api_with_user_agent_options(comm, requests, user_agent, credential, false, false)
+            .await
+    }
+
+    async fn post_api_signed(
+        &self,
+        comm: &Value,
+        requests: &[QqApiRequest],
+        credential: &QqCredential,
+    ) -> Result<Vec<QqApiResponse>> {
+        self.post_api_with_user_agent_options(comm, requests, None, Some(credential), false, true)
             .await
     }
 
@@ -557,6 +588,7 @@ impl QqClient {
         user_agent: Option<&str>,
         credential: Option<&QqCredential>,
         allow_business_errors: bool,
+        signed: bool,
     ) -> Result<Vec<QqApiResponse>> {
         let mut payload = Map::new();
         payload.insert("comm".to_owned(), comm.clone());
@@ -571,7 +603,33 @@ impl QqClient {
                 }),
             );
         }
-        let mut request = self.http.post(API_ENDPOINT).json(&Value::Object(payload));
+        let payload = Value::Object(payload);
+        let mut request = if signed {
+            let body = serde_json::to_vec(&payload).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!("failed to serialize QQ signed request: {error}"),
+                )
+                .with_platform(Platform::Qq)
+            })?;
+            let mut endpoint = reqwest::Url::parse(SIGNED_API_ENDPOINT).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!("QQ signed API endpoint is invalid: {error}"),
+                )
+                .with_platform(Platform::Qq)
+            })?;
+            endpoint
+                .query_pairs_mut()
+                .append_pair("_", &unix_millis_now()?.to_string())
+                .append_pair("sign", &zzc_sign(&body));
+            self.http
+                .post(endpoint)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+        } else {
+            self.http.post(API_ENDPOINT).json(&payload)
+        };
         if let Some(user_agent) = user_agent {
             request = request.header(reqwest::header::USER_AGENT, user_agent);
         }
@@ -647,6 +705,46 @@ impl QqClient {
         }
         Ok(())
     }
+}
+
+fn unix_millis_now() -> Result<u128> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "system clock is before the Unix epoch",
+            )
+            .with_platform(Platform::Qq)
+        })
+}
+
+fn zzc_sign(payload: &[u8]) -> String {
+    const PART_1_INDEXES: [usize; 7] = [23, 14, 6, 36, 16, 7, 19];
+    const PART_2_INDEXES: [usize; 8] = [16, 1, 32, 12, 19, 27, 8, 5];
+    const SCRAMBLE_VALUES: [u8; 20] = [
+        89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121,
+        179,
+    ];
+
+    let hash = Sha1::digest(payload);
+    let hash_hex = hex::encode_upper(hash);
+    let part_1 = PART_1_INDEXES
+        .into_iter()
+        .map(|index| char::from(hash_hex.as_bytes()[index]))
+        .collect::<String>();
+    let part_2 = PART_2_INDEXES
+        .into_iter()
+        .map(|index| char::from(hash_hex.as_bytes()[index]))
+        .collect::<String>();
+    let scrambled = std::array::from_fn::<_, 20, _>(|index| SCRAMBLE_VALUES[index] ^ hash[index]);
+    let encoded = BASE64
+        .encode(scrambled)
+        .chars()
+        .filter(|character| !matches!(character, '/' | '\\' | '+' | '='))
+        .collect::<String>();
+    format!("zzc{part_1}{encoded}{part_2}").to_ascii_lowercase()
 }
 
 fn android_comm(device: &QqDevice, credential: Option<&QqCredential>) -> Value {
@@ -819,6 +917,26 @@ fn qq_data_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zzc_signature_matches_independent_python_vectors() {
+        for (payload, expected) in [
+            (
+                b"".as_slice(),
+                "zzcf0e03e5gx4qeiq5cfgdyqwu7sdqfsb5fro3aa45053",
+            ),
+            (
+                b"{}".as_slice(),
+                "zzcf8e26805gyafigxmxjehoe02mvsjjgtwzw6f1a05f9",
+            ),
+            (
+                br#"{"comm":{"ct":11},"req_0":{"module":"music.feedback.FeedbackBlack","method":"GetDislikeList","param":{"Cmd":3,"Page":1}}}"#.as_slice(),
+                "zzc70553ebaldyicnjfqbpwu8na9rh9iin831f1b65e",
+            ),
+        ] {
+            assert_eq!(zzc_sign(payload), expected);
+        }
+    }
 
     #[test]
     fn booleans_are_normalized_recursively_without_touching_numbers() {

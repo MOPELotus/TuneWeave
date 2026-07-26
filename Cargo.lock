@@ -1957,6 +1957,7 @@ dependencies = [
  "rumqttc",
  "serde",
  "serde_json",
+ "sha1",
  "tokio",
  "tokio-tungstenite",
  "tuneweave-core",

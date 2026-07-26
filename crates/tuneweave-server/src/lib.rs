@@ -21,9 +21,10 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest,
-    AlbumStats, AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist,
-    ArtistArea, ArtistCatalog, ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea,
+    AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest, AccountProfile,
+    AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats,
+    AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea,
+    ArtistCatalog, ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea,
     ArtistChartRequest, ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind,
     ArtistHomepageTabRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
     ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
@@ -581,6 +582,7 @@ pub fn build_router(state: AppState) -> Router {
             "/account/podcast-episodes/{reference}",
             axum::routing::delete(podcast_episode_delete),
         )
+        .route("/account/dislikes", get(account_dislikes))
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -11081,6 +11083,118 @@ fn parse_optional_podcast_filter(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AccountDislikeParams {
+    platform: Option<String>,
+    account: Option<String>,
+    kind: Option<String>,
+    #[serde(rename = "type")]
+    resource_type: Option<String>,
+    cmd: Option<String>,
+    page: Option<String>,
+    cursor: Option<String>,
+    #[serde(alias = "lastid")]
+    last_id: Option<String>,
+}
+
+fn parse_account_dislike_kind(
+    kind: Option<&str>,
+    resource_type: Option<&str>,
+    cmd: Option<&str>,
+) -> Result<AccountDislikeKind, TuneWeaveError> {
+    let provided = [kind, resource_type, cmd]
+        .into_iter()
+        .filter(|value| value.is_some())
+        .count();
+    if provided > 1 {
+        return Err(TuneWeaveError::invalid_request(
+            "kind, type, and cmd cannot be provided together",
+        )
+        .with_details(json!({ "conflicts": ["kind", "type", "cmd"] })));
+    }
+    if let Some(cmd) = cmd {
+        return match cmd.trim() {
+            "2" => Ok(AccountDislikeKind::Artist),
+            "3" => Ok(AccountDislikeKind::Track),
+            "4" => Ok(AccountDislikeKind::Style),
+            value => Err(TuneWeaveError::invalid_request(format!(
+                "unsupported QQ dislike cmd: {value}"
+            ))
+            .with_details(json!({ "allowed": [2, 3, 4] }))),
+        };
+    }
+    match kind
+        .or(resource_type)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("track") | Some("song") | Some("music") => Ok(AccountDislikeKind::Track),
+        Some("artist") | Some("singer") => Ok(AccountDislikeKind::Artist),
+        Some("style") | Some("genre") => Ok(AccountDislikeKind::Style),
+        Some(value) => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported dislike kind: {value}"
+        ))
+        .with_details(json!({ "allowed": ["track", "artist", "style"] }))),
+    }
+}
+
+fn parse_account_dislike_cursor(
+    cursor: Option<&str>,
+    last_id: Option<&str>,
+) -> Result<Option<u64>, TuneWeaveError> {
+    if cursor.is_some() && last_id.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "cursor and last_id cannot be provided together",
+        )
+        .with_details(json!({ "conflicts": ["cursor", "last_id"] })));
+    }
+    let Some(value) = cursor.or(last_id) else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let cursor = value.parse::<u64>().map_err(|_| {
+        TuneWeaveError::invalid_request("dislike cursor must be an unsigned integer")
+            .with_details(json!({ "cursor": value }))
+    })?;
+    Ok((cursor > 0).then_some(cursor))
+}
+
+async fn account_dislikes(
+    State(state): State<AppState>,
+    params: Result<Query<AccountDislikeParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<AccountDislikeList>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let kind = parse_account_dislike_kind(
+        params.kind.as_deref(),
+        params.resource_type.as_deref(),
+        params.cmd.as_deref(),
+    )?;
+    let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
+    if !(1..=1_000_000).contains(&page) {
+        return Err(TuneWeaveError::invalid_request("page must be between 1 and 1000000").into());
+    }
+    let cursor = parse_account_dislike_cursor(params.cursor.as_deref(), params.last_id.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .account_dislikes(&AccountDislikeListRequest {
+            kind,
+            page,
+            cursor,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(list)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AccountFollowingArtistParams {
     platform: Option<String>,
     account: Option<String>,
@@ -15130,6 +15244,30 @@ mod tests {
                         json!(false),
                     )]),
                 },
+            })
+        }
+
+        async fn account_dislikes(
+            &self,
+            request: &AccountDislikeListRequest,
+        ) -> Result<AccountDislikeList> {
+            Ok(AccountDislikeList {
+                platform: self.platform(),
+                kind: request.kind,
+                items: vec![tuneweave_core::AccountDislikeEntry {
+                    platform: self.platform(),
+                    kind: request.kind,
+                    id: request.cursor.unwrap_or(398_282_803).to_string(),
+                    name: "不喜欢内容".to_owned(),
+                    image_url: Some("https://example.test/dislike.jpg".to_owned()),
+                    added_at: Some("2024-01-01T00:00:00Z".to_owned()),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                page: request.page,
+                next_page: request.page.checked_add(1),
+                next_cursor: Some(398_282_803),
+                token: Some("opaque-token".to_owned()),
+                extensions: Extensions::from([("mock".to_owned(), json!(true))]),
             })
         }
 
@@ -25370,6 +25508,58 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn account_dislikes_accept_unified_kinds_and_qq_cursor_aliases() {
+        let (status, tracks) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/dislikes?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"]["kind"], "track");
+        assert_eq!(tracks["data"]["items"][0]["kind"], "track");
+        assert_eq!(tracks["data"]["page"], 1);
+        assert_eq!(tracks["meta"]["platform"], "netease");
+        assert_eq!(tracks["meta"]["account"], "personal");
+
+        let (status, artists) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/dislikes?platform=netease&cmd=2&page=3&cursor=4558",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artists["data"]["kind"], "artist");
+        assert_eq!(artists["data"]["items"][0]["id"], "4558");
+        assert_eq!(artists["data"]["page"], 3);
+        assert_eq!(artists["data"]["next_page"], 4);
+
+        let (status, styles) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/dislikes?platform=netease&type=genre&page=2&lastid=123",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(styles["data"]["kind"], "style");
+        assert_eq!(styles["data"]["items"][0]["id"], "123");
+        assert_eq!(styles["data"]["token"], "opaque-token");
+
+        for path in [
+            "/v1/account/dislikes?platform=netease&kind=track&cmd=3",
+            "/v1/account/dislikes?platform=netease&kind=track&type=song",
+            "/v1/account/dislikes?platform=netease&kind=unknown",
+            "/v1/account/dislikes?platform=netease&cmd=1",
+            "/v1/account/dislikes?platform=netease&page=0",
+            "/v1/account/dislikes?platform=netease&page=1000001",
+            "/v1/account/dislikes?platform=netease&cursor=next",
+            "/v1/account/dislikes?platform=netease&cursor=1&last_id=2",
+            "/v1/account/dislikes?platform=netease&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

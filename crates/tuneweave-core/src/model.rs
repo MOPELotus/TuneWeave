@@ -2077,6 +2077,57 @@ pub struct RecommendationDislikeResult {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AccountDislikeKind {
+    #[default]
+    Track,
+    Artist,
+    Style,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AccountDislikeEntry {
+    pub platform: Platform,
+    pub kind: AccountDislikeKind,
+    pub id: String,
+    pub name: String,
+    pub image_url: Option<String>,
+    pub added_at: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountDislikeListRequest {
+    pub kind: AccountDislikeKind,
+    pub page: u32,
+    pub cursor: Option<u64>,
+    pub account: Option<String>,
+}
+
+impl Default for AccountDislikeListRequest {
+    fn default() -> Self {
+        Self {
+            kind: AccountDislikeKind::Track,
+            page: 1,
+            cursor: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AccountDislikeList {
+    pub platform: Platform,
+    pub kind: AccountDislikeKind,
+    pub items: Vec<AccountDislikeEntry>,
+    pub page: u32,
+    pub next_page: Option<u32>,
+    pub next_cursor: Option<u64>,
+    pub token: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtistCategory {
     #[default]
     All,
@@ -4736,6 +4787,32 @@ mod tests {
         let value = serde_json::to_value(result).expect("serialize dislike result");
         assert_eq!(value["track_ref"], "netease:347230");
         assert_eq!(value["applied"], true);
+
+        let list = AccountDislikeList {
+            platform: Platform::Qq,
+            kind: AccountDislikeKind::Style,
+            items: vec![AccountDislikeEntry {
+                platform: Platform::Qq,
+                kind: AccountDislikeKind::Style,
+                id: "123".to_owned(),
+                name: "摇滚".to_owned(),
+                image_url: None,
+                added_at: Some("2024-01-01T00:00:00Z".to_owned()),
+                extensions: Extensions::new(),
+            }],
+            page: 2,
+            next_page: Some(3),
+            next_cursor: Some(123),
+            token: Some("opaque-page-token".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize account dislike list");
+        assert_eq!(value["platform"], "qq");
+        assert_eq!(value["kind"], "style");
+        assert_eq!(value["items"][0]["id"], "123");
+        assert_eq!(value["items"][0]["kind"], "style");
+        assert_eq!(value["next_page"], 3);
+        assert_eq!(value["next_cursor"], 123);
     }
 
     #[test]

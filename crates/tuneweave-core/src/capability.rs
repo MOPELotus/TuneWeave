@@ -117,6 +117,7 @@ pub enum Capability {
     AccountPodcasts,
     AccountCreatedPodcasts,
     AccountFollowingArtists,
+    AccountDislikes,
     AccountArtistNewVideos,
     AccountArtistNewTracks,
     AccountArtistNewWorks,
@@ -322,6 +323,11 @@ mod tests {
             serde_json::to_value(Capability::AccountVideos)
                 .expect("serialize account videos capability"),
             serde_json::json!("account_videos")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountDislikes)
+                .expect("serialize account dislikes capability"),
+            serde_json::json!("account_dislikes")
         );
         assert_eq!(
             serde_json::to_value(Capability::RadioStationDetail).expect("serialize capability"),

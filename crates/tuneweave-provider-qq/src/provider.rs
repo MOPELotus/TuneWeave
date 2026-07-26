@@ -9,7 +9,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
+    AccountCredentialStore, AccountDislikeEntry, AccountDislikeKind, AccountDislikeList,
+    AccountDislikeListRequest, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
     AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistArea,
     ArtistBiographySection, ArtistCatalog, ArtistCatalogFilterOption, ArtistCatalogFilters,
     ArtistCatalogRequest, ArtistCategory, ArtistGenre, ArtistHomepageIntroduction,
@@ -75,6 +76,8 @@ const FAVORITE_MV_MODULE: &str = "music.musicasset.MVFavRead";
 const FAVORITE_MV_METHOD: &str = "getMyFavMV_v2";
 const FOLLOWED_SINGER_MODULE: &str = "music.concern.RelationList";
 const FOLLOWED_SINGER_METHOD: &str = "GetFollowSingerList";
+const DISLIKE_MODULE: &str = "music.feedback.FeedbackBlack";
+const DISLIKE_LIST_METHOD: &str = "GetDislikeList";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -808,6 +811,42 @@ struct QqFollowedSingerResponse {
     lock_flag: i64,
     #[serde(rename = "LockMsg")]
     lock_message: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqDislikeItem {
+    #[serde(rename = "ID", deserialize_with = "deserialize_qq_string")]
+    id: String,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(default, rename = "Img")]
+    image_url: String,
+    #[serde(rename = "IdType", deserialize_with = "deserialize_qq_i64")]
+    id_type: i64,
+    #[serde(rename = "Time", deserialize_with = "deserialize_qq_u64")]
+    timestamp: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqDislikeListResponse {
+    #[serde(rename = "Retcode", deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    #[serde(default, rename = "Msg")]
+    message: String,
+    #[serde(default, rename = "Singers")]
+    artists: Vec<QqDislikeItem>,
+    #[serde(default, rename = "Songs")]
+    tracks: Vec<QqDislikeItem>,
+    #[serde(default, rename = "Styles")]
+    styles: Vec<QqDislikeItem>,
+    #[serde(rename = "Page", deserialize_with = "deserialize_qq_u64")]
+    page: u64,
+    #[serde(default, rename = "Token")]
+    token: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2671,6 +2710,7 @@ impl MusicProvider for QqProvider {
             Capability::AccountAlbums,
             Capability::AccountVideos,
             Capability::AccountFollowingArtists,
+            Capability::AccountDislikes,
         ])
     }
 
@@ -3747,6 +3787,33 @@ impl MusicProvider for QqProvider {
             .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
         self.qq_following_artists_page(encrypted_uin, request, &credential, "user")
             .await
+    }
+
+    async fn account_dislikes(
+        &self,
+        request: &AccountDislikeListRequest,
+    ) -> Result<AccountDislikeList> {
+        if !(1..=1_000_000).contains(&request.page) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ dislike page must be between 1 and 1000000",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let response = self
+            .client
+            .request_android_signed_with_credential(
+                &[qq_dislike_list_request(request)?],
+                &credential,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ dislike list request returned no response"))?;
+        map_qq_dislike_list(request, response)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -10015,6 +10082,39 @@ fn qq_followed_artists_request(
     ))
 }
 
+const fn qq_dislike_kind_contract(kind: AccountDislikeKind) -> (i64, &'static str, i64) {
+    match kind {
+        AccountDislikeKind::Track => (3, "SongLastid", 1),
+        AccountDislikeKind::Artist => (2, "SingersLastid", 2),
+        AccountDislikeKind::Style => (4, "StyleLastid", 3),
+    }
+}
+
+fn qq_dislike_list_request(request: &AccountDislikeListRequest) -> Result<QqApiRequest> {
+    if !(1..=1_000_000).contains(&request.page) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ dislike page must be between 1 and 1000000",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let (command, cursor_field, _) = qq_dislike_kind_contract(request.kind);
+    let mut param = json!({
+        "Cmd": command,
+        "Page": request.page
+    });
+    if let Some(cursor) = request.cursor.filter(|cursor| *cursor > 0) {
+        param
+            .as_object_mut()
+            .expect("QQ dislike parameters are always an object")
+            .insert(cursor_field.to_owned(), json!(cursor));
+    }
+    Ok(QqApiRequest::new(
+        DISLIKE_MODULE,
+        DISLIKE_LIST_METHOD,
+        param,
+    ))
+}
+
 fn qq_favorite_mv_request(encrypted_uin: &str, page_size: u32, page_index: u32) -> QqApiRequest {
     QqApiRequest::new(
         FAVORITE_MV_MODULE,
@@ -10525,6 +10625,133 @@ fn map_qq_followed_artist(item: QqFollowedSingerItem) -> Result<Artist> {
             ("relation_item".to_owned(), raw),
         ]),
     })
+}
+
+fn map_qq_dislike_list(
+    request: &AccountDislikeListRequest,
+    response: QqApiResponse,
+) -> Result<AccountDislikeList> {
+    let data = serde_json::from_value::<QqDislikeListResponse>(response.data).map_err(|error| {
+        qq_data_error(format!("QQ dislike list response is malformed: {error}"))
+    })?;
+    if data.retcode != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ dislike list failed with code {}", data.retcode),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": data.retcode,
+            "platform_message": data.message
+        })));
+    }
+    if data.page != u64::from(request.page) {
+        return Err(qq_data_error(
+            "QQ dislike list returned a different page number",
+        ));
+    }
+    let (selected, unexpected_counts) = match request.kind {
+        AccountDislikeKind::Track => (&data.tracks, [data.artists.len(), data.styles.len()]),
+        AccountDislikeKind::Artist => (&data.artists, [data.tracks.len(), data.styles.len()]),
+        AccountDislikeKind::Style => (&data.styles, [data.tracks.len(), data.artists.len()]),
+    };
+    if unexpected_counts.into_iter().any(|count| count > 0) {
+        return Err(qq_data_error(
+            "QQ dislike list returned entries outside the requested kind",
+        ));
+    }
+    let items = selected
+        .iter()
+        .cloned()
+        .map(|item| map_qq_dislike_item(request.kind, item))
+        .collect::<Result<Vec<_>>>()?;
+    let next_cursor = selected
+        .last()
+        .map(|item| qq_response_positive_u64(&item.id, "dislike continuation ID"))
+        .transpose()?;
+    let next_page = if items.is_empty() {
+        None
+    } else {
+        Some(request.page.checked_add(1).ok_or_else(|| {
+            qq_data_error("QQ dislike pagination exceeded the supported page range")
+        })?)
+    };
+    let token = (!data.token.trim().is_empty()).then(|| data.token.trim().to_owned());
+    let typed_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ dislike list response"))?;
+    Ok(AccountDislikeList {
+        platform: Platform::Qq,
+        kind: request.kind,
+        items,
+        page: request.page,
+        next_page,
+        next_cursor,
+        token,
+        extensions: Extensions::from([
+            ("platform_code".to_owned(), json!(data.retcode)),
+            ("platform_message".to_owned(), json!(data.message)),
+            ("requested_cursor".to_owned(), json!(request.cursor)),
+            (
+                "continuation_inferred".to_owned(),
+                json!(next_cursor.is_some()),
+            ),
+            ("data".to_owned(), typed_data),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_qq_dislike_item(
+    kind: AccountDislikeKind,
+    item: QqDislikeItem,
+) -> Result<AccountDislikeEntry> {
+    let id = qq_response_positive_u64(&item.id, "dislike item ID")?;
+    let (_, _, expected_id_type) = qq_dislike_kind_contract(kind);
+    if item.id_type != expected_id_type {
+        return Err(qq_data_error(
+            "QQ dislike item type does not match its response container",
+        ));
+    }
+    let name = item.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error("QQ dislike item is missing its name"));
+    }
+    let image_url = first_qq_display_url(&[(item.image_url.as_str(), "dislike item image")])?;
+    let added_at = qq_platform_timestamp_rfc3339(item.timestamp);
+    if item.timestamp > 0 && added_at.is_none() {
+        return Err(qq_data_error(
+            "QQ dislike item returned an unsupported timestamp",
+        ));
+    }
+    let raw = serde_json::to_value(&item)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ dislike item"))?;
+    Ok(AccountDislikeEntry {
+        platform: Platform::Qq,
+        kind,
+        id: id.to_string(),
+        name: name.to_owned(),
+        image_url,
+        added_at,
+        extensions: Extensions::from([
+            ("id_type".to_owned(), json!(item.id_type)),
+            ("timestamp".to_owned(), json!(item.timestamp)),
+            ("dislike_item".to_owned(), raw),
+        ]),
+    })
+}
+
+fn qq_response_positive_u64(value: &str, context: &str) -> Result<u64> {
+    let value = value.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(qq_data_error(format!(
+            "QQ {context} is not a positive unsigned integer"
+        )));
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| qq_data_error(format!("QQ {context} is not a positive unsigned integer")))
 }
 
 fn map_qq_favorite_mvs(
@@ -13038,6 +13265,17 @@ mod tests {
             "FanNum": "50540499",
             "IsFollow": 1,
             "futureRelationField": {"kept": true}
+        })
+    }
+
+    fn sample_dislike_item(id: u64, id_type: i64, name: &str) -> Value {
+        json!({
+            "ID": id.to_string(),
+            "Name": name,
+            "Img": "//y.qq.com/dislike/image.jpg",
+            "IdType": id_type,
+            "Time": 1_704_067_200_u64,
+            "futureDislikeField": {"kept": true}
         })
     }
 
@@ -18046,6 +18284,214 @@ mod tests {
             .expect_err("missing viewer alias is rejected before network");
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
         assert_eq!(missing.details["account"], "missing");
+    }
+
+    #[test]
+    fn dislike_list_requests_preserve_each_command_cursor_and_page_branch() {
+        for (kind, command, cursor_field) in [
+            (AccountDislikeKind::Track, 3, "SongLastid"),
+            (AccountDislikeKind::Artist, 2, "SingersLastid"),
+            (AccountDislikeKind::Style, 4, "StyleLastid"),
+        ] {
+            let request = qq_dislike_list_request(&AccountDislikeListRequest {
+                kind,
+                page: 3,
+                cursor: Some(123),
+                account: Some("personal".to_owned()),
+            })
+            .expect("dislike list request");
+            assert_eq!(request.module, DISLIKE_MODULE);
+            assert_eq!(request.method, DISLIKE_LIST_METHOD);
+            assert_eq!(request.param["Cmd"], command);
+            assert_eq!(request.param["Page"], 3);
+            assert_eq!(request.param[cursor_field], 123);
+            for other in ["SongLastid", "SingersLastid", "StyleLastid"] {
+                if other != cursor_field {
+                    assert!(request.param.get(other).is_none());
+                }
+            }
+        }
+
+        let first = qq_dislike_list_request(&AccountDislikeListRequest::default())
+            .expect("first dislike page");
+        assert_eq!(first.param, json!({"Cmd": 3, "Page": 1}));
+        let zero_cursor = qq_dislike_list_request(&AccountDislikeListRequest {
+            cursor: Some(0),
+            ..AccountDislikeListRequest::default()
+        })
+        .expect("reference zero cursor is omitted");
+        assert!(zero_cursor.param.get("SongLastid").is_none());
+        for page in [0, 1_000_001] {
+            assert!(
+                qq_dislike_list_request(&AccountDislikeListRequest {
+                    page,
+                    ..AccountDislikeListRequest::default()
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn dislike_list_mapping_preserves_typed_items_and_inferred_continuation() {
+        let request = AccountDislikeListRequest {
+            kind: AccountDislikeKind::Track,
+            page: 2,
+            cursor: Some(300),
+            account: Some("personal".to_owned()),
+        };
+        let list = map_qq_dislike_list(
+            &request,
+            response(json!({
+                "Retcode": 0,
+                "Msg": "ok",
+                "Singers": [],
+                "Songs": [
+                    sample_dislike_item(398_282_803, 1, "不喜欢歌曲"),
+                    sample_dislike_item(399_000_001, 1, "下一首")
+                ],
+                "Styles": [],
+                "Page": "2",
+                "Token": "opaque-page-token",
+                "futureListField": {"kept": true}
+            })),
+        )
+        .expect("map QQ dislike list");
+
+        assert_eq!(list.platform, Platform::Qq);
+        assert_eq!(list.kind, AccountDislikeKind::Track);
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items[0].id, "398282803");
+        assert_eq!(list.items[0].name, "不喜欢歌曲");
+        assert_eq!(
+            list.items[0].image_url.as_deref(),
+            Some("https://y.qq.com/dislike/image.jpg")
+        );
+        assert_eq!(
+            list.items[0].added_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(list.items[0].extensions["id_type"], 1);
+        assert_eq!(
+            list.items[0].extensions["dislike_item"]["futureDislikeField"]["kept"],
+            true
+        );
+        assert_eq!(list.page, 2);
+        assert_eq!(list.next_page, Some(3));
+        assert_eq!(list.next_cursor, Some(399_000_001));
+        assert_eq!(list.token.as_deref(), Some("opaque-page-token"));
+        assert_eq!(list.extensions["requested_cursor"], 300);
+        assert_eq!(list.extensions["continuation_inferred"], true);
+        assert_eq!(list.extensions["data"]["futureListField"]["kept"], true);
+        assert_eq!(list.extensions["response"]["code"], 0);
+
+        let end = map_qq_dislike_list(
+            &AccountDislikeListRequest {
+                kind: AccountDislikeKind::Style,
+                page: 4,
+                cursor: Some(88),
+                account: None,
+            },
+            response(json!({
+                "Retcode": 0,
+                "Msg": "",
+                "Singers": [],
+                "Songs": [],
+                "Styles": [],
+                "Page": 4,
+                "Token": ""
+            })),
+        )
+        .expect("empty dislike page");
+        assert!(end.items.is_empty());
+        assert_eq!(end.next_page, None);
+        assert_eq!(end.next_cursor, None);
+        assert_eq!(end.token, None);
+        assert_eq!(end.extensions["continuation_inferred"], false);
+    }
+
+    #[test]
+    fn dislike_list_mapping_rejects_errors_wrong_kinds_and_malformed_items() {
+        let request = AccountDislikeListRequest::default();
+        let valid = || {
+            json!({
+                "Retcode": 0,
+                "Msg": "",
+                "Singers": [],
+                "Songs": [sample_dislike_item(398_282_803, 1, "歌曲")],
+                "Styles": [],
+                "Page": 1,
+                "Token": ""
+            })
+        };
+        let mut fixtures = vec![
+            json!({}),
+            json!({
+                "Retcode": 1000, "Msg": "login required",
+                "Singers": [], "Songs": [], "Styles": [], "Page": 1, "Token": ""
+            }),
+            json!({
+                "Retcode": 0, "Msg": "",
+                "Singers": [sample_dislike_item(4558, 2, "歌手")],
+                "Songs": [sample_dislike_item(398_282_803, 1, "歌曲")],
+                "Styles": [], "Page": 1, "Token": ""
+            }),
+        ];
+        for (field, value) in [
+            ("ID", json!("0")),
+            ("ID", json!("not-numeric")),
+            ("Name", json!("")),
+            ("Img", json!("file:///secret")),
+            ("IdType", json!(2)),
+            ("Time", json!(-1)),
+        ] {
+            let mut fixture = valid();
+            fixture["Songs"][0][field] = value;
+            fixtures.push(fixture);
+        }
+        for (field, value) in [
+            ("Page", json!(2)),
+            ("Songs", json!({})),
+            ("Retcode", json!("invalid")),
+        ] {
+            let mut fixture = valid();
+            fixture[field] = value;
+            fixtures.push(fixture);
+        }
+        for fixture in fixtures {
+            let error = map_qq_dislike_list(&request, response(fixture))
+                .expect_err("invalid QQ dislike response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn dislike_list_requires_the_exact_account_before_signed_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::AccountDislikes)
+        );
+        let missing = provider
+            .account_dislikes(&AccountDislikeListRequest {
+                account: Some("missing".to_owned()),
+                ..AccountDislikeListRequest::default()
+            })
+            .await
+            .expect_err("missing account rejected before signed request");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing");
+
+        let invalid_page = provider
+            .account_dislikes(&AccountDislikeListRequest {
+                page: 0,
+                account: Some("missing".to_owned()),
+                ..AccountDislikeListRequest::default()
+            })
+            .await
+            .expect_err("invalid page rejected before account lookup");
+        assert_eq!(invalid_page.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
