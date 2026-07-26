@@ -15575,6 +15575,55 @@ mod tests {
             })
         }
 
+        async fn album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+            let album_ref =
+                ResourceRef::new(Platform::Qq, "001uKKpF1RuJSd").expect("valid QQ album reference");
+            let mut tracks = [
+                ("0039MnYb0qxYhV", "晴天"),
+                ("003v4UL61IYlTY", "东风破"),
+                ("001Bbywq2gicae", "她的睫毛"),
+            ]
+            .into_iter()
+            .map(|(track_id, name)| {
+                let mut track = Track::new(
+                    ResourceRef::new(Platform::Qq, track_id)
+                        .expect("valid QQ album track reference"),
+                    name,
+                );
+                track.album = Some(AlbumSummary {
+                    resource_ref: Some(album_ref.clone()),
+                    name: "叶惠美".to_owned(),
+                    cover_url: None,
+                });
+                track
+            })
+            .collect::<Vec<_>>();
+            let start = usize::try_from(request.offset)
+                .unwrap_or(usize::MAX)
+                .min(tracks.len());
+            let end = start
+                .saturating_add(usize::try_from(request.limit).unwrap_or(usize::MAX))
+                .min(tracks.len());
+            let items = tracks.drain(start..end).collect::<Vec<_>>();
+            let has_more = end < 3;
+            let next_offset = has_more.then(|| u32::try_from(end).expect("small test offset"));
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset,
+                    has_more,
+                    extensions: Extensions::from([
+                        ("requested_id".to_owned(), json!(id)),
+                        ("album_mid".to_owned(), json!("001uKKpF1RuJSd")),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                },
+            })
+        }
+
         async fn video_stream(
             &self,
             id: &str,
@@ -19144,11 +19193,9 @@ mod tests {
 
     #[tokio::test]
     async fn qq_album_detail_canonicalizes_numeric_identity_and_forwards_account() {
-        let (status, album) = json_response_from(
-            test_app_with_import_providers(),
-            "/v1/albums/qq:100?account=green-vip",
-        )
-        .await;
+        let app = test_app_with_import_providers();
+        let (status, album) =
+            json_response_from(app.clone(), "/v1/albums/qq:100?account=green-vip").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(album["data"]["ref"], "qq:001uKKpF1RuJSd");
         assert_eq!(album["data"]["id"], "001uKKpF1RuJSd");
@@ -19158,6 +19205,27 @@ mod tests {
         assert_eq!(album["data"]["extensions"]["account"], "green-vip");
         assert_eq!(album["meta"]["platform"], "qq");
         assert_eq!(album["meta"]["account"], "green-vip");
+
+        let (status, tracks) = json_response_from(
+            app,
+            "/v1/albums/qq:100/tracks?limit=2&offset=0&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"].as_array().expect("album tracks").len(), 2);
+        assert_eq!(tracks["data"][0]["ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(tracks["data"][0]["album"]["ref"], "qq:001uKKpF1RuJSd");
+        assert_eq!(tracks["meta"]["pagination"]["limit"], 2);
+        assert_eq!(tracks["meta"]["pagination"]["total"], 3);
+        assert_eq!(tracks["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["requested_id"],
+            "100"
+        );
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["account"],
+            "green-vip"
+        );
     }
 
     #[tokio::test]

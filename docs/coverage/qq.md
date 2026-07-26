@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=68`、`partial=0`、`implemented=21`、`verified=15`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=67`、`partial=0`、`implemented=21`、`verified=16`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -44,7 +44,7 @@
 | Q103 | 内容展示 | `LyricApi.is_ai_dict_exists` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/lyrics/ai-dictionary/availability` 固定调用 Android `music.musichallSong.PlayLyricInfo/IsAIDictExists` 与正数 `songID`；数字 ID 直接提交，MID 复用共同歌词资源解析器取得数值身份。独立 `AiLyricDictionaryAvailability.available` 只读取明确 `exists` 标志，不因 Q104 详情数组为空反推；兼容平台布尔/0/1 标量，缺失按参考默认 `false`，畸形值拒绝为假阴性。原请求引用、数值 ID、未知数据和完整响应均保留。2026-07-26 Rust provider 与统一 release HTTP 真实验证数字 ID `7137686` 和 MID `002uFQ2G2zxj1n` 均返回 `available=true` 且数值身份一致。同日完成 Q101–Q103 后检查上游仍为 `873255f`，104 个公开方法无变化 |
 | Q104 | 内容展示 | `LyricApi.get_ai_dict` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/lyrics/ai-dictionary` 固定调用 Android `music.musichallSong.PlayLyricInfo/GetAIDictInfo` 与正数 `songID`，数字 ID/MID 身份解析和账户前置复用共同歌词资源链。`AiLyricDictionary.entries` 保留 `dictList` 顺序与重复项，并逐项强类型表达 `phrase/explanation/lyric_text/translated_lyric_text/lyric_timestamp`；平台时间戳按真实协议保持字符串，不擅自换算。缺失列表和参考默认字段保留为空，已出现但类型错误的字段、条目或容器拒绝为假成功；未知字段与完整响应保留。2026-07-26 Rust provider 真实验证数字 ID `7137686` 与 MID `002uFQ2G2zxj1n` 均返回相同 6 项完整词典；统一 release HTTP 同步验收通过 |
 | Q025 | 内容展示 | `AlbumApi.get_detail` | 是 | `verified` | `GET /v1/albums/{qq-ref}` 精确调用 Android `music.musichallAlbum.AlbumInfoServer/GetAlbumDetail`；纯十进制引用提交正数 `albumId`，字母数字 MID 提交 `albumMId`，不会把超范围数字或含分隔符的输入降级成 MID。响应以强类型解析 `basicInfo/company/singer.singerList`，统一 `Album` 使用平台返回 MID 作为稳定身份，并保留数字 ID、名称/副标题、发行日期、描述、语种、专辑类型、流派、百科地址、发行公司和全部署名歌手；封面只由固定 QQ 图片域和已校验 MID 构造。请求/响应身份冲突、缺少双重身份、名称、公司必需字段或畸形歌手容器均拒绝为假成功，未知字段及完整响应保留。公开读取可省略账户；指定非默认命名账户时只验证精确 `(qq, account)` 别名，不注入任意调用方凭据。2026-07-26 Rust provider 与 release 统一 HTTP 真实验证数字 ID `100` 及服务端返回的规范 MID 均得到相同专辑身份、名称和歌手 |
-| Q026 | 内容展示 | `AlbumApi.get_song` | 是 | `pending` | 专辑歌曲分页 |
+| Q026 | 内容展示 | `AlbumApi.get_song` | 是 | `verified` | `GET /v1/albums/{qq-ref}/tracks` 精确调用 Android `music.musichallAlbum.AlbumSongList/GetAlbumSongList`；纯十进制引用提交正数 `albumId`，MID 提交 `albumMid`，统一 `offset/limit` 原样映射到 `begin/num`，不会退化为只能整页对齐的页码。响应强类型解析 `albumMid/totalNum/songList[*].songInfo`，每首歌曲复用完整统一 `Track` 映射并保留外层条目、未知字段和完整响应；返回顺序与重复项均不改写。服务端 MID 与请求或曲目专辑身份冲突、页宽超限、提前空页、总数越界及畸形包装均拒绝为假成功，`total/next_offset/has_more` 反映真实上游分页。公开读取可省略账户，命名账户只验证精确别名。2026-07-26 Rust provider 真实验证数字 ID `8220` 与其规范 MID 首页面完全一致，第二页非空且与首页面无重叠；release 统一 HTTP 同样验证数字 ID、MID 与连续分页链路 |
 | Q027 | 内容展示 | `AlbumApi.get_new_album` | 是 | `pending` | 新专辑目录 |
 | Q028 | 内容展示 | `SingerApi.get_singer_list` | 是 | `pending` | 歌手分类目录 |
 | Q029 | 内容展示 | `SingerApi.get_singer_list_index` | 是 | `pending` | 歌手索引分页 |
