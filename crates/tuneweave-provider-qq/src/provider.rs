@@ -36,8 +36,9 @@ use tuneweave_core::{
     SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient,
     SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry,
     SearchTrendingList, SearchTrendingRequest, SearchVariant, SimilarArtistList,
-    SimilarArtistRequest, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
-    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SimilarTrackSection,
+    SimilarTrackSectionKind, SingingAnnotationsAvailability, StoredAccountCredential,
+    StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackIdentifierKind, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
     VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
@@ -66,6 +67,8 @@ const RECOMMENDATION_GUESS_METHOD: &str = "get_radio_track";
 const RECOMMENDATION_RADAR_MODULE: &str = "music.recommend.TrackRelationServer";
 const RECOMMENDATION_RADAR_METHOD: &str = "GetRadarSong";
 const RECOMMENDATION_RADAR_PAGE_SIZE: u32 = 10;
+const SIMILAR_TRACK_MODULE: &str = "music.recommend.TrackRelationServer";
+const SIMILAR_TRACK_METHOD: &str = "GetSimilarSongs";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1027,6 +1030,55 @@ struct MappedQqRadarPage {
     has_more: bool,
     context: Value,
     response: Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqSimilarTrackWrapper {
+    abt: String,
+    tf: String,
+    trace: String,
+    track: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqSimilarTrackGroup {
+    title_template: String,
+    title_content: String,
+    #[serde(default)]
+    extra_info: BTreeMap<String, Value>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    songs: Vec<QqSimilarTrackWrapper>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqSimilarTrackResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    msg: String,
+    #[serde(
+        rename = "songTagInfoList",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    tags: Vec<QqRecommendationNewTrackTag>,
+    #[serde(
+        rename = "vecSong",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    direct_tracks: Vec<QqSimilarTrackWrapper>,
+    #[serde(
+        rename = "vecSongNew",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    groups: Vec<QqSimilarTrackGroup>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3206,6 +3258,7 @@ impl MusicProvider for QqProvider {
             Capability::ArtistList,
             Capability::ArtistHomepageTabs,
             Capability::SimilarArtists,
+            Capability::SimilarTracks,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3632,6 +3685,25 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ similar singer request returned no response"))?;
         map_qq_similar_singers(id.trim(), request.limit, response)
+    }
+
+    async fn similar_tracks(
+        &self,
+        id: &str,
+        request: &SimilarTrackRequest,
+    ) -> Result<SimilarTrackList> {
+        validate_qq_similar_track_request(request)?;
+        let (_, song_id) = self
+            .resolve_lyric_song_id(id, request.account.as_deref())
+            .await?;
+        let response = self
+            .client
+            .request_android(&[qq_similar_tracks_request(song_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ similar track request returned no response"))?;
+        map_qq_similar_tracks(id.trim(), song_id, request.limit_per_section, response)
     }
 
     async fn artist_tracks(
@@ -6737,6 +6809,250 @@ fn validate_qq_radar_recommendation_metadata(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_qq_similar_track_request(request: &SimilarTrackRequest) -> Result<()> {
+    if !(1..=100).contains(&request.limit_per_section) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ similar track limit_per_section must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
+fn qq_similar_tracks_request(song_id: u64) -> QqApiRequest {
+    QqApiRequest::new(
+        SIMILAR_TRACK_MODULE,
+        SIMILAR_TRACK_METHOD,
+        json!({"songid": song_id}),
+    )
+}
+
+fn map_qq_similar_tracks(
+    requested_id: &str,
+    song_id: u64,
+    limit_per_section: u32,
+    response: QqApiResponse,
+) -> Result<SimilarTrackList> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqSimilarTrackResponse>(response_data).map_err(|error| {
+            qq_data_error(format!("QQ similar track response is malformed: {error}"))
+        })?;
+    validate_qq_similar_track_metadata(&parsed)?;
+
+    let QqSimilarTrackResponse {
+        retcode,
+        msg,
+        tags,
+        direct_tracks,
+        groups,
+        extra,
+    } = parsed;
+    let tag_values = tags
+        .iter()
+        .map(|tag| {
+            serde_json::to_value(tag)
+                .map_err(|_| qq_data_error("failed to preserve QQ similar track tag"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut tags_by_song_id = BTreeMap::<u64, Vec<Value>>::new();
+    for (tag, value) in tags.iter().zip(&tag_values) {
+        tags_by_song_id
+            .entry(tag.id)
+            .or_default()
+            .push(value.clone());
+    }
+    let limit = usize::try_from(limit_per_section)
+        .map_err(|_| qq_data_error("QQ similar track section limit overflowed"))?;
+    let mut sections = Vec::with_capacity(groups.len().saturating_add(1));
+    let direct_count = direct_tracks.len();
+    sections.push(SimilarTrackSection {
+        kind: SimilarTrackSectionKind::Direct,
+        title_template: None,
+        title_content: None,
+        tracks: map_qq_similar_track_wrappers(
+            direct_tracks,
+            SimilarTrackSectionKind::Direct,
+            limit,
+            song_id,
+            &tags_by_song_id,
+        )?,
+        extensions: Extensions::from([
+            ("upstream_count".to_owned(), json!(direct_count)),
+            (
+                "limit_applied".to_owned(),
+                Value::Bool(direct_count > limit),
+            ),
+        ]),
+    });
+
+    for group in groups {
+        let QqSimilarTrackGroup {
+            title_template,
+            title_content,
+            extra_info,
+            songs,
+            extra,
+        } = group;
+        let upstream_count = songs.len();
+        sections.push(SimilarTrackSection {
+            kind: SimilarTrackSectionKind::Audience,
+            title_template: normalized_qq_text(&title_template),
+            title_content: normalized_qq_text(&title_content),
+            tracks: map_qq_similar_track_wrappers(
+                songs,
+                SimilarTrackSectionKind::Audience,
+                limit,
+                song_id,
+                &tags_by_song_id,
+            )?,
+            extensions: Extensions::from([
+                ("upstream_count".to_owned(), json!(upstream_count)),
+                (
+                    "limit_applied".to_owned(),
+                    Value::Bool(upstream_count > limit),
+                ),
+                ("extra_info".to_owned(), json!(extra_info)),
+                ("extra".to_owned(), json!(extra)),
+            ]),
+        });
+    }
+
+    Ok(SimilarTrackList {
+        track_ref: qq_ref(requested_id, "similar track source")?,
+        requested_limit_per_section: limit_per_section,
+        sections,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("message".to_owned(), json!(msg)),
+            ("platform_code".to_owned(), json!(retcode)),
+            ("tags".to_owned(), Value::Array(tag_values)),
+            ("continuation_supported".to_owned(), Value::Bool(false)),
+            ("extra".to_owned(), json!(extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_similar_track_wrappers(
+    wrappers: Vec<QqSimilarTrackWrapper>,
+    section_kind: SimilarTrackSectionKind,
+    limit: usize,
+    source_song_id: u64,
+    tags_by_song_id: &BTreeMap<u64, Vec<Value>>,
+) -> Result<Vec<Track>> {
+    wrappers
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, wrapper)| {
+            let QqSimilarTrackWrapper {
+                abt,
+                tf,
+                trace,
+                track: raw_track,
+                extra,
+            } = wrapper;
+            let published_at = nonempty_string(raw_track.get("time_public"));
+            let mut track = map_track(raw_track)?;
+            track.extensions.remove("search_item");
+            let numeric_id = qq_track_numeric_id(&track)?;
+            insert_some(&mut track.extensions, "published_at", published_at);
+            track.extensions.insert(
+                "similarity".to_owned(),
+                json!({
+                    "source_song_id": source_song_id,
+                    "section": section_kind,
+                    "rank": index.saturating_add(1),
+                    "experiment": abt,
+                    "tf": tf,
+                    "trace": trace,
+                    "tags": tags_by_song_id.get(&numeric_id).cloned().unwrap_or_default(),
+                    "extra": extra
+                }),
+            );
+            Ok(track)
+        })
+        .collect()
+}
+
+fn validate_qq_similar_track_metadata(response: &QqSimilarTrackResponse) -> Result<()> {
+    if response.retcode != 0 {
+        return Err(qq_data_error(format!(
+            "QQ similar track request failed with code {}",
+            response.retcode
+        )));
+    }
+    if response.msg.len() > 8_192 || response.msg.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ similar track response has an invalid message",
+        ));
+    }
+    if response.direct_tracks.len() > 100 || response.groups.len() > 20 {
+        return Err(qq_data_error(
+            "QQ similar track response exceeded its safe section bounds",
+        ));
+    }
+    for tag in &response.tags {
+        validate_qq_song_tag(tag, "similar track")?;
+    }
+    for wrapper in response
+        .direct_tracks
+        .iter()
+        .chain(response.groups.iter().flat_map(|group| &group.songs))
+    {
+        for (value, context, max_len) in [
+            (&wrapper.abt, "experiment metadata", 65_536),
+            (&wrapper.tf, "feedback metadata", 8_192),
+            (&wrapper.trace, "trace metadata", 65_536),
+        ] {
+            if value.len() > max_len || value.chars().any(char::is_control) {
+                return Err(qq_data_error(format!(
+                    "QQ similar track response has invalid {context}"
+                )));
+            }
+        }
+    }
+    for group in &response.groups {
+        if group.songs.len() > 100 {
+            return Err(qq_data_error(
+                "QQ similar track response exceeded its safe group size",
+            ));
+        }
+        for (value, context) in [
+            (&group.title_template, "group title template"),
+            (&group.title_content, "group title content"),
+        ] {
+            if value.len() > 8_192 || value.chars().any(char::is_control) {
+                return Err(qq_data_error(format!(
+                    "QQ similar track response has invalid {context}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_qq_song_tag(tag: &QqRecommendationNewTrackTag, context: &str) -> Result<()> {
+    if tag.id == 0
+        || tag.tagid == 0
+        || tag.tag.trim().is_empty()
+        || tag.tag.len() > 256
+        || tag.tag.chars().any(char::is_control)
+    {
+        return Err(qq_data_error(format!(
+            "QQ {context} response has an invalid song tag"
+        )));
+    }
+    if !tag.link.trim().is_empty() {
+        validate_qq_recommendation_scheme(&tag.link)?;
     }
     Ok(())
 }
@@ -24907,6 +25223,176 @@ mod tests {
         assert_eq!(invalid.code, ErrorCode::InvalidRequest);
     }
 
+    fn similar_track_wrapper(track: Value, index: usize) -> Value {
+        json!({
+            "abt": format!("experiment-{index}"),
+            "tf": format!("feedback-{index}"),
+            "trace": format!("trace-{index}"),
+            "track": track,
+            "futureWrapperField": true
+        })
+    }
+
+    fn similar_track_fixture(direct_tracks: Vec<Value>, audience_tracks: Vec<Value>) -> Value {
+        json!({
+            "msg": "",
+            "retcode": 0,
+            "songTagInfoList": [{
+                "from_type": 6,
+                "id": 101,
+                "link": "qqmusic://qq.com/ui/toplist?p=%7B%22id%22%3A%2226%22%7D",
+                "tag": "获奖歌曲",
+                "tagid": 132,
+                "futureTagField": true
+            }],
+            "vecSong": direct_tracks.into_iter().enumerate().map(|(index, track)| {
+                similar_track_wrapper(track, index)
+            }).collect::<Vec<_>>(),
+            "vecSongNew": [{
+                "extra_info": {"moudle": "2", "futureInfoField": true},
+                "songs": audience_tracks.into_iter().enumerate().map(|(index, track)| {
+                    similar_track_wrapper(track, index)
+                }).collect::<Vec<_>>(),
+                "title_content": "周杰伦",
+                "title_template": "听「{String}」的也在听",
+                "futureGroupField": true
+            }],
+            "futureResponseField": true
+        })
+    }
+
+    #[test]
+    fn similar_track_request_and_mapping_preserve_both_sections_and_local_limits() {
+        let request = qq_similar_tracks_request(97773);
+        assert_eq!(request.module, SIMILAR_TRACK_MODULE);
+        assert_eq!(request.method, SIMILAR_TRACK_METHOD);
+        assert_eq!(request.param, json!({"songid": 97773}));
+
+        let mut direct = sample_track(101, "001similarDirect", "直接相似");
+        direct["time_public"] = json!("2026-07-26");
+        let data = similar_track_fixture(
+            vec![
+                direct,
+                sample_track(102, "002similarDirect", "第二首直接相似"),
+            ],
+            vec![
+                sample_track(201, "001similarAudience", "相同听众"),
+                sample_track(202, "002similarAudience", "第二首相同听众"),
+            ],
+        );
+        let list = map_qq_similar_tracks(
+            "0039MnYb0qxYhV",
+            97773,
+            1,
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ similar tracks");
+        assert_eq!(list.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(list.requested_limit_per_section, 1);
+        assert_eq!(list.sections.len(), 2);
+        assert_eq!(list.sections[0].kind, SimilarTrackSectionKind::Direct);
+        assert_eq!(list.sections[0].tracks.len(), 1);
+        assert_eq!(
+            list.sections[0].tracks[0].resource_ref.to_string(),
+            "qq:001similarDirect"
+        );
+        assert_eq!(
+            list.sections[0].tracks[0].extensions["published_at"],
+            "2026-07-26"
+        );
+        assert_eq!(
+            list.sections[0].tracks[0].extensions["similarity"]["section"],
+            "direct"
+        );
+        assert_eq!(
+            list.sections[0].tracks[0].extensions["similarity"]["tags"][0]["tag"],
+            "获奖歌曲"
+        );
+        assert_eq!(
+            list.sections[0].tracks[0].extensions["similarity"]["extra"]["futureWrapperField"],
+            true
+        );
+        assert_eq!(list.sections[0].extensions["upstream_count"], 2);
+        assert_eq!(list.sections[0].extensions["limit_applied"], true);
+        assert_eq!(list.sections[1].kind, SimilarTrackSectionKind::Audience);
+        assert_eq!(
+            list.sections[1].title_template.as_deref(),
+            Some("听「{String}」的也在听")
+        );
+        assert_eq!(list.sections[1].title_content.as_deref(), Some("周杰伦"));
+        assert_eq!(list.sections[1].tracks.len(), 1);
+        assert_eq!(
+            list.sections[1].extensions["extra_info"]["futureInfoField"],
+            true
+        );
+        assert_eq!(
+            list.sections[1].extensions["extra"]["futureGroupField"],
+            true
+        );
+        assert_eq!(list.extensions["numeric_id"], 97773);
+        assert_eq!(list.extensions["continuation_supported"], false);
+        assert_eq!(list.extensions["tags"][0]["futureTagField"], true);
+        assert_eq!(
+            list.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn similar_track_mapping_rejects_business_errors_unsafe_tags_and_malformed_sections() {
+        let track = || sample_track(101, "001similarDirect", "相似歌曲");
+        let mut fixtures = vec![json!({})];
+        let mut business_error = similar_track_fixture(vec![track()], vec![]);
+        business_error["retcode"] = json!(1000);
+        fixtures.push(business_error);
+        let mut unsafe_tag = similar_track_fixture(vec![track()], vec![]);
+        unsafe_tag["songTagInfoList"][0]["link"] = json!("javascript:alert(1)");
+        fixtures.push(unsafe_tag);
+        let mut invalid_title = similar_track_fixture(vec![track()], vec![]);
+        invalid_title["vecSongNew"][0]["title_template"] = json!("bad\ntitle");
+        fixtures.push(invalid_title);
+        let invalid_track = similar_track_fixture(vec![json!({"id": 101, "title": ""})], vec![]);
+        fixtures.push(invalid_track);
+
+        for fixture in fixtures {
+            let error = map_qq_similar_tracks("97773", 97773, 15, response(fixture))
+                .expect_err("invalid QQ similar track response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn similar_tracks_validate_limit_and_exact_account_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::SimilarTracks));
+        let missing = provider
+            .similar_tracks(
+                "97773",
+                &SimilarTrackRequest {
+                    limit_per_section: 15,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing QQ similar track account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+
+        let invalid = provider
+            .similar_tracks(
+                "97773",
+                &SimilarTrackRequest {
+                    limit_per_section: 0,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("invalid QQ similar track limit");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
     #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
@@ -25915,6 +26401,63 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| !reason.is_empty())
         }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_similar_tracks_preserve_direct_and_audience_sections_for_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let list = provider
+                .similar_tracks(id, &SimilarTrackRequest::new(3))
+                .await
+                .unwrap_or_else(|error| panic!("live QQ similar tracks for {id}: {error}"));
+            assert_eq!(list.track_ref.to_string(), format!("qq:{id}"));
+            assert_eq!(list.requested_limit_per_section, 3);
+            assert_eq!(list.extensions["numeric_id"], 97773);
+            assert_eq!(list.extensions["platform_code"], 0);
+            assert_eq!(list.extensions["continuation_supported"], false);
+            assert!(
+                list.extensions["tags"]
+                    .as_array()
+                    .is_some_and(|tags| !tags.is_empty())
+            );
+            assert!(list.sections.len() >= 2);
+            assert_eq!(list.sections[0].kind, SimilarTrackSectionKind::Direct);
+            assert_eq!(list.sections[0].tracks.len(), 3);
+            let audience = list
+                .sections
+                .iter()
+                .find(|section| section.kind == SimilarTrackSectionKind::Audience)
+                .expect("audience section");
+            assert_eq!(audience.tracks.len(), 3);
+            assert!(
+                audience
+                    .title_template
+                    .as_deref()
+                    .is_some_and(|title| !title.is_empty())
+            );
+            assert!(
+                audience
+                    .title_content
+                    .as_deref()
+                    .is_some_and(|title| !title.is_empty())
+            );
+            assert!(
+                list.sections
+                    .iter()
+                    .flat_map(|section| &section.tracks)
+                    .all(|track| {
+                        track.platform == Platform::Qq
+                            && !track.name.is_empty()
+                            && track.extensions["similarity"]["source_song_id"] == 97773
+                    })
+            );
+        }
     }
 
     #[tokio::test]

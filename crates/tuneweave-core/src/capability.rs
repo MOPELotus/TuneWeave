@@ -75,6 +75,7 @@ pub enum Capability {
     ArtistDetail,
     ArtistHomepageTabs,
     SimilarArtists,
+    SimilarTracks,
     ArtistOverview,
     ArtistStats,
     ArtistCatalog,
@@ -156,6 +157,20 @@ pub enum Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn similar_resource_capabilities_use_stable_discovery_names() {
+        assert_eq!(
+            serde_json::to_value(Capability::SimilarArtists)
+                .expect("serialize similar artist capability"),
+            serde_json::json!("similar_artists")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SimilarTracks)
+                .expect("serialize similar track capability"),
+            serde_json::json!("similar_tracks")
+        );
+    }
 
     #[test]
     fn uni_playlist_capabilities_use_stable_discovery_names() {

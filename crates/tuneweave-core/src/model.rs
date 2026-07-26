@@ -2700,6 +2700,46 @@ pub struct SimilarArtistList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarTrackSectionKind {
+    Direct,
+    Audience,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SimilarTrackRequest {
+    pub limit_per_section: u32,
+    pub account: Option<String>,
+}
+
+impl SimilarTrackRequest {
+    #[must_use]
+    pub fn new(limit_per_section: u32) -> Self {
+        Self {
+            limit_per_section,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SimilarTrackSection {
+    pub kind: SimilarTrackSectionKind,
+    pub title_template: Option<String>,
+    pub title_content: Option<String>,
+    pub tracks: Vec<Track>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SimilarTrackList {
+    pub track_ref: ResourceRef,
+    pub requested_limit_per_section: u32,
+    pub sections: Vec<SimilarTrackSection>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -5754,6 +5794,51 @@ mod tests {
         assert_eq!(value["artist_ref"], "qq:0025NhlN2yWrP4");
         assert_eq!(value["requested_limit"], 10);
         assert_eq!(value["artists"], Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn similar_track_contract_keeps_direct_and_audience_sections_distinct() {
+        let mut request = SimilarTrackRequest::new(15);
+        request.account = Some("green-vip".to_owned());
+        let value = serde_json::to_value(&request).expect("serialize similar track request");
+        assert_eq!(value["limit_per_section"], 15);
+        assert_eq!(value["account"], "green-vip");
+
+        let list = SimilarTrackList {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid source track reference"),
+            requested_limit_per_section: 15,
+            sections: vec![
+                SimilarTrackSection {
+                    kind: SimilarTrackSectionKind::Direct,
+                    title_template: None,
+                    title_content: None,
+                    tracks: vec![Track::new(
+                        ResourceRef::new(Platform::Qq, "0017ahqa0NvuNU")
+                            .expect("valid direct similar track reference"),
+                        "直接相似",
+                    )],
+                    extensions: Extensions::new(),
+                },
+                SimilarTrackSection {
+                    kind: SimilarTrackSectionKind::Audience,
+                    title_template: Some("听「{String}」的也在听".to_owned()),
+                    title_content: Some("周杰伦".to_owned()),
+                    tracks: Vec::new(),
+                    extensions: Extensions::new(),
+                },
+            ],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize similar track list");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["sections"][0]["kind"], "direct");
+        assert_eq!(value["sections"][0]["tracks"][0]["name"], "直接相似");
+        assert_eq!(value["sections"][1]["kind"], "audience");
+        assert_eq!(
+            value["sections"][1]["title_template"],
+            "听「{String}」的也在听"
+        );
     }
 
     #[test]
