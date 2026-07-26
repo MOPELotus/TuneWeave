@@ -589,6 +589,10 @@ pub fn build_router(state: AppState) -> Router {
                 .post(account_dislikes_add)
                 .delete(account_dislikes_remove),
         )
+        .route(
+            "/account/dislikes/tracks",
+            delete(account_dislike_tracks_clear),
+        )
         .route("/account/following/artists", get(account_following_artists))
         .route(
             "/account/following/artists/{reference}",
@@ -11117,6 +11121,13 @@ struct AccountDislikeMutationBody {
     values: Option<PlaylistReferenceInput>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountDislikeClearParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
 fn parse_account_dislike_kind(
     kind: Option<&str>,
     resource_type: Option<&str>,
@@ -11333,6 +11344,24 @@ async fn account_dislikes_remove(
             ids,
             account: Some(account.clone()),
         })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
+async fn account_dislike_tracks_clear(
+    State(state): State<AppState>,
+    params: Result<Query<AccountDislikeClearParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = account_alias(params.account.as_deref())?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .clear_account_dislike_tracks(Some(&account))
         .await?;
     Ok(Json(
         ApiResponse::new(result)
@@ -15444,6 +15473,20 @@ mod tests {
                 ids: request.ids.clone(),
                 applied: true,
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn clear_account_dislike_tracks(
+            &self,
+            account: Option<&str>,
+        ) -> Result<AccountDislikeMutationResult> {
+            Ok(AccountDislikeMutationResult {
+                platform: self.platform(),
+                kind: AccountDislikeKind::Track,
+                action: tuneweave_core::AccountDislikeMutationAction::Clear,
+                ids: Vec::new(),
+                applied: true,
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
 
@@ -25837,6 +25880,34 @@ mod tests {
                 Some(body),
             )
             .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_dislike_track_clear_is_explicit_and_account_scoped() {
+        let (status, result) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/dislikes/tracks?platform=netease&account=personal",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["data"]["platform"], "netease");
+        assert_eq!(result["data"]["kind"], "track");
+        assert_eq!(result["data"]["action"], "clear");
+        assert_eq!(result["data"]["ids"], json!([]));
+        assert_eq!(result["data"]["applied"], true);
+        assert_eq!(result["meta"]["account"], "personal");
+
+        for path in [
+            "/v1/account/dislikes/tracks?platform=unknown",
+            "/v1/account/dislikes/tracks?platform=netease&unknown=true",
+        ] {
+            let (status, response) =
+                json_request_from(test_app_with_provider(), Method::DELETE, path, None).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(response["error"]["code"], "invalid_request");
         }

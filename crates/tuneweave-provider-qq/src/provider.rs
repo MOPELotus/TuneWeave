@@ -81,6 +81,7 @@ const DISLIKE_MODULE: &str = "music.feedback.FeedbackBlack";
 const DISLIKE_LIST_METHOD: &str = "GetDislikeList";
 const DISLIKE_ADD_METHOD: &str = "AddDislike";
 const DISLIKE_CANCEL_METHOD: &str = "CancelDislike";
+const DISLIKE_CLEAR_METHOD: &str = "CancelAllDislike";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -860,6 +861,18 @@ struct QqDislikeMutationResponse {
     retcode: i64,
     #[serde(default, rename = "Msg")]
     message: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct QqDislikeClearTokenResponse {
+    #[serde(rename = "Retcode", deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    #[serde(default, rename = "Msg")]
+    message: String,
+    #[serde(rename = "Token")]
+    token: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3876,6 +3889,35 @@ impl MusicProvider for QqProvider {
             normalized_ids,
             response,
         )
+    }
+
+    async fn clear_account_dislike_tracks(
+        &self,
+        account: Option<&str>,
+    ) -> Result<AccountDislikeMutationResult> {
+        let account = account.unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let token_response = self
+            .client
+            .request_android_with_credential(&[qq_dislike_clear_token_request()], Some(&credential))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ dislike clear token request returned no response"))?;
+        let (token, token_data, token_response) = parse_qq_dislike_clear_token(token_response)?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_dislike_clear_commit_request(&token)],
+                Some(&credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ dislike clear request returned no response"))?;
+        map_qq_dislike_clear(token_data, token_response, response)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -10223,6 +10265,23 @@ fn qq_dislike_mutation_request(
     ))
 }
 
+fn qq_dislike_clear_token_request() -> QqApiRequest {
+    QqApiRequest::new(
+        DISLIKE_MODULE,
+        DISLIKE_CLEAR_METHOD,
+        json!({"ISOnlyGetToken": true}),
+    )
+    .preserving_booleans()
+}
+
+fn qq_dislike_clear_commit_request(token: &str) -> QqApiRequest {
+    QqApiRequest::new(
+        DISLIKE_MODULE,
+        DISLIKE_CLEAR_METHOD,
+        json!({"DelType": 3, "Token": token}),
+    )
+}
+
 fn qq_favorite_mv_request(encrypted_uin: &str, page_size: u32, page_index: u32) -> QqApiRequest {
     QqApiRequest::new(
         FAVORITE_MV_MODULE,
@@ -10886,6 +10945,81 @@ fn map_qq_dislike_mutation(
             ("response".to_owned(), response.raw),
         ]),
     })
+}
+
+fn parse_qq_dislike_clear_token(response: QqApiResponse) -> Result<(String, Value, Value)> {
+    let data =
+        serde_json::from_value::<QqDislikeClearTokenResponse>(response.data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ dislike clear token response is malformed: {error}"
+            ))
+        })?;
+    if data.retcode != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!(
+                "QQ dislike clear token request failed with code {}",
+                data.retcode
+            ),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": data.retcode,
+            "platform_message": data.message
+        })));
+    }
+    let token = data.token.trim();
+    if token.is_empty() || token.len() > 4096 || token.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(qq_data_error(
+            "QQ dislike clear token response did not contain a valid transaction token",
+        ));
+    }
+    let mut typed_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve QQ dislike clear token response"))?;
+    redact_qq_transaction_tokens(&mut typed_data);
+    let mut raw = response.raw;
+    redact_qq_transaction_tokens(&mut raw);
+    Ok((token.to_owned(), typed_data, raw))
+}
+
+fn map_qq_dislike_clear(
+    token_data: Value,
+    token_response: Value,
+    response: QqApiResponse,
+) -> Result<AccountDislikeMutationResult> {
+    let mut result = map_qq_dislike_mutation(
+        AccountDislikeKind::Track,
+        AccountDislikeMutationAction::Clear,
+        Vec::new(),
+        response,
+    )?;
+    result
+        .extensions
+        .insert("token_redacted".to_owned(), json!(true));
+    result
+        .extensions
+        .insert("token_handshake_data".to_owned(), token_data);
+    result
+        .extensions
+        .insert("token_handshake_response".to_owned(), token_response);
+    Ok(result)
+}
+
+fn redact_qq_transaction_tokens(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| !key.eq_ignore_ascii_case("token"));
+            for value in object.values_mut() {
+                redact_qq_transaction_tokens(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_qq_transaction_tokens(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn qq_response_positive_u64(value: &str, context: &str) -> Result<u64> {
@@ -18738,6 +18872,89 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dislike_clear_preserves_two_phase_boolean_and_redacts_the_transaction_token() {
+        let token_request = qq_dislike_clear_token_request();
+        assert_eq!(token_request.module, DISLIKE_MODULE);
+        assert_eq!(token_request.method, DISLIKE_CLEAR_METHOD);
+        assert_eq!(token_request.param, json!({"ISOnlyGetToken": true}));
+        assert!(token_request.preserves_booleans());
+
+        let secret = "transaction-secret-that-must-not-leak";
+        let (token, token_data, token_response) = parse_qq_dislike_clear_token(response(json!({
+            "Retcode": 0,
+            "Msg": "ok",
+            "Token": secret,
+            "futureTokenField": {"kept": true}
+        })))
+        .expect("parse clear token response");
+        assert_eq!(token, secret);
+        assert_eq!(token_data["futureTokenField"]["kept"], true);
+        assert!(token_data.get("Token").is_none());
+        assert!(token_response["data"].get("Token").is_none());
+        assert!(
+            !serde_json::to_string(&token_data)
+                .expect("token data JSON")
+                .contains(secret)
+        );
+        assert!(
+            !serde_json::to_string(&token_response)
+                .expect("token response JSON")
+                .contains(secret)
+        );
+
+        let commit_request = qq_dislike_clear_commit_request(&token);
+        assert_eq!(commit_request.module, DISLIKE_MODULE);
+        assert_eq!(commit_request.method, DISLIKE_CLEAR_METHOD);
+        assert_eq!(commit_request.param["DelType"], 3);
+        assert_eq!(commit_request.param["Token"], secret);
+        assert!(!commit_request.preserves_booleans());
+
+        let result = map_qq_dislike_clear(
+            token_data,
+            token_response,
+            response(json!({
+                "Retcode": 0,
+                "Msg": "",
+                "futureClearField": {"kept": true}
+            })),
+        )
+        .expect("map clear dislike result");
+        assert_eq!(result.kind, AccountDislikeKind::Track);
+        assert_eq!(result.action, AccountDislikeMutationAction::Clear);
+        assert!(result.ids.is_empty());
+        assert!(result.applied);
+        assert_eq!(result.extensions["token_redacted"], true);
+        assert_eq!(result.extensions["data"]["futureClearField"]["kept"], true);
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("clear result JSON")
+                .contains(secret)
+        );
+    }
+
+    #[test]
+    fn dislike_clear_rejects_failed_missing_and_unsafe_tokens_without_echoing_them() {
+        for fixture in [
+            json!({}),
+            json!({"Retcode": 1000, "Msg": "login required", "Token": "secret-one"}),
+            json!({"Retcode": 0, "Msg": "", "Token": ""}),
+            json!({"Retcode": 0, "Msg": "", "Token": "unsafe\nsecret-two"}),
+            json!({"Retcode": 0, "Msg": "", "Token": "x".repeat(4097)}),
+        ] {
+            let source = serde_json::to_string(&fixture).expect("source fixture");
+            let error = parse_qq_dislike_clear_token(response(fixture))
+                .expect_err("invalid clear token response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            let debug = format!("{error:?}");
+            for secret in ["secret-one", "secret-two", &"x".repeat(128)] {
+                if source.contains(secret) {
+                    assert!(!debug.contains(secret));
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn dislike_list_requires_the_exact_account_before_signed_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -18820,6 +19037,17 @@ mod tests {
             .await
             .expect_err("empty ID list rejected before account lookup");
         assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn dislike_clear_requires_the_exact_account_before_the_token_handshake() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .clear_account_dislike_tracks(Some("missing"))
+            .await
+            .expect_err("missing exact account rejected");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing");
     }
 
     #[test]

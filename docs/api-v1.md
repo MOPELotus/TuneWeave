@@ -1085,6 +1085,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/account/dislikes` | `platform?`、`account?`、`kind/type?=track|artist|style`、`page?`、`cursor/last_id?`；QQ 兼容 `cmd=3|2|4` 与 `lastid` | `AccountDislikeList`；歌曲、歌手和风格三类不喜欢目录共用强类型条目，返回下一页、末项游标及平台分页元数据 |
 | POST | `/v1/account/dislikes` | JSON `{platform?, account?, kind|type|id_type, ids|values}`；类别接受 `track|artist|style` 或 `1|2|3`，ID 接受单项、数组或逗号列表 | `AccountDislikeMutationResult`；批量添加不喜欢内容，顺序和重复项原样保留 |
 | DELETE | `/v1/account/dislikes` | 与 POST 相同的 JSON 批量契约 | `AccountDislikeMutationResult`；取消单项或批量不喜欢内容，空批次明确拒绝 |
+| DELETE | `/v1/account/dislikes/tracks` | `platform?`、`account?` | `AccountDislikeMutationResult`；以独立两阶段事务清空全部歌曲不喜欢内容，不影响歌手或风格 |
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist`；`uni:` 复用同一实体，混合项目数位于 `extensions.uni_item_count`，不伪装成纯歌曲数 |
 | GET | `/v1/playlists/{ref}/items` | 分页、`account?` | `PlaylistPlayableEntry[]`；统一返回 `track/mv/video/podcast_episode/radio_station`、资源引用、位置与紧凑快照；Uni 项提供稳定 `item_id`，外部只读项目为 `null` |
 | GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]`；混合 Uni 歌单先过滤非歌曲再计算真实分页，B 站合集/收藏夹视频按可播放音频内容归一并保留 `video_ref` |
@@ -1144,6 +1145,8 @@ QQ 不喜欢目录固定调用签名端点 `https://u.y.qq.com/cgi-bin/musics.fc
 添加 QQ 不喜欢内容使用普通 Android `music.feedback.FeedbackBlack/AddDislike`，不复用读取目录的签名端点。统一 `track/artist/style` 和参考 `id_type=1/2/3` 分别只生成 `Songs/Singers/Styles` 一个请求容器；每项携带规范十进制字符串 `ID` 及对应 `IdType`，批量顺序和重复项不会被集合化。空列表、非正整数、超出 `u64` 的 QQ ID、类别冲突和 `ids/values` 冲突均在账户查找或联网前拒绝。成功结果明确返回 `action=add/applied=true` 和规范 ID；`Retcode` 非零进入统一上游错误而不虚报写入成功，完整响应保留在扩展。该写操作通过 `account_dislike_write` 能力发现，并要求精确 `(qq, account)`。
 
 取消 QQ 不喜欢内容使用同一批量模型和普通 Android CGI，仅将方法切换为 `music.feedback.FeedbackBlack/CancelDislike`，成功结果返回 `action=remove`。参考实现把空 `values` 改写为空数组后仍发起写请求；TuneWeave 认为这既没有可观察效果又会增加账户风控面，因此空批次在账户查找和联网前返回 400。其余类别、ID 规范化、顺序/重复项、精确账户、强类型 `Retcode` 和完整响应语义与添加操作一致。
+
+清空 QQ 歌曲不喜欢目录完整执行 `music.feedback.FeedbackBlack/CancelAllDislike` 的两阶段事务：第一请求原样保留布尔 `ISOnlyGetToken=true`，取得并校验一次性 Token；第二请求提交 `DelType=3/Token`。Token 仅在同一次 provider 调用的内存中传递，不进入稳定模型、HTTP 响应、扩展、错误或 Debug；保存第一阶段平台数据和原响应前会递归移除所有大小写形式的 Token 字段，并以 `token_redacted=true` 标记。空白、含控制字符或超过 4096 字节的 Token 会阻止第二阶段，事务不做无限重试。最终只有第二阶段 `Retcode=0` 才返回 `kind=track/action=clear/applied=true`；独立 `/tracks` 路径避免调用者把批量取消误作清空，也不会影响歌手和风格目录。
 
 会员摘要同时提供公开用户和当前账户两条统一路径。`backend` 缺省为 `front`，也接受 `public/v1`；网易云固定使用 WeAPI `/api/music-vip-membership/front/vip/info`，公开用户把引用 ID 作为 `userId`，当前账户按参考默认分支提交空字符串。`redVipLevel/redVipAnnualCount/redVipLevelIcon` 分别映射为等级、年费次数和图标；该公开接口没有可靠有效期和激活态，因此相关字段保持可空。
 

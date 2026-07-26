@@ -182,6 +182,11 @@ impl QqApiRequest {
         self.preserve_booleans = true;
         self
     }
+
+    #[cfg(test)]
+    pub(crate) const fn preserves_booleans(&self) -> bool {
+        self.preserve_booleans
+    }
 }
 
 #[derive(Clone)]
