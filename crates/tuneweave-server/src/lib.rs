@@ -24,21 +24,21 @@ use tuneweave_core::{
     AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest,
     AlbumStats, AlbumSummary, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist,
     ArtistArea, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
-    ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest,
-    ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
-    ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
-    ChartCatalogRequest, ChartCatalogView, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabRequest, ArtistListRequest,
+    ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder,
+    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
+    AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AudioRecognition,
+    AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest,
+    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
@@ -314,6 +314,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/charts/{reference}/tracks", get(playlist_tracks))
         .route("/artists", get(artists))
         .route("/artists/{reference}", get(artist))
+        .route("/artists/{reference}/tabs/{tab}", get(artist_homepage_tab))
         .route("/artists/{reference}/overview", get(artist_overview))
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
@@ -6957,6 +6958,51 @@ async fn artist(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtistHomepageTabParams {
+    page: Option<String>,
+    #[serde(alias = "num", alias = "page_size")]
+    limit: Option<String>,
+    account: Option<String>,
+}
+
+async fn artist_homepage_tab(
+    State(state): State<AppState>,
+    Path((reference, tab)): Path<(String, String)>,
+    params: Result<Query<ArtistHomepageTabParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<ArtistHomepageTab>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
+    if page == 0 {
+        return Err(TuneWeaveError::invalid_request("page must start at 1").into());
+    }
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let tab = provider
+        .artist_homepage_tab(
+            reference.id(),
+            &ArtistHomepageTabRequest {
+                kind: parse_artist_homepage_tab_kind(&tab)?,
+                page,
+                limit,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(tab).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
 async fn artist_overview(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -11597,6 +11643,31 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
     }
 }
 
+fn parse_artist_homepage_tab_kind(value: &str) -> Result<ArtistHomepageTabKind, TuneWeaveError> {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "wiki" | "introduction" | "intro" => Ok(ArtistHomepageTabKind::Wiki),
+        "album" | "albums" => Ok(ArtistHomepageTabKind::Album),
+        "composer" | "composing" | "song_composing" => Ok(ArtistHomepageTabKind::Composer),
+        "lyricist" | "lyric" | "song_lyric" => Ok(ArtistHomepageTabKind::Lyricist),
+        "producer" => Ok(ArtistHomepageTabKind::Producer),
+        "arranger" => Ok(ArtistHomepageTabKind::Arranger),
+        "musician" => Ok(ArtistHomepageTabKind::Musician),
+        "song" | "songs" | "sing" | "song_sing" => Ok(ArtistHomepageTabKind::Song),
+        "video" | "videos" | "mv" => Ok(ArtistHomepageTabKind::Video),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported artist homepage tab: {value}"
+        ))
+        .with_details(json!({
+            "allowed": ["wiki", "album", "composer", "lyricist", "producer", "arranger", "musician", "song", "video"]
+        }))),
+    }
+}
+
 fn parse_video_kind(value: Option<&str>) -> Result<VideoKind, TuneWeaveError> {
     match value.unwrap_or("mv").trim().to_ascii_lowercase().as_str() {
         "all" | "video" => Ok(VideoKind::All),
@@ -12244,13 +12315,14 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
-        AiLyricDictionaryEntry, ArtistBiographySection, ArtistSummary, ArtistWorkKind,
-        AudioCdnNode, AudioFileAccess, AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup,
-        ChartTrackPreview, CommentMutationAction, CommentReplyReference, CommentThreadStats,
-        CreatorSummary, DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page,
-        PageMeta, PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart,
-        RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource, Result, SearchQuery,
-        StreamRequest, VideoResolution,
+        AiLyricDictionaryEntry, ArtistBiographySection, ArtistHomepageIntroduction,
+        ArtistHomepageTabMetadata, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
+        AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup, ChartTrackPreview,
+        CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
+        DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
+        PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
+        RadioPlaybackItem, RadioStyle, RadioStyleSource, Result, SearchQuery, StreamRequest,
+        VideoResolution,
     };
 
     use super::*;
@@ -15538,6 +15610,7 @@ mod tests {
                 Capability::UserMembership,
                 Capability::AlbumDetail,
                 Capability::ArtistDetail,
+                Capability::ArtistHomepageTabs,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -15752,6 +15825,126 @@ mod tests {
                     ("numeric_id".to_owned(), json!(4558)),
                     ("follower_count".to_owned(), json!(50_540_499)),
                 ]),
+            })
+        }
+
+        async fn artist_homepage_tab(
+            &self,
+            id: &str,
+            request: &ArtistHomepageTabRequest,
+        ) -> Result<ArtistHomepageTab> {
+            let tab_id = match request.kind {
+                ArtistHomepageTabKind::Wiki => "wiki",
+                ArtistHomepageTabKind::Album => "album",
+                ArtistHomepageTabKind::Composer => "song_composing",
+                ArtistHomepageTabKind::Lyricist => "song_lyric",
+                ArtistHomepageTabKind::Producer => "producer",
+                ArtistHomepageTabKind::Arranger => "arranger",
+                ArtistHomepageTabKind::Musician => "musician",
+                ArtistHomepageTabKind::Song => "song_sing",
+                ArtistHomepageTabKind::Video => "video",
+            };
+            let singer_ref =
+                ResourceRef::new(Platform::Qq, id).expect("valid QQ singer homepage tab reference");
+            let mut tracks = Vec::new();
+            if matches!(
+                request.kind,
+                ArtistHomepageTabKind::Composer
+                    | ArtistHomepageTabKind::Lyricist
+                    | ArtistHomepageTabKind::Producer
+                    | ArtistHomepageTabKind::Arranger
+                    | ArtistHomepageTabKind::Musician
+                    | ArtistHomepageTabKind::Song
+            ) {
+                let mut track = Track::new(
+                    ResourceRef::new(Platform::Qq, format!("tab-song-{}", request.page))
+                        .expect("valid QQ singer homepage song reference"),
+                    "晴天",
+                );
+                track.artists = vec![ArtistSummary {
+                    resource_ref: Some(singer_ref.clone()),
+                    name: "周杰伦".to_owned(),
+                }];
+                tracks.push(track);
+            }
+            let albums = (request.kind == ArtistHomepageTabKind::Album)
+                .then(|| Album {
+                    resource_ref: ResourceRef::new(Platform::Qq, "000MkMni19ClKG")
+                        .expect("valid QQ singer homepage album reference"),
+                    platform: Platform::Qq,
+                    id: "000MkMni19ClKG".to_owned(),
+                    name: "叶惠美".to_owned(),
+                    aliases: Vec::new(),
+                    artists: vec![ArtistSummary {
+                        resource_ref: Some(singer_ref.clone()),
+                        name: "周杰伦".to_owned(),
+                    }],
+                    description: String::new(),
+                    cover_url: None,
+                    published_at: Some("2003-07-31".to_owned()),
+                    track_count: Some(11),
+                    company: None,
+                    kind: Some("album".to_owned()),
+                    extensions: Extensions::new(),
+                })
+                .into_iter()
+                .collect();
+            let videos = (request.kind == ArtistHomepageTabKind::Video)
+                .then(|| Video {
+                    resource_ref: ResourceRef::new(Platform::Qq, "a001mvvid01")
+                        .expect("valid QQ singer homepage video reference"),
+                    platform: Platform::Qq,
+                    id: "a001mvvid01".to_owned(),
+                    title: "晴天 MV".to_owned(),
+                    creators: vec![CreatorSummary {
+                        resource_ref: Some(singer_ref.clone()),
+                        name: "周杰伦".to_owned(),
+                        avatar_url: None,
+                    }],
+                    description: String::new(),
+                    cover_url: None,
+                    duration_ms: Some(269_000),
+                    published_at: Some("1700000000".to_owned()),
+                    play_count: Some(123_456),
+                    subscribed: None,
+                    extensions: Extensions::new(),
+                })
+                .into_iter()
+                .collect();
+            let introduction = (request.kind == ArtistHomepageTabKind::Wiki)
+                .then(|| ArtistHomepageIntroduction {
+                    item_type: 2,
+                    titles: vec!["简介".to_owned()],
+                    texts: vec!["周杰伦，华语流行歌手。".to_owned()],
+                    extensions: Extensions::from([(
+                        "source".to_owned(),
+                        json!("IntroductionTab.List"),
+                    )]),
+                })
+                .into_iter()
+                .collect();
+            let has_more = request.kind != ArtistHomepageTabKind::Wiki && request.page < 3;
+            Ok(ArtistHomepageTab {
+                artist_ref: singer_ref,
+                kind: request.kind,
+                tab_id: tab_id.to_owned(),
+                page: request.page,
+                limit: request.limit,
+                has_more,
+                next_page: has_more.then(|| request.page + 1),
+                need_show: Some(false),
+                order: 0,
+                tabs: vec![ArtistHomepageTabMetadata {
+                    id: tab_id.to_owned(),
+                    name: "主页标签".to_owned(),
+                    title: "标签标题".to_owned(),
+                    extensions: Extensions::new(),
+                }],
+                introduction,
+                tracks,
+                albums,
+                videos,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -19748,6 +19941,47 @@ mod tests {
         assert_eq!(artist["data"]["extensions"]["account"], "green-vip");
         assert_eq!(artist["meta"]["platform"], "qq");
         assert_eq!(artist["meta"]["account"], "green-vip");
+
+        let (status, tab) = json_response_from(
+            app.clone(),
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/song?page=2&limit=2&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tab["data"]["artist_ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(tab["data"]["kind"], "song");
+        assert_eq!(tab["data"]["tab_id"], "song_sing");
+        assert_eq!(tab["data"]["page"], 2);
+        assert_eq!(tab["data"]["limit"], 2);
+        assert_eq!(tab["data"]["next_page"], 3);
+        assert_eq!(tab["data"]["tracks"][0]["ref"], "qq:tab-song-2");
+        assert_eq!(tab["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(tab["meta"]["platform"], "qq");
+        assert_eq!(tab["meta"]["account"], "green-vip");
+
+        let (status, wiki) = json_response_from(
+            app.clone(),
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/introduction?num=5",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(wiki["data"]["kind"], "wiki");
+        assert_eq!(wiki["data"]["tab_id"], "wiki");
+        assert_eq!(wiki["data"]["introduction"][0]["item_type"], 2);
+        assert_eq!(wiki["data"]["introduction"][0]["titles"][0], "简介");
+        assert_eq!(wiki["data"]["has_more"], false);
+
+        for path in [
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/unknown",
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/wiki?page=0",
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/wiki?limit=0",
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/wiki?limit=101",
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/wiki?unknown=true",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
 
         let (status, tracks) = json_response_from(
             app.clone(),

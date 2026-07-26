@@ -2285,6 +2285,76 @@ pub struct ArtistOverview {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtistHomepageTabKind {
+    #[default]
+    Wiki,
+    Album,
+    Composer,
+    Lyricist,
+    Producer,
+    Arranger,
+    Musician,
+    Song,
+    Video,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistHomepageTabRequest {
+    pub kind: ArtistHomepageTabKind,
+    pub page: u32,
+    pub limit: u32,
+    pub account: Option<String>,
+}
+
+impl ArtistHomepageTabRequest {
+    #[must_use]
+    pub fn new(kind: ArtistHomepageTabKind, page: u32, limit: u32) -> Self {
+        Self {
+            kind,
+            page,
+            limit,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistHomepageTabMetadata {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistHomepageIntroduction {
+    pub item_type: i64,
+    pub titles: Vec<String>,
+    pub texts: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtistHomepageTab {
+    pub artist_ref: ResourceRef,
+    pub kind: ArtistHomepageTabKind,
+    pub tab_id: String,
+    pub page: u32,
+    pub limit: u32,
+    pub has_more: bool,
+    pub next_page: Option<u32>,
+    pub need_show: Option<bool>,
+    pub order: i64,
+    pub tabs: Vec<ArtistHomepageTabMetadata>,
+    pub introduction: Vec<ArtistHomepageIntroduction>,
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Album>,
+    pub videos: Vec<Video>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -5164,6 +5234,52 @@ mod tests {
             serde_json::to_value(ArtistArea::Western).expect("serialize artist area"),
             "western"
         );
+    }
+
+    #[test]
+    fn artist_homepage_tabs_keep_kind_page_resources_and_dynamic_introduction_distinct() {
+        let mut request = ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Composer, 2, 10);
+        request.account = Some("green-vip".to_owned());
+        let value = serde_json::to_value(&request).expect("serialize artist homepage tab request");
+        assert_eq!(value["kind"], "composer");
+        assert_eq!(value["page"], 2);
+        assert_eq!(value["limit"], 10);
+        assert_eq!(value["account"], "green-vip");
+
+        let tab = ArtistHomepageTab {
+            artist_ref: ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                .expect("valid QQ artist reference"),
+            kind: ArtistHomepageTabKind::Wiki,
+            tab_id: "wiki".to_owned(),
+            page: 1,
+            limit: 10,
+            has_more: false,
+            next_page: None,
+            need_show: Some(false),
+            order: 0,
+            tabs: vec![ArtistHomepageTabMetadata {
+                id: "wiki".to_owned(),
+                name: "百科".to_owned(),
+                title: "艺人百科".to_owned(),
+                extensions: Extensions::new(),
+            }],
+            introduction: vec![ArtistHomepageIntroduction {
+                item_type: 2,
+                titles: vec!["简介".to_owned()],
+                texts: vec!["歌手、词曲作者与制作人。".to_owned()],
+                extensions: Extensions::new(),
+            }],
+            tracks: Vec::new(),
+            albums: Vec::new(),
+            videos: Vec::new(),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(tab).expect("serialize artist homepage tab");
+        assert_eq!(value["artist_ref"], "qq:0025NhlN2yWrP4");
+        assert_eq!(value["kind"], "wiki");
+        assert_eq!(value["introduction"][0]["item_type"], 2);
+        assert_eq!(value["introduction"][0]["titles"][0], "简介");
+        assert_eq!(value["next_page"], Value::Null);
     }
 
     #[test]

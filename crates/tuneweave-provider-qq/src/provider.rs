@@ -10,11 +10,13 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
-    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistSummary, ArtistTrackListRequest,
-    ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
-    AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState,
-    Capability, ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
-    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistHomepageIntroduction,
+    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabMetadata, ArtistHomepageTabRequest,
+    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistVideoListRequest,
+    AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
+    AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod,
+    CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
+    MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
     MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
     MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
@@ -63,6 +65,7 @@ const ALBUM_SONG_MODULE: &str = "music.musichallAlbum.AlbumSongList";
 const ALBUM_SONG_METHOD: &str = "GetAlbumSongList";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
+const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
 const SINGER_SONG_MODULE: &str = "musichall.song_list_server";
 const SINGER_SONG_METHOD: &str = "GetSingerSongList";
 const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
@@ -1401,7 +1404,7 @@ struct QqHomepageAlbumList {
         rename = "AlbumList",
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
-    items: Vec<Value>,
+    items: Vec<QqSingerAlbum>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1413,7 +1416,7 @@ struct QqHomepageVideoList {
         rename = "VideoList",
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
-    items: Vec<Value>,
+    items: Vec<QqSingerMv>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1802,6 +1805,7 @@ impl MusicProvider for QqProvider {
             Capability::UserMembership,
             Capability::AlbumDetail,
             Capability::ArtistDetail,
+            Capability::ArtistHomepageTabs,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -2027,6 +2031,23 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ singer homepage request returned no response"))?;
         map_qq_singer_homepage(id.trim(), response)
+    }
+
+    async fn artist_homepage_tab(
+        &self,
+        id: &str,
+        request: &ArtistHomepageTabRequest,
+    ) -> Result<ArtistHomepageTab> {
+        self.validate_public_account(request.account.as_deref())?;
+        let request_api = qq_singer_homepage_tab_request(id, request)?;
+        let response = self
+            .client
+            .request_android(&[request_api])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ singer homepage tab request returned no response"))?;
+        map_qq_singer_homepage_tab(id.trim(), request, response)
     }
 
     async fn artist_tracks(
@@ -4170,6 +4191,52 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
     ))
 }
 
+fn qq_singer_homepage_tab_request(
+    mid: &str,
+    request: &ArtistHomepageTabRequest,
+) -> Result<QqApiRequest> {
+    let mid = mid.trim();
+    validate_qq_media_id(mid, "singer MID")?;
+    if request.page == 0 {
+        return Err(
+            TuneWeaveError::invalid_request("QQ singer homepage tab page must start at 1")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ singer homepage tab page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(QqApiRequest::new(
+        SINGER_HOMEPAGE_MODULE,
+        SINGER_HOMEPAGE_TAB_METHOD,
+        json!({
+            "SingerMid": mid,
+            "IsQueryTabDetail": 1,
+            "TabID": qq_singer_homepage_tab_id(request.kind),
+            "PageNum": request.page - 1,
+            "PageSize": request.limit,
+            "Order": 0
+        }),
+    ))
+}
+
+const fn qq_singer_homepage_tab_id(kind: ArtistHomepageTabKind) -> &'static str {
+    match kind {
+        ArtistHomepageTabKind::Wiki => "wiki",
+        ArtistHomepageTabKind::Album => "album",
+        ArtistHomepageTabKind::Composer => "song_composing",
+        ArtistHomepageTabKind::Lyricist => "song_lyric",
+        ArtistHomepageTabKind::Producer => "producer",
+        ArtistHomepageTabKind::Arranger => "arranger",
+        ArtistHomepageTabKind::Musician => "musician",
+        ArtistHomepageTabKind::Song => "song_sing",
+        ArtistHomepageTabKind::Video => "video",
+    }
+}
+
 fn qq_singer_songs_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRequest> {
     let mid = mid.trim();
     validate_qq_media_id(mid, "singer MID")?;
@@ -6012,6 +6079,155 @@ fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
         return Ok(Some(normalized));
     }
     Ok(None)
+}
+
+fn map_qq_singer_homepage_tab(
+    singer_mid: &str,
+    request: &ArtistHomepageTabRequest,
+    response: QqApiResponse,
+) -> Result<ArtistHomepageTab> {
+    validate_qq_media_id(singer_mid, "singer MID")?;
+    let data = serde_json::from_value::<QqHomepageTabDetail>(response.data).map_err(|error| {
+        qq_data_error(format!(
+            "QQ singer homepage tab response is malformed: {error}"
+        ))
+    })?;
+    let expected_tab_id = qq_singer_homepage_tab_id(request.kind);
+    if data.id.trim() != expected_tab_id {
+        return Err(qq_data_error(
+            "QQ singer homepage tab response returned a different tab ID",
+        ));
+    }
+    let has_more = qq_homepage_boolean(data.has_more, "HasMore")?;
+    let need_show = qq_homepage_boolean(data.need_show, "NeedShowTab")?;
+    let next_page = has_more
+        .then(|| {
+            request.page.checked_add(1).ok_or_else(|| {
+                qq_data_error("QQ singer homepage tab page exceeded the supported range")
+            })
+        })
+        .transpose()?;
+
+    let tab_data = serde_json::to_value(&data)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ singer homepage tab"))?;
+    let tabs = data
+        .tabs
+        .into_iter()
+        .map(|tab| {
+            let id = tab.id.trim();
+            if id.is_empty() || id.len() > 64 || id.chars().any(char::is_control) {
+                return Err(qq_data_error(
+                    "QQ singer homepage tab metadata contains an invalid ID",
+                ));
+            }
+            let metadata = serde_json::to_value(&tab)
+                .map_err(|_| qq_data_error("failed to preserve QQ singer homepage tab metadata"))?;
+            Ok(ArtistHomepageTabMetadata {
+                id: id.to_owned(),
+                name: tab.name.trim().to_owned(),
+                title: tab.title.trim().to_owned(),
+                extensions: Extensions::from([("tab".to_owned(), metadata)]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let introduction = data
+        .introduction
+        .items
+        .into_iter()
+        .map(map_qq_homepage_introduction)
+        .collect::<Result<Vec<_>>>()?;
+    let tracks = data
+        .songs
+        .items
+        .into_iter()
+        .map(map_track)
+        .collect::<Result<Vec<_>>>()?;
+    let albums = data
+        .albums
+        .items
+        .into_iter()
+        .map(|album| map_qq_singer_album(singer_mid, album))
+        .collect::<Result<Vec<_>>>()?;
+    let videos = data
+        .videos
+        .items
+        .into_iter()
+        .map(|video| map_qq_singer_mv(singer_mid, video))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ArtistHomepageTab {
+        artist_ref: qq_ref(singer_mid, "singer")?,
+        kind: request.kind,
+        tab_id: expected_tab_id.to_owned(),
+        page: request.page,
+        limit: request.limit,
+        has_more,
+        next_page,
+        need_show: Some(need_show),
+        order: data.order,
+        tabs,
+        introduction,
+        tracks,
+        albums,
+        videos,
+        extensions: Extensions::from([
+            ("tab_detail".to_owned(), tab_data),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn qq_homepage_boolean(value: i64, field: &str) -> Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(qq_data_error(format!(
+            "QQ singer homepage tab returned an invalid {field} flag"
+        ))),
+    }
+}
+
+fn map_qq_homepage_introduction(value: Value) -> Result<ArtistHomepageIntroduction> {
+    let item_type = value.get("ItemType").and_then(json_i64).ok_or_else(|| {
+        qq_data_error("QQ singer homepage introduction is missing a numeric ItemType")
+    })?;
+    let mut titles = Vec::new();
+    let mut texts = Vec::new();
+    collect_qq_homepage_strings(&value, &mut titles, &mut texts);
+    Ok(ArtistHomepageIntroduction {
+        item_type,
+        titles,
+        texts,
+        extensions: Extensions::from([("introduction_item".to_owned(), value)]),
+    })
+}
+
+fn collect_qq_homepage_strings(value: &Value, titles: &mut Vec<String>, texts: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "Title" | "Content")
+                    && let Some(text) = value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                {
+                    if key == "Title" {
+                        titles.push(text.to_owned());
+                    } else {
+                        texts.push(text.to_owned());
+                    }
+                }
+                collect_qq_homepage_strings(value, titles, texts);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_qq_homepage_strings(item, titles, texts);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn map_qq_singer_songs(
@@ -9572,6 +9788,26 @@ mod tests {
         })
     }
 
+    fn sample_singer_homepage_tab(tab_id: &str, has_more: i64) -> Value {
+        json!({
+            "TabID": tab_id,
+            "HasMore": has_more,
+            "NeedShowTab": 0,
+            "Order": 0,
+            "TabList": [{
+                "TabID": tab_id,
+                "TabName": "主页标签",
+                "Title": "标签标题",
+                "futureTabMetaField": true
+            }],
+            "IntroductionTab": {"List": null, "futureIntroductionField": true},
+            "SongTab": {"List": null, "SearchText": ""},
+            "AlbumTab": {"AlbumList": null, "TypeList": null},
+            "VideoTab": {"VideoList": null, "TagList": null},
+            "futureTabField": "kept"
+        })
+    }
+
     fn sample_singer_album(id: i64, mid: &str, name: &str) -> Value {
         json!({
             "albumID": id,
@@ -10877,6 +11113,186 @@ mod tests {
             assert_eq!(error.code, ErrorCode::UpstreamError);
             assert_eq!(error.platform, Some(Platform::Qq));
         }
+    }
+
+    #[test]
+    fn singer_homepage_tab_requests_preserve_all_nine_ids_and_page_numbers() {
+        for (kind, tab_id) in [
+            (ArtistHomepageTabKind::Wiki, "wiki"),
+            (ArtistHomepageTabKind::Album, "album"),
+            (ArtistHomepageTabKind::Composer, "song_composing"),
+            (ArtistHomepageTabKind::Lyricist, "song_lyric"),
+            (ArtistHomepageTabKind::Producer, "producer"),
+            (ArtistHomepageTabKind::Arranger, "arranger"),
+            (ArtistHomepageTabKind::Musician, "musician"),
+            (ArtistHomepageTabKind::Song, "song_sing"),
+            (ArtistHomepageTabKind::Video, "video"),
+        ] {
+            let request = qq_singer_homepage_tab_request(
+                " 0025NhlN2yWrP4 ",
+                &ArtistHomepageTabRequest::new(kind, 3, 7),
+            )
+            .expect("singer homepage tab request");
+            assert_eq!(request.module, SINGER_HOMEPAGE_MODULE);
+            assert_eq!(request.method, SINGER_HOMEPAGE_TAB_METHOD);
+            assert_eq!(
+                request.param,
+                json!({
+                    "SingerMid": "0025NhlN2yWrP4",
+                    "IsQueryTabDetail": 1,
+                    "TabID": tab_id,
+                    "PageNum": 2,
+                    "PageSize": 7,
+                    "Order": 0
+                })
+            );
+        }
+
+        for request in [
+            ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 0, 10),
+            ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 0),
+            ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 101),
+        ] {
+            assert!(qq_singer_homepage_tab_request("0025NhlN2yWrP4", &request).is_err());
+        }
+    }
+
+    #[test]
+    fn singer_homepage_wiki_maps_dynamic_blocks_without_losing_platform_content() {
+        let request = ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 10);
+        let mut data = sample_singer_homepage_tab("wiki", 0);
+        data["IntroductionTab"]["List"] = json!([{
+            "ItemType": "2",
+            "SingerInfoList": [{
+                "Title": "简介",
+                "Content": "周杰伦，华语流行歌手。",
+                "More": {"Title": "更多", "Scheme": "qqmusic://artist/wiki"}
+            }],
+            "ArtistAchievementList": [{
+                "Title": "艺人成就",
+                "Awards": [{"Title": "第34届金曲奖", "Desc": "年度歌曲奖"}]
+            }],
+            "futureIntroductionField": {"kept": true}
+        }]);
+        let tab = map_qq_singer_homepage_tab("0025NhlN2yWrP4", &request, response(data))
+            .expect("map singer wiki tab");
+        assert_eq!(tab.artist_ref.to_string(), "qq:0025NhlN2yWrP4");
+        assert_eq!(tab.kind, ArtistHomepageTabKind::Wiki);
+        assert_eq!(tab.tab_id, "wiki");
+        assert!(!tab.has_more);
+        assert_eq!(tab.next_page, None);
+        assert_eq!(tab.need_show, Some(false));
+        assert_eq!(tab.tabs[0].id, "wiki");
+        assert_eq!(tab.tabs[0].extensions["tab"]["futureTabMetaField"], true);
+        assert_eq!(tab.introduction[0].item_type, 2);
+        assert!(tab.introduction[0].titles.contains(&"简介".to_owned()));
+        assert!(tab.introduction[0].titles.contains(&"艺人成就".to_owned()));
+        assert!(
+            tab.introduction[0]
+                .texts
+                .contains(&"周杰伦，华语流行歌手。".to_owned())
+        );
+        assert_eq!(
+            tab.introduction[0].extensions["introduction_item"]["futureIntroductionField"]["kept"],
+            true
+        );
+        assert!(tab.tracks.is_empty());
+        assert!(tab.albums.is_empty());
+        assert!(tab.videos.is_empty());
+        assert_eq!(tab.extensions["tab_detail"]["futureTabField"], "kept");
+        assert_eq!(tab.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn singer_homepage_music_tabs_map_tracks_albums_videos_and_page_continuation() {
+        let mut song_data = sample_singer_homepage_tab("song_sing", 1);
+        song_data["SongTab"]["List"] = json!([
+            sample_track(97_773, "0039MnYb0qxYhV", "晴天"),
+            sample_track(48_283, "003v4UL61IYlTY", "东风破")
+        ]);
+        let song = map_qq_singer_homepage_tab(
+            "0025NhlN2yWrP4",
+            &ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Song, 2, 2),
+            response(song_data),
+        )
+        .expect("map singer song tab");
+        assert_eq!(song.tracks.len(), 2);
+        assert_eq!(song.tracks[0].resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(song.next_page, Some(3));
+        assert!(song.has_more);
+
+        let mut album_data = sample_singer_homepage_tab("album", 1);
+        album_data["AlbumTab"]["AlbumList"] =
+            json!([sample_singer_album(8220, "000MkMni19ClKG", "叶惠美")]);
+        let album = map_qq_singer_homepage_tab(
+            "0025NhlN2yWrP4",
+            &ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Album, 1, 1),
+            response(album_data),
+        )
+        .expect("map singer album tab");
+        assert_eq!(
+            album.albums[0].resource_ref.to_string(),
+            "qq:000MkMni19ClKG"
+        );
+        assert_eq!(album.albums[0].name, "叶惠美");
+
+        let mut video_data = sample_singer_homepage_tab("video", 1);
+        video_data["VideoTab"]["VideoList"] =
+            json!([sample_singer_mv(101, "a001mvvid01", "晴天 MV")]);
+        let video = map_qq_singer_homepage_tab(
+            "0025NhlN2yWrP4",
+            &ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Video, 1, 1),
+            response(video_data),
+        )
+        .expect("map singer video tab");
+        assert_eq!(video.videos[0].resource_ref.to_string(), "qq:a001mvvid01");
+        assert_eq!(video.videos[0].title, "晴天 MV");
+    }
+
+    #[test]
+    fn singer_homepage_tab_mapping_rejects_identity_flags_items_and_page_overflow() {
+        let request = ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 10);
+        for data in [
+            sample_singer_homepage_tab("album", 0),
+            {
+                let mut value = sample_singer_homepage_tab("wiki", 2);
+                value["HasMore"] = json!(2);
+                value
+            },
+            {
+                let mut value = sample_singer_homepage_tab("wiki", 0);
+                value["NeedShowTab"] = json!(-1);
+                value
+            },
+            {
+                let mut value = sample_singer_homepage_tab("wiki", 0);
+                value["TabList"][0]["TabID"] = json!("");
+                value
+            },
+            {
+                let mut value = sample_singer_homepage_tab("wiki", 0);
+                value["IntroductionTab"]["List"] = json!([{"Title": "缺少类型"}]);
+                value
+            },
+            {
+                let mut value = sample_singer_homepage_tab("wiki", 0);
+                value["SongTab"]["List"] = json!({});
+                value
+            },
+        ] {
+            let error = map_qq_singer_homepage_tab("0025NhlN2yWrP4", &request, response(data))
+                .expect_err("malformed singer homepage tab");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let overflow = ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Song, u32::MAX, 10);
+        let error = map_qq_singer_homepage_tab(
+            "0025NhlN2yWrP4",
+            &overflow,
+            response(sample_singer_homepage_tab("song_sing", 1)),
+        )
+        .expect_err("page continuation overflow");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[test]
@@ -13593,6 +14009,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn singer_homepage_tabs_validate_mids_pages_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::ArtistHomepageTabs)
+        );
+        for (mid, request) in [
+            (
+                "unsafe/singer",
+                ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 10),
+            ),
+            (
+                "0025NhlN2yWrP4",
+                ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 0, 10),
+            ),
+            (
+                "0025NhlN2yWrP4",
+                ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 101),
+            ),
+        ] {
+            let error = provider
+                .artist_homepage_tab(mid, &request)
+                .await
+                .expect_err("invalid singer homepage tab request");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let mut missing = ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Wiki, 1, 10);
+        missing.account = Some("missing-account".to_owned());
+        let error = provider
+            .artist_homepage_tab("0025NhlN2yWrP4", &missing)
+            .await
+            .expect_err("missing singer homepage tab account alias");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
     async fn mv_catalog_validates_page_sizes_filters_and_accounts_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::VideoCatalog));
@@ -14864,6 +15318,88 @@ mod tests {
                 .is_some_and(|url| url.starts_with("http"))
         );
         assert_eq!(artist.extensions["response"]["code"], 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_singer_homepage_tabs_cover_all_kinds_and_song_continuation() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+
+        for (kind, tab_id) in [
+            (ArtistHomepageTabKind::Wiki, "wiki"),
+            (ArtistHomepageTabKind::Album, "album"),
+            (ArtistHomepageTabKind::Composer, "song_composing"),
+            (ArtistHomepageTabKind::Lyricist, "song_lyric"),
+            (ArtistHomepageTabKind::Producer, "producer"),
+            (ArtistHomepageTabKind::Arranger, "arranger"),
+            (ArtistHomepageTabKind::Musician, "musician"),
+            (ArtistHomepageTabKind::Song, "song_sing"),
+            (ArtistHomepageTabKind::Video, "video"),
+        ] {
+            let tab = provider
+                .artist_homepage_tab("0025NhlN2yWrP4", &ArtistHomepageTabRequest::new(kind, 1, 2))
+                .await
+                .unwrap_or_else(|error| panic!("live {tab_id} tab: {error}"));
+            assert_eq!(tab.artist_ref.to_string(), "qq:0025NhlN2yWrP4");
+            assert_eq!(tab.kind, kind);
+            assert_eq!(tab.tab_id, tab_id);
+            assert_eq!(tab.page, 1);
+            assert_eq!(tab.limit, 2);
+            assert_eq!(tab.next_page, tab.has_more.then_some(2));
+            if kind == ArtistHomepageTabKind::Wiki {
+                assert!(!tab.introduction.is_empty());
+                assert!(tab.introduction.iter().any(|item| {
+                    !item.titles.is_empty() || !item.texts.is_empty() || !item.extensions.is_empty()
+                }));
+            }
+            if kind == ArtistHomepageTabKind::Album {
+                assert_eq!(tab.albums.len(), 2);
+                assert!(
+                    tab.albums
+                        .iter()
+                        .all(|album| album.platform == Platform::Qq)
+                );
+            }
+            if kind == ArtistHomepageTabKind::Song {
+                assert_eq!(tab.tracks.len(), 2);
+                assert!(
+                    tab.tracks
+                        .iter()
+                        .all(|track| track.platform == Platform::Qq)
+                );
+            }
+            if kind == ArtistHomepageTabKind::Video {
+                assert_eq!(tab.videos.len(), 2);
+                assert!(
+                    tab.videos
+                        .iter()
+                        .all(|video| video.platform == Platform::Qq)
+                );
+            }
+        }
+
+        let first = provider
+            .artist_homepage_tab(
+                "0025NhlN2yWrP4",
+                &ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Song, 1, 2),
+            )
+            .await
+            .expect("first singer homepage song page");
+        assert!(first.has_more);
+        let second = provider
+            .artist_homepage_tab(
+                "0025NhlN2yWrP4",
+                &ArtistHomepageTabRequest::new(ArtistHomepageTabKind::Song, 2, 2),
+            )
+            .await
+            .expect("continued singer homepage song page");
+        assert_eq!(second.page, 2);
+        assert_eq!(second.tracks.len(), 2);
+        assert_ne!(second.tracks[0].resource_ref, first.tracks[0].resource_ref);
     }
 
     #[tokio::test]

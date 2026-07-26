@@ -5,11 +5,12 @@ use async_trait::async_trait;
 use crate::{
     AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest,
     AlbumStats, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistChart,
-    ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
-    ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
-    AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioRecognition, AudioRecognitionRequest,
-    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
-    Banner, BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, CloudImportRequest,
+    ArtistChartRequest, ArtistHomepageTab, ArtistHomepageTabRequest, ArtistListRequest,
+    ArtistOverview, ArtistStats, ArtistTrackListRequest, ArtistUpdatesRequest,
+    ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch,
+    AudioFileRequest, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, Banner,
+    BannerListRequest, Capability, ChartCatalog, ChartCatalogRequest, CloudImportRequest,
     CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
     CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
@@ -654,6 +655,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistDetail,
+        ))
+    }
+
+    async fn artist_homepage_tab(
+        &self,
+        _id: &str,
+        _request: &ArtistHomepageTabRequest,
+    ) -> Result<ArtistHomepageTab> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistHomepageTabs,
         ))
     }
 
