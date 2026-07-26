@@ -25,8 +25,8 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
     SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoKind, VideoResourceKind,
-    VideoStream, VideoStreamRequest,
+    TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -68,11 +68,14 @@ const SINGER_ALBUM_MODULE: &str = "music.musichallAlbum.AlbumListServer";
 const SINGER_ALBUM_METHOD: &str = "GetAlbumList";
 const SINGER_MV_MODULE: &str = "MvService.MvInfoProServer";
 const SINGER_MV_METHOD: &str = "GetSingerMvList";
+const MV_DETAIL_MODULE: &str = "video.VideoDataServer";
+const MV_DETAIL_METHOD: &str = "get_video_info_batch";
 const MV_URL_MODULE: &str = "music.stream.MvUrlProxy";
 const MV_URL_METHOD: &str = "GetMvUrls";
 const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
 const MAX_SONG_URL_ITEMS: usize = 100;
 const MAX_MV_URL_ITEMS: usize = 100;
+const MAX_MV_DETAIL_ITEMS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QqAudioFileSpec {
@@ -1565,6 +1568,56 @@ struct QqSingerMvResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqMvDetail {
+    #[serde(default)]
+    vid: String,
+    #[serde(default, rename = "type", deserialize_with = "deserialize_qq_i64")]
+    video_type: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    sid: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    cover_pic: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    duration: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singers: Vec<QqAlbumSinger>,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    video_switch: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    playcnt: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    pubdate: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    isfav: i64,
+    #[serde(default)]
+    gmid: String,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    uploader_headurl: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    uploader_nick: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    uploader_encuin: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    uploader_uin: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_i64")]
+    uploader_hasfollow: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_u64")]
+    uploader_follower_num: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    related_songs: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqMvUrlItem {
     url: Vec<String>,
@@ -1695,6 +1748,7 @@ impl MusicProvider for QqProvider {
             Capability::AudioDownload,
             Capability::AudioCdnDispatch,
             Capability::AudioFileAccess,
+            Capability::VideoDetail,
             Capability::VideoStream,
             Capability::PlaylistRead,
             Capability::PlaylistWrite,
@@ -2348,6 +2402,51 @@ impl MusicProvider for QqProvider {
             .into_iter()
             .next()
             .ok_or_else(|| qq_data_error("QQ MV URL request returned no stream"))
+    }
+
+    async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
+        self.videos(&[id.to_owned()], request)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ MV detail request returned no detail"))
+    }
+
+    async fn videos(
+        &self,
+        ids: &[String],
+        request: &VideoDetailRequest,
+    ) -> Result<Vec<VideoDetail>> {
+        if request.kind != VideoResourceKind::Mv {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ video details currently accept MV resources only",
+            )
+            .with_platform(Platform::Qq)
+            .with_details(json!({ "allowed": ["mv"] })));
+        }
+        if ids.is_empty() || ids.len() > MAX_MV_DETAIL_ITEMS {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "QQ MV detail batch must contain between 1 and {MAX_MV_DETAIL_ITEMS} VIDs"
+            ))
+            .with_platform(Platform::Qq));
+        }
+        self.validate_public_account(request.account.as_deref())?;
+        let vids = ids
+            .iter()
+            .map(|vid| {
+                let vid = vid.trim();
+                validate_qq_media_id(vid, "MV VID")?;
+                Ok(vid.to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let response = self
+            .client
+            .request_android(&[qq_mv_details_request(&vids)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ MV detail request returned no response"))?;
+        map_qq_mv_detail_response(&vids, response)
     }
 
     async fn video_streams(
@@ -4030,6 +4129,39 @@ fn qq_singer_mvs_request(mid: &str, limit: u32, offset: u32) -> Result<QqApiRequ
             "start": offset
         }),
     ))
+}
+
+fn qq_mv_details_request(vids: &[String]) -> QqApiRequest {
+    QqApiRequest::new(
+        MV_DETAIL_MODULE,
+        MV_DETAIL_METHOD,
+        json!({
+            "vidlist": vids,
+            "required": [
+                "vid",
+                "type",
+                "sid",
+                "cover_pic",
+                "duration",
+                "singers",
+                "video_switch",
+                "msg",
+                "name",
+                "desc",
+                "playcnt",
+                "pubdate",
+                "isfav",
+                "gmid",
+                "uploader_headurl",
+                "uploader_nick",
+                "uploader_encuin",
+                "uploader_uin",
+                "uploader_hasfollow",
+                "uploader_follower_num",
+                "related_songs"
+            ]
+        }),
+    )
 }
 
 fn qq_mv_urls_request(vids: &[String]) -> (QqApiRequest, String) {
@@ -6235,6 +6367,183 @@ fn map_qq_album_songs(
     })
 }
 
+fn map_qq_mv_detail_response(
+    requested: &[String],
+    response: QqApiResponse,
+) -> Result<Vec<VideoDetail>> {
+    let QqApiResponse { data, raw } = response;
+    let details = serde_json::from_value::<BTreeMap<String, QqMvDetail>>(data)
+        .map_err(|error| qq_data_error(format!("QQ MV detail response is malformed: {error}")))?;
+    let requested_unique = requested
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for (key, detail) in &details {
+        validate_qq_media_id(key, "MV VID")
+            .map_err(|_| qq_data_error("QQ MV detail response contains an invalid VID key"))?;
+        if !requested_unique.contains(key.as_str()) {
+            return Err(qq_data_error(
+                "QQ MV detail response returned an unrequested VID",
+            ));
+        }
+        let detail_vid = detail.vid.trim();
+        validate_qq_media_id(detail_vid, "MV VID")
+            .map_err(|_| qq_data_error("QQ MV detail response contains an invalid detail VID"))?;
+        if detail_vid != key {
+            return Err(qq_data_error(
+                "QQ MV detail response key and detail VID do not match",
+            ));
+        }
+    }
+    if details.len() != requested_unique.len() {
+        return Err(qq_data_error(
+            "QQ MV detail response did not return every requested VID",
+        ));
+    }
+    let response_metadata = qq_response_metadata(raw);
+    requested
+        .iter()
+        .map(|vid| {
+            let detail = details.get(vid).cloned().ok_or_else(|| {
+                qq_data_error(format!(
+                    "QQ MV detail response is missing requested VID {vid}"
+                ))
+            })?;
+            map_qq_mv_detail(detail, response_metadata.clone())
+        })
+        .collect()
+}
+
+fn map_qq_mv_detail(detail: QqMvDetail, response_metadata: Value) -> Result<VideoDetail> {
+    let vid = detail.vid.trim().to_owned();
+    validate_qq_media_id(&vid, "MV VID")
+        .map_err(|_| qq_data_error("QQ MV detail response returned an invalid VID"))?;
+    let title = [detail.name.trim(), detail.title.trim()]
+        .into_iter()
+        .find(|title| !title.is_empty())
+        .ok_or_else(|| qq_data_error("QQ MV detail response is missing its name"))?
+        .to_owned();
+    let creators = detail
+        .singers
+        .iter()
+        .map(map_qq_mv_detail_singer)
+        .collect::<Result<Vec<_>>>()?;
+    let duration_ms = (detail.duration > 0)
+        .then(|| {
+            detail
+                .duration
+                .checked_mul(1_000)
+                .ok_or_else(|| qq_data_error("QQ MV detail duration is out of range"))
+        })
+        .transpose()?;
+    let detail_data = serde_json::to_value(&detail)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ MV detail"))?;
+    let subscribed = match detail.isfav {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    let mut video_extensions = Extensions::from([
+        ("numeric_id".to_owned(), json!(detail.sid)),
+        ("vid".to_owned(), json!(detail.vid)),
+        ("mv_type".to_owned(), json!(detail.video_type)),
+        ("video_switch".to_owned(), json!(detail.video_switch)),
+        ("message".to_owned(), json!(detail.msg)),
+        ("gmid".to_owned(), json!(detail.gmid)),
+        ("related_song_ids".to_owned(), json!(detail.related_songs)),
+        (
+            "published_at_unix_seconds".to_owned(),
+            json!(detail.pubdate),
+        ),
+        ("mv_detail".to_owned(), detail_data.clone()),
+    ]);
+    video_extensions.insert(
+        "uploader".to_owned(),
+        json!({
+            "avatar_url": detail.uploader_headurl,
+            "name": detail.uploader_nick,
+            "encrypted_uin": detail.uploader_encuin,
+            "uin": detail.uploader_uin,
+            "followed": match detail.uploader_hasfollow { Some(0) => Some(false), Some(1) => Some(true), _ => None },
+            "follower_count": detail.uploader_follower_num
+        }),
+    );
+    let video = Video {
+        resource_ref: qq_ref(&vid, "MV")?,
+        platform: Platform::Qq,
+        id: vid,
+        title,
+        creators,
+        description: detail.desc.trim().to_owned(),
+        cover_url: (!detail.cover_pic.trim().is_empty())
+            .then(|| detail.cover_pic.trim().to_owned()),
+        duration_ms,
+        published_at: (detail.pubdate > 0).then(|| detail.pubdate.to_string()),
+        play_count: Some(detail.playcnt),
+        subscribed,
+        extensions: video_extensions,
+    };
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Mv,
+        video,
+        resolutions: Vec::new(),
+        extensions: Extensions::from([
+            ("mv_detail".to_owned(), detail_data),
+            ("response_metadata".to_owned(), response_metadata),
+        ]),
+    })
+}
+
+fn map_qq_mv_detail_singer(singer: &QqAlbumSinger) -> Result<CreatorSummary> {
+    let name = [singer.name.as_str(), singer.title.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .ok_or_else(|| qq_data_error("QQ MV detail contains a singer without a name"))?;
+    let mid = singer.mid.trim();
+    let resource_ref = if !mid.is_empty() {
+        validate_qq_media_id(mid, "MV singer MID")
+            .map_err(|_| qq_data_error("QQ MV detail returned an invalid singer MID"))?;
+        Some(qq_ref(mid, "MV singer")?)
+    } else if singer.id > 0 {
+        Some(qq_ref(&singer.id.to_string(), "MV singer")?)
+    } else {
+        None
+    };
+    let image_mid = if !mid.is_empty() {
+        Some(mid)
+    } else {
+        let pmid = singer.pmid.trim();
+        (!pmid.is_empty()).then_some(pmid)
+    };
+    let avatar_url = image_mid
+        .map(|image_mid| {
+            validate_qq_media_id(image_mid, "MV singer image MID")
+                .map_err(|_| qq_data_error("QQ MV detail returned an invalid singer image MID"))?;
+            Ok(qq_cover_url("T001", image_mid))
+        })
+        .transpose()?;
+    Ok(CreatorSummary {
+        resource_ref,
+        name: name.to_owned(),
+        avatar_url,
+    })
+}
+
+fn qq_response_metadata(mut raw: Value) -> Value {
+    if let Some(object) = raw.as_object_mut() {
+        object.remove("data");
+        for (key, value) in object.iter_mut() {
+            if key.starts_with("req_")
+                && let Some(response) = value.as_object_mut()
+            {
+                response.remove("data");
+            }
+        }
+    }
+    raw
+}
+
 fn map_qq_mv_url_response(
     requested: &[String],
     request: &VideoStreamRequest,
@@ -7625,12 +7934,61 @@ where
     json_i64(&value).ok_or_else(|| D::Error::custom("expected a QQ integer"))
 }
 
+fn deserialize_qq_optional_u64<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    value
+        .as_ref()
+        .map(|value| {
+            json_u64(value)
+                .ok_or_else(|| D::Error::custom("expected a nullable QQ unsigned integer"))
+        })
+        .transpose()
+}
+
+fn deserialize_qq_optional_i64<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    value
+        .as_ref()
+        .map(|value| {
+            json_i64(value).ok_or_else(|| D::Error::custom("expected a nullable QQ integer"))
+        })
+        .transpose()
+}
+
 fn deserialize_qq_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
     value_as_string(Some(&value)).ok_or_else(|| D::Error::custom("expected a QQ scalar string"))
+}
+
+fn deserialize_qq_optional_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            Ok((!value.is_empty()).then(|| value.to_owned()))
+        }
+        Some(Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(_) => Err(D::Error::custom("expected a nullable QQ scalar string")),
+    }
 }
 
 fn deserialize_qq_vec_or_empty<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
@@ -8958,6 +9316,42 @@ mod tests {
             "pubdate": "1700000000",
             "icon_type": 2,
             "futureMvField": true
+        })
+    }
+
+    fn sample_mv_detail(vid: &str, title: &str) -> Value {
+        json!({
+            "vid": vid,
+            "type": "0",
+            "sid": "101",
+            "name": title,
+            "cover_pic": "https://y.gtimg.cn/music/photo_new/T015R640x360M000sample.jpg",
+            "duration": "189",
+            "singers": [{
+                "id": "4558",
+                "mid": "0025NhlN2yWrP4",
+                "name": "周杰伦",
+                "title": "周杰伦",
+                "type": 0,
+                "uin": 0,
+                "pmid": "0025NhlN2yWrP4",
+                "futureSingerField": true
+            }],
+            "video_switch": "1",
+            "msg": "",
+            "desc": "MV 详情",
+            "playcnt": "123456",
+            "pubdate": "1779206400",
+            "isfav": 1,
+            "gmid": "global-media-id",
+            "uploader_headurl": "https://thirdqq.qlogo.cn/avatar.jpg",
+            "uploader_nick": "官方账号",
+            "uploader_encuin": "opaque-uploader",
+            "uploader_uin": 123456,
+            "uploader_hasfollow": 0,
+            "uploader_follower_num": "9876",
+            "related_songs": [97773, 48283],
+            "futureDetailField": {"kept": true}
         })
     }
 
@@ -10655,6 +11049,151 @@ mod tests {
     }
 
     #[test]
+    fn mv_detail_request_preserves_batch_order_and_complete_unique_field_selection() {
+        let vids = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
+        let request = qq_mv_details_request(&vids);
+        assert_eq!(request.module, MV_DETAIL_MODULE);
+        assert_eq!(request.method, MV_DETAIL_METHOD);
+        assert_eq!(request.param["vidlist"], json!(vids));
+        let required = request.param["required"]
+            .as_array()
+            .expect("required MV detail fields");
+        assert_eq!(required.len(), 21);
+        assert_eq!(
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            required.len(),
+            "the duplicated upstream uploader_hasfollow selector is intentionally corrected"
+        );
+        for field in [
+            "vid",
+            "sid",
+            "singers",
+            "video_switch",
+            "uploader_encuin",
+            "uploader_follower_num",
+            "related_songs",
+        ] {
+            assert!(required.contains(&json!(field)), "missing field {field}");
+        }
+    }
+
+    #[test]
+    fn mv_detail_mapping_preserves_order_duplicates_typed_fields_and_response_metadata() {
+        let requested = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
+        let details = map_qq_mv_detail_response(
+            &requested,
+            response(json!({
+                "013xscuH0xlbie": sample_mv_detail("013xscuH0xlbie", "七月的极光")
+            })),
+        )
+        .expect("map QQ MV detail batch");
+        assert_eq!(details.len(), 2);
+        assert_eq!(
+            details[0].video.resource_ref.to_string(),
+            "qq:013xscuH0xlbie"
+        );
+        assert_eq!(details[1].video.resource_ref, details[0].video.resource_ref);
+        assert_eq!(details[0].kind, VideoResourceKind::Mv);
+        assert_eq!(details[0].video.title, "七月的极光");
+        assert_eq!(details[0].video.duration_ms, Some(189_000));
+        assert_eq!(details[0].video.play_count, Some(123_456));
+        assert_eq!(details[0].video.subscribed, Some(true));
+        assert_eq!(details[0].video.published_at.as_deref(), Some("1779206400"));
+        assert_eq!(details[0].video.creators.len(), 1);
+        assert_eq!(details[0].video.creators[0].name, "周杰伦");
+        assert_eq!(
+            details[0].video.creators[0]
+                .resource_ref
+                .as_ref()
+                .expect("singer ref")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(
+            details[0].video.extensions["related_song_ids"],
+            json!([97773, 48283])
+        );
+        assert_eq!(details[0].video.extensions["uploader"]["uin"], "123456");
+        assert_eq!(
+            details[0].extensions["mv_detail"]["futureDetailField"]["kept"],
+            true
+        );
+        assert_eq!(details[0].extensions["response_metadata"]["code"], 0);
+        assert!(details[0].extensions["response_metadata"]["req_0"]["data"].is_null());
+        assert!(details[0].resolutions.is_empty());
+
+        let mut nullable_uploader = sample_mv_detail("013xscuH0xlbie", "七月的极光");
+        for field in [
+            "uploader_headurl",
+            "uploader_nick",
+            "uploader_encuin",
+            "uploader_hasfollow",
+            "uploader_follower_num",
+        ] {
+            nullable_uploader[field] = Value::Null;
+        }
+        nullable_uploader["uploader_uin"] = json!("  ");
+        let nullable = map_qq_mv_detail_response(
+            &["013xscuH0xlbie".to_owned()],
+            response(json!({"013xscuH0xlbie": nullable_uploader})),
+        )
+        .expect("nullable QQ uploader fields");
+        assert!(nullable[0].video.extensions["uploader"]["uin"].is_null());
+    }
+
+    #[test]
+    fn mv_detail_mapping_rejects_missing_extra_mismatched_and_malformed_entries() {
+        let requested = vec!["013xscuH0xlbie".to_owned()];
+        for data in [
+            json!({}),
+            json!({
+                "013xscuH0xlbie": sample_mv_detail("013xscuH0xlbie", "七月的极光"),
+                "002abcXYZ": sample_mv_detail("002abcXYZ", "额外 MV")
+            }),
+            json!({
+                "013xscuH0xlbie": sample_mv_detail("002abcXYZ", "错误身份")
+            }),
+            json!({
+                "unsafe/vid": sample_mv_detail("unsafe/vid", "错误身份")
+            }),
+            json!({
+                "013xscuH0xlbie": {
+                    "vid": "013xscuH0xlbie",
+                    "sid": 101,
+                    "singers": [],
+                    "duration": 189
+                }
+            }),
+            json!({
+                "013xscuH0xlbie": {
+                    "vid": "013xscuH0xlbie",
+                    "sid": 101,
+                    "name": "七月的极光",
+                    "singers": [{}],
+                    "duration": 189
+                }
+            }),
+            json!({
+                "013xscuH0xlbie": {
+                    "vid": "013xscuH0xlbie",
+                    "sid": 101,
+                    "name": "七月的极光",
+                    "singers": [],
+                    "duration": "18446744073709551615"
+                }
+            }),
+        ] {
+            let error = map_qq_mv_detail_response(&requested, response(data))
+                .expect_err("malformed QQ MV detail response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
     fn mv_url_request_and_mapping_preserve_batches_and_choose_the_best_mp4() {
         let vids = vec!["013xscuH0xlbie".to_owned(), "013xscuH0xlbie".to_owned()];
         let (api_request, guid) = qq_mv_urls_request(&vids);
@@ -12323,6 +12862,45 @@ mod tests {
         assert_eq!(mismatch.code, ErrorCode::InvalidRequest);
         assert_eq!(mismatch.details["requested_user_id"], "654321");
         assert_eq!(mismatch.details["account_user_id"], "123456");
+    }
+
+    #[tokio::test]
+    async fn mv_details_validate_batches_kinds_and_accounts_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::VideoDetail));
+        let request = VideoDetailRequest::new(VideoResourceKind::Mv);
+        let empty = provider
+            .videos(&[], &request)
+            .await
+            .expect_err("empty MV detail batch");
+        assert_eq!(empty.code, ErrorCode::InvalidRequest);
+
+        let invalid = provider
+            .video("unsafe/vid", &request)
+            .await
+            .expect_err("invalid MV VID");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+
+        let unsupported = provider
+            .video(
+                "013xscuH0xlbie",
+                &VideoDetailRequest::new(VideoResourceKind::Video),
+            )
+            .await
+            .expect_err("QQ cloud video detail kind");
+        assert_eq!(unsupported.code, ErrorCode::InvalidRequest);
+
+        let account = provider
+            .video(
+                "013xscuH0xlbie",
+                &VideoDetailRequest {
+                    kind: VideoResourceKind::Mv,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing account alias");
+        assert_eq!(account.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -14342,6 +14920,35 @@ mod tests {
         assert_eq!(by_mid.track_ref, track.resource_ref);
         assert_eq!(by_mid.extensions["numeric_id"], 7_137_686);
         assert_eq!(by_mid.entries, numeric.entries);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_mv_details_preserve_duplicate_vids_and_complete_typed_metadata() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let vid = "013xscuH0xlbie".to_owned();
+        let details = provider
+            .videos(
+                &[vid.clone(), vid.clone()],
+                &VideoDetailRequest::new(VideoResourceKind::Mv),
+            )
+            .await
+            .expect("live QQ MV detail batch");
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].video.resource_ref, details[1].video.resource_ref);
+        assert_eq!(
+            details[0].video.resource_ref.to_string(),
+            format!("qq:{vid}")
+        );
+        assert!(!details[0].video.title.is_empty());
+        assert_eq!(details[0].kind, VideoResourceKind::Mv);
+        assert!(details[0].resolutions.is_empty());
+        assert!(details[0].extensions.contains_key("mv_detail"));
+        assert!(details[0].extensions.contains_key("response_metadata"));
     }
 
     #[tokio::test]

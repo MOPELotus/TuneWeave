@@ -302,7 +302,7 @@
 
 独立 MV 目录通过 `GET /v1/videos` 读取。`catalog=all` 支持地区、类型、排序和偏移分页；`latest` 只支持地区且不伪造参考模块不存在的 offset；`exclusive` 表示平台自制内容，只支持真实存在的偏移分页。统一英文筛选同时兼容网易云中文值，实际目录、筛选、续页能力和完整响应保存在分页扩展。
 
-视频详情端点返回 `VideoDetail`，以 `kind=mv|video` 明确资源类型，`video` 承载统一元数据，`resolutions` 列出平台实际公布的清晰度及可用的宽高、大小和格式。网易云数值 ID 默认推断为 MV，不透明字符串 ID 默认推断为站内视频；调用方也可通过 `kind`（兼容 `type`）显式指定，避免依赖推断。
+视频详情端点返回 `VideoDetail`，以 `kind=mv|video` 明确资源类型，`video` 承载统一元数据，`resolutions` 列出平台实际公布的清晰度及可用的宽高、大小和格式。网易云数值 ID 默认推断为 MV，不透明字符串 ID 默认推断为站内视频；QQ 字母数字 VID 默认按 MV 处理。调用方也可通过 `kind`（兼容 `type`）显式指定，避免依赖推断。批量详情使用 `GET/POST /v1/videos/details`，限制 1–100 个同平台、同类型资源，保留输入顺序与重复项；provider 有原生批量协议时只发一次上游请求，否则使用统一逐项默认实现。
 
 `VideoStats` 独立返回点赞态以及点赞、评论和分享计数。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云与 QQ 接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。批量视频流使用 `GET/POST /v1/videos/streams`，保留输入顺序和重复项，但一个请求只接受同一平台，以便支持平台原生批量协议。
 
@@ -1200,6 +1200,8 @@ QQ 会员信息只支持当前登录账户：`GET /v1/account/membership?platfor
 | GET | `/v1/tracks/{ref}/download/redirect` | 同上 | 有专用下载 URL 时返回 302；否则尝试同音质播放 URL 后再返回 302 |
 | POST | `/v1/resolve` | 完整解析请求，见下文 | `Stream` |
 | GET | `/v1/videos/{ref}` | `kind/type=mv|video`、`account?` | `VideoDetail`，含统一视频信息和平台公布的清晰度 |
+| GET | `/v1/videos/details` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`account?` | `VideoDetail[]`；1–100 项，同平台、同类型、保序且保留重复项 |
+| POST | `/v1/videos/details` | JSON `{refs?|ids/vids?, platform?, kind/type?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoDetail[]`；使用 provider 原生批量能力或统一逐项默认实现 |
 | GET | `/v1/videos/{ref}/stats` | `kind/type=mv|video`、`account?` | `VideoStats` |
 | GET | `/v1/videos/{ref}/stream` | `kind/type=mv|video`、`resolution/res?`、`account?` | `VideoStream`；默认请求 1080，允许无可用 URL 的业务成功态 |
 | GET | `/v1/videos/streams` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`resolution/res?`、`account?` | `VideoStream[]`；1–100 项，同平台、保序且保留重复项 |
@@ -1317,6 +1319,8 @@ QQ 歌手歌曲固定调用 Android `musichall.song_list_server/GetSingerSongLis
 QQ 歌手专辑固定调用 Android `music.musichallAlbum.AlbumListServer/GetAlbumList`，使用 `singerMid/order=1/number/begin`。稳定专辑 MID 优先于数字 ID，译名、歌手、封面、发行日期、曲数、类型、标签和完整原项均映射或保留；`albumList=null` 作为合法空页处理，歌手身份、总数或条目畸形则明确失败。当前上游同样会把较小的 `number` 固定过取为 30 条，统一接口按请求的逻辑窗口裁切并在分页扩展公开 `upstream_returned/limit_applied`；2026-07-26 的 release HTTP 验证确认任意 offset 连续且不会跳过专辑。
 
 QQ 歌手 MV 固定调用 Android `MvService.MvInfoProServer/GetSingerMvList`，使用 `singermid/order=1/count/start`。默认 `type=mv`，显式 `type=all` 在 QQ 当前只提供歌手 MV 的能力边界内使用同一目录；排序只接受 hot，不支持游标。VID 优先于数字 MV ID，标题、封面、时长、播放量、发布时间戳和完整原项均映射或保留；该响应不包含歌手名，TuneWeave 不伪造空名 creator，而是在条目及分页扩展保留 `singer_mid`。分页保留过取裁切防线及 `upstream_returned/limit_applied`，2026-07-26 的 release HTTP 验证中上游 `count=2` 精确返回 2 条，总数 10426，offset 0/1/2 连续。
+
+QQ MV 详情固定调用 Android `video.VideoDataServer/get_video_info_batch`。请求完整列出 VID、SID、封面、时长、歌手、开关、消息、名称、描述、播放量、发布时间、收藏态、GMID、上传者资料及关联歌曲等 21 个唯一字段；参考实现中重复的 `uploader_hasfollow` 选择项被去重。单项和 1–100 项批量共用原生批量请求，返回映射按输入重建，因此重复 VID 和调用顺序不会被上游字典覆盖；缺失、额外、错位或畸形 VID 明确失败。上传者字段允许平台真实存在的空字符串/null，并保持其他非标量为错误；每项保留完整自身详情及去除整批 data 后的顶层响应元数据，避免批量响应在每项重复造成二次方膨胀。详情接口不伪造播放清晰度，实际档位继续由流端点返回。2026-07-26 已真实验证普通短视频 MV 与歌手 MV，以及异构三项、首尾重复的统一批次。
 
 `principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 

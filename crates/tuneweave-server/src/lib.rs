@@ -324,6 +324,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos", get(music_videos))
         .route("/videos/taxonomy", get(video_taxonomy))
         .route(
+            "/videos/details",
+            get(video_details_get).post(video_details_post),
+        )
+        .route(
             "/videos/streams",
             get(video_streams_get).post(video_streams_post),
         )
@@ -4298,6 +4302,25 @@ fn parse_stream_batch_references(
     platform: Option<&str>,
     default_platform: Platform,
 ) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    parse_batch_references(refs, ids, platform, default_platform, "stream")
+}
+
+fn parse_video_detail_batch_references(
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    default_platform: Platform,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
+    parse_batch_references(refs, ids, platform, default_platform, "video detail")
+}
+
+fn parse_batch_references(
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    default_platform: Platform,
+    resource_name: &str,
+) -> Result<Vec<ResourceRef>, TuneWeaveError> {
     let (kind, values) = match (refs, ids) {
         (Some(_), Some(_)) => {
             return Err(TuneWeaveError::invalid_request(
@@ -4328,7 +4351,7 @@ fn parse_stream_batch_references(
             .into_iter()
             .map(|id| {
                 ResourceRef::new(platform, &id).map_err(|error| {
-                    TuneWeaveError::invalid_request(format!("invalid stream id: {error}"))
+                    TuneWeaveError::invalid_request(format!("invalid {resource_name} id: {error}"))
                         .with_details(json!({ "id": id, "platform": platform }))
                 })
             })
@@ -7185,6 +7208,30 @@ struct VideoDetailParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoDetailBatchParams {
+    refs: Option<String>,
+    #[serde(alias = "vids")]
+    ids: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoDetailBatchBody {
+    refs: Option<StreamReferenceInput>,
+    #[serde(alias = "id", alias = "vids")]
+    ids: Option<StreamReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoStreamParams {
     account: Option<String>,
     #[serde(alias = "type")]
@@ -7229,12 +7276,142 @@ async fn video_detail(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
-    let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
     let provider = state.registry.require(reference.platform())?;
     let mut request = VideoDetailRequest::new(kind);
     request.account.clone_from(&account);
     let detail = provider.video(reference.id(), &request).await?;
     let mut response = ApiResponse::new(detail).with_platform(reference.platform());
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn video_details_get(
+    State(state): State<AppState>,
+    params: Result<Query<VideoDetailBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<VideoDetail>>>, ApiError> {
+    let params = query_params(params)?;
+    video_details_response(
+        &state,
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        params.account,
+        params.kind.as_deref(),
+    )
+    .await
+}
+
+async fn video_details_post(
+    State(state): State<AppState>,
+    body: Result<Json<VideoDetailBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<VideoDetail>>>, ApiError> {
+    let body = json_body(body)?;
+    video_details_response(
+        &state,
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(StreamReferenceInput::into_values),
+        body.platform.as_deref(),
+        body.account,
+        body.kind.as_deref(),
+    )
+    .await
+}
+
+async fn video_details_response(
+    state: &AppState,
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    account: Option<String>,
+    kind: Option<&str>,
+) -> Result<Json<ApiResponse<Vec<VideoDetail>>>, ApiError> {
+    let references =
+        parse_video_detail_batch_references(refs, ids, platform, state.default_platform)?;
+    if references.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "video detail batch cannot contain more than 100 references",
+        )
+        .into());
+    }
+    let selected_platform = references[0].platform();
+    if references
+        .iter()
+        .any(|reference| reference.platform() != selected_platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "video detail batch references must use one platform",
+        )
+        .with_details(json!({
+            "platforms": references
+                .iter()
+                .map(ResourceRef::platform)
+                .collect::<BTreeSet<_>>()
+        }))
+        .into());
+    }
+    let kind = match kind {
+        Some(kind) => parse_video_resource_kind(Some(kind), references[0].id())?,
+        None if selected_platform == Platform::Qq => VideoResourceKind::Mv,
+        None => {
+            let inferred = references
+                .iter()
+                .map(|reference| parse_video_resource_kind(None, reference.id()))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let first = inferred[0];
+            if inferred.iter().any(|kind| *kind != first) {
+                return Err(TuneWeaveError::invalid_request(
+                    "video detail batch requires an explicit type when reference kinds differ",
+                )
+                .with_details(json!({ "allowed": ["mv", "video"] }))
+                .into());
+            }
+            first
+        }
+    };
+    let account = optional_trimmed(account);
+    let mut request = VideoDetailRequest::new(kind);
+    request.account.clone_from(&account);
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let provider = state.registry.require(selected_platform)?;
+    let details = provider.videos(&ids, &request).await?;
+    if details.len() != references.len() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "video provider returned an inconsistent detail batch",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({
+            "requested": references.len(),
+            "returned": details.len()
+        }))
+        .into());
+    }
+    if let Some(index) = details
+        .iter()
+        .zip(&references)
+        .position(|(detail, reference)| {
+            detail.kind != kind || detail.video.resource_ref != *reference
+        })
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "video provider returned detail for the wrong reference or kind",
+        )
+        .with_platform(selected_platform)
+        .with_details(json!({ "index": index }))
+        .into());
+    }
+    let mut response = ApiResponse::new(details).with_platform(selected_platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -15348,6 +15525,7 @@ mod tests {
                 Capability::PlaylistSubscriptionWrite,
                 Capability::SearchTracks,
                 Capability::AudioStream,
+                Capability::VideoDetail,
                 Capability::VideoStream,
                 Capability::TrackSubscriptionWrite,
                 Capability::Lyrics,
@@ -15821,6 +15999,31 @@ mod tests {
                 ));
             }
             Ok(sample_qq_video_stream(id, request))
+        }
+
+        async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
+            if request.kind != VideoResourceKind::Mv {
+                return Err(TuneWeaveError::invalid_request(
+                    "test QQ provider accepts MV resources only",
+                ));
+            }
+            Ok(sample_qq_video_detail(id, request))
+        }
+
+        async fn videos(
+            &self,
+            ids: &[String],
+            request: &VideoDetailRequest,
+        ) -> Result<Vec<VideoDetail>> {
+            if request.kind != VideoResourceKind::Mv {
+                return Err(TuneWeaveError::invalid_request(
+                    "test QQ provider accepts MV resources only",
+                ));
+            }
+            Ok(ids
+                .iter()
+                .map(|id| sample_qq_video_detail(id, request))
+                .collect())
         }
 
         async fn video_streams(
@@ -16324,6 +16527,35 @@ mod tests {
                 ("account".to_owned(), json!(request.account)),
                 ("batch_provider".to_owned(), json!(true)),
             ]),
+        }
+    }
+
+    fn sample_qq_video_detail(id: &str, request: &VideoDetailRequest) -> VideoDetail {
+        VideoDetail {
+            kind: request.kind,
+            video: Video {
+                resource_ref: ResourceRef::new(Platform::Qq, id).expect("valid QQ MV reference"),
+                platform: Platform::Qq,
+                id: id.to_owned(),
+                title: format!("QQ MV {id}"),
+                creators: vec![CreatorSummary {
+                    resource_ref: Some(
+                        ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                            .expect("valid QQ singer reference"),
+                    ),
+                    name: "周杰伦".to_owned(),
+                    avatar_url: None,
+                }],
+                description: "QQ MV 详情".to_owned(),
+                cover_url: Some("https://example.test/qq-mv.jpg".to_owned()),
+                duration_ms: Some(189_000),
+                published_at: Some("1779206400".to_owned()),
+                play_count: Some(123_456),
+                subscribed: Some(false),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            },
+            resolutions: Vec::new(),
+            extensions: Extensions::from([("batch_provider".to_owned(), json!(true))]),
         }
     }
 
@@ -19693,6 +19925,106 @@ mod tests {
                 "{path}"
             );
             assert_eq!(detail["meta"]["account"], "collector", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_video_details_preserve_batch_order_duplicates_and_default_mv_kind() {
+        let app = test_app_with_import_providers();
+        let (status, single) = json_response_from(
+            app.clone(),
+            "/v1/videos/qq:013xscuH0xlbie?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["kind"], "mv");
+        assert_eq!(single["data"]["video"]["ref"], "qq:013xscuH0xlbie");
+        assert_eq!(
+            single["data"]["video"]["extensions"]["account"],
+            "green-vip"
+        );
+
+        let (status, details) = json_response_from(
+            app.clone(),
+            "/v1/videos/details?ids=013xscuH0xlbie,002abcXYZ,013xscuH0xlbie&platform=qq&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let details_data = details["data"].as_array().expect("QQ MV detail batch");
+        assert_eq!(details_data.len(), 3);
+        assert_eq!(details_data[0]["video"]["ref"], "qq:013xscuH0xlbie");
+        assert_eq!(details_data[1]["video"]["ref"], "qq:002abcXYZ");
+        assert_eq!(details_data[2]["video"]["ref"], "qq:013xscuH0xlbie");
+        assert_eq!(details_data[0]["kind"], "mv");
+        assert_eq!(details_data[0]["extensions"]["batch_provider"], true);
+        assert_eq!(details["meta"]["platform"], "qq");
+        assert_eq!(details["meta"]["account"], "green-vip");
+
+        let (status, details) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/videos/details",
+            Some(json!({
+                "refs": ["qq:013xscuH0xlbie", "qq:002abcXYZ"],
+                "type": "mv"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(details["data"][0]["video"]["ref"], "qq:013xscuH0xlbie");
+        assert_eq!(details["data"][1]["video"]["ref"], "qq:002abcXYZ");
+    }
+
+    #[tokio::test]
+    async fn video_detail_batch_default_provider_fanout_preserves_duplicates() {
+        let (status, details) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/details?refs=netease:22695250,netease:22695250&type=mv&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let data = details["data"].as_array().expect("video detail batch");
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["video"]["ref"], "netease:22695250");
+        assert_eq!(data[1]["video"]["ref"], "netease:22695250");
+        assert_eq!(data[0]["video"]["extensions"]["account"], "collector");
+        assert_eq!(details["meta"]["account"], "collector");
+    }
+
+    #[tokio::test]
+    async fn video_detail_batches_reject_ambiguous_mixed_and_invalid_requests() {
+        let app = test_app_with_import_providers();
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/v1/videos/details",
+                Some(json!({"refs": ["qq:013xscuH0xlbie"], "ids": ["013xscuH0xlbie"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/details",
+                Some(json!({"refs": ["qq:013xscuH0xlbie", "netease:22695250"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/details",
+                Some(json!({"vids": ["013xscuH0xlbie"], "platform": "qq", "kind": "video"})),
+            ),
+            (
+                Method::POST,
+                "/v1/videos/details",
+                Some(json!({"ids": ["013xscuH0xlbie"], "platform": "qq", "unknown": true})),
+            ),
+            (Method::GET, "/v1/videos/details?platform=qq", None),
+            (
+                Method::GET,
+                "/v1/videos/details?refs=netease:22695250,netease:D1C2B3A40987654321ABCDEF12345678",
+                None,
+            ),
+        ] {
+            let (status, response) = json_request_from(app.clone(), method, path, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
     }
 

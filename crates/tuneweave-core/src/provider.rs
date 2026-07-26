@@ -727,6 +727,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn videos(
+        &self,
+        ids: &[String],
+        request: &VideoDetailRequest,
+    ) -> Result<Vec<VideoDetail>> {
+        let mut details = Vec::with_capacity(ids.len());
+        for id in ids {
+            details.push(self.video(id, request).await?);
+        }
+        Ok(details)
+    }
+
     async fn video_stats(&self, _id: &str, _request: &VideoDetailRequest) -> Result<VideoStats> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
