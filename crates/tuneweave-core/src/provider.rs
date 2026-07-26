@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 
 use crate::{
-    AccountProfile, AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats,
-    AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistChart,
+    AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability, Album, AlbumListRequest,
+    AlbumStats, AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistChart,
     ArtistChartRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistTrackListRequest,
     ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate, ArtistWorksRequest,
     AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioRecognition, AudioRecognitionRequest,
@@ -1203,6 +1203,17 @@ pub trait MusicProvider: Send + Sync {
         _id: &str,
         _account: Option<&str>,
     ) -> Result<AiLyricDictionaryAvailability> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Lyrics,
+        ))
+    }
+
+    async fn ai_lyric_dictionary(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<AiLyricDictionary> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Lyrics,

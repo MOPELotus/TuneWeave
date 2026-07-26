@@ -1187,6 +1187,7 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 | GET | `/v1/tracks/{ref}/lyrics/singing-annotations/availability` | `account?`；引用决定平台 | `SingingAnnotationsAvailability`；独立返回助唱标注是否存在，不从普通或逐字歌词内容反推 |
 | GET | `/v1/tracks/{ref}/lyrics/translations/styles` | `account?`；引用决定平台 | `MultiStyleLyricTranslations`；多种翻译风格逐项返回并保留平台顺序、风格 ID、名称、歌词和时间戳 |
 | GET | `/v1/tracks/{ref}/lyrics/ai-dictionary/availability` | `account?`；引用决定平台 | `AiLyricDictionaryAvailability`；独立返回 AI 歌词词典是否存在，不从词典详情数组推断 |
+| GET | `/v1/tracks/{ref}/lyrics/ai-dictionary` | `account?`；引用决定平台 | `AiLyricDictionary`；保序返回短语、语境解释、原歌词行、翻译歌词行和平台歌词时间戳 |
 | GET | `/v1/episodes/{ref}/lyrics` | `account?` | `PodcastEpisodeLyrics`；真实无歌词分支也返回可检查的成功数据 |
 | GET | `/v1/episodes/{ref}/stream` | 与歌曲流相同的音质、后端、播放平台、回退、解灰和账户参数 | `PodcastEpisodeStream`；节目、原音频和最终解析资源身份分离 |
 | GET | `/v1/episodes/{ref}/stream/redirect` | 同上 | 成功解析节目音频后返回 302，不向客户端暴露账户凭据 |
@@ -1209,6 +1210,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 多风格翻译不压缩进普通歌词的单个 `translated` 字符串。QQ 端点同样支持数字 ID 和 MID，固定调用 `BatchGetMultiStyleTransLyric`；`lyrics` 保留平台顺序与重复项，每个条目的 `style/style_name/lyric/timestamp` 独立建模和解密。缺失列表按平台语义返回空数组，但容器、条目字段或任一非空密文畸形时整次请求失败，不把密文或不完整条目伪装成可显示歌词。
 
 AI 歌词词典存在性与词典详情是两个独立能力。QQ 数字 ID 或由 MID 解析的数值身份固定调用 `IsAIDictExists`，`available` 只来自平台 `exists` 标志；字段缺失按平台默认 `false`，畸形布尔值返回上游错误，不能用后续详情是否为空反推或覆盖。
+
+AI 歌词词典详情固定调用 QQ `GetAIDictInfo`。统一 `entries` 保留 `dictList` 的顺序与重复项，并把 `phrase/explanation/lyric_text/translated_lyric_text/lyric_timestamp` 分开建模；平台时间戳保持不透明字符串，不擅自改成毫秒。缺失列表和条目内缺失字符串按平台参考默认返回空值，已出现但类型错误的容器或字段则拒绝，未知字段及完整原始响应保存在扩展中。
 
 CDN 调度是播放地址解析的底层目录能力，不代替歌曲流端点。`roots` 保留平台给出的顺序和重复项，调用方可把相对 `test_file` 拼接到候选根地址做连通性探测；`nodes` 额外表达 QUIC、IP 栈和主机信息，`expires_in_seconds/refresh_after_seconds/cache_for_seconds` 决定目录生命周期。QQ 每次请求使用新的 GUID，固定启用新域名与 IPv6；TuneWeave 只接受无嵌入凭据的 HTTP(S) 根地址，并拒绝绝对探活 URL、空目录、非正计时及业务失败，完整平台响应仍保存在扩展供诊断。
 

@@ -3455,6 +3455,23 @@ pub struct AiLyricDictionaryAvailability {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiLyricDictionaryEntry {
+    pub phrase: String,
+    pub explanation: String,
+    pub lyric_text: String,
+    pub translated_lyric_text: String,
+    pub lyric_timestamp: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiLyricDictionary {
+    pub track_ref: ResourceRef,
+    pub entries: Vec<AiLyricDictionaryEntry>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamVariant {
@@ -3784,6 +3801,29 @@ mod tests {
         assert_eq!(value["track_ref"], "qq:7137686");
         assert_eq!(value["available"], true);
         assert_eq!(value["extensions"]["numeric_id"], 7_137_686);
+    }
+
+    #[test]
+    fn ai_lyric_dictionary_keeps_explanation_translation_and_timestamp_typed() {
+        let dictionary = AiLyricDictionary {
+            track_ref: ResourceRef::new(Platform::Qq, "7137686").expect("valid QQ track reference"),
+            entries: vec![AiLyricDictionaryEntry {
+                phrase: "示例短语".to_owned(),
+                explanation: "结合语境的详细解释".to_owned(),
+                lyric_text: "示例歌词原文".to_owned(),
+                translated_lyric_text: "示例翻译".to_owned(),
+                lyric_timestamp: "0000123456".to_owned(),
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+
+        let value = serde_json::to_value(dictionary).expect("serialize AI lyric dictionary");
+        assert_eq!(value["track_ref"], "qq:7137686");
+        assert_eq!(value["entries"][0]["phrase"], "示例短语");
+        assert_eq!(value["entries"][0]["explanation"], "结合语境的详细解释");
+        assert_eq!(value["entries"][0]["translated_lyric_text"], "示例翻译");
+        assert_eq!(value["entries"][0]["lyric_timestamp"], "0000123456");
     }
 
     #[test]

@@ -9,21 +9,21 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AccountCredentialStore, AccountProfile, AiLyricDictionaryAvailability, Album, AlbumSummary,
-    Artist, ArtistSummary, AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch,
-    AudioFileRequest, AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics,
-    LyricsRequest, MediaDownload, MediaStream, MultiStyleLyricTranslation,
-    MultiStyleLyricTranslations, MusicProvider, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
-    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest,
-    SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
+    AccountCredentialStore, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
+    AiLyricDictionaryEntry, Album, AlbumSummary, Artist, ArtistSummary, AudioCdnDispatch,
+    AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
+    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, CreatorSummary, ErrorCode,
+    Extensions, ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream,
+    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicProvider, Page, PageMeta,
+    Platform, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction, PlaylistMutationResult,
+    PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll,
+    ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, SingingAnnotationsAvailability, StoredAccountCredential,
+    StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
 };
 
@@ -896,6 +896,30 @@ struct QqAiDictExistsResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqAiDictItem {
+    #[serde(default)]
+    phrase: String,
+    #[serde(default)]
+    explain: String,
+    #[serde(default)]
+    lyric_text: String,
+    #[serde(default)]
+    trans_lyric_text: String,
+    #[serde(default)]
+    lyric_timestamp: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqAiDictResponse {
+    #[serde(default, rename = "dictList")]
+    entries: Vec<QqAiDictItem>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone)]
 pub struct QqProvider {
     client: QqClient,
@@ -1265,6 +1289,22 @@ impl MusicProvider for QqProvider {
                 qq_data_error("QQ AI lyric dictionary availability request returned no response")
             })?;
         map_ai_lyric_dictionary_availability(identifier, song_id, response)
+    }
+
+    async fn ai_lyric_dictionary(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<AiLyricDictionary> {
+        let (identifier, song_id) = self.resolve_lyric_song_id(id, account).await?;
+        let response = self
+            .client
+            .request_android(&[ai_lyric_dictionary_request(song_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ AI lyric dictionary request returned no response"))?;
+        map_ai_lyric_dictionary(identifier, song_id, response)
     }
 
     async fn audio_cdn_dispatch(&self, account: Option<&str>) -> Result<AudioCdnDispatch> {
@@ -2947,6 +2987,10 @@ fn cdn_dispatch_request() -> (QqApiRequest, String) {
     )
 }
 
+fn ai_lyric_dictionary_request(song_id: u64) -> QqApiRequest {
+    QqApiRequest::new(LYRIC_MODULE, "GetAIDictInfo", json!({"songID": song_id}))
+}
+
 fn parse_qq_audio_file_spec(value: Option<&str>) -> Result<&'static QqAudioFileSpec> {
     let Some(value) = value else {
         return Ok(&QQ_AUDIO_FILE_SPECS[13]);
@@ -3242,6 +3286,44 @@ fn map_ai_lyric_dictionary_availability(
         extensions: Extensions::from([
             ("numeric_id".to_owned(), json!(song_id)),
             ("data".to_owned(), json!(parsed)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_ai_lyric_dictionary(
+    requested: QqTrackIdentifier,
+    song_id: u64,
+    response: QqApiResponse,
+) -> Result<AiLyricDictionary> {
+    let parsed = serde_json::from_value::<QqAiDictResponse>(response.data.clone())
+        .map_err(|_| qq_data_error("QQ AI lyric dictionary response is malformed"))?;
+    let preserved_data = json!(&parsed);
+    let entries = parsed
+        .entries
+        .into_iter()
+        .map(|item| {
+            let preserved_item = json!(&item);
+            AiLyricDictionaryEntry {
+                phrase: item.phrase,
+                explanation: item.explain,
+                lyric_text: item.lyric_text,
+                translated_lyric_text: item.trans_lyric_text,
+                lyric_timestamp: item.lyric_timestamp,
+                extensions: Extensions::from([("response".to_owned(), preserved_item)]),
+            }
+        })
+        .collect();
+    let track_id = match requested {
+        QqTrackIdentifier::Numeric(_) => song_id.to_string(),
+        QqTrackIdentifier::Mid(mid) => mid,
+    };
+    Ok(AiLyricDictionary {
+        track_ref: qq_ref(&track_id, "AI lyric dictionary")?,
+        entries,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("data".to_owned(), preserved_data),
             ("response".to_owned(), response.raw),
         ]),
     })
@@ -7339,6 +7421,18 @@ mod tests {
             .await
             .expect_err("AI dictionary zero numeric track ID");
         assert_eq!(identity_error.code, ErrorCode::InvalidRequest);
+
+        let account_error = provider
+            .ai_lyric_dictionary("7137686", Some("missing-account"))
+            .await
+            .expect_err("AI dictionary detail missing named account");
+        assert_eq!(account_error.code, ErrorCode::AuthenticationRequired);
+
+        let identity_error = provider
+            .ai_lyric_dictionary("0", None)
+            .await
+            .expect_err("AI dictionary detail zero numeric track ID");
+        assert_eq!(identity_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -7464,6 +7558,95 @@ mod tests {
                 response(json!({"exists": malformed})),
             )
             .expect_err("malformed AI dictionary availability flag");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn ai_lyric_dictionary_request_and_mapping_preserve_complete_ordered_entries() {
+        let request = ai_lyric_dictionary_request(7_137_686);
+        assert_eq!(request.module, LYRIC_MODULE);
+        assert_eq!(request.method, "GetAIDictInfo");
+        assert_eq!(request.param, json!({"songID": 7_137_686_u64}));
+
+        let mapped = map_ai_lyric_dictionary(
+            QqTrackIdentifier::Mid("002uFQ2G2zxj1n".to_owned()),
+            7_137_686,
+            response(json!({
+                "dictList": [
+                    {
+                        "phrase": "第一个短语",
+                        "explain": "第一条详细解释",
+                        "lyric_text": "第一行原文",
+                        "trans_lyric_text": "第一行翻译",
+                        "lyric_timestamp": "0000001000",
+                        "futureItemField": "first"
+                    },
+                    {
+                        "phrase": "第二个短语",
+                        "explain": "第二条详细解释",
+                        "lyric_text": "第二行原文",
+                        "trans_lyric_text": "第二行翻译",
+                        "lyric_timestamp": "0000002000"
+                    }
+                ],
+                "futureTopField": true
+            })),
+        )
+        .expect("map AI lyric dictionary");
+        assert_eq!(mapped.track_ref.to_string(), "qq:002uFQ2G2zxj1n");
+        assert_eq!(mapped.entries.len(), 2);
+        assert_eq!(mapped.entries[0].phrase, "第一个短语");
+        assert_eq!(mapped.entries[0].explanation, "第一条详细解释");
+        assert_eq!(mapped.entries[0].lyric_text, "第一行原文");
+        assert_eq!(mapped.entries[0].translated_lyric_text, "第一行翻译");
+        assert_eq!(mapped.entries[0].lyric_timestamp, "0000001000");
+        assert_eq!(
+            mapped.entries[0].extensions["response"]["futureItemField"],
+            "first"
+        );
+        assert_eq!(mapped.entries[1].phrase, "第二个短语");
+        assert_eq!(mapped.extensions["numeric_id"], 7_137_686);
+        assert_eq!(mapped.extensions["data"]["futureTopField"], true);
+        assert_eq!(mapped.extensions["response"]["code"], 0);
+
+        let empty = map_ai_lyric_dictionary(
+            QqTrackIdentifier::Numeric(7_137_686),
+            7_137_686,
+            response(json!({})),
+        )
+        .expect("missing dictionary list follows upstream empty default");
+        assert_eq!(empty.track_ref.to_string(), "qq:7137686");
+        assert!(empty.entries.is_empty());
+
+        let defaults = map_ai_lyric_dictionary(
+            QqTrackIdentifier::Numeric(7_137_686),
+            7_137_686,
+            response(json!({"dictList": [{}]})),
+        )
+        .expect("missing item strings follow upstream empty defaults");
+        assert_eq!(defaults.entries.len(), 1);
+        assert!(defaults.entries[0].phrase.is_empty());
+        assert!(defaults.entries[0].explanation.is_empty());
+        assert!(defaults.entries[0].lyric_timestamp.is_empty());
+    }
+
+    #[test]
+    fn ai_lyric_dictionary_mapping_rejects_malformed_container_and_fields() {
+        for malformed in [
+            json!({"dictList": {}}),
+            json!({"dictList": [{"phrase": 1}]}),
+            json!({"dictList": [{"explain": []}]}),
+            json!({"dictList": [{"lyric_text": {}}]}),
+            json!({"dictList": [{"trans_lyric_text": false}]}),
+            json!({"dictList": [{"lyric_timestamp": 1000}]}),
+        ] {
+            let error = map_ai_lyric_dictionary(
+                QqTrackIdentifier::Numeric(7_137_686),
+                7_137_686,
+                response(malformed),
+            )
+            .expect_err("malformed AI lyric dictionary response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
     }
@@ -10502,6 +10685,41 @@ mod tests {
         assert_eq!(by_mid.track_ref, track.resource_ref);
         assert_eq!(by_mid.extensions["numeric_id"], 7_137_686);
         assert_eq!(by_mid.available, numeric.available);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_ai_lyric_dictionary_accepts_numeric_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let numeric = provider
+            .ai_lyric_dictionary("7137686", None)
+            .await
+            .expect("numeric AI lyric dictionary");
+        assert_eq!(numeric.track_ref.to_string(), "qq:7137686");
+        assert!(!numeric.entries.is_empty());
+        assert!(numeric.entries.iter().all(|entry| {
+            !entry.phrase.is_empty()
+                && !entry.explanation.is_empty()
+                && !entry.lyric_text.is_empty()
+                && !entry.lyric_timestamp.is_empty()
+        }));
+        assert_eq!(numeric.extensions["response"]["code"], 0);
+
+        let track = provider
+            .track("7137686", None)
+            .await
+            .expect("resolve AI dictionary track MID");
+        let by_mid = provider
+            .ai_lyric_dictionary(&track.id, None)
+            .await
+            .expect("MID AI lyric dictionary");
+        assert_eq!(by_mid.track_ref, track.resource_ref);
+        assert_eq!(by_mid.extensions["numeric_id"], 7_137_686);
+        assert_eq!(by_mid.entries, numeric.entries);
     }
 
     #[tokio::test]
