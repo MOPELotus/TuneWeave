@@ -45,18 +45,18 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
     DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
     DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ErrorCode, Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType,
-    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
-    ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
-    MemoryUniPlaylistStore, MultiStyleLyricTranslations, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
-    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult, ImageUploadRequest,
+    ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog, ListeningRightsAdRequest,
+    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsTimestamp,
+    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
+    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MultiStyleLyricTranslations,
+    MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType,
+    PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
+    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
     PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
@@ -237,6 +237,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
         .route("/search", get(search))
+        .route("/search/general", get(general_search))
         .route("/search/default", get(search_default))
         .route("/search/trending", get(search_trending))
         .route("/search/suggestions", get(search_suggestions))
@@ -760,6 +761,23 @@ struct SearchParams {
     selectors: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneralSearchParams {
+    #[serde(alias = "keywords", alias = "keyword")]
+    q: Option<String>,
+    platform: Option<String>,
+    page: Option<String>,
+    #[serde(alias = "num")]
+    limit: Option<String>,
+    #[serde(alias = "searchid")]
+    search_id: Option<String>,
+    #[serde(alias = "cursor")]
+    page_start: Option<String>,
+    highlight: Option<String>,
+    account: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchSelectorInput {
@@ -1019,6 +1037,63 @@ async fn execute_local_track_match(
             .with_platform(platform)
             .with_account(account),
     ))
+}
+
+async fn general_search(
+    State(state): State<AppState>,
+    params: Result<Query<GeneralSearchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<GeneralSearchResult>>, ApiError> {
+    let params = query_params(params)?;
+    let query = params
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
+    let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
+    if page == 0 {
+        return Err(TuneWeaveError::invalid_request("page must start at 1").into());
+    }
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 15)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let page_start = params
+        .page_start
+        .as_deref()
+        .map(str::trim)
+        .map(|value| {
+            if value.is_empty() {
+                return Err(TuneWeaveError::invalid_request(
+                    "page_start must not be empty when provided",
+                ));
+            }
+            serde_json::from_str::<Extensions>(value).map_err(|error| {
+                TuneWeaveError::invalid_request(format!(
+                    "page_start must be a JSON object: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    let platform = search_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .general_search(&GeneralSearchRequest {
+            query: query.to_owned(),
+            page,
+            limit,
+            search_id: optional_trimmed(params.search_id),
+            page_start,
+            highlight: parse_bool_parameter("highlight", params.highlight.as_deref(), true)?,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(result).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn search(
@@ -13375,6 +13450,58 @@ mod tests {
             })
         }
 
+        async fn general_search(
+            &self,
+            request: &GeneralSearchRequest,
+        ) -> Result<GeneralSearchResult> {
+            Ok(GeneralSearchResult {
+                query: request.query.clone(),
+                search_id: request
+                    .search_id
+                    .clone()
+                    .unwrap_or_else(|| "generated-search-id".to_owned()),
+                page: request.page,
+                per_page: request.limit,
+                next_page: Some(request.page.saturating_add(1)),
+                next_page_start: Extensions::from([
+                    ("song".to_owned(), json!(request.page)),
+                    ("cursor".to_owned(), json!("next")),
+                ]),
+                sections: vec![tuneweave_core::GeneralSearchSection {
+                    section: "song".to_owned(),
+                    kind: SearchKind::Track,
+                    estimated_total: 10,
+                    total: 8,
+                    items: vec![SearchItem::Track(sample_track("123"))],
+                    more_info: Extensions::from([("next".to_owned(), json!("song-cursor"))]),
+                    extensions: Extensions::from([("provider".to_owned(), json!("mock"))]),
+                }],
+                direct: vec![tuneweave_core::SearchOpaqueItem {
+                    platform: Platform::Netease,
+                    kind: "artist".to_owned(),
+                    id: Some("6452".to_owned()),
+                    title: Some("direct artist".to_owned()),
+                    extensions: Extensions::new(),
+                }],
+                related: tuneweave_core::GeneralSearchRelated {
+                    estimated_total: 1,
+                    total: 1,
+                    terms: vec![tuneweave_core::GeneralSearchRelatedTerm {
+                        display_text: "相关搜索".to_owned(),
+                        query: "related query".to_owned(),
+                        extensions: Extensions::new(),
+                    }],
+                    more_info: Extensions::new(),
+                    extensions: Extensions::new(),
+                },
+                extensions: Extensions::from([
+                    ("highlight".to_owned(), json!(request.highlight)),
+                    ("page_start".to_owned(), json!(request.page_start)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
+            })
+        }
+
         async fn default_search_keyword(
             &self,
             request: &SearchDefaultKeywordRequest,
@@ -18260,6 +18387,60 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn general_search_preserves_session_bucket_cursor_related_and_direct_results() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search/general?keywords=clock&platform=netease&page=3&num=15&searchid=session-42&page_start=%7B%22song%22%3A2%7D&account=search-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["query"], "clock");
+        assert_eq!(response["data"]["search_id"], "session-42");
+        assert_eq!(response["data"]["page"], 3);
+        assert_eq!(response["data"]["per_page"], 15);
+        assert_eq!(response["data"]["next_page"], 4);
+        assert_eq!(response["data"]["next_page_start"]["song"], 3);
+        assert_eq!(response["data"]["sections"][0]["section"], "song");
+        assert_eq!(response["data"]["sections"][0]["kind"], "track");
+        assert_eq!(
+            response["data"]["sections"][0]["items"][0]["data"]["ref"],
+            "netease:123"
+        );
+        assert_eq!(response["data"]["direct"][0]["kind"], "artist");
+        assert_eq!(response["data"]["direct"][0]["id"], "6452");
+        assert_eq!(
+            response["data"]["related"]["terms"][0]["query"],
+            "related query"
+        );
+        assert_eq!(response["data"]["extensions"]["highlight"], true);
+        assert_eq!(response["data"]["extensions"]["page_start"]["song"], 2);
+        assert_eq!(response["data"]["extensions"]["account"], "search-user");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "search-user");
+    }
+
+    #[tokio::test]
+    async fn general_search_rejects_invalid_pages_cursors_and_unknown_fields() {
+        for path in [
+            "/v1/search/general",
+            "/v1/search/general?q=%20%20",
+            "/v1/search/general?q=clock&page=0",
+            "/v1/search/general?q=clock&limit=0",
+            "/v1/search/general?q=clock&limit=101",
+            "/v1/search/general?q=clock&page_start=",
+            "/v1/search/general?q=clock&page_start=%5B1%2C2%5D",
+            "/v1/search/general?q=clock&page_start=not-json",
+            "/v1/search/general?q=clock&highlight=sometimes",
+            "/v1/search/general?q=clock&platform=unknown",
+            "/v1/search/general?q=clock&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

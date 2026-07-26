@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=43`、`partial=0`、`implemented=31`、`verified=30`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=42`、`partial=0`、`implemented=31`、`verified=31`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -19,7 +19,7 @@
 | Q002 | 搜索与发现 | `SearchApi.complete` | 是 | `verified` | `GET /v1/search/suggestions?platform=qq&client=mobile&q=...` 精确调用 Android `music.smartboxCgi.SmartBoxCgi/GetSmartBoxResult`，参考固定的 `search_id/query/num_per_page=0/page_idx=0` 均保留。`items` 普通补全、`vec_related_items` 相关词和按 `insert_pos` 插入的 `vec_direct_items` 直达结果不会合并丢失；歌手直达结果提升为统一 `Artist`，其他已知类型保留 `kind`，无法安全提升的直达结构以含完整原文的 `opaque` 资源表达。搜索会话、展示高亮、图标、跳转、分值、关联 ID 和完整响应均保留，非数组桶拒绝为假空结果。2026-07-22 同一持久匿名设备的 provider 与 release 统一 HTTP 真实搜索“周杰伦”，返回 21 项，首项为 `artist/qq:0025NhlN2yWrP4`，上游码 0 |
 | Q003 | 搜索与发现 | `SearchApi.quick_search` | 是 | `verified` | `GET /v1/search/suggestions?platform=qq&client=web&q=...` 精确调用固定 HTTPS `c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg`，查询参数经 URL 编码且不会开放任意域名、请求头或凭据注入。响应按各分区 `order` 动态排序，单曲、歌手、专辑、MV 分别提升为统一 `Track/Artist/Album/Video`，不会因 JSON 对象字段顺序变化而乱序；未来新增的未知分区仍逐项以携带完整原文的 `Opaque` 资源返回，不会静默丢弃。分区名称、顺序、类型、计数、原项和完整响应均保留；非零或缺失 `code/subcode`、缺失数据、已知分区缺失或畸形 `itemlist` 均拒绝为假成功。2026-07-22 provider 与 release 统一 HTTP 真实搜索“周杰伦”均通过，返回 10 项，依次覆盖 4 首单曲、2 位歌手、2 张专辑、2 个 MV，首项为 `track/qq:0039MnYb0qxYhV`“晴天”，上游 `code/subcode=0` |
 | Q004 | 搜索与发现 | `SearchApi.search_by_type` | 是 | `verified` | `GET /v1/search?platform=qq&kind=...` 接入 Android `DoSearchForQQMusicMobile` 的歌曲、歌手、专辑、歌单、MV、歌词、用户、彩铃、节目专辑和节目 10 类，并保留 `searchid/highlight`、按类别安全页宽、逻辑槽位分页、稀疏歌单缺口、稳定身份和完整原项。统一 `ringtone|ring` 不复用跨平台数字 `10=album`，彩铃结果提升为带 `search_category=ringtone` 的可播放 `Track`。`selectors` 以 URL 编码的强类型 `[{id,name,type}]` 接受；同类型重复项在联网前拒绝，合法项同时生成字符串映射 `selectors` 与保序 `vec_selectors`，二维响应目录经强结构校验进入分页扩展，未知字段保存在 selector 扩展。2026-07-25 上游 Python、Rust provider 和统一 HTTP 均真实验证：彩铃“周杰伦”总数 553、返回 2 条统一曲目；`id=4558/name=默认/type=0` selector 返回 2 条且选择语义保留。随后 Rust provider 逐类真实回归全部 10 类均通过，并据当前用户响应补齐 `title/subtitle/iconurl` 字段优先级；早前把最后三类合并进单批探测得到的 `code=2001` 不再作为单类可用性结论 |
-| Q005 | 搜索与发现 | `SearchApi.general_search` | 是 | `pending` | 综合搜索及多字段续页游标 |
+| Q005 | 搜索与发现 | `SearchApi.general_search` | 是 | `verified` | `GET /v1/search/general?platform=qq&q=...` 固定调用 Android `music.adaptor.SearchAdaptor/do_search_v2`，精确保留 `search_type=100/page_num/page_id/highlight/grp` 以及调用方指定或安全生成的 `searchid`。续页不退化成 offset：响应 `meta.sid/nextpage/nextpage_start` 强类型映射为同一搜索会话、下一页及完整对象游标，调用方可用原会话和游标继续请求；空白/控制字符会话、非对象/超大游标、零页码和不前进续页均在明确层级拒绝。歌曲、歌手、MV、专辑、歌单、节目六个结果桶依平台顺序分别提升为统一 `Track/Artist/Video/Album/Playlist/Podcast`，每桶独立保留预估/确切总数、`more_info`、未知字段与完整原项；直达对象与相关展示词/查询词单独建模，不覆盖普通分类结果。共享客户端先校验 CGI 顶层及逐子请求业务码，再解析模块 `data` 的强类型 `meta/body`，不错误要求模块数据重复携带外层 `code`。2026-07-26 provider 和 release 统一 HTTP 真实搜索“周杰伦”，六桶首屏与携带同一 `sid/nextpage_start` 的下一页均通过 |
 | Q006 | 搜索与发现 | `RecommendApi.get_home_feed` | 是 | `pending` | 首页推荐卡片和防重复游标 |
 | Q007 | 搜索与发现 | `RecommendApi.get_recommend_songlist` | 是 | `pending` | 推荐歌单 |
 | Q008 | 搜索与发现 | `RecommendApi.get_recommend_newsong` | 是 | `pending` | 分地区/语种新歌 |

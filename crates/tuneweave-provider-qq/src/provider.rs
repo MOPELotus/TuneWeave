@@ -20,8 +20,9 @@ use tuneweave_core::{
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Chart,
     ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest, ChartTrackPreview,
-    CreatorSummary, ErrorCode, Extensions, ImmersiveAudioType, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    CreatorSummary, ErrorCode, Extensions, GeneralSearchRelated, GeneralSearchRelatedTerm,
+    GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection, ImmersiveAudioType, Lyrics,
+    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
     MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
     MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
@@ -49,6 +50,8 @@ use crate::qrc::decrypt_qrc;
 
 const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
+const GENERAL_SEARCH_MODULE: &str = "music.adaptor.SearchAdaptor";
+const GENERAL_SEARCH_METHOD: &str = "do_search_v2";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -550,6 +553,86 @@ struct TypedSearchBatch {
     search_id: String,
     highlight: bool,
     selectors: Vec<SearchSelector>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchBucket {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    estimate_sum: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total_num: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    items: Vec<Value>,
+    #[serde(default)]
+    more_info: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchRelatedItem {
+    display_word: String,
+    search_word: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchRelatedBucket {
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    estimate_sum: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_u64")]
+    total_num: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    items: Vec<QqGeneralSearchRelatedItem>,
+    #[serde(default)]
+    more_info: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqGeneralSearchDirect {
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    direct_group: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchMeta {
+    sid: String,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    perpage: u64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    nextpage: i64,
+    #[serde(default)]
+    nextpage_start: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchBody {
+    item_song: QqGeneralSearchBucket,
+    singer: QqGeneralSearchBucket,
+    item_mv: QqGeneralSearchBucket,
+    item_album: QqGeneralSearchBucket,
+    item_songlist: QqGeneralSearchBucket,
+    item_audio: QqGeneralSearchBucket,
+    #[serde(default)]
+    direct_result: QqGeneralSearchDirect,
+    item_related: QqGeneralSearchRelatedBucket,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqGeneralSearchResponse {
+    meta: QqGeneralSearchMeta,
+    body: QqGeneralSearchBody,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2712,6 +2795,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchPodcasts,
             Capability::SearchVoices,
             Capability::SearchRingtones,
+            Capability::SearchMixed,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
             Capability::UserProfileModern,
@@ -2813,6 +2897,19 @@ impl MusicProvider for QqProvider {
             batch.highlight,
             &batch.selectors,
         ))
+    }
+
+    async fn general_search(&self, request: &GeneralSearchRequest) -> Result<GeneralSearchResult> {
+        let (api_request, search_id) = qq_general_search_request(request)?;
+        self.validate_public_account(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ general search returned no response"))?;
+        map_qq_general_search(request, &search_id, response)
     }
 
     async fn search_suggestions(
@@ -4901,6 +4998,269 @@ impl QqProvider {
             selectors: query.selectors.clone(),
         })
     }
+}
+
+fn qq_general_search_request(request: &GeneralSearchRequest) -> Result<(QqApiRequest, String)> {
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ general search query cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if request.page == 0 {
+        return Err(
+            TuneWeaveError::invalid_request("QQ general search page must start at 1")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ general search page size must be between 1 and 100",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let search_id = request
+        .search_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|search_id| !search_id.is_empty())
+        .map(validate_qq_general_search_id)
+        .transpose()?
+        .map_or_else(generate_search_id, |search_id| Ok(search_id.to_owned()))?;
+    if let Some(page_start) = &request.page_start {
+        if page_start
+            .keys()
+            .any(|key| key.is_empty() || key.chars().any(char::is_control))
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ general search page_start contains an invalid key",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let encoded = serde_json::to_vec(page_start).map_err(|_| {
+            TuneWeaveError::invalid_request("QQ general search page_start is not valid JSON")
+                .with_platform(Platform::Qq)
+        })?;
+        if encoded.len() > 65_536 {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ general search page_start cannot exceed 65536 bytes",
+            )
+            .with_platform(Platform::Qq));
+        }
+    }
+    let mut param = json!({
+        "searchid": search_id,
+        "search_type": 100,
+        "page_num": request.limit,
+        "query": query,
+        "page_id": request.page,
+        "highlight": request.highlight,
+        "grp": true
+    });
+    if let Some(page_start) = &request.page_start {
+        param["page_start"] = json!(page_start);
+    }
+    Ok((
+        QqApiRequest::new(GENERAL_SEARCH_MODULE, GENERAL_SEARCH_METHOD, param),
+        search_id,
+    ))
+}
+
+fn validate_qq_general_search_id(search_id: &str) -> Result<&str> {
+    if search_id.len() > 256 || search_id.chars().any(char::is_control) {
+        return Err(
+            TuneWeaveError::invalid_request("QQ general search ID is invalid")
+                .with_platform(Platform::Qq),
+        );
+    }
+    Ok(search_id)
+}
+
+fn map_qq_general_search(
+    request: &GeneralSearchRequest,
+    requested_search_id: &str,
+    response: QqApiResponse,
+) -> Result<GeneralSearchResult> {
+    let parsed = serde_json::from_value::<QqGeneralSearchResponse>(response.data.clone()).map_err(
+        |error| qq_data_error(format!("QQ general search response is malformed: {error}")),
+    )?;
+    let data = serde_json::to_value(&parsed)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ general search response"))?;
+    let QqGeneralSearchResponse {
+        meta, body, extra, ..
+    } = parsed;
+    let returned_search_id = meta.sid.trim();
+    if returned_search_id.is_empty() {
+        return Err(qq_data_error(
+            "QQ general search response is missing its search ID",
+        ));
+    }
+    validate_qq_general_search_id(returned_search_id)
+        .map_err(|_| qq_data_error("QQ general search returned an invalid search ID"))?;
+    let per_page = u32::try_from(meta.perpage)
+        .ok()
+        .filter(|per_page| *per_page > 0)
+        .ok_or_else(|| qq_data_error("QQ general search returned an invalid page size"))?;
+    let next_page = match meta.nextpage {
+        -1 => None,
+        next if next > 0 => {
+            let next = u32::try_from(next)
+                .map_err(|_| qq_data_error("QQ general search next page is too large"))?;
+            if next <= request.page {
+                return Err(qq_data_error(
+                    "QQ general search pagination did not make progress",
+                ));
+            }
+            Some(next)
+        }
+        _ => {
+            return Err(qq_data_error(
+                "QQ general search returned an invalid next page",
+            ));
+        }
+    };
+    let sections = vec![
+        map_qq_general_search_section("song", SearchKind::Track, body.item_song, |raw| {
+            map_track(raw).map(SearchItem::Track)
+        })?,
+        map_qq_general_search_section(
+            "singer",
+            SearchKind::Artist,
+            body.singer,
+            map_artist_search_item,
+        )?,
+        map_qq_general_search_section("mv", SearchKind::Mv, body.item_mv, map_mv_search_item)?,
+        map_qq_general_search_section(
+            "album",
+            SearchKind::Album,
+            body.item_album,
+            map_album_search_item,
+        )?,
+        map_qq_general_search_section(
+            "playlist",
+            SearchKind::Playlist,
+            body.item_songlist,
+            map_playlist_search_item,
+        )?,
+        map_qq_general_search_section(
+            "audio",
+            SearchKind::Podcast,
+            body.item_audio,
+            map_podcast_search_item,
+        )?,
+    ];
+    let direct = body
+        .direct_result
+        .direct_group
+        .into_iter()
+        .map(map_qq_general_direct_item)
+        .collect::<Result<Vec<_>>>()?;
+    let related_data = serde_json::to_value(&body.item_related)
+        .map_err(|_| qq_data_error("failed to preserve QQ related search terms"))?;
+    let related = GeneralSearchRelated {
+        estimated_total: body.item_related.estimate_sum,
+        total: body.item_related.total_num,
+        terms: body
+            .item_related
+            .items
+            .into_iter()
+            .map(map_qq_general_related_term)
+            .collect::<Result<Vec<_>>>()?,
+        more_info: body.item_related.more_info,
+        extensions: Extensions::from([("data".to_owned(), related_data)]),
+    };
+    Ok(GeneralSearchResult {
+        query: request.query.trim().to_owned(),
+        search_id: returned_search_id.to_owned(),
+        page: request.page,
+        per_page,
+        next_page,
+        next_page_start: meta.nextpage_start,
+        sections,
+        direct,
+        related,
+        extensions: Extensions::from([
+            ("requested_search_id".to_owned(), json!(requested_search_id)),
+            ("highlight".to_owned(), json!(request.highlight)),
+            ("request_page_size".to_owned(), json!(request.limit)),
+            ("request_page_start".to_owned(), json!(request.page_start)),
+            ("meta".to_owned(), json!(meta.extra)),
+            ("body".to_owned(), json!(body.extra)),
+            ("extra".to_owned(), json!(extra)),
+            ("data".to_owned(), data),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_qq_general_search_section(
+    section: &'static str,
+    kind: SearchKind,
+    bucket: QqGeneralSearchBucket,
+    mapper: SearchItemMapper,
+) -> Result<GeneralSearchSection> {
+    let data = serde_json::to_value(&bucket)
+        .map_err(|_| qq_data_error("failed to preserve QQ general search section"))?;
+    let items = bucket
+        .items
+        .into_iter()
+        .map(mapper)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(GeneralSearchSection {
+        section: section.to_owned(),
+        kind,
+        estimated_total: bucket.estimate_sum,
+        total: bucket.total_num,
+        items,
+        more_info: bucket.more_info,
+        extensions: Extensions::from([
+            ("extra".to_owned(), json!(bucket.extra)),
+            ("data".to_owned(), data),
+        ]),
+    })
+}
+
+fn map_qq_general_related_term(
+    term: QqGeneralSearchRelatedItem,
+) -> Result<GeneralSearchRelatedTerm> {
+    let display_text = term.display_word.trim();
+    let query = term.search_word.trim();
+    if display_text.is_empty() || query.is_empty() {
+        return Err(qq_data_error(
+            "QQ related search term is missing its display or search text",
+        ));
+    }
+    Ok(GeneralSearchRelatedTerm {
+        display_text: display_text.to_owned(),
+        query: query.to_owned(),
+        extensions: Extensions::from([("extra".to_owned(), json!(term.extra))]),
+    })
+}
+
+fn map_qq_general_direct_item(raw: Value) -> Result<SearchOpaqueItem> {
+    if !raw.is_object() {
+        return Err(qq_data_error(
+            "QQ general search direct group contains a non-object item",
+        ));
+    }
+    let kind = ["type", "res_type", "resource_type"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)))
+        .unwrap_or_else(|| "direct".to_owned());
+    let id = ["mid", "id", "direct_id", "docid"]
+        .into_iter()
+        .find_map(|field| value_as_string(raw.get(field)));
+    let title = ["title", "name", "display_word", "query"]
+        .into_iter()
+        .find_map(|field| nonempty_string(raw.get(field)));
+    Ok(SearchOpaqueItem {
+        platform: Platform::Qq,
+        kind,
+        id,
+        title,
+        extensions: Extensions::from([("response".to_owned(), raw)]),
+    })
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<&str> {
@@ -21632,6 +21992,362 @@ mod tests {
     }
 
     #[test]
+    fn general_search_request_preserves_session_page_cursor_and_boolean_controls() {
+        let request = GeneralSearchRequest {
+            query: " 周杰伦 ".to_owned(),
+            page: 2,
+            limit: 15,
+            search_id: Some("session-42".to_owned()),
+            page_start: Some(Extensions::from([
+                ("song".to_owned(), json!(15)),
+                ("singer".to_owned(), json!({"index": 1})),
+            ])),
+            highlight: true,
+            account: None,
+        };
+        let (api_request, search_id) =
+            qq_general_search_request(&request).expect("QQ general search request");
+        assert_eq!(search_id, "session-42");
+        assert_eq!(api_request.module, GENERAL_SEARCH_MODULE);
+        assert_eq!(api_request.method, GENERAL_SEARCH_METHOD);
+        assert_eq!(api_request.param["searchid"], "session-42");
+        assert_eq!(api_request.param["search_type"], 100);
+        assert_eq!(api_request.param["page_num"], 15);
+        assert_eq!(api_request.param["query"], "周杰伦");
+        assert_eq!(api_request.param["page_id"], 2);
+        assert_eq!(api_request.param["highlight"], true);
+        assert_eq!(api_request.param["grp"], true);
+        assert_eq!(api_request.param["page_start"]["song"], 15);
+        assert_eq!(api_request.param["page_start"]["singer"]["index"], 1);
+        assert!(!api_request.preserves_booleans());
+
+        let (first_page, generated_search_id) = qq_general_search_request(&GeneralSearchRequest {
+            query: "周杰伦".to_owned(),
+            page: 1,
+            limit: 15,
+            search_id: None,
+            page_start: None,
+            highlight: false,
+            account: None,
+        })
+        .expect("generated QQ search session");
+        assert!(!generated_search_id.is_empty());
+        assert_eq!(first_page.param["searchid"], generated_search_id);
+        assert!(first_page.param.get("page_start").is_none());
+    }
+
+    #[test]
+    fn general_search_mapping_preserves_all_typed_buckets_and_continuation_state() {
+        let bucket = |items: Vec<Value>, total: u64, label: &str| {
+            json!({
+                "estimate_sum": total + 2,
+                "total_num": total,
+                "items": items,
+                "more_info": {"cursor": format!("{label}-cursor")},
+                "futureBucketField": label
+            })
+        };
+        let data = json!({
+            "code": 0,
+            "meta": {
+                "sid": "returned-session",
+                "perpage": 15,
+                "nextpage": 3,
+                "nextpage_start": {"song": 15, "singer": {"index": 1}},
+                "futureMetaField": true
+            },
+            "body": {
+                "item_song": bucket(
+                    vec![sample_track(97_773, "0039MnYb0qxYhV", "晴天")],
+                    100,
+                    "song"
+                ),
+                "singer": bucket(
+                    vec![json!({
+                        "id": 4558,
+                        "mid": "0025NhlN2yWrP4",
+                        "name": "周杰伦"
+                    })],
+                    10,
+                    "singer"
+                ),
+                "item_mv": bucket(
+                    vec![json!({
+                        "id": 293791,
+                        "vid": "w0026q7f01a",
+                        "title": "晴天 MV",
+                        "singerid": 4558,
+                        "singermid": "0025NhlN2yWrP4",
+                        "singername": "周杰伦"
+                    })],
+                    20,
+                    "mv"
+                ),
+                "item_album": bucket(
+                    vec![json!({
+                        "id": 8220,
+                        "mid": "000MkMni19ClKG",
+                        "name": "叶惠美",
+                        "singer_list": [{
+                            "id": 4558,
+                            "mid": "0025NhlN2yWrP4",
+                            "name": "周杰伦"
+                        }]
+                    })],
+                    30,
+                    "album"
+                ),
+                "item_songlist": bucket(
+                    vec![json!({"id": 7_039_749_142_u64, "name": "公开歌单"})],
+                    40,
+                    "playlist"
+                ),
+                "item_audio": bucket(
+                    vec![json!({
+                        "id": 336355127,
+                        "mid": "001PodcastMid",
+                        "name": "音乐播客"
+                    })],
+                    50,
+                    "audio"
+                ),
+                "direct_result": {
+                    "direct_group": [{
+                        "type": "singer",
+                        "mid": "0025NhlN2yWrP4",
+                        "title": "周杰伦"
+                    }],
+                    "futureDirectField": "kept"
+                },
+                "item_related": {
+                    "estimate_sum": 2,
+                    "total_num": 1,
+                    "items": [{
+                        "display_word": "周杰伦歌曲",
+                        "search_word": "周杰伦 热门歌曲",
+                        "futureRelatedField": true
+                    }],
+                    "more_info": {"cursor": "related-cursor"},
+                    "futureRelatedBucket": true
+                },
+                "futureBodyField": {"kept": true}
+            },
+            "futureResponseField": "kept"
+        });
+        let request = GeneralSearchRequest {
+            query: "周杰伦".to_owned(),
+            page: 2,
+            limit: 15,
+            search_id: Some("requested-session".to_owned()),
+            page_start: Some(Extensions::from([("song".to_owned(), json!(0))])),
+            highlight: true,
+            account: None,
+        };
+        let result = map_qq_general_search(
+            &request,
+            "requested-session",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ general search");
+        assert_eq!(result.search_id, "returned-session");
+        assert_eq!(result.page, 2);
+        assert_eq!(result.per_page, 15);
+        assert_eq!(result.next_page, Some(3));
+        assert_eq!(result.next_page_start["song"], 15);
+        assert_eq!(result.sections.len(), 6);
+        assert_eq!(
+            result
+                .sections
+                .iter()
+                .map(|section| section.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SearchKind::Track,
+                SearchKind::Artist,
+                SearchKind::Mv,
+                SearchKind::Album,
+                SearchKind::Playlist,
+                SearchKind::Podcast
+            ]
+        );
+        let SearchItem::Track(track) = &result.sections[0].items[0] else {
+            panic!("general song bucket must map to tracks");
+        };
+        assert_eq!(track.resource_ref.to_string(), "qq:0039MnYb0qxYhV");
+        let SearchItem::Podcast(podcast) = &result.sections[5].items[0] else {
+            panic!("general audio bucket must map to podcasts");
+        };
+        assert_eq!(podcast.resource_ref.to_string(), "qq:001PodcastMid");
+        assert_eq!(result.sections[0].more_info["cursor"], "song-cursor");
+        assert_eq!(
+            result.sections[0].extensions["data"]["futureBucketField"],
+            "song"
+        );
+        assert_eq!(result.direct[0].kind, "singer");
+        assert_eq!(result.direct[0].id.as_deref(), Some("0025NhlN2yWrP4"));
+        assert_eq!(result.related.terms[0].display_text, "周杰伦歌曲");
+        assert_eq!(result.related.terms[0].query, "周杰伦 热门歌曲");
+        assert_eq!(
+            result.related.terms[0].extensions["extra"]["futureRelatedField"],
+            true
+        );
+        assert_eq!(
+            result.extensions["requested_search_id"],
+            "requested-session"
+        );
+        assert_eq!(result.extensions["meta"]["futureMetaField"], true);
+        assert_eq!(result.extensions["body"]["futureBodyField"]["kept"], true);
+        assert_eq!(result.extensions["extra"]["futureResponseField"], "kept");
+    }
+
+    #[test]
+    fn general_search_mapping_rejects_failed_malformed_and_nonprogressing_responses() {
+        let request = GeneralSearchRequest {
+            query: "周杰伦".to_owned(),
+            page: 2,
+            limit: 15,
+            search_id: Some("session".to_owned()),
+            page_start: None,
+            highlight: true,
+            account: None,
+        };
+        let valid = || {
+            json!({
+                "code": 0,
+                "meta": {
+                    "sid": "session",
+                    "perpage": 15,
+                    "nextpage": -1,
+                    "nextpage_start": {}
+                },
+                "body": {
+                    "item_song": {"items": []},
+                    "singer": {"items": []},
+                    "item_mv": {"items": []},
+                    "item_album": {"items": []},
+                    "item_songlist": {"items": []},
+                    "item_audio": {"items": []},
+                    "direct_result": {"direct_group": []},
+                    "item_related": {"items": []}
+                }
+            })
+        };
+        let mut fixtures = vec![
+            json!({}),
+            {
+                let mut value = valid();
+                value["meta"]["nextpage"] = json!(2);
+                value
+            },
+            {
+                let mut value = valid();
+                value["meta"]["sid"] = json!("");
+                value
+            },
+            {
+                let mut value = valid();
+                value["body"]["direct_result"]["direct_group"] = json!([1]);
+                value
+            },
+            {
+                let mut value = valid();
+                value["body"]["item_related"]["items"] =
+                    json!([{"display_word": "", "search_word": "query"}]);
+                value
+            },
+        ];
+        let mut missing_bucket = valid();
+        missing_bucket["body"]
+            .as_object_mut()
+            .expect("body object")
+            .remove("item_audio");
+        fixtures.push(missing_bucket);
+        for fixture in fixtures {
+            let error = map_qq_general_search(&request, "session", response(fixture))
+                .expect_err("invalid QQ general search response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn general_search_validates_input_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::SearchMixed));
+
+        let missing = provider
+            .general_search(&GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 1,
+                limit: 15,
+                search_id: None,
+                page_start: None,
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            })
+            .await
+            .expect_err("missing optional general search account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing-account");
+
+        for request in [
+            GeneralSearchRequest {
+                query: " ".to_owned(),
+                page: 1,
+                limit: 15,
+                search_id: None,
+                page_start: None,
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            },
+            GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 0,
+                limit: 15,
+                search_id: None,
+                page_start: None,
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            },
+            GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 1,
+                limit: 0,
+                search_id: None,
+                page_start: None,
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            },
+            GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 1,
+                limit: 15,
+                search_id: Some("unsafe\nsession".to_owned()),
+                page_start: None,
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            },
+            GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 1,
+                limit: 15,
+                search_id: None,
+                page_start: Some(Extensions::from([("unsafe\nkey".to_owned(), json!(1))])),
+                highlight: true,
+                account: Some("missing-account".to_owned()),
+            },
+        ] {
+            let error = provider
+                .general_search(&request)
+                .await
+                .expect_err("invalid general search input");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
     fn selector_mapping_preserves_two_dimensional_catalogs_and_extra_fields() {
         let page = map_track_search_response(
             0,
@@ -22204,6 +22920,70 @@ mod tests {
                 .iter()
                 .all(|track| track.extensions.contains_key("media_mid"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_general_search_preserves_all_buckets_and_continuation_state() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .general_search(&GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: 1,
+                limit: 15,
+                search_id: None,
+                page_start: None,
+                highlight: true,
+                account: None,
+            })
+            .await
+            .expect("live QQ general search first page");
+        assert!(!first.search_id.is_empty());
+        assert_eq!(first.page, 1);
+        assert_eq!(first.sections.len(), 6);
+        assert_eq!(
+            first
+                .sections
+                .iter()
+                .map(|section| section.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SearchKind::Track,
+                SearchKind::Artist,
+                SearchKind::Mv,
+                SearchKind::Album,
+                SearchKind::Playlist,
+                SearchKind::Podcast
+            ]
+        );
+        assert!(
+            first
+                .sections
+                .iter()
+                .any(|section| !section.items.is_empty())
+        );
+        assert_eq!(first.extensions["response"]["code"], 0);
+
+        let next_page = first.next_page.expect("general search has another page");
+        let second = provider
+            .general_search(&GeneralSearchRequest {
+                query: "周杰伦".to_owned(),
+                page: next_page,
+                limit: 15,
+                search_id: Some(first.search_id.clone()),
+                page_start: Some(first.next_page_start.clone()),
+                highlight: true,
+                account: None,
+            })
+            .await
+            .expect("live QQ general search continuation");
+        assert_eq!(second.search_id, first.search_id);
+        assert_eq!(second.page, next_page);
+        assert_eq!(second.sections.len(), 6);
     }
 
     #[tokio::test]

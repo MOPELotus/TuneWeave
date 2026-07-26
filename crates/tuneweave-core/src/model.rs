@@ -200,6 +200,58 @@ pub struct SearchMultiMatch {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSearchRequest {
+    pub query: String,
+    pub page: u32,
+    pub limit: u32,
+    pub search_id: Option<String>,
+    pub page_start: Option<Extensions>,
+    pub highlight: bool,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSearchSection {
+    pub section: String,
+    pub kind: SearchKind,
+    pub estimated_total: u64,
+    pub total: u64,
+    pub items: Vec<SearchItem>,
+    pub more_info: Extensions,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSearchRelatedTerm {
+    pub display_text: String,
+    pub query: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSearchRelated {
+    pub estimated_total: u64,
+    pub total: u64,
+    pub terms: Vec<GeneralSearchRelatedTerm>,
+    pub more_info: Extensions,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneralSearchResult {
+    pub query: String,
+    pub search_id: String,
+    pub page: u32,
+    pub per_page: u32,
+    pub next_page: Option<u32>,
+    pub next_page_start: Extensions,
+    pub sections: Vec<GeneralSearchSection>,
+    pub direct: Vec<SearchOpaqueItem>,
+    pub related: GeneralSearchRelated,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LocalTrackMatchRequest {
     pub title: String,

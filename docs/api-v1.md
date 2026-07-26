@@ -601,6 +601,61 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 多重搜索匹配不是普通分页搜索：平台可针对一个关键词同时返回歌手、歌单、MV/视频等多个高置信分区。`sections` 严格保持平台给出的顺序，`section` 保留平台分区名，`kind` 在能映射到统一搜索类型时提供；各资源继续使用统一 `SearchItem {type,data}`。未知分区和暂时无法规范化的条目不会丢弃，而是以 `opaque` 项及完整扩展原文返回。
 
+### GeneralSearchResult
+
+```json
+{
+  "query": "周杰伦",
+  "search_id": "1600000000000-1234567890",
+  "page": 1,
+  "per_page": 15,
+  "next_page": 2,
+  "next_page_start": {
+    "song": 15,
+    "singer": { "index": 1 }
+  },
+  "sections": [
+    {
+      "section": "song",
+      "kind": "track",
+      "estimated_total": 10000,
+      "total": 1000,
+      "items": [
+        {
+          "type": "track",
+          "data": {
+            "ref": "qq:0039MnYb0qxYhV",
+            "platform": "qq",
+            "id": "0039MnYb0qxYhV",
+            "name": "晴天",
+            "extensions": {}
+          }
+        }
+      ],
+      "more_info": {},
+      "extensions": {}
+    }
+  ],
+  "direct": [],
+  "related": {
+    "estimated_total": 1,
+    "total": 1,
+    "terms": [
+      {
+        "display_text": "周杰伦歌曲",
+        "query": "周杰伦 热门歌曲",
+        "extensions": {}
+      }
+    ],
+    "more_info": {},
+    "extensions": {}
+  },
+  "extensions": {}
+}
+```
+
+综合搜索保留一个平台搜索会话内的多类结果，不等同于只返回高置信直达项的多重搜索。各分类桶独立提供预估/确切总数、条目和分类续页信息；`search_id`、`next_page` 与完整 `next_page_start` 必须一起用于后续页。`direct` 保存无法稳定归入普通分类的直达对象，`related` 保存展示词与实际查询词，不以展示文案覆盖查询语义。
+
 ### LocalTrackMatchResult
 
 ```json
@@ -1022,6 +1077,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
 | GET | `/v1/search` | `q`（也接受 `keywords`）、`type?`（也接受 `kind`）、`variant?`、`platform?`、`account?`、`search_id?`（也接受 `searchid`）、`highlight?`、`selectors?`（URL 编码的 `[{id,name,type}]` JSON 数组）、分页 | 带 `type/data` 判别字段的统一 `SearchItem[]`；选择项与平台返回的二维 selector 目录位于分页扩展，未知查询字段会被拒绝 |
+| GET | `/v1/search/general` | `q`（也接受 `keywords/keyword`）、`platform?`、`account?`、`page?`、`limit?`（也接受 `num`）、`search_id?`（也接受 `searchid`）、`page_start?`（也接受 `cursor`，URL 编码 JSON 对象）、`highlight?` | `GeneralSearchResult`；保留搜索会话、多分类桶、直达结果、相关词和完整多字段续页游标 |
 | GET | `/v1/search/default` | `platform?`、`account?` | `SearchDefaultKeyword`；实际查询词、展示文案、搜索类型与可选图片 |
 | GET | `/v1/search/trending` | `platform?`、`account?`、`detail=brief|full` | `SearchTrendingList`；有序热搜关键词及可用的分数、说明和图标 |
 | GET | `/v1/search/suggestions` | `q`（也接受 `keywords/keyword`）、`client=web|mobile|pc`、`platform?`、`account?` | `SearchSuggestionList`；关键词建议、可选统一资源及独立推荐项 |
@@ -1121,6 +1177,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 搜索类型缺省为 `track`，既接受统一名称，也接受网易云参考数字：`track|song|1`、`album|10`、`artist|100`、`playlist|1000`、`user|1002`、`mv|1004`、`lyric|lyrics|1006`、`podcast|dj|dj_radio|1009`、`radio_station|radio|broadcast`、`video|1014`、`mixed|complex|1018`、`voice|2000`，QQ 另支持统一名称 `ringtone|ring`；数字 `10` 继续表示跨平台既有的专辑搜索，不与 QQ 内部彩铃代码混淆。`podcast` 表示可点播的播客目录，`radio_station` 表示直播广播频道；两者不会因为平台字段名含 `radio` 而混为同一实体，平台没有对应搜索时会明确返回能力不支持。`variant` 支持 `default|legacy|cloud`，也兼容 `backend` 字段以及 `search/cloudsearch/auto` 值；缺省时由 provider 使用推荐后端。网易云缺省播客搜索精确对应参考 `/voicelist/search`，使用 EAPI `/api/search/voicelist/get`；`legacy` 精确对应参考 `/search`：普通类型使用 `/api/search/get`，声音使用独立 `/api/search/voice/get`；`cloud` 对应 `/cloudsearch`。每一项统一序列化为 `{type,data}`；歌曲、专辑、歌手、歌单、用户、MV/视频、播客及广播电台使用对应统一实体，其中 MV 与视频均为 `video`，歌词和彩铃搜索以 `track` 返回并在曲目扩展标明命中内容或彩铃类别。网易云 1009/`djRadios` 按 `Podcast` 映射；专用播客响应的 `baseInfo` 提升为稳定实体，外层算法与命中理由保留在 `extensions.search_item`。综合搜索、声音或上游出现尚无稳定公共结构的条目使用 `opaque`，保留平台、搜索类型、可提取的 ID/标题及完整原文。声音响应同时出现专用 `voices/voiceCount` 与通用 `resources/resourceCount` 时优先专用字段；空的旧数组或空 `result` 不会遮住后续非空数组或旧版 `data`。实际后端和上游路径位于分页扩展 `variant/request_path`，完整上游响应也保存在分页扩展；上游若不应用请求 `limit`，TuneWeave 返回真实条目并显式写入 `limit_applied=false`，不会截断后伪装成已应用分页。
 
 QQ 分类搜索固定使用 Android `music.search.SearchCgiService/DoSearchForQQMusicMobile`，启动时生成并在 `TUNEWEAVE_DATA_DIR/qq-device.json` 私有持久化 GUID、Android ID、IMEI、QIMEI 和匿名会话。TuneWeave 已实现歌曲、歌手、专辑、歌单、MV、歌词、用户、彩铃、节目专辑和节目十类；按真实静默失败边界使用歌曲/专辑/MV/歌词/彩铃 60、歌手 40、歌单 30、其余 10 的页宽，并用同批子请求按上游逻辑槽位实现统一 `limit=1..100` 与任意 `offset`。`search_id/searchid`、`highlight`、稀疏歌单缺口、非稀疏完整性、稳定身份和完整原项均保留。`selectors` 使用强类型 `id/name/type`，同一类型重复选择会在联网前拒绝，避免参考实现中映射只保留末项而向量保留全部的歧义；合法选择同时提交字符串键值映射 `selectors` 和保序对象数组 `vec_selectors`，响应的二维 selector 分组经结构校验后位于分页扩展 `selectors`，本次选择位于 `selected_filters`。命名账户用于搜索等公开元数据时只验证 `(qq, account)` 别名存在，不把账户密钥注入不需要认证的请求；真正的音源授权再由 provider 注入该账户。2026-07-25 上游 Python、TuneWeave Rust provider 与统一 HTTP 均真实验证彩铃和 selector 分支：彩铃“周杰伦”返回总数 553，统一结果为可播放 `Track`；selector `id=4558/type=0` 返回 2 条且请求语义完整保留。
+
+QQ 综合搜索固定使用 Android `music.adaptor.SearchAdaptor/do_search_v2` 和 `search_type=100`。首请求生成或接受调用方 `search_id`；续页精确回传平台返回的 `sid/nextpage/nextpage_start`，不会把多字段游标压成普通 offset。歌曲、歌手、MV、专辑、歌单和节目六个桶按平台顺序映射为统一类型，各桶自身的计数、`more_info`、未知字段与原始数据均保留；直达分组和相关词独立建模。平台 CGI 包络的业务码先由共享客户端校验，模块 `data` 再由强类型综合搜索模型解析，缺失桶、非法会话、畸形条目或不前进的页码均拒绝为假成功。2026-07-26 provider 与 release 统一 HTTP 真实搜索“周杰伦”，首屏及携带同一会话和多字段游标的下一页均通过。
 
 默认搜索词与搜索结果分离：`keyword` 是应提交给搜索端点的真实词，`display_text` 是可直接展示的文案，`kind` 仅在平台类型可映射时返回，图片允许为空。网易云固定使用 EAPI `/api/search/defaultkeyword/get`；空白 `showKeyword` 会继续回退 `styleKeyword.keyWord`，算法、样式词和业务意图等动态字段完整保留在 `extensions.response`，调用方不应解析它们来替代稳定字段。
 
