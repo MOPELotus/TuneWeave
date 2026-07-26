@@ -656,6 +656,67 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 综合搜索保留一个平台搜索会话内的多类结果，不等同于只返回高置信直达项的多重搜索。各分类桶独立提供预估/确切总数、条目和分类续页信息；`search_id`、`next_page` 与完整 `next_page_start` 必须一起用于后续页。`direct` 保存无法稳定归入普通分类的直达对象，`related` 保存展示词与实际查询词，不以展示文案覆盖查询语义。
 
+### RecommendationFeed
+
+```json
+{
+  "page": 1,
+  "direction": "initial",
+  "loaded_count": 8,
+  "prompt": "",
+  "message": "",
+  "batch_count": 0,
+  "load_mark": 0,
+  "shelves": [
+    {
+      "id": 301,
+      "title_template": "今日为你打造",
+      "title": "",
+      "style": 2,
+      "expires_in_seconds": 30,
+      "action": null,
+      "niches": [
+        {
+          "id": 203,
+          "title_template": "",
+          "title": "",
+          "style": 10002,
+          "sub_style": 0,
+          "action": null,
+          "cards": [
+            {
+              "id": "666124541",
+              "kind": "track",
+              "ref": "qq:666124541",
+              "title": "玻璃",
+              "subtitle": "Gareth.T",
+              "cover_url": "https://...",
+              "count": 0,
+              "type_code": 200,
+              "subtype": 201,
+              "style": 10,
+              "action": null,
+              "extensions": {}
+            }
+          ],
+          "extensions": {}
+        }
+      ],
+      "extensions": {}
+    }
+  ],
+  "next": {
+    "page": 2,
+    "direction": "forward",
+    "loaded_count": 8,
+    "seen_ids": ["301", "207"]
+  },
+  "extensions": {}
+}
+```
+
+首页推荐流保留平台的楼层→细分组→卡片层级，不压成普通歌曲或歌单列表。已确认身份的歌曲、专辑、歌单和榜单卡片给出统一 `ref`，功能入口及未来未知类型仍保留稳定卡片字段与完整扩展原文。后续请求必须整体使用 `next` 中的页码、方向、累计楼层数和已曝光 ID；同一响应内重复楼层仍按原顺序返回，`seen_ids` 则稳定去重以防重复推荐。
+
 ### LocalTrackMatchResult
 
 ```json
@@ -1162,6 +1223,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/users/{ref}/following/artists` | 分页、`account?` | 指定用户关注的 `Artist[]`；目标用户与查看者账户分离，平台要求登录时 `account` 必填 |
 | GET | `/v1/users/{ref}/membership` | `account?`、`backend=front|client` | 指定用户的 `MembershipSummary`；引用决定平台，客户端后端要求登录 |
 | GET | `/v1/users/{ref}/history` | `period=all_time|week`、分页、`account?` | 指定用户的 `PlaybackHistoryEntry[]` |
+| GET | `/v1/recommendations/feed` | `platform?`、`account?`、`page?`、`direction?=initial|forward`、`loaded_count?`（也接受 `s_num/snum`）、`seen_ids?`（也接受 `v_cache/cache`，JSON 数组或逗号列表） | `RecommendationFeed`；楼层化推荐卡片及完整多字段防重复续页状态 |
 | GET | `/v1/recommendations/tracks` | `platform?`、`account?`、`source?=daily|personalized`、`refresh?`、`area_id?`、分页 | `Track[]`；推荐理由和首页包装保存在扩展 |
 | GET | `/v1/recommendations/playlists` | `platform?`、`account?`、`source?=daily|personalized`、分页 | `Playlist[]` |
 | GET | `/v1/recommendations/videos` | `platform?`、`account?`、`kind=mv|exclusive`、`view=featured|catalog`、分页 | `Video[]`；`exclusive/catalog` 是独家放送真实分页列表 |
@@ -1179,6 +1241,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 QQ 分类搜索固定使用 Android `music.search.SearchCgiService/DoSearchForQQMusicMobile`，启动时生成并在 `TUNEWEAVE_DATA_DIR/qq-device.json` 私有持久化 GUID、Android ID、IMEI、QIMEI 和匿名会话。TuneWeave 已实现歌曲、歌手、专辑、歌单、MV、歌词、用户、彩铃、节目专辑和节目十类；按真实静默失败边界使用歌曲/专辑/MV/歌词/彩铃 60、歌手 40、歌单 30、其余 10 的页宽，并用同批子请求按上游逻辑槽位实现统一 `limit=1..100` 与任意 `offset`。`search_id/searchid`、`highlight`、稀疏歌单缺口、非稀疏完整性、稳定身份和完整原项均保留。`selectors` 使用强类型 `id/name/type`，同一类型重复选择会在联网前拒绝，避免参考实现中映射只保留末项而向量保留全部的歧义；合法选择同时提交字符串键值映射 `selectors` 和保序对象数组 `vec_selectors`，响应的二维 selector 分组经结构校验后位于分页扩展 `selectors`，本次选择位于 `selected_filters`。命名账户用于搜索等公开元数据时只验证 `(qq, account)` 别名存在，不把账户密钥注入不需要认证的请求；真正的音源授权再由 provider 注入该账户。2026-07-25 上游 Python、TuneWeave Rust provider 与统一 HTTP 均真实验证彩铃和 selector 分支：彩铃“周杰伦”返回总数 553，统一结果为可播放 `Track`；selector `id=4558/type=0` 返回 2 条且请求语义完整保留。
 
 QQ 综合搜索固定使用 Android `music.adaptor.SearchAdaptor/do_search_v2` 和 `search_type=100`。首请求生成或接受调用方 `search_id`；续页精确回传平台返回的 `sid/nextpage/nextpage_start`，不会把多字段游标压成普通 offset。歌曲、歌手、MV、专辑、歌单和节目六个桶按平台顺序映射为统一类型，各桶自身的计数、`more_info`、未知字段与原始数据均保留；直达分组和相关词独立建模。平台 CGI 包络的业务码先由共享客户端校验，模块 `data` 再由强类型综合搜索模型解析，缺失桶、非法会话、畸形条目或不前进的页码均拒绝为假成功。2026-07-26 provider 与 release 统一 HTTP 真实搜索“周杰伦”，首屏及携带同一会话和多字段游标的下一页均通过。
+
+QQ 首页推荐固定使用 Android `music.recommend.RecommendFeed/get_recommend_feed`，首屏默认提交 `direction=0/page=1/s_num=0`，后续页把返回楼层数累加进 `s_num`，以 `direction=1` 推进，并把所有已曝光楼层 ID 放入 `v_cache`。TuneWeave 保留重复楼层及卡片原序，但对缓存 ID 做稳定去重；非空响应若没有新增楼层 ID 会停止生成 `next`，修正参考分页器可能无限重复请求的风险。楼层、细分组、更多动作和卡片均为强类型；当前 `type=200/400/500/1000` 分别提供歌曲/专辑/歌单/榜单统一引用，`700/900` 功能入口和未知类型不会猜测资源身份。封面只接受无凭据 HTTP(S)，动作只接受安全的 QQ Music 或 HTTP(S) scheme，完整实验、布局、反馈、内嵌歌曲和未来字段保留于扩展。2026-07-26 provider 与 release 统一 HTTP 匿名真实验收首屏与下一页，包含重复楼层、多种资源卡片和防重复续页状态。
 
 默认搜索词与搜索结果分离：`keyword` 是应提交给搜索端点的真实词，`display_text` 是可直接展示的文案，`kind` 仅在平台类型可映射时返回，图片允许为空。网易云固定使用 EAPI `/api/search/defaultkeyword/get`；空白 `showKeyword` 会继续回退 `styleKeyword.keyWord`，算法、样式词和业务意图等动态字段完整保留在 `extensions.response`，调用方不应解析它们来替代稳定字段。
 

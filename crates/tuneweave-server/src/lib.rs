@@ -72,6 +72,7 @@ use tuneweave_core::{
     RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationCursor,
     RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
     RecommendationRequest, RecommendationSource, ResolutionAttempt, ResolutionStatus,
     ResolveRequest, ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem,
     SearchKind, SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector,
@@ -489,6 +490,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
+        .route("/recommendations/feed", get(recommendation_feed))
         .route("/recommendations/tracks", get(recommended_tracks))
         .route("/recommendations/playlists", get(recommended_playlists))
         .route("/recommendations/videos", get(recommended_videos))
@@ -8865,6 +8867,117 @@ async fn user_history(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RecommendationFeedParams {
+    platform: Option<String>,
+    account: Option<String>,
+    page: Option<String>,
+    direction: Option<String>,
+    #[serde(alias = "s_num", alias = "snum")]
+    loaded_count: Option<String>,
+    #[serde(alias = "v_cache", alias = "cache")]
+    seen_ids: Option<String>,
+}
+
+async fn recommendation_feed(
+    State(state): State<AppState>,
+    params: Result<Query<RecommendationFeedParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RecommendationFeed>>, ApiError> {
+    let params = query_params(params)?;
+    let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
+    if page == 0 {
+        return Err(TuneWeaveError::invalid_request("page must start at 1").into());
+    }
+    let loaded_count = parse_u32_parameter("loaded_count", params.loaded_count.as_deref(), 0)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let feed = provider
+        .recommendation_feed(&RecommendationFeedRequest {
+            page,
+            direction: parse_recommendation_feed_direction(params.direction.as_deref())?,
+            loaded_count,
+            seen_ids: parse_recommendation_feed_seen_ids(params.seen_ids.as_deref())?,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(feed).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+fn parse_recommendation_feed_direction(
+    value: Option<&str>,
+) -> Result<RecommendationFeedDirection, TuneWeaveError> {
+    match value
+        .unwrap_or("initial")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "initial" | "first" | "refresh" | "0" => Ok(RecommendationFeedDirection::Initial),
+        "forward" | "next" | "1" => Ok(RecommendationFeedDirection::Forward),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported recommendation feed direction: {value}"
+        ))
+        .with_details(json!({ "allowed": ["initial", "forward"] }))),
+    }
+}
+
+fn parse_recommendation_feed_seen_ids(value: Option<&str>) -> Result<Vec<String>, TuneWeaveError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(TuneWeaveError::invalid_request(
+            "seen_ids must not be empty when provided",
+        ));
+    }
+    if value.starts_with('[') {
+        let values = serde_json::from_str::<Vec<Value>>(value).map_err(|error| {
+            TuneWeaveError::invalid_request(format!(
+                "seen_ids must be a JSON array or comma-separated list: {error}"
+            ))
+        })?;
+        return values
+            .into_iter()
+            .map(|value| match value {
+                Value::String(value) => {
+                    let value = value.trim();
+                    (!value.is_empty())
+                        .then(|| value.to_owned())
+                        .ok_or_else(|| {
+                            TuneWeaveError::invalid_request(
+                                "seen_ids JSON array cannot contain empty strings",
+                            )
+                        })
+                }
+                Value::Number(value) => Ok(value.to_string()),
+                _ => Err(TuneWeaveError::invalid_request(
+                    "seen_ids JSON array entries must be strings or numbers",
+                )),
+            })
+            .collect();
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .map(|value| {
+            (!value.is_empty())
+                .then(|| value.to_owned())
+                .ok_or_else(|| {
+                    TuneWeaveError::invalid_request(
+                        "seen_ids comma-separated list cannot contain empty entries",
+                    )
+                })
+        })
+        .collect()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecommendationParams {
     platform: Option<String>,
     account: Option<String>,
@@ -13373,6 +13486,7 @@ mod tests {
                 Capability::ListeningRightsGain,
                 Capability::Favorites,
                 Capability::ListeningHistory,
+                Capability::RecommendationFeed,
                 Capability::Recommendations,
                 Capability::VideoRecommendations,
                 Capability::PodcastEpisodeRecommendations,
@@ -15911,6 +16025,68 @@ mod tests {
                     has_more: false,
                     extensions: Default::default(),
                 },
+            })
+        }
+
+        async fn recommendation_feed(
+            &self,
+            request: &RecommendationFeedRequest,
+        ) -> Result<RecommendationFeed> {
+            let loaded_count = request.loaded_count.saturating_add(1);
+            let mut seen_ids = request.seen_ids.clone();
+            if !seen_ids.iter().any(|id| id == "301") {
+                seen_ids.push("301".to_owned());
+            }
+            Ok(RecommendationFeed {
+                page: request.page,
+                direction: request.direction,
+                loaded_count,
+                prompt: "继续探索".to_owned(),
+                message: String::new(),
+                batch_count: 0,
+                load_mark: 1,
+                shelves: vec![tuneweave_core::RecommendationFeedShelf {
+                    id: 301,
+                    title_template: "今日为你打造".to_owned(),
+                    title: "推荐".to_owned(),
+                    style: 2,
+                    expires_in_seconds: Some(30),
+                    action: None,
+                    niches: vec![tuneweave_core::RecommendationFeedNiche {
+                        id: 203,
+                        title_template: String::new(),
+                        title: String::new(),
+                        style: 10_002,
+                        sub_style: 0,
+                        action: None,
+                        cards: vec![tuneweave_core::RecommendationFeedCard {
+                            id: Some("185809".to_owned()),
+                            kind: tuneweave_core::RecommendationFeedCardKind::Track,
+                            resource_ref: Some(
+                                ResourceRef::new(Platform::Netease, "185809")
+                                    .expect("valid feed track"),
+                            ),
+                            title: Some("晴天".to_owned()),
+                            subtitle: Some("周杰伦".to_owned()),
+                            cover_url: Some("https://example.test/feed.jpg".to_owned()),
+                            count: Some(1),
+                            type_code: 200,
+                            subtype: 201,
+                            style: 10,
+                            action: None,
+                            extensions: Extensions::new(),
+                        }],
+                        extensions: Extensions::new(),
+                    }],
+                    extensions: Extensions::new(),
+                }],
+                next: Some(tuneweave_core::RecommendationFeedCursor {
+                    page: request.page.saturating_add(1),
+                    direction: RecommendationFeedDirection::Forward,
+                    loaded_count,
+                    seen_ids,
+                }),
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -26684,6 +26860,55 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn recommendation_feed_preserves_multi_field_continuation_and_typed_cards() {
+        let (status, feed) = json_response_from(
+            test_app_with_provider(),
+            "/v1/recommendations/feed?platform=netease&account=listener&page=3&direction=next&s_num=2&v_cache=%5B%22301%22%2C302%5D",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(feed["data"]["page"], 3);
+        assert_eq!(feed["data"]["direction"], "forward");
+        assert_eq!(feed["data"]["loaded_count"], 3);
+        assert_eq!(feed["data"]["shelves"][0]["id"], 301);
+        assert_eq!(
+            feed["data"]["shelves"][0]["niches"][0]["cards"][0]["kind"],
+            "track"
+        );
+        assert_eq!(
+            feed["data"]["shelves"][0]["niches"][0]["cards"][0]["ref"],
+            "netease:185809"
+        );
+        assert_eq!(feed["data"]["next"]["page"], 4);
+        assert_eq!(feed["data"]["next"]["direction"], "forward");
+        assert_eq!(feed["data"]["next"]["loaded_count"], 3);
+        assert_eq!(feed["data"]["next"]["seen_ids"][0], "301");
+        assert_eq!(feed["data"]["next"]["seen_ids"][1], "302");
+        assert_eq!(feed["data"]["extensions"]["account"], "listener");
+        assert_eq!(feed["meta"]["platform"], "netease");
+        assert_eq!(feed["meta"]["account"], "listener");
+    }
+
+    #[tokio::test]
+    async fn recommendation_feed_rejects_invalid_state_and_unknown_fields() {
+        for path in [
+            "/v1/recommendations/feed?page=0",
+            "/v1/recommendations/feed?direction=backward",
+            "/v1/recommendations/feed?loaded_count=invalid",
+            "/v1/recommendations/feed?seen_ids=",
+            "/v1/recommendations/feed?seen_ids=%5B",
+            "/v1/recommendations/feed?seen_ids=%5B%7B%7D%5D",
+            "/v1/recommendations/feed?seen_ids=301,,302",
+            "/v1/recommendations/feed?platform=unknown",
+            "/v1/recommendations/feed?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

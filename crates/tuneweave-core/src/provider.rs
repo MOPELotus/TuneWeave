@@ -43,14 +43,14 @@ use crate::{
     ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
     RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, ResolutionStatus, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
-    SearchTrendingRequest, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
-    StreamBatch, StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackDetailBatchRequest, TrackEntitlement, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    RecommendationFeed, RecommendationFeedRequest, RecommendationRequest, ResolutionStatus, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingList, SearchTrendingRequest, SimilarArtistList, SimilarArtistRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement, TuneWeaveError, User,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
     VideoTaxonomyRequest,
 };
@@ -1249,6 +1249,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Recommendations,
+        ))
+    }
+
+    async fn recommendation_feed(
+        &self,
+        _request: &RecommendationFeedRequest,
+    ) -> Result<RecommendationFeed> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationFeed,
         ))
     }
 

@@ -29,7 +29,10 @@ use tuneweave_core::{
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
     PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
     PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
+    RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
+    RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf, ResourceRef,
+    Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
@@ -52,6 +55,8 @@ const SEARCH_MODULE: &str = "music.search.SearchCgiService";
 const SEARCH_METHOD: &str = "DoSearchForQQMusicMobile";
 const GENERAL_SEARCH_MODULE: &str = "music.adaptor.SearchAdaptor";
 const GENERAL_SEARCH_METHOD: &str = "do_search_v2";
+const RECOMMENDATION_FEED_MODULE: &str = "music.recommend.RecommendFeed";
+const RECOMMENDATION_FEED_METHOD: &str = "get_recommend_feed";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -631,6 +636,128 @@ struct QqGeneralSearchBody {
 struct QqGeneralSearchResponse {
     meta: QqGeneralSearchMeta,
     body: QqGeneralSearchBody,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqRecommendationFeedAction {
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    scheme: Option<String>,
+    #[serde(default, rename = "jumptype", deserialize_with = "deserialize_qq_i64")]
+    jump_type: i64,
+    #[serde(
+        default,
+        rename = "button_type",
+        deserialize_with = "deserialize_qq_i64"
+    )]
+    button_type: i64,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRecommendationFeedCard {
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    id: Option<String>,
+    #[serde(rename = "type", deserialize_with = "deserialize_qq_i64")]
+    type_code: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    subtype: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    style: i64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    subtitle: String,
+    #[serde(default)]
+    cover: String,
+    #[serde(
+        default,
+        rename = "cnt",
+        deserialize_with = "deserialize_qq_optional_u64"
+    )]
+    count: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_qq_optional_string")]
+    scheme: Option<String>,
+    #[serde(default, rename = "jumptype", deserialize_with = "deserialize_qq_i64")]
+    jump_type: i64,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRecommendationFeedNiche {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default)]
+    title_template: String,
+    #[serde(default)]
+    title_content: String,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    style: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    sub_style: i64,
+    #[serde(default)]
+    more: Option<QqRecommendationFeedAction>,
+    #[serde(
+        rename = "v_card",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    cards: Vec<QqRecommendationFeedCard>,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRecommendationFeedShelf {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    #[serde(default)]
+    title_template: String,
+    #[serde(default)]
+    title_content: String,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    style: i64,
+    #[serde(
+        default,
+        rename = "expire",
+        deserialize_with = "deserialize_qq_optional_u64"
+    )]
+    expires_in_seconds: Option<u64>,
+    #[serde(default)]
+    more: Option<QqRecommendationFeedAction>,
+    #[serde(
+        rename = "v_niche",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    niches: Vec<QqRecommendationFeedNiche>,
+    #[serde(flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRecommendationFeedResponse {
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    retcode: i64,
+    msg: String,
+    prompt: String,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    d_num: i64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    load_mark: i64,
+    #[serde(
+        rename = "v_shelf",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    shelves: Vec<QqRecommendationFeedShelf>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2798,6 +2925,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchMixed,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
+            Capability::RecommendationFeed,
             Capability::UserProfileModern,
             Capability::ChartCatalog,
             Capability::ChartTracks,
@@ -2910,6 +3038,22 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ general search returned no response"))?;
         map_qq_general_search(request, &search_id, response)
+    }
+
+    async fn recommendation_feed(
+        &self,
+        request: &RecommendationFeedRequest,
+    ) -> Result<RecommendationFeed> {
+        let (api_request, seen_ids) = qq_recommendation_feed_request(request)?;
+        self.validate_public_account(request.account.as_deref())?;
+        let response = self
+            .client
+            .request_android(&[api_request])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ recommendation feed returned no response"))?;
+        map_qq_recommendation_feed(request, seen_ids, response)
     }
 
     async fn search_suggestions(
@@ -5261,6 +5405,319 @@ fn map_qq_general_direct_item(raw: Value) -> Result<SearchOpaqueItem> {
         title,
         extensions: Extensions::from([("response".to_owned(), raw)]),
     })
+}
+
+fn qq_recommendation_feed_request(
+    request: &RecommendationFeedRequest,
+) -> Result<(QqApiRequest, Vec<String>)> {
+    if request.page == 0 {
+        return Err(
+            TuneWeaveError::invalid_request("QQ recommendation feed page must start at 1")
+                .with_platform(Platform::Qq),
+        );
+    }
+    let seen_ids = validate_qq_recommendation_seen_ids(&request.seen_ids)?;
+    let direction = match request.direction {
+        RecommendationFeedDirection::Initial => 0,
+        RecommendationFeedDirection::Forward => 1,
+    };
+    let mut param = json!({
+        "direction": direction,
+        "page": request.page,
+        "s_num": request.loaded_count
+    });
+    if !seen_ids.is_empty() {
+        param["v_cache"] = json!(seen_ids);
+    }
+    Ok((
+        QqApiRequest::new(
+            RECOMMENDATION_FEED_MODULE,
+            RECOMMENDATION_FEED_METHOD,
+            param,
+        ),
+        seen_ids,
+    ))
+}
+
+fn validate_qq_recommendation_seen_ids(seen_ids: &[String]) -> Result<Vec<String>> {
+    if seen_ids.len() > 2_048 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommendation feed seen_ids cannot contain more than 2048 entries",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let mut unique = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(seen_ids.len());
+    for id in seen_ids {
+        let id = id.trim();
+        if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ recommendation feed contains an invalid seen shelf ID",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if unique.insert(id.to_owned()) {
+            normalized.push(id.to_owned());
+        }
+    }
+    let encoded = serde_json::to_vec(&normalized).map_err(|_| {
+        TuneWeaveError::invalid_request("QQ recommendation feed seen_ids are not valid JSON")
+            .with_platform(Platform::Qq)
+    })?;
+    if encoded.len() > 65_536 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ recommendation feed seen_ids cannot exceed 65536 bytes",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(normalized)
+}
+
+fn map_qq_recommendation_feed(
+    request: &RecommendationFeedRequest,
+    seen_ids: Vec<String>,
+    response: QqApiResponse,
+) -> Result<RecommendationFeed> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqRecommendationFeedResponse>(response_data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ recommendation feed response is malformed: {error}"
+            ))
+        })?;
+    if parsed.retcode != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ recommendation feed was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": parsed.retcode,
+            "platform_message": parsed.msg
+        })));
+    }
+    let QqRecommendationFeedResponse {
+        msg,
+        prompt,
+        d_num,
+        load_mark,
+        shelves: raw_shelves,
+        extra,
+        ..
+    } = parsed;
+    let shelf_count = u32::try_from(raw_shelves.len())
+        .map_err(|_| qq_data_error("QQ recommendation feed returned too many shelves"))?;
+    let loaded_count = request
+        .loaded_count
+        .checked_add(shelf_count)
+        .ok_or_else(|| qq_data_error("QQ recommendation feed loaded count overflowed"))?;
+    let mut accumulated_seen_ids = seen_ids;
+    let mut seen = accumulated_seen_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut made_progress = false;
+    for shelf in &raw_shelves {
+        let shelf_id = shelf.id.to_string();
+        if seen.insert(shelf_id.clone()) {
+            accumulated_seen_ids.push(shelf_id);
+            made_progress = true;
+        }
+    }
+    let shelves = raw_shelves
+        .into_iter()
+        .map(map_qq_recommendation_shelf)
+        .collect::<Result<Vec<_>>>()?;
+    let next = if shelves.is_empty() || !made_progress {
+        None
+    } else {
+        Some(RecommendationFeedCursor {
+            page: request
+                .page
+                .checked_add(1)
+                .ok_or_else(|| qq_data_error("QQ recommendation feed page overflowed"))?,
+            direction: RecommendationFeedDirection::Forward,
+            loaded_count,
+            seen_ids: accumulated_seen_ids,
+        })
+    };
+    Ok(RecommendationFeed {
+        page: request.page,
+        direction: request.direction,
+        loaded_count,
+        prompt,
+        message: msg,
+        batch_count: d_num,
+        load_mark,
+        shelves,
+        next,
+        extensions: Extensions::from([
+            (
+                "requested_loaded_count".to_owned(),
+                json!(request.loaded_count),
+            ),
+            ("requested_seen_ids".to_owned(), json!(request.seen_ids)),
+            ("extra".to_owned(), json!(extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_recommendation_shelf(
+    shelf: QqRecommendationFeedShelf,
+) -> Result<RecommendationFeedShelf> {
+    Ok(RecommendationFeedShelf {
+        id: shelf.id,
+        title_template: shelf.title_template.trim().to_owned(),
+        title: shelf.title_content.trim().to_owned(),
+        style: shelf.style,
+        expires_in_seconds: shelf.expires_in_seconds,
+        action: shelf.more.map(map_qq_recommendation_action).transpose()?,
+        niches: shelf
+            .niches
+            .into_iter()
+            .map(map_qq_recommendation_niche)
+            .collect::<Result<Vec<_>>>()?,
+        extensions: Extensions::new(),
+    })
+}
+
+fn map_qq_recommendation_niche(
+    niche: QqRecommendationFeedNiche,
+) -> Result<RecommendationFeedNiche> {
+    Ok(RecommendationFeedNiche {
+        id: niche.id,
+        title_template: niche.title_template.trim().to_owned(),
+        title: niche.title_content.trim().to_owned(),
+        style: niche.style,
+        sub_style: niche.sub_style,
+        action: niche.more.map(map_qq_recommendation_action).transpose()?,
+        cards: niche
+            .cards
+            .into_iter()
+            .map(map_qq_recommendation_card)
+            .collect::<Result<Vec<_>>>()?,
+        extensions: Extensions::new(),
+    })
+}
+
+fn map_qq_recommendation_card(card: QqRecommendationFeedCard) -> Result<RecommendationFeedCard> {
+    let id = card
+        .id
+        .as_deref()
+        .map(validate_qq_recommendation_id)
+        .transpose()?
+        .map(str::to_owned);
+    let kind = match card.type_code {
+        200 => RecommendationFeedCardKind::Track,
+        400 => RecommendationFeedCardKind::Album,
+        500 => RecommendationFeedCardKind::Playlist,
+        1_000 => RecommendationFeedCardKind::Chart,
+        700 | 900 => RecommendationFeedCardKind::Feature,
+        _ => RecommendationFeedCardKind::Unknown,
+    };
+    let resource_ref = match (kind, id.as_deref().filter(|id| *id != "0")) {
+        (RecommendationFeedCardKind::Track, Some(id)) => Some(qq_ref(id, "feed track")?),
+        (RecommendationFeedCardKind::Album, Some(id)) => Some(qq_ref(id, "feed album")?),
+        (RecommendationFeedCardKind::Playlist, Some(id)) => Some(qq_ref(id, "feed playlist")?),
+        (RecommendationFeedCardKind::Chart, Some(id)) => {
+            Some(qq_ref(&format!("chart:{id}"), "feed chart")?)
+        }
+        _ => None,
+    };
+    let cover_url = first_qq_display_url(&[(&card.cover, "recommendation card cover")])?;
+    let scheme = card
+        .scheme
+        .as_deref()
+        .map(validate_qq_recommendation_scheme)
+        .transpose()?;
+    let action = (scheme.is_some() || card.jump_type != 0).then(|| RecommendationFeedAction {
+        id: None,
+        title: None,
+        scheme,
+        jump_type: (card.jump_type != 0).then_some(card.jump_type),
+        button_type: None,
+        extensions: Extensions::new(),
+    });
+    Ok(RecommendationFeedCard {
+        id,
+        kind,
+        resource_ref,
+        title: normalized_qq_text(&card.title),
+        subtitle: normalized_qq_text(&card.subtitle),
+        cover_url,
+        count: card.count,
+        type_code: card.type_code,
+        subtype: card.subtype,
+        style: card.style,
+        action,
+        extensions: Extensions::new(),
+    })
+}
+
+fn map_qq_recommendation_action(
+    action: QqRecommendationFeedAction,
+) -> Result<RecommendationFeedAction> {
+    let id = action
+        .id
+        .as_deref()
+        .map(validate_qq_recommendation_id)
+        .transpose()?
+        .map(str::to_owned);
+    Ok(RecommendationFeedAction {
+        id,
+        title: action.title,
+        scheme: action
+            .scheme
+            .as_deref()
+            .map(validate_qq_recommendation_scheme)
+            .transpose()?,
+        jump_type: (action.jump_type != 0).then_some(action.jump_type),
+        button_type: (action.button_type != 0).then_some(action.button_type),
+        extensions: Extensions::new(),
+    })
+}
+
+fn validate_qq_recommendation_id(id: &str) -> Result<&str> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ recommendation feed returned an invalid card or action ID",
+        ));
+    }
+    Ok(id)
+}
+
+fn validate_qq_recommendation_scheme(scheme: &str) -> Result<String> {
+    let scheme = scheme.trim();
+    if scheme.is_empty() {
+        return Err(qq_data_error(
+            "QQ recommendation feed returned an empty action scheme",
+        ));
+    }
+    if scheme.len() > 8_192 || scheme.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ recommendation feed returned an invalid action scheme",
+        ));
+    }
+    let url = reqwest::Url::parse(scheme)
+        .map_err(|_| qq_data_error("QQ recommendation feed returned a malformed action scheme"))?;
+    match url.scheme() {
+        "qqmusic" if url.host_str().is_some() => {}
+        "http" | "https"
+            if url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none() => {}
+        _ => {
+            return Err(qq_data_error(
+                "QQ recommendation feed returned an unsafe action scheme",
+            ));
+        }
+    }
+    Ok(scheme.to_owned())
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<&str> {
@@ -22348,6 +22805,287 @@ mod tests {
     }
 
     #[test]
+    fn recommendation_feed_request_preserves_multi_field_state_and_stably_deduplicates_cache() {
+        let (request, seen_ids) = qq_recommendation_feed_request(&RecommendationFeedRequest {
+            page: 2,
+            direction: RecommendationFeedDirection::Forward,
+            loaded_count: 12,
+            seen_ids: vec!["301".to_owned(), "301".to_owned(), " 207 ".to_owned()],
+            account: Some("listener".to_owned()),
+        })
+        .expect("QQ recommendation feed request");
+        assert_eq!(request.module, RECOMMENDATION_FEED_MODULE);
+        assert_eq!(request.method, RECOMMENDATION_FEED_METHOD);
+        assert_eq!(request.param["direction"], 1);
+        assert_eq!(request.param["page"], 2);
+        assert_eq!(request.param["s_num"], 12);
+        assert_eq!(request.param["v_cache"], json!(["301", "207"]));
+        assert_eq!(seen_ids, ["301", "207"]);
+
+        let (initial, seen_ids) =
+            qq_recommendation_feed_request(&RecommendationFeedRequest::default())
+                .expect("initial QQ recommendation feed");
+        assert_eq!(initial.param["direction"], 0);
+        assert_eq!(initial.param["page"], 1);
+        assert_eq!(initial.param["s_num"], 0);
+        assert!(initial.param.get("v_cache").is_none());
+        assert!(seen_ids.is_empty());
+    }
+
+    #[test]
+    fn recommendation_feed_mapping_preserves_duplicate_shelves_typed_cards_and_next_state() {
+        let action = json!({
+            "id": "more-1",
+            "title": "更多",
+            "scheme": "qqmusic://qq.com/ui/home",
+            "jumptype": 3003,
+            "button_type": 1,
+            "futureActionField": true
+        });
+        let card = |id: &str, type_code: i64, title: &str| {
+            json!({
+                "id": id,
+                "type": type_code,
+                "subtype": 201,
+                "style": 10,
+                "title": title,
+                "subtitle": "副标题",
+                "cover": "https://y.gtimg.cn/feed.jpg",
+                "cnt": 42,
+                "scheme": "qqmusic://qq.com/ui/detail",
+                "jumptype": 3003,
+                "futureCardField": type_code
+            })
+        };
+        let shelf = |title: &str| {
+            json!({
+                "id": 301,
+                "title_template": "今日为你打造",
+                "title_content": title,
+                "style": 2,
+                "expire": 30,
+                "more": action.clone(),
+                "v_niche": [{
+                    "id": 203,
+                    "title_template": "推荐",
+                    "title_content": "精选",
+                    "style": 10002,
+                    "sub_style": 7,
+                    "more": action.clone(),
+                    "v_card": [
+                        card("185809", 200, "歌曲"),
+                        card("32311", 400, "专辑"),
+                        card("211111", 500, "歌单"),
+                        card("62", 1000, "榜单"),
+                        card("feature", 900, "功能入口"),
+                        card("future", 1200, "未知卡片")
+                    ],
+                    "futureNicheField": "kept"
+                }],
+                "futureShelfField": "kept"
+            })
+        };
+        let data = json!({
+            "retcode": 0,
+            "msg": "",
+            "prompt": "继续探索",
+            "d_num": 0,
+            "load_mark": 1,
+            "v_shelf": [shelf("第一层"), shelf("重复 ID 层")],
+            "futureResponseField": "kept"
+        });
+        let request = RecommendationFeedRequest {
+            page: 2,
+            direction: RecommendationFeedDirection::Forward,
+            loaded_count: 5,
+            seen_ids: vec!["old".to_owned()],
+            account: None,
+        };
+        let result = map_qq_recommendation_feed(
+            &request,
+            vec!["old".to_owned()],
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ recommendation feed");
+        assert_eq!(result.page, 2);
+        assert_eq!(result.loaded_count, 7);
+        assert_eq!(result.shelves.len(), 2);
+        assert_eq!(result.shelves[0].id, 301);
+        assert_eq!(result.shelves[1].id, 301);
+        assert_eq!(result.shelves[0].expires_in_seconds, Some(30));
+        assert_eq!(
+            result.shelves[0]
+                .action
+                .as_ref()
+                .and_then(|action| action.scheme.as_deref()),
+            Some("qqmusic://qq.com/ui/home")
+        );
+        let cards = &result.shelves[0].niches[0].cards;
+        assert_eq!(cards.len(), 6);
+        assert_eq!(cards[0].kind, RecommendationFeedCardKind::Track);
+        assert_eq!(
+            cards[0]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("qq:185809")
+        );
+        assert_eq!(cards[1].kind, RecommendationFeedCardKind::Album);
+        assert_eq!(cards[2].kind, RecommendationFeedCardKind::Playlist);
+        assert_eq!(cards[3].kind, RecommendationFeedCardKind::Chart);
+        assert_eq!(
+            cards[3]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("qq:chart:62")
+        );
+        assert_eq!(cards[4].kind, RecommendationFeedCardKind::Feature);
+        assert!(cards[4].resource_ref.is_none());
+        assert_eq!(cards[5].kind, RecommendationFeedCardKind::Unknown);
+        assert_eq!(
+            result.extensions["response"]["data"]["v_shelf"][0]["v_niche"][0]["v_card"][0]["futureCardField"],
+            200
+        );
+        let next = result.next.expect("recommendation feed continuation");
+        assert_eq!(next.page, 3);
+        assert_eq!(next.direction, RecommendationFeedDirection::Forward);
+        assert_eq!(next.loaded_count, 7);
+        assert_eq!(next.seen_ids, ["old", "301"]);
+        assert_eq!(result.extensions["extra"]["futureResponseField"], "kept");
+    }
+
+    #[test]
+    fn recommendation_feed_mapping_stops_on_empty_or_nonprogressing_shelves_and_rejects_bad_data() {
+        let request = RecommendationFeedRequest {
+            page: 2,
+            direction: RecommendationFeedDirection::Forward,
+            loaded_count: 1,
+            seen_ids: vec!["301".to_owned()],
+            account: None,
+        };
+        let feed = |shelves: Value| {
+            json!({
+                "retcode": 0,
+                "msg": "",
+                "prompt": "",
+                "d_num": 0,
+                "load_mark": 0,
+                "v_shelf": shelves
+            })
+        };
+        let duplicate = json!([{
+            "id": 301,
+            "v_niche": [],
+            "title_template": "",
+            "title_content": ""
+        }]);
+        let result =
+            map_qq_recommendation_feed(&request, vec!["301".to_owned()], response(feed(duplicate)))
+                .expect("map repeated recommendation shelf");
+        assert!(result.next.is_none());
+        let result =
+            map_qq_recommendation_feed(&request, vec!["301".to_owned()], response(feed(json!([]))))
+                .expect("map empty recommendation feed");
+        assert!(result.next.is_none());
+
+        for fixture in [
+            json!({}),
+            json!({
+                "retcode": 1000,
+                "msg": "rejected",
+                "prompt": "",
+                "d_num": 0,
+                "load_mark": 0,
+                "v_shelf": []
+            }),
+            feed(json!([{"id": "invalid", "v_niche": []}])),
+            feed(json!([{
+                "id": 302,
+                "v_niche": [{
+                    "id": 203,
+                    "v_card": [{"id": "1", "title": "missing type"}]
+                }]
+            }])),
+            feed(json!([{
+                "id": 302,
+                "v_niche": [{
+                    "id": 203,
+                    "v_card": [{
+                        "id": "1",
+                        "type": 200,
+                        "cover": "javascript:alert(1)"
+                    }]
+                }]
+            }])),
+            feed(json!([{
+                "id": 302,
+                "v_niche": [{
+                    "id": 203,
+                    "v_card": [{
+                        "id": "1",
+                        "type": 200,
+                        "scheme": "javascript:alert(1)"
+                    }]
+                }]
+            }])),
+        ] {
+            let error =
+                map_qq_recommendation_feed(&request, vec!["301".to_owned()], response(fixture))
+                    .expect_err("invalid QQ recommendation feed response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn recommendation_feed_validates_input_before_exact_optional_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::RecommendationFeed)
+        );
+        let missing = provider
+            .recommendation_feed(&RecommendationFeedRequest {
+                account: Some("missing-account".to_owned()),
+                ..RecommendationFeedRequest::default()
+            })
+            .await
+            .expect_err("missing optional recommendation feed account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing-account");
+
+        for request in [
+            RecommendationFeedRequest {
+                page: 0,
+                account: Some("missing-account".to_owned()),
+                ..RecommendationFeedRequest::default()
+            },
+            RecommendationFeedRequest {
+                seen_ids: vec![String::new()],
+                account: Some("missing-account".to_owned()),
+                ..RecommendationFeedRequest::default()
+            },
+            RecommendationFeedRequest {
+                seen_ids: vec!["unsafe\nid".to_owned()],
+                account: Some("missing-account".to_owned()),
+                ..RecommendationFeedRequest::default()
+            },
+        ] {
+            let error = provider
+                .recommendation_feed(&request)
+                .await
+                .expect_err("invalid recommendation feed input");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[test]
     fn selector_mapping_preserves_two_dimensional_catalogs_and_extra_fields() {
         let page = map_track_search_response(
             0,
@@ -22984,6 +23722,65 @@ mod tests {
         assert_eq!(second.search_id, first.search_id);
         assert_eq!(second.page, next_page);
         assert_eq!(second.sections.len(), 6);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_recommendation_feed_preserves_shelves_cards_and_continuation_state() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let first = provider
+            .recommendation_feed(&RecommendationFeedRequest::default())
+            .await
+            .expect("live QQ recommendation feed first page");
+        assert_eq!(first.page, 1);
+        assert_eq!(first.direction, RecommendationFeedDirection::Initial);
+        assert!(!first.shelves.is_empty());
+        assert!(
+            first
+                .shelves
+                .iter()
+                .flat_map(|shelf| &shelf.niches)
+                .flat_map(|niche| &niche.cards)
+                .any(|card| card.resource_ref.is_some())
+        );
+        assert_eq!(first.extensions["response"]["data"]["retcode"], 0);
+        let next = first.next.expect("home feed has continuation");
+        assert_eq!(next.page, 2);
+        assert_eq!(next.direction, RecommendationFeedDirection::Forward);
+        assert_eq!(
+            next.loaded_count,
+            u32::try_from(first.shelves.len()).expect("shelf count")
+        );
+        assert!(!next.seen_ids.is_empty());
+        assert_eq!(
+            next.seen_ids.iter().collect::<BTreeSet<_>>().len(),
+            next.seen_ids.len()
+        );
+
+        let second = provider
+            .recommendation_feed(&RecommendationFeedRequest {
+                page: next.page,
+                direction: next.direction,
+                loaded_count: next.loaded_count,
+                seen_ids: next.seen_ids.clone(),
+                account: None,
+            })
+            .await
+            .expect("live QQ recommendation feed continuation");
+        assert_eq!(second.page, 2);
+        assert_eq!(second.direction, RecommendationFeedDirection::Forward);
+        assert!(!second.shelves.is_empty());
+        assert!(second.loaded_count > first.loaded_count);
+        assert!(
+            second
+                .next
+                .as_ref()
+                .is_none_or(|cursor| cursor.seen_ids.starts_with(&next.seen_ids))
+        );
     }
 
     #[tokio::test]

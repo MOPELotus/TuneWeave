@@ -2050,6 +2050,120 @@ pub enum RecommendationSource {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RecommendationFeedDirection {
+    #[default]
+    Initial,
+    Forward,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedRequest {
+    pub page: u32,
+    pub direction: RecommendationFeedDirection,
+    pub loaded_count: u32,
+    pub seen_ids: Vec<String>,
+    pub account: Option<String>,
+}
+
+impl Default for RecommendationFeedRequest {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            direction: RecommendationFeedDirection::Initial,
+            loaded_count: 0,
+            seen_ids: Vec::new(),
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedCursor {
+    pub page: u32,
+    pub direction: RecommendationFeedDirection,
+    pub loaded_count: u32,
+    pub seen_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedAction {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub scheme: Option<String>,
+    pub jump_type: Option<i64>,
+    pub button_type: Option<i64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecommendationFeedCardKind {
+    Track,
+    Album,
+    Playlist,
+    Chart,
+    Feature,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedCard {
+    pub id: Option<String>,
+    pub kind: RecommendationFeedCardKind,
+    #[serde(rename = "ref")]
+    pub resource_ref: Option<ResourceRef>,
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub cover_url: Option<String>,
+    pub count: Option<u64>,
+    pub type_code: i64,
+    pub subtype: i64,
+    pub style: i64,
+    pub action: Option<RecommendationFeedAction>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedNiche {
+    pub id: u64,
+    pub title_template: String,
+    pub title: String,
+    pub style: i64,
+    pub sub_style: i64,
+    pub action: Option<RecommendationFeedAction>,
+    pub cards: Vec<RecommendationFeedCard>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeedShelf {
+    pub id: u64,
+    pub title_template: String,
+    pub title: String,
+    pub style: i64,
+    pub expires_in_seconds: Option<u64>,
+    pub action: Option<RecommendationFeedAction>,
+    pub niches: Vec<RecommendationFeedNiche>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationFeed {
+    pub page: u32,
+    pub direction: RecommendationFeedDirection,
+    pub loaded_count: u32,
+    pub prompt: String,
+    pub message: String,
+    pub batch_count: i64,
+    pub load_mark: i64,
+    pub shelves: Vec<RecommendationFeedShelf>,
+    pub next: Option<RecommendationFeedCursor>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoRecommendationKind {
     #[default]
     Mv,

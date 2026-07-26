@@ -136,6 +136,7 @@ pub enum Capability {
     Favorites,
     ListeningHistory,
     RecentPodcastEpisodeHistory,
+    RecommendationFeed,
     Recommendations,
     VideoRecommendations,
     PodcastEpisodeRecommendations,
