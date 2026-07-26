@@ -1093,7 +1093,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | PUT | `/v1/resources/{type}/{ref}/comments/{comment_id}/reactions/{reaction}` | `account?` | `CommentReactionMutationResult`；启用评论反应 |
 | DELETE | `/v1/resources/{type}/{ref}/comments/{comment_id}/reactions/{reaction}` | `account?` | `CommentReactionMutationResult`；停用评论反应 |
 | POST | `/v1/resources/{type}/{ref}/comments/{comment_id}/reports` | 查询参数 `account?`；JSON `{reason}` | `CommentReportResult`；举报评论 |
-| GET | `/v1/users/{ref}` | `account?`、`backend?=modern|legacy`（也接受 `variant/source`） | 指定用户的完整 `UserProfile`；引用决定平台 |
+| GET | `/v1/users/{ref}` | `account?`、`backend?=modern|legacy`（也接受 `variant/source`） | 指定用户的完整 `UserProfile`；引用决定平台；QQ 仅支持 modern 且要求查看者账户 |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/playlists/created` | 分页、`account?` | 指定用户创建的 `Playlist[]`；平台用户引用的 ID 语义由对应 provider 校验 |
 | GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
@@ -1132,6 +1132,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 本地歌曲匹配的 `md5` 必填并按 32 位十六进制校验，标题、专辑和歌手允许为空以保留参考模块的默认分支；时长省略时按参考行为使用 0。若同时提供毫秒与秒数，两者四舍五入到毫秒后必须一致。网易云固定使用未加密直连 API `/api/search/match/new`，把一项标签记录序列化进 `songs`；上游 `result.ids/songs` 分别映射为匹配 ID 和统一候选曲目，空数组原样表达无命中。
 
 用户完整资料的 `backend` 缺省为 `modern`，也接受 `new/eapi/v2`；网易云精确对应参考 `user_detail_new`，以 EAPI 调用 `/api/w/v1/user/detail/{uid}` 并提交字符串 `all=true/userId`。`backend=legacy`（也接受 `old/weapi/v1`）精确对应 `user_detail`，以空载荷 WeAPI 调用 `/api/v1/user/detail/{uid}`。两条路径共用 `UserProfile`，但通过独立能力和 `extensions.backend/response` 保留实际后端及完整响应。空包装、空文本、零时间戳不会遮蔽后续有效兼容字段，返回用户 ID 与请求不一致时按上游错误拒绝。`/v1/account/profile` 先从指定 `platform/account` 的持久登录态取得用户 ID，再以同一账户请求资料，不会借用默认账户或把登录凭据写入响应。2026-07-22 已真实验证公开 legacy/modern 及持久账户 modern 三条统一 HTTP 路径。
+
+QQ 用户资料只支持 modern 后端，固定调用 Android `music.UnifiedHomepage.UnifiedHomepageSrv/GetHomepageHeader` 并提交 `uin/IsQueryTabDetail=1`。`GET /v1/users/qq:<encrypted-uin>?account=...` 把路径中的加密 UIN 作为目标用户，显式 `account` 只选择登录查看者；`GET /v1/account/profile?platform=qq&account=...` 则把所选会话的数值 music ID 精确换成同一凭据保存的 `encryptUin`，不会混用两种身份。稳定资料包含规范用户引用、名称、安全头像/背景、关注态和粉丝/关注数；朋友/访客数、用户类型、歌手关联、标签页、提示、未知字段与完整响应保存在扩展。响应身份不一致、非法布尔标志、危险 URL、畸形必需字段和非零状态都会拒绝。参考实现的匿名分支会注入固定假 music ID/musickey；TuneWeave 不制造或发送占位凭据，2026-07-26 真实匿名请求已确认返回业务码 1000，因此两条 QQ 路径均要求真实 `(qq, account)` 登录态，成功态留待账户联合验收。
 
 会员摘要同时提供公开用户和当前账户两条统一路径。`backend` 缺省为 `front`，也接受 `public/v1`；网易云固定使用 WeAPI `/api/music-vip-membership/front/vip/info`，公开用户把引用 ID 作为 `userId`，当前账户按参考默认分支提交空字符串。`redVipLevel/redVipAnnualCount/redVipLevelIcon` 分别映射为等级、年费次数和图标；该公开接口没有可靠有效期和激活态，因此相关字段保持可空。
 

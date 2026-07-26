@@ -31,8 +31,9 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, SimilarArtistList, SimilarArtistRequest, SingingAnnotationsAvailability,
     StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrialWindow, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
+    VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -1749,6 +1750,60 @@ struct QqSingerHomepageResponse {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqUserHomepageBaseInfo {
+    #[serde(rename = "EncryptedUin")]
+    encrypted_uin: String,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Avatar")]
+    avatar: String,
+    #[serde(rename = "BackgroundImage")]
+    background_image: String,
+    #[serde(rename = "UserType", deserialize_with = "deserialize_qq_i64")]
+    user_type: i64,
+    #[serde(default, rename = "IsHost", deserialize_with = "deserialize_qq_i64")]
+    is_host: i64,
+    #[serde(default, rename = "IsSinger", deserialize_with = "deserialize_qq_i64")]
+    is_singer: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqUserHomepageInfo {
+    #[serde(rename = "BaseInfo")]
+    base_info: QqUserHomepageBaseInfo,
+    #[serde(rename = "Singer")]
+    singer: QqHomepageSinger,
+    #[serde(rename = "IsFollowed", deserialize_with = "deserialize_qq_i64")]
+    followed: i64,
+    #[serde(default, rename = "FansNum")]
+    fans: QqHomepageCounter,
+    #[serde(default, rename = "FollowNum")]
+    following: QqHomepageCounter,
+    #[serde(default, rename = "FriendsNum")]
+    friends: QqHomepageCounter,
+    #[serde(default, rename = "VisitorNum")]
+    visitors: QqHomepageCounter,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqUserHomepageResponse {
+    #[serde(rename = "Status", deserialize_with = "deserialize_qq_i64")]
+    status: i64,
+    #[serde(rename = "Info")]
+    info: QqUserHomepageInfo,
+    #[serde(rename = "TabDetail")]
+    tab_detail: QqHomepageTabDetail,
+    #[serde(default, rename = "Prompt")]
+    prompt: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct QqSingerDescriptionBasic {
     #[serde(default, rename = "singer_id", deserialize_with = "deserialize_qq_i64")]
@@ -2536,6 +2591,7 @@ impl MusicProvider for QqProvider {
             Capability::SearchRingtones,
             Capability::SearchSuggestions,
             Capability::SearchTrending,
+            Capability::UserProfileModern,
             Capability::ChartCatalog,
             Capability::ChartTracks,
             Capability::UserMembership,
@@ -3319,6 +3375,46 @@ impl MusicProvider for QqProvider {
             message: (!available).then(|| "QQ did not return a downloadable file".to_owned()),
             extensions,
         })
+    }
+
+    async fn user_profile(
+        &self,
+        id: &str,
+        backend: UserProfileBackend,
+        account: Option<&str>,
+    ) -> Result<UserProfile> {
+        if backend != UserProfileBackend::Modern {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Qq,
+                Capability::UserProfileLegacy,
+            ));
+        }
+        validate_qq_encrypted_uin(id, "homepage user identity")?;
+        let account = account
+            .map(str::trim)
+            .filter(|account| !account.is_empty())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "QQ user homepage requires an explicit viewer account",
+                )
+                .with_platform(Platform::Qq)
+            })?;
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let encrypted_uin = qq_user_homepage_target(id, Some(&credential))?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_user_homepage_request(encrypted_uin)?],
+                Some(&credential),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ user homepage request returned no response"))?;
+        map_qq_user_homepage(encrypted_uin, response)
     }
 
     async fn user_membership(
@@ -5237,6 +5333,31 @@ fn qq_singer_homepage_request(mid: &str) -> Result<QqApiRequest> {
         SINGER_HOMEPAGE_METHOD,
         json!({ "SingerMid": mid }),
     ))
+}
+
+fn qq_user_homepage_request(encrypted_uin: &str) -> Result<QqApiRequest> {
+    let encrypted_uin = validate_qq_encrypted_uin(encrypted_uin, "user encrypted UIN")?;
+    Ok(QqApiRequest::new(
+        SINGER_HOMEPAGE_MODULE,
+        SINGER_HOMEPAGE_METHOD,
+        json!({
+            "uin": encrypted_uin,
+            "IsQueryTabDetail": 1
+        }),
+    ))
+}
+
+fn qq_user_homepage_target<'a>(
+    id: &'a str,
+    credential: Option<&'a QqCredential>,
+) -> Result<&'a str> {
+    let requested_id = validate_qq_encrypted_uin(id, "homepage user identity")?;
+    match credential {
+        Some(credential) if requested_id == credential.string_music_id() => {
+            qq_encrypted_uin(credential)
+        }
+        _ => Ok(requested_id),
+    }
 }
 
 fn qq_singer_catalog_request(
@@ -7475,6 +7596,115 @@ fn map_qq_singer_catalog_item(item: QqSingerCatalogItem, context: &str) -> Resul
         video_count: None,
         identities: Vec::new(),
         extensions,
+    })
+}
+
+fn map_qq_user_homepage(
+    requested_encrypted_uin: &str,
+    response: QqApiResponse,
+) -> Result<UserProfile> {
+    let homepage =
+        serde_json::from_value::<QqUserHomepageResponse>(response.data).map_err(|error| {
+            qq_data_error(format!("QQ user homepage response is malformed: {error}"))
+        })?;
+    if homepage.status != 0 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("QQ user homepage failed with status {}", homepage.status),
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({ "platform_status": homepage.status })));
+    }
+    let base = &homepage.info.base_info;
+    let encrypted_uin =
+        validate_qq_encrypted_uin(base.encrypted_uin.trim(), "homepage response encrypted UIN")
+            .map_err(|_| qq_data_error("QQ user homepage returned an invalid encrypted UIN"))?;
+    if encrypted_uin != requested_encrypted_uin {
+        return Err(qq_data_error(
+            "QQ user homepage returned a different encrypted UIN",
+        ));
+    }
+    let name = base.name.trim();
+    if name.is_empty() {
+        return Err(qq_data_error(
+            "QQ user homepage is missing its display name",
+        ));
+    }
+    if base.user_type < 0 {
+        return Err(qq_data_error(
+            "QQ user homepage returned a negative user type",
+        ));
+    }
+    let followed = match homepage.info.followed {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(qq_data_error(
+                "QQ user homepage returned an invalid followed flag",
+            ));
+        }
+    };
+    for (field, value) in [("IsHost", base.is_host), ("IsSinger", base.is_singer)] {
+        if !matches!(value, 0 | 1) {
+            return Err(qq_data_error(format!(
+                "QQ user homepage returned an invalid {field} flag"
+            )));
+        }
+    }
+    let avatar_url = first_qq_display_url(&[(base.avatar.as_str(), "homepage avatar")])?;
+    let background_url =
+        first_qq_display_url(&[(base.background_image.as_str(), "homepage background image")])?;
+    let info_data = serde_json::to_value(&homepage.info)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ user homepage info"))?;
+    let tab_data = serde_json::to_value(&homepage.tab_detail)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ user homepage tabs"))?;
+    let prompt_data = serde_json::to_value(&homepage.prompt)
+        .map_err(|_| qq_data_error("failed to preserve typed QQ user homepage prompt"))?;
+    let user_extensions = Extensions::from([
+        ("user_type".to_owned(), json!(base.user_type)),
+        ("is_host".to_owned(), json!(base.is_host == 1)),
+        ("is_singer".to_owned(), json!(base.is_singer == 1)),
+        (
+            "friend_count".to_owned(),
+            json!(homepage.info.friends.count),
+        ),
+        (
+            "visitor_count".to_owned(),
+            json!(homepage.info.visitors.count),
+        ),
+        ("singer".to_owned(), json!(homepage.info.singer)),
+    ]);
+    Ok(UserProfile {
+        user: User {
+            resource_ref: qq_ref(encrypted_uin, "user")?,
+            platform: Platform::Qq,
+            id: encrypted_uin.to_owned(),
+            name: name.to_owned(),
+            avatar_url,
+            signature: None,
+            followed: Some(followed),
+            mutual: None,
+            extensions: user_extensions,
+        },
+        level: None,
+        listened_track_count: None,
+        playlist_count: None,
+        playlist_subscriber_count: None,
+        following_count: Some(homepage.info.following.count),
+        follower_count: Some(homepage.info.fans.count),
+        event_count: None,
+        birthday: None,
+        created_at: None,
+        background_url,
+        description: None,
+        public_listening_history: None,
+        extensions: Extensions::from([
+            ("backend".to_owned(), json!(UserProfileBackend::Modern)),
+            ("info".to_owned(), info_data),
+            ("tab_detail".to_owned(), tab_data),
+            ("prompt".to_owned(), prompt_data),
+            ("response".to_owned(), response.raw),
+        ]),
     })
 }
 
@@ -14629,6 +14859,164 @@ mod tests {
         )
         .expect_err("QQ singer totals changed between windows");
         assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn user_homepage_request_and_current_account_identity_follow_the_real_contract() {
+        let request =
+            qq_user_homepage_request(" opaque-public-user-id ").expect("user homepage request");
+        assert_eq!(request.module, SINGER_HOMEPAGE_MODULE);
+        assert_eq!(request.method, SINGER_HOMEPAGE_METHOD);
+        assert_eq!(
+            request.param,
+            json!({"uin": "opaque-public-user-id", "IsQueryTabDetail": 1})
+        );
+        assert!(request.param.get("SingerMid").is_none());
+
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "encryptUin": "current-encrypted-uin",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        assert_eq!(
+            qq_user_homepage_target("123456", Some(&credential)).expect("current account"),
+            "current-encrypted-uin"
+        );
+        assert_eq!(
+            qq_user_homepage_target("other-encrypted-uin", Some(&credential)).expect("other user"),
+            "other-encrypted-uin"
+        );
+        assert_eq!(
+            qq_user_homepage_target("anonymous-encrypted-uin", None).expect("anonymous user"),
+            "anonymous-encrypted-uin"
+        );
+        for invalid in ["", "bad\nuser"] {
+            assert!(qq_user_homepage_request(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn user_homepage_mapping_preserves_identity_counts_images_and_unknown_fields() {
+        let profile = map_qq_user_homepage(
+            "opaque-public-user-id",
+            response(sample_singer_homepage("0025NhlN2yWrP4")),
+        )
+        .expect("map QQ user homepage");
+        assert_eq!(
+            profile.user.resource_ref.to_string(),
+            "qq:opaque-public-user-id"
+        );
+        assert_eq!(profile.user.id, "opaque-public-user-id");
+        assert_eq!(profile.user.name, "周杰伦");
+        assert_eq!(profile.user.followed, Some(true));
+        assert_eq!(profile.follower_count, Some(50_540_499));
+        assert_eq!(profile.following_count, Some(3));
+        assert_eq!(profile.playlist_count, None);
+        assert!(
+            profile
+                .user
+                .avatar_url
+                .as_deref()
+                .is_some_and(|url| url == "https://y.qq.com/singer/avatar.jpg")
+        );
+        assert_eq!(
+            profile.background_url.as_deref(),
+            Some("https://y.gtimg.cn/singer/background.jpg")
+        );
+        assert_eq!(profile.user.extensions["is_singer"], true);
+        assert_eq!(profile.user.extensions["friend_count"], 2);
+        assert_eq!(profile.user.extensions["visitor_count"], 9);
+        assert_eq!(profile.user.extensions["singer"]["futureSingerField"], true);
+        assert_eq!(profile.extensions["backend"], "modern");
+        assert_eq!(profile.extensions["info"]["futureInfoField"]["kept"], true);
+        assert_eq!(profile.extensions["tab_detail"]["futureTabField"], "kept");
+        assert_eq!(profile.extensions["prompt"]["futurePromptField"], true);
+        assert_eq!(profile.extensions["response"]["code"], 0);
+    }
+
+    #[test]
+    fn user_homepage_mapping_rejects_status_identity_flags_and_unsafe_fields() {
+        let valid = || sample_singer_homepage("0025NhlN2yWrP4");
+        let mut fixtures = Vec::new();
+        for (pointer, value) in [
+            ("/Status", json!(1)),
+            ("/Info/BaseInfo/EncryptedUin", json!("different-user")),
+            ("/Info/BaseInfo/Name", json!("")),
+            ("/Info/BaseInfo/Avatar", json!("javascript:alert(1)")),
+            ("/Info/BaseInfo/BackgroundImage", json!("file:///secret")),
+            ("/Info/BaseInfo/UserType", json!(-1)),
+            ("/Info/BaseInfo/IsHost", json!(2)),
+            ("/Info/BaseInfo/IsSinger", json!(-1)),
+            ("/Info/IsFollowed", json!(3)),
+            ("/Info/Singer", json!(null)),
+            ("/TabDetail", json!([])),
+        ] {
+            let mut fixture = valid();
+            *fixture
+                .pointer_mut(pointer)
+                .unwrap_or_else(|| panic!("fixture pointer {pointer}")) = value;
+            fixtures.push(fixture);
+        }
+        let mut missing_encrypted = valid();
+        missing_encrypted["Info"]["BaseInfo"]
+            .as_object_mut()
+            .expect("base info")
+            .remove("EncryptedUin");
+        fixtures.push(missing_encrypted);
+
+        for fixture in fixtures {
+            let error = map_qq_user_homepage("opaque-public-user-id", response(fixture))
+                .expect_err("invalid QQ user homepage response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn user_homepage_rejects_unsupported_backend_and_missing_account_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::UserProfileModern)
+        );
+        assert!(
+            !provider
+                .capabilities()
+                .contains(&Capability::UserProfileLegacy)
+        );
+        let legacy = provider
+            .user_profile("opaque-public-user-id", UserProfileBackend::Legacy, None)
+            .await
+            .expect_err("QQ has no separate legacy homepage backend");
+        assert_eq!(legacy.code, ErrorCode::CapabilityNotSupported);
+
+        let no_account = provider
+            .user_profile("opaque-public-user-id", UserProfileBackend::Modern, None)
+            .await
+            .expect_err("QQ homepage must not inject placeholder credentials");
+        assert_eq!(no_account.code, ErrorCode::AuthenticationRequired);
+
+        let missing_account = provider
+            .user_profile(
+                "opaque-public-user-id",
+                UserProfileBackend::Modern,
+                Some("missing-account"),
+            )
+            .await
+            .expect_err("missing viewer account rejected before network");
+        assert_eq!(missing_account.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing_account.details["account"], "missing-account");
+
+        let invalid_id = provider
+            .user_profile("bad\nuser", UserProfileBackend::Modern, None)
+            .await
+            .expect_err("invalid homepage identity rejected before network");
+        assert_eq!(invalid_id.code, ErrorCode::InvalidRequest);
     }
 
     #[test]
