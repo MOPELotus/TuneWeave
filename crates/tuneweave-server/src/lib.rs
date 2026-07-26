@@ -585,7 +585,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/account/dislikes",
-            get(account_dislikes).post(account_dislikes_add),
+            get(account_dislikes)
+                .post(account_dislikes_add)
+                .delete(account_dislikes_remove),
         )
         .route("/account/following/artists", get(account_following_artists))
         .route(
@@ -11311,6 +11313,34 @@ async fn account_dislikes_add(
     ))
 }
 
+async fn account_dislikes_remove(
+    State(state): State<AppState>,
+    payload: Result<Json<AccountDislikeMutationBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = account_platform(&state, body.platform.as_deref())?;
+    let account = account_alias(body.account.as_deref())?;
+    let kind = parse_account_dislike_mutation_kind(
+        body.kind.as_ref(),
+        body.resource_type.as_ref(),
+        body.id_type.as_ref(),
+    )?;
+    let ids = parse_account_dislike_mutation_ids(body.ids, body.values)?;
+    let provider = state.registry.require(platform)?;
+    let result = provider
+        .remove_account_dislikes(&AccountDislikeMutationRequest {
+            kind,
+            ids,
+            account: Some(account.clone()),
+        })
+        .await?;
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(platform)
+            .with_account(account),
+    ))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccountFollowingArtistParams {
@@ -15397,6 +15427,20 @@ mod tests {
                 platform: self.platform(),
                 kind: request.kind,
                 action: tuneweave_core::AccountDislikeMutationAction::Add,
+                ids: request.ids.clone(),
+                applied: true,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn remove_account_dislikes(
+            &self,
+            request: &AccountDislikeMutationRequest,
+        ) -> Result<AccountDislikeMutationResult> {
+            Ok(AccountDislikeMutationResult {
+                platform: self.platform(),
+                kind: request.kind,
+                action: tuneweave_core::AccountDislikeMutationAction::Remove,
                 ids: request.ids.clone(),
                 applied: true,
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
@@ -25745,6 +25789,50 @@ mod tests {
             let (status, response) = json_request_from(
                 test_app_with_provider(),
                 Method::POST,
+                "/v1/account/dislikes",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_dislike_remove_reuses_the_typed_batch_contract() {
+        let (status, tracks) = json_request_from(
+            test_app_with_provider(),
+            Method::DELETE,
+            "/v1/account/dislikes",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "id_type": 1,
+                "values": [398282803, "7", 398282803]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"]["platform"], "netease");
+        assert_eq!(tracks["data"]["kind"], "track");
+        assert_eq!(tracks["data"]["action"], "remove");
+        assert_eq!(
+            tracks["data"]["ids"],
+            json!(["398282803", "7", "398282803"])
+        );
+        assert_eq!(tracks["data"]["applied"], true);
+        assert_eq!(tracks["meta"]["account"], "personal");
+
+        for body in [
+            json!({"platform": "netease", "kind": "track"}),
+            json!({"platform": "netease", "kind": "track", "ids": []}),
+            json!({"platform": "netease", "type": "track", "id_type": 1, "ids": [1]}),
+            json!({"platform": "netease", "type": 4, "ids": [1]}),
+            json!({"platform": "netease", "kind": "track", "ids": [1], "unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                test_app_with_provider(),
+                Method::DELETE,
                 "/v1/account/dislikes",
                 Some(body),
             )

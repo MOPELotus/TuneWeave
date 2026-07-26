@@ -1298,6 +1298,16 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn remove_account_dislikes(
+        &self,
+        _request: &AccountDislikeMutationRequest,
+    ) -> Result<AccountDislikeMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountDislikeWrite,
+        ))
+    }
+
     async fn lyrics(&self, _id: &str, _account: Option<&str>) -> Result<Lyrics> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

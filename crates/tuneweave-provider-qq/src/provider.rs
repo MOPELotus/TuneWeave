@@ -80,6 +80,7 @@ const FOLLOWED_SINGER_METHOD: &str = "GetFollowSingerList";
 const DISLIKE_MODULE: &str = "music.feedback.FeedbackBlack";
 const DISLIKE_LIST_METHOD: &str = "GetDislikeList";
 const DISLIKE_ADD_METHOD: &str = "AddDislike";
+const DISLIKE_CANCEL_METHOD: &str = "CancelDislike";
 const SINGER_HOMEPAGE_MODULE: &str = "music.UnifiedHomepage.UnifiedHomepageSrv";
 const SINGER_HOMEPAGE_METHOD: &str = "GetHomepageHeader";
 const SINGER_HOMEPAGE_TAB_METHOD: &str = "GetHomepageTabDetail";
@@ -3848,6 +3849,30 @@ impl MusicProvider for QqProvider {
         map_qq_dislike_mutation(
             request.kind,
             AccountDislikeMutationAction::Add,
+            normalized_ids,
+            response,
+        )
+    }
+
+    async fn remove_account_dislikes(
+        &self,
+        request: &AccountDislikeMutationRequest,
+    ) -> Result<AccountDislikeMutationResult> {
+        let (api_request, normalized_ids) = qq_dislike_remove_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let credential = self
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        let response = self
+            .client
+            .request_android_with_credential(&[api_request], Some(&credential))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ cancel dislike request returned no response"))?;
+        map_qq_dislike_mutation(
+            request.kind,
+            AccountDislikeMutationAction::Remove,
             normalized_ids,
             response,
         )
@@ -10155,10 +10180,24 @@ fn qq_dislike_list_request(request: &AccountDislikeListRequest) -> Result<QqApiR
 fn qq_dislike_add_request(
     request: &AccountDislikeMutationRequest,
 ) -> Result<(QqApiRequest, Vec<String>)> {
+    qq_dislike_mutation_request(request, DISLIKE_ADD_METHOD, "add")
+}
+
+fn qq_dislike_remove_request(
+    request: &AccountDislikeMutationRequest,
+) -> Result<(QqApiRequest, Vec<String>)> {
+    qq_dislike_mutation_request(request, DISLIKE_CANCEL_METHOD, "cancel")
+}
+
+fn qq_dislike_mutation_request(
+    request: &AccountDislikeMutationRequest,
+    method: &'static str,
+    operation: &str,
+) -> Result<(QqApiRequest, Vec<String>)> {
     if request.ids.is_empty() {
-        return Err(TuneWeaveError::invalid_request(
-            "QQ add dislike request must contain at least one ID",
-        )
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ {operation} dislike request must contain at least one ID"
+        ))
         .with_platform(Platform::Qq));
     }
     let (_, _, id_type) = qq_dislike_kind_contract(request.kind);
@@ -10179,7 +10218,7 @@ fn qq_dislike_add_request(
     let mut param = serde_json::Map::new();
     param.insert(container.to_owned(), Value::Array(items));
     Ok((
-        QqApiRequest::new(DISLIKE_MODULE, DISLIKE_ADD_METHOD, Value::Object(param)),
+        QqApiRequest::new(DISLIKE_MODULE, method, Value::Object(param)),
         normalized_ids,
     ))
 }
@@ -18610,6 +18649,21 @@ mod tests {
                     {"ID": "398282803", "IdType": id_type}
                 ])
             );
+
+            let (cancel, cancel_ids) = qq_dislike_remove_request(&AccountDislikeMutationRequest {
+                kind,
+                ids: vec![
+                    "398282803".to_owned(),
+                    "0007".to_owned(),
+                    "398282803".to_owned(),
+                ],
+                account: Some("personal".to_owned()),
+            })
+            .expect("QQ cancel dislike request");
+            assert_eq!(cancel.module, DISLIKE_MODULE);
+            assert_eq!(cancel.method, DISLIKE_CANCEL_METHOD);
+            assert_eq!(cancel_ids, ids);
+            assert_eq!(cancel.param, request.param);
         }
 
         for ids in [
@@ -18655,6 +18709,18 @@ mod tests {
             true
         );
         assert_eq!(result.extensions["response"]["code"], 0);
+
+        let removed = map_qq_dislike_mutation(
+            AccountDislikeKind::Style,
+            AccountDislikeMutationAction::Remove,
+            vec!["7".to_owned()],
+            response(json!({"Retcode": 0, "Msg": ""})),
+        )
+        .expect("QQ cancel dislike result");
+        assert_eq!(removed.kind, AccountDislikeKind::Style);
+        assert_eq!(removed.action, AccountDislikeMutationAction::Remove);
+        assert_eq!(removed.ids, vec!["7".to_owned()]);
+        assert!(removed.applied);
 
         for fixture in [
             json!({}),
@@ -18728,6 +18794,31 @@ mod tests {
             })
             .await
             .expect_err("invalid ID rejected before account lookup");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn dislike_remove_validates_ids_and_exact_account_before_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let missing = provider
+            .remove_account_dislikes(&AccountDislikeMutationRequest {
+                kind: AccountDislikeKind::Artist,
+                ids: vec!["4558".to_owned()],
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("missing exact account rejected");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(missing.details["account"], "missing");
+
+        let invalid = provider
+            .remove_account_dislikes(&AccountDislikeMutationRequest {
+                kind: AccountDislikeKind::Artist,
+                ids: Vec::new(),
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("empty ID list rejected before account lookup");
         assert_eq!(invalid.code, ErrorCode::InvalidRequest);
     }
 
