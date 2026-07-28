@@ -19,24 +19,30 @@ TuneWeave 采用 `MIT OR Apache-2.0`。项目不复制、翻译、链接、打�
 
 许可证和授权说明见 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。
 
-## 完整覆盖原则
+## 项目范围与扩展候选
 
-参考项目中属于 TuneWeave 范围的公开 API 必须逐项得到以下结果之一：
+参考项目是协议事实来源，不是 TuneWeave 的功能分母。只有能直接增强媒体检索、整理、播放或必要账户体验的能力进入平台项目范围，并逐项得到以下结果之一：
 
 1. 映射到稳定统一端点；
 2. 因缺少合理跨平台语义而映射到 `/v1/extensions/{platform}`；
 3. 经真实请求确认上游失效，并保留稳定错误和兼容说明。
 
-平台特有、低频或难以统一不是遗漏理由。已知响应结构使用强类型模型；无法预知的扩展字段可以有界保留，但不能长期用裸 JSON 代替已知结构。覆盖账本：
+范围内的低频或平台特有分支不能静默遗漏。范围外接口可以登记到平台功能扩展候选池，但候选项不构成实施承诺、完成率或平台欠账；只有出现明确需求时才选择实施。已知响应结构使用强类型模型；无法预知的扩展字段可以有界保留，但不能长期用裸 JSON 代替已知结构。
 
-- [网易云公开模块](coverage/netease.md)
-- [网易云 Basic](coverage/netease-basic.md)
-- [QQ 音乐公开方法](coverage/qq.md)
-- [QQ 音乐 Basic](coverage/qq-basic.md)
-- [B 站 Basic](coverage/bilibili-basic.md)
+项目范围账本：
+
+- [网易云音乐](coverage/netease-scope.md)
+- [QQ 音乐](coverage/qq-scope.md)
+- [B 站](coverage/bilibili-scope.md)
 - [Uni Playlist](coverage/uni-playlist.md)
 
-B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，不包含专栏、直播、漫画、游戏等业务。
+扩展候选池：
+
+- [网易云](coverage/extensions/netease.md)
+- [QQ 音乐](coverage/extensions/qq.md)
+- [B 站](coverage/extensions/bilibili.md)
+
+B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，不包含专栏、直播、漫画、游戏等业务，也不再建立以全部 B 站业务为分母的全量账本。
 
 ## 平台协议摘要
 

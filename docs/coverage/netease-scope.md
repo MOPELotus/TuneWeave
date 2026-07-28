@@ -1,8 +1,8 @@
-# 网易云 Basic 阶段验收账本
+# 网易云音乐项目范围覆盖账本
 
-上游基线与逐模块状态仍以 [`netease.md`](netease.md) 的 431 项全量账本为准；本表只把 Basic 范围聚合成可独立验收的能力单元，不替代或合并掉任何上游 API。
+上游基线为 `NeteaseCloudMusicApiEnhanced/api-enhanced@63d89aa906f78c286a7f838258fa29220d7f41dd`。本表是网易云音乐在 TuneWeave 产品定位内承诺完成的正式能力分母；参考项目中不属于本范围的能力仅登记到[网易云扩展候选池](extensions/netease.md)，不影响平台完成度。
 
-状态沿用全量账本：`pending` 尚未实现，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户/后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
+状态含义：`pending` 尚未实现，`deferred` 已明确保留但按路线延期，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户或后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
 当前共 64 个验收单元：`pending=0`、`partial=6`、`implemented=15`、`verified=43`。
 
@@ -10,9 +10,9 @@
 - 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
 - 完整联网验收率：`verified / 64 = 43 / 64 = 67.19%`。
 
-这些百分比是 Basic 能力验收口径，不是 431 个全量上游模块的完成率。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；切换到 QQ Basic 前，网易云 Basic 的 `pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
+这些百分比仅统计项目范围。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；网易云项目范围收口前，`pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-全部 64 个 Basic 单元现已触达，MV 与站内视频的目录、详情、收藏和播放链也已真实验收。上游新增免费听市场状态、普通/安全验证码发送分支和手机号登录安全验证码，因此 P08、A04、A06 如实保持 `partial`；它们与 C10、C11、P10 均需补齐相应分支后再升级状态。
+全部 64 个项目范围单元现已触达，MV 与站内视频的目录、详情、收藏和播放链也已真实验收。上游新增免费听市场状态、普通/安全验证码发送分支和手机号登录安全验证码，因此 P08、A04、A06 如实保持 `partial`；它们与 C10、C11、P10 均需补齐相应分支后再升级状态。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -28,7 +28,7 @@
 | S10 | 搜索与发现 | 音频指纹识别 | `implemented` | 无命中真实路径及映射已验证；无效 `startTime` 会回退可解析的 `start_time`，待有效指纹成功命中 |
 | C01 | 内容展示 | 歌曲详情 | `verified` | `song_detail` 与统一 `Track` 已验收 |
 | C02 | 内容展示 | 普通专辑目录、详情、曲目和动态统计 | `verified` | `album*` 常规展示链已验收 |
-| C03 | 内容展示 | 数字专辑目录、详情及销量榜 | `verified` | `digitalAlbum*` 已接入的 Basic 展示链已验收；多艺人名称优先于单艺人摘要 |
+| C03 | 内容展示 | 数字专辑目录、详情及销量榜 | `verified` | `digitalAlbum*` 已接入的 项目范围展示链已验收；多艺人名称优先于单艺人摘要 |
 | C04 | 内容展示 | 歌手目录、详情、专辑、歌曲及热门歌曲 | `verified` | 常规 `artist*` 展示链已验收 |
 | C05 | 内容展示 | 歌单详情及完整曲目列表 | `verified` | `playlist_detail/playlist_track_all` 已验收 |
 | C06 | 内容展示 | 普通、翻译、罗马音及逐字歌词 | `verified` | `lyric` 统一映射已验收；YRC 与 LRC 并存时以 `format=yrc` 标记最高同步能力并同时保留两者 |

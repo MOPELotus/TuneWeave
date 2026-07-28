@@ -1345,7 +1345,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 推荐节目的 `source=personalized` 固定使用 WeAPI `/api/personalized/djprogram`，外层推荐包装中的 `program` 映射为完整 `PodcastEpisode`；节目、所属播客和承载音频三种引用保持分离，并可直接复用节目取流链路。该接口不接受分页控制，因此只允许 `offset=0`，`limit` 是本地快照上限，分页扩展明确 `continuation_supported=false/limit_applied=false`。`source=category` 固定使用 WeAPI `/api/program/recommend/v1` 并精确提交 `cateId/limit/offset`；省略 `source` 但提供分类字段时会自动选择该分支，省略分类则完整复刻参考模块未提供 `type` 的调用。上游当前 `offset` 确实生效，但即使后续偏移仍返回不同节目也可能报告 `more=false`，因此 TuneWeave 如实保留 `more`、允许调用方显式偏移，却不会伪造 `next_offset`。匿名真实 provider 与统一 HTTP 已验证分类 `2` 的偏移 0/2 分别返回不同的两期完整节目及可播放音频，两个响应均保留上游 `code=200/more=false`；同一次联网测试也覆盖既有个性化首页六分支，七个分支均返回非空类型化资源。
 
-推荐反馈要求完整曲目引用，引用决定平台，`account` 选择该平台的持久账户别名。网易云固定使用 WeAPI `/api/v2/discovery/recommend/dislike`，精确提交 `resId`、`resType=4`、`sceneType=1`；未知平台、跨平台冲突及空 ID 会在请求前拒绝。匿名真实联网会把上游登录边界映射为 401 `authentication_required`，成功写入留到 Basic 末尾用持久化账户集中验收。
+推荐反馈要求完整曲目引用，引用决定平台，`account` 选择该平台的持久账户别名。网易云固定使用 WeAPI `/api/v2/discovery/recommend/dislike`，精确提交 `resId`、`resType=4`、`sceneType=1`；未知平台、跨平台冲突及空 ID 会在请求前拒绝。匿名真实联网会把上游登录边界映射为 401 `authentication_required`，成功写入留到 项目范围末尾用持久化账户集中验收。
 
 为兼容网易云参考项目，横幅端点也接受 `type=0|1|2|3`，依次对应 PC、Android、iPhone、iPad；响应始终使用统一字段与客户端名称。`catalog` 缺省为 `music`，也接受 `scope` 别名；`podcast`（别名 `dj`）使用平台播客横幅目录，网易云该目录没有客户端选择能力，因此只允许缺省的 PC 值并把目标 `60001` 映射为 `podcast_episode`。
 
@@ -1407,7 +1407,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/streams` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`resolution/res?`、`account?` | `VideoStream[]`；1–100 项，同平台、保序且保留重复项 |
 | POST | `/v1/videos/streams` | JSON `{refs?|ids/vids?, platform?, kind/type?, resolution/res?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoStream[]`；使用 provider 原生批量能力或统一逐项默认实现 |
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
-| GET | `/v1/videos/{ref}/parts` | 分页；B 站 Basic 阶段接入 | `VideoPart[]` |
+| GET | `/v1/videos/{ref}/parts` | 分页；B 站 项目范围阶段接入 | `VideoPart[]` |
 
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
@@ -1447,7 +1447,7 @@ QQ 统一歌曲流建立在同一精确授权上，但不会把需要 EKey 的�
 
 Uni Playlist 项流复用同一音质与路由参数，并额外以 `accounts` 为每个平台选择独立账户。查询值可写成 `netease=main,qq=green-diamond`，也可传 URL 编码后的 JSON 对象；同一平台不能同时由兼容 `account` 和 `accounts` 指定。歌曲直接进入严格解析器；播客先取得节目承载音频；MV/视频按同一平台顺序选择原生视频流或严格匹配到其他平台的音频；广播刷新原平台直播地址或动态队列，不会用标题把直播频道错配成歌曲。`resolution=1..4320` 只适用于 MV/视频，请求档位和上游实际档位分开保留。响应中的 `item_id/source_ref/kind` 始终指向歌单项目，`stream.resolved_track/resolved_platform/attempts` 表达本次实际媒体来源。
 
-节目流复用上述同一套解析器，不单独维护低能力播放分支。provider 先把节目 ID 解析为原音频 `Track`，随后才应用 `playback_platform/fallback/unblock/source/account`；因此网易云节目可以在原音频权益不足时严格匹配到 QQ 等平台，但节目引用本身不会被替换成歌曲引用。网易云 Basic 已真实验证公开节目 JSON 取流和 302；跨平台成功命中仍随 QQ Basic 接入后补验。
+节目流复用上述同一套解析器，不单独维护低能力播放分支。provider 先把节目 ID 解析为原音频 `Track`，随后才应用 `playback_platform/fallback/unblock/source/account`；因此网易云节目可以在原音频权益不足时严格匹配到 QQ 等平台，但节目引用本身不会被替换成歌曲引用。网易云 项目范围已真实验证公开节目 JSON 取流和 302；跨平台成功命中仍随 QQ 项目范围接入后补验。
 
 下载端点复用同一套音质、后端、精确码率和账户参数，但不会把播放 URL 冒充不存在的专用下载能力。`MediaDownload.available` 与可空 `url` 明确表达下载能力，平台返回的实际音质、码率、大小、时长、业务码、费用和完整原文均保留；空白编码不会遮住有效容器格式，零响应时长不会遮住歌曲元数据时长。网易云新版下载即使顶层 `code=200`，单档 `code=-110/url=null` 仍返回 `available=false`；其 `/download/redirect` 先取专用下载地址，缺失时才以同音质播放 URL 兜底。QQ 的参考协议本身以同一文件授权取得可下载媒体，因此统一下载直接使用所选完整文件的授权 URL，但排除 `trial/trial_ogg_640`；真实文件不存在或无权限时仍返回可检查的 `available=false`，不会把试听片段标成下载成功。只有取得非空安全 URL 才发出 302 `Location`，客户端账户凭据和上游 Cookie不会进入重定向响应。
 
@@ -1476,7 +1476,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 
 ### 登录与账户
 
-QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。QQ 与网易云当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；B 站已覆盖二维码登录、会话状态、账户资料、刷新和退出，其他业务端点随 Basic 顺序逐项接通。这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
+QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。QQ 与网易云当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；B 站已覆盖二维码登录、会话状态、账户资料、刷新和退出，其他业务端点随 项目范围顺序逐项接通。这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的扩展候选已经实施。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
