@@ -32,10 +32,10 @@ use tuneweave_core::{
     ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
     AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
     AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, Capability, ChallengeMethod, ChartCatalog,
-    ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest, CloudImportRequest,
-    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
-    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential, Capability,
+    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
@@ -50,8 +50,8 @@ use tuneweave_core::{
     ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsTimestamp,
     LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
     MediaStream, MembershipSummary, MemoryUniPlaylistStore, MultiStyleLyricTranslations,
-    MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType,
-    PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
+    MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder,
+    MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
     PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
@@ -68,10 +68,10 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderRegistry, Quality, RadioPlaybackItem,
-    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    PodcastTaxonomyRequest, PrincipalType, ProviderCredential, ProviderRegistry, Quality,
+    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
     RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
     RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
@@ -98,6 +98,7 @@ use tuneweave_core::{
 pub use response::{ApiError, ApiResponse, ResponseMeta};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
@@ -195,6 +196,94 @@ pub struct AppState {
     uni_playlists: Arc<dyn UniPlaylistStore>,
     default_platform: Platform,
     started_at: Instant,
+}
+
+#[derive(Clone, Default)]
+struct CallerCredentialSet {
+    credentials: BTreeMap<Platform, ProviderCredential>,
+}
+
+#[derive(Clone, Copy)]
+enum AccountSelection {
+    Optional,
+    Default,
+}
+
+struct ProviderAccess {
+    provider: Arc<dyn MusicProvider>,
+    provider_account: Option<String>,
+    response_account: Option<String>,
+}
+
+impl CallerCredentialSet {
+    fn from_headers(headers: &HeaderMap) -> Result<Self, TuneWeaveError> {
+        let values = headers.get_all(CALLER_CREDENTIAL_HEADER);
+        let count = values.iter().count();
+        if count > MAX_CALLER_CREDENTIALS_PER_REQUEST {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "a request accepts at most {MAX_CALLER_CREDENTIALS_PER_REQUEST} caller credentials"
+            )));
+        }
+
+        let mut credentials = BTreeMap::new();
+        for value in values {
+            let value = value.to_str().map_err(|_| {
+                TuneWeaveError::invalid_request("caller credential header is not valid ASCII")
+            })?;
+            let credential = CallerCredential::parse(value)?;
+            let platform = credential.platform;
+            if credentials.insert(platform, credential).is_some() {
+                return Err(TuneWeaveError::invalid_request(format!(
+                    "only one caller credential is allowed for platform {platform}"
+                ))
+                .with_platform(platform));
+            }
+        }
+        Ok(Self { credentials })
+    }
+
+    fn select_provider(
+        &self,
+        state: &AppState,
+        platform: Platform,
+        explicit_account: Option<&str>,
+        account_selection: AccountSelection,
+    ) -> Result<ProviderAccess, TuneWeaveError> {
+        let provider = state.registry.require(platform)?;
+        if let Some(credential) = self.credentials.get(&platform) {
+            if explicit_account.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "caller credentials cannot be combined with a server account alias",
+                )
+                .with_platform(platform));
+            }
+            if credential.is_expired_at(unix_time_seconds()?) {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "caller credential has expired",
+                )
+                .with_platform(platform));
+            }
+            return Ok(ProviderAccess {
+                provider: provider.with_caller_credential(credential)?,
+                provider_account: Some("default".to_owned()),
+                response_account: None,
+            });
+        }
+
+        let provider_account = match account_selection {
+            AccountSelection::Optional => explicit_account
+                .map(str::trim)
+                .filter(|account| !account.is_empty())
+                .map(str::to_owned),
+            AccountSelection::Default => Some(account_alias(explicit_account)?),
+        };
+        Ok(ProviderAccess {
+            provider,
+            response_account: provider_account.clone(),
+            provider_account,
+        })
+    }
 }
 
 impl AppState {
@@ -898,48 +987,67 @@ struct LocalTrackMatchInput {
 
 async fn search_default(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<SearchDefaultParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SearchDefaultKeyword>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let provider = access.provider;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let prompt = provider
         .default_search_keyword(&SearchDefaultKeywordRequest {
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(prompt)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(prompt).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn search_trending(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<SearchTrendingParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SearchTrendingList>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let provider = access.provider;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let detail = parse_search_trending_detail(params.detail.as_deref())?;
-    let provider = state.registry.require(platform)?;
     let list = provider
         .trending_searches(&SearchTrendingRequest {
             detail,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(list)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn search_suggestions(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<SearchSuggestionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SearchSuggestionList>>, ApiError> {
     let params = query_params(params)?;
@@ -951,8 +1059,16 @@ async fn search_suggestions(
         .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
     let client = parse_search_suggestion_client(params.client.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let provider = access.provider;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let list = provider
         .search_suggestions(&SearchSuggestionRequest {
             query: query.to_owned(),
@@ -960,15 +1076,16 @@ async fn search_suggestions(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(list)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn search_multi_match(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<SearchMultiMatchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SearchMultiMatch>>, ApiError> {
     let params = query_params(params)?;
@@ -980,8 +1097,16 @@ async fn search_multi_match(
         .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
     let kind = parse_search_kind(params.kind.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let provider = access.provider;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let result = provider
         .search_multi_match(&SearchMultiMatchRequest {
             query: query.to_owned(),
@@ -989,15 +1114,16 @@ async fn search_multi_match(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(result).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn search_local_track_match_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<LocalTrackMatchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
     let params = query_params(params)?;
@@ -1005,6 +1131,7 @@ async fn search_local_track_match_get(
     let duration_seconds = params.duration_seconds.map(Value::String);
     execute_local_track_match(
         &state,
+        CallerCredentialSet::from_headers(&headers)?,
         LocalTrackMatchInput {
             title: params.title.unwrap_or_default(),
             album: params.album.unwrap_or_default(),
@@ -1023,11 +1150,13 @@ async fn search_local_track_match_get(
 
 async fn search_local_track_match_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<LocalTrackMatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
     let body = json_body(payload)?;
     execute_local_track_match(
         &state,
+        CallerCredentialSet::from_headers(&headers)?,
         LocalTrackMatchInput {
             title: body.title,
             album: body.album,
@@ -1046,11 +1175,20 @@ async fn search_local_track_match_post(
 
 async fn execute_local_track_match(
     state: &AppState,
+    credentials: CallerCredentialSet,
     input: LocalTrackMatchInput,
 ) -> Result<Json<ApiResponse<LocalTrackMatchResult>>, ApiError> {
     let platform = account_platform(state, input.platform.as_deref())?;
-    let account = account_alias(input.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let access = credentials.select_provider(
+        state,
+        platform,
+        input.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let provider = access.provider;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let result = provider
         .match_local_track(&LocalTrackMatchRequest {
             title: input.title,
@@ -1061,15 +1199,16 @@ async fn execute_local_track_match(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(result).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn general_search(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<GeneralSearchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<GeneralSearchResult>>, ApiError> {
     let params = query_params(params)?;
@@ -1105,8 +1244,14 @@ async fn general_search(
         })
         .transpose()?;
     let platform = search_platform(&state, params.platform.as_deref())?;
-    let account = optional_trimmed(params.account.clone());
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let result = provider
         .general_search(&GeneralSearchRequest {
             query: query.to_owned(),
@@ -1119,7 +1264,7 @@ async fn general_search(
         })
         .await?;
     let mut response = ApiResponse::new(result).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -1127,6 +1272,7 @@ async fn general_search(
 
 async fn search(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<SearchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<SearchItem>>>, ApiError> {
     let params = query_params(params)?;
@@ -1144,13 +1290,15 @@ async fn search(
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = search_platform(&state, params.platform.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty())
-        .map(str::to_owned);
+    let credentials = CallerCredentialSet::from_headers(&headers)?;
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let search_id = params
         .search_id
         .as_deref()
@@ -1172,7 +1320,7 @@ async fn search(
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
 
@@ -13937,6 +14085,18 @@ fn unix_time_millis() -> Result<u64, TuneWeaveError> {
     })
 }
 
+fn unix_time_seconds() -> Result<u64, TuneWeaveError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| {
+            TuneWeaveError::new(
+                tuneweave_core::ErrorCode::InternalError,
+                "system clock is before the Unix epoch",
+            )
+        })
+}
+
 fn parse_optional_i64_parameter(
     name: &str,
     value: Option<&str>,
@@ -14009,6 +14169,21 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "Test NetEase"
+        }
+
+        fn with_caller_credential(
+            &self,
+            credential: &ProviderCredential,
+        ) -> Result<Arc<dyn MusicProvider>> {
+            if credential.platform != Platform::Netease
+                || credential.kind != "cookie"
+                || !credential.secret().starts_with("MUSIC_U=")
+            {
+                return Err(TuneWeaveError::invalid_request(
+                    "test caller credential is invalid",
+                ));
+            }
+            Ok(Arc::new(Self))
         }
 
         fn capabilities(&self) -> BTreeSet<Capability> {
@@ -19442,6 +19617,173 @@ mod tests {
 
     async fn json_response(path: &str) -> (StatusCode, Value) {
         json_response_from(test_app(), path).await
+    }
+
+    fn qq_caller_credential(expires_at: Option<u64>) -> CallerCredential {
+        let (create_time, expires_in) = match expires_at {
+            Some(expires_at) => (expires_at.saturating_sub(60), 60),
+            None => (0, 0),
+        };
+        let secret = serde_json::to_string(&json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "musickeyCreateTime": create_time,
+            "keyExpiresIn": expires_in,
+            "loginType": 2
+        }))
+        .expect("credential JSON");
+        let material =
+            ProviderCredential::new(Platform::Qq, "qq_credential_v1", secret, expires_at)
+                .expect("provider credential");
+        CallerCredential::issue(&material).expect("caller credential")
+    }
+
+    #[test]
+    fn caller_credential_headers_enforce_count_platform_and_redaction_boundaries() {
+        let qq = qq_caller_credential(None);
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("NetEase provider credential"),
+        )
+        .expect("NetEase caller credential");
+        let mut headers = HeaderMap::new();
+        headers.append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ header value"),
+        );
+        headers.append(
+            CALLER_CREDENTIAL_HEADER,
+            netease.value.parse().expect("NetEase header value"),
+        );
+        let parsed = CallerCredentialSet::from_headers(&headers).expect("parse headers");
+        assert_eq!(parsed.credentials.len(), 2);
+
+        headers.append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("duplicate QQ header value"),
+        );
+        let duplicate = CallerCredentialSet::from_headers(&headers)
+            .err()
+            .expect("duplicate platform must fail");
+        assert_eq!(duplicate.code, ErrorCode::InvalidRequest);
+        assert!(!duplicate.message.contains("private"));
+
+        let mut oversized = HeaderMap::new();
+        for _ in 0..=MAX_CALLER_CREDENTIALS_PER_REQUEST {
+            oversized.append(
+                CALLER_CREDENTIAL_HEADER,
+                qq.value.parse().expect("caller credential header value"),
+            );
+        }
+        let error = CallerCredentialSet::from_headers(&oversized)
+            .err()
+            .expect("credential count must be bounded");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(!error.message.contains(&qq.value));
+    }
+
+    #[test]
+    fn caller_credential_selection_is_request_scoped_and_rejects_account_conflicts() {
+        let qq = qq_caller_credential(Some(u64::MAX));
+        let mut headers = HeaderMap::new();
+        headers.append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ header value"),
+        );
+        let credentials = CallerCredentialSet::from_headers(&headers).expect("parse headers");
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(QqProvider::new(QqConfig::default()).expect("QQ provider"))
+            .expect("register QQ provider");
+        let state = AppState::new(registry, Platform::Qq);
+
+        let access = credentials
+            .select_provider(&state, Platform::Qq, None, AccountSelection::Optional)
+            .expect("select caller-scoped provider");
+        assert_eq!(access.provider.platform(), Platform::Qq);
+        assert_eq!(access.provider_account.as_deref(), Some("default"));
+        assert!(access.response_account.is_none());
+
+        let conflict = credentials
+            .select_provider(
+                &state,
+                Platform::Qq,
+                Some("default"),
+                AccountSelection::Default,
+            )
+            .err()
+            .expect("explicit account must conflict");
+        assert_eq!(conflict.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn search_uses_caller_credentials_without_exposing_a_server_account_alias() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/search?q=test&account=default")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["error"]["code"], "invalid_request");
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+
+        for path in [
+            "/v1/search/default?account=default",
+            "/v1/search/trending?account=default",
+            "/v1/search/suggestions?q=test&account=default",
+            "/v1/search/multimatch?q=test&account=default",
+            "/v1/search/match?md5=0123456789abcdef0123456789abcdef&duration_ms=1000&account=default",
+            "/v1/search/general?q=test&account=default",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/search?q=test")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["account"],
+            "default"
+        );
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
     }
 
     #[tokio::test]
