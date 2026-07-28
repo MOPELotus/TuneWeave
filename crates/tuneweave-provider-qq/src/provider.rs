@@ -20,35 +20,35 @@ use tuneweave_core::{
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
     AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Chart,
     ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest, ChartTrackPreview,
-    CreatorSummary, ErrorCode, Extensions, GeneralSearchRelated, GeneralSearchRelatedTerm,
-    GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection, ImmersiveAudioType, Lyrics,
-    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
-    MultiStyleLyricTranslations, MusicGeneAge, MusicGeneAiInterpretation, MusicGeneAttribute,
-    MusicGeneGroove, MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGeneMainDescription,
-    MusicGenePersonality, MusicGenePreferences, MusicGeneStatus, MusicGeneStatusEntry,
-    MusicGeneTempo, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
-    MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, PlatformApiRequest,
-    PlatformBatchRequest, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    CreatorSummary, CredentialMode, ErrorCode, Extensions, GeneralSearchRelated,
+    GeneralSearchRelatedTerm, GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection,
+    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
+    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicGeneAge,
+    MusicGeneAiInterpretation, MusicGeneAttribute, MusicGeneGroove, MusicGeneListeningPeriod,
+    MusicGeneListeningReport, MusicGeneMainDescription, MusicGenePersonality, MusicGenePreferences,
+    MusicGeneStatus, MusicGeneStatusEntry, MusicGeneTempo, MusicProvider, MusicVideoArea,
+    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
+    Platform, PlatformApiRequest, PlatformBatchRequest, Playlist, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
     PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
-    ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality, RecommendationFeed,
-    RecommendationFeedAction, RecommendationFeedCard, RecommendationFeedCardKind,
-    RecommendationFeedCursor, RecommendationFeedDirection, RecommendationFeedNiche,
-    RecommendationFeedRequest, RecommendationFeedShelf, RecommendationRequest,
-    RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest, RelatedPlaylistSection,
-    RelatedPlaylistSectionKind, RelatedVideoList, RelatedVideoRequest, ResourceRef, Result,
-    SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, SheetMusic,
-    SheetMusicAvailability, SheetMusicList, SheetMusicSource, SimilarArtistList,
-    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SimilarTrackSection,
-    SimilarTrackSectionKind, SingingAnnotationsAvailability, StoredAccountCredential,
-    StreamRequest, SubscriptionResult, Track, TrackCredit, TrackCreditGroup, TrackCredits,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind,
-    TrackLabel, TrackLabelList, TrackVersionList, TrialWindow, TuneWeaveError, User, UserMusicGene,
-    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoResourceKind, VideoStream, VideoStreamRequest,
+    ProviderAuthResult, ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality,
+    RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
+    RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
+    RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
+    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
+    RelatedPlaylistSection, RelatedPlaylistSectionKind, RelatedVideoList, RelatedVideoRequest,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SheetMusic, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackCredit,
+    TrackCreditGroup, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
+    TrialWindow, TuneWeaveError, User, UserMusicGene, UserProfile, UserProfileBackend, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -6004,6 +6004,17 @@ impl MusicProvider for QqProvider {
         provider_transaction_id: &str,
         account: &str,
     ) -> Result<ProviderQrPoll> {
+        self.poll_qr_login_with_mode(provider_transaction_id, account, CredentialMode::Server)
+            .await
+    }
+
+    async fn poll_qr_login_with_mode(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrPoll> {
+        validate_qq_login_account(account, mode)?;
         let outcome = self
             .qr_transactions
             .poll(&self.client, provider_transaction_id)
@@ -6034,12 +6045,12 @@ impl MusicProvider for QqProvider {
                 credential: None,
             }),
             QqQrPollOutcome::Confirmed(credential) => {
-                let profile = self.persist_qq_credential(account, &credential)?;
+                let result = self.finish_qq_authentication(account, &credential, mode)?;
                 Ok(ProviderQrPoll {
                     state: AuthState::Confirmed,
                     message: Some("QQ Music account authenticated".to_owned()),
-                    profile: Some(profile),
-                    credential: None,
+                    profile: Some(result.profile),
+                    credential: result.credential,
                 })
             }
         }
@@ -6063,12 +6074,25 @@ impl MusicProvider for QqProvider {
         request: &AuthChallengeRequest,
         code: &str,
     ) -> Result<AccountProfile> {
+        Ok(self
+            .verify_auth_challenge_with_mode(request, code, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn verify_auth_challenge_with_mode(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        validate_qq_login_account(&request.account, mode)?;
         let credential = match request.method {
             ChallengeMethod::Sms => {
                 login_with_phone_authcode(&self.client, &request.principal, code).await?
             }
         };
-        self.persist_qq_credential(&request.account, &credential)
+        self.finish_qq_authentication(&request.account, &credential, mode)
     }
 
     async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
@@ -6276,14 +6300,19 @@ impl QqProvider {
         account: &str,
         credential: &QqCredential,
     ) -> Result<AccountProfile> {
+        Ok(self
+            .finish_qq_authentication(account, credential, CredentialMode::Server)?
+            .profile)
+    }
+
+    fn finish_qq_authentication(
+        &self,
+        account: &str,
+        credential: &QqCredential,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        validate_qq_login_account(account, mode)?;
         let account = account.trim();
-        let store = self.credential_store.as_ref().ok_or_else(|| {
-            TuneWeaveError::new(
-                ErrorCode::InternalError,
-                "QQ account storage is not configured",
-            )
-            .with_platform(Platform::Qq)
-        })?;
         let secret = serde_json::to_string(credential).map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
@@ -6291,12 +6320,32 @@ impl QqProvider {
             )
             .with_platform(Platform::Qq)
         })?;
-        store.put(&StoredAccountCredential::new(
-            Platform::Qq,
-            account,
-            QQ_CREDENTIAL_KIND,
-            secret,
-        )?)?;
+        let caller_credential = mode
+            .returns_to_caller()
+            .then(|| {
+                ProviderCredential::new(
+                    Platform::Qq,
+                    QQ_CREDENTIAL_KIND,
+                    &secret,
+                    credential.expires_at_epoch(),
+                )
+            })
+            .transpose()?;
+        if mode.persists_on_server() {
+            let store = self.credential_store.as_ref().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "QQ account storage is not configured",
+                )
+                .with_platform(Platform::Qq)
+            })?;
+            store.put(&StoredAccountCredential::new(
+                Platform::Qq,
+                account,
+                QQ_CREDENTIAL_KIND,
+                &secret,
+            )?)?;
+        }
         let mut profile = AccountProfile::authenticated(Platform::Qq, account);
         profile.user_id = Some(credential.string_music_id().to_owned());
         profile
@@ -6305,7 +6354,10 @@ impl QqProvider {
         profile
             .extensions
             .insert("credential_kind".to_owned(), json!(QQ_CREDENTIAL_KIND));
-        Ok(profile)
+        Ok(ProviderAuthResult {
+            profile,
+            credential: caller_credential,
+        })
     }
 
     fn validate_public_account(&self, account: Option<&str>) -> Result<()> {
@@ -11981,6 +12033,29 @@ fn optional_string(value: Option<&Value>, context: &str) -> Result<String> {
 fn nonempty_optional_string(value: Option<&Value>, context: &str) -> Result<Option<String>> {
     let value = optional_string(value, context)?.trim().to_owned();
     Ok((!value.is_empty()).then_some(value))
+}
+
+fn validate_qq_login_account(account: &str, mode: CredentialMode) -> Result<()> {
+    let account = account.trim();
+    if account.is_empty() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ account alias cannot be empty")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if account.len() > 64 {
+        return Err(
+            TuneWeaveError::invalid_request("QQ account alias cannot exceed 64 bytes")
+                .with_platform(Platform::Qq),
+        );
+    }
+    if mode == CredentialMode::Client && account != "default" {
+        return Err(TuneWeaveError::invalid_request(
+            "client credential mode does not accept a server account alias",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
 }
 
 fn qq_authentication_required(account: &str, message: &str) -> TuneWeaveError {
@@ -25994,6 +26069,62 @@ mod tests {
                 .capabilities()
                 .contains(&Capability::TrackSubscriptionWrite)
         );
+    }
+
+    #[test]
+    fn qq_login_credential_modes_separate_client_and_server_ownership() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2,
+            "musickeyCreateTime": 100,
+            "keyExpiresIn": 50
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+
+        let client_only = QqProvider::new(QqConfig::default()).expect("client-only provider");
+        let result = client_only
+            .finish_qq_authentication("default", &credential, CredentialMode::Client)
+            .expect("client-owned result");
+        let caller_credential = result.credential.expect("caller credential");
+        assert_eq!(result.profile.account, "default");
+        assert_eq!(caller_credential.platform, Platform::Qq);
+        assert_eq!(caller_credential.kind, QQ_CREDENTIAL_KIND);
+        assert_eq!(caller_credential.expires_at, Some(150));
+        assert_eq!(
+            serde_json::from_str::<QqCredential>(caller_credential.secret())
+                .expect("returned QQ credential")
+                .normalize()
+                .expect("normalized returned credential"),
+            credential
+        );
+        assert_eq!(
+            client_only
+                .finish_qq_authentication("named", &credential, CredentialMode::Client)
+                .expect_err("client mode must reject aliases")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let store = Arc::new(RecordingCredentialStore::default());
+        let both = QqProvider::new(QqConfig {
+            credential_store: Some(store.clone()),
+            ..QqConfig::default()
+        })
+        .expect("both-mode provider");
+        let result = both
+            .finish_qq_authentication("green-vip", &credential, CredentialMode::Both)
+            .expect("both-owned result");
+        let caller_credential = result.credential.expect("caller credential");
+        let stored = store
+            .load_platform(Platform::Qq)
+            .expect("stored credential");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].account, "green-vip");
+        assert_eq!(stored[0].secret(), caller_credential.secret());
     }
 
     #[tokio::test]
