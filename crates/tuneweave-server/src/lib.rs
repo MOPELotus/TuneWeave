@@ -9135,6 +9135,7 @@ async fn artist_top_tracks(
 async fn user_favorite_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
@@ -9145,40 +9146,46 @@ async fn user_favorite_tracks(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .user_favorite_tracks(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 async fn user_created_playlists(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
-    user_playlist_directory(state, reference, params, false).await
+    user_playlist_directory(state, reference, params, headers, false).await
 }
 
 async fn user_favorite_playlists(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
-    user_playlist_directory(state, reference, params, true).await
+    user_playlist_directory(state, reference, params, headers, true).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9193,6 +9200,7 @@ async fn user_favorite_albums(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserFavoriteAlbumParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -9203,24 +9211,28 @@ async fn user_favorite_albums(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .user_favorite_albums(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9235,6 +9247,7 @@ async fn user_favorite_videos(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserFavoriteVideoParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -9245,24 +9258,28 @@ async fn user_favorite_videos(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .user_favorite_videos(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9277,6 +9294,7 @@ async fn user_following_artists(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserFollowingArtistParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -9287,30 +9305,35 @@ async fn user_following_artists(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .user_following_artists(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 async fn user_playlist_directory(
     state: AppState,
     reference: String,
     params: PageParams,
+    headers: HeaderMap,
     favorites: bool,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
     let reference = parse_reference(reference)?;
@@ -9321,28 +9344,33 @@ async fn user_playlist_directory(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let request = PageRequest {
         limit,
         offset,
-        account: account.clone(),
+        account: access.provider_account.clone(),
     };
     let page = if favorites {
-        provider
+        access
+            .provider
             .user_favorite_playlists(reference.id(), &request)
             .await?
     } else {
-        provider
+        access
+            .provider
             .user_created_playlists(reference.id(), &request)
             .await?
     };
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9848,6 +9876,7 @@ struct HistoryParams {
 async fn user_history(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<ApiResponse<Vec<PlaybackHistoryEntry>>>, ApiError> {
     let reference = parse_reference(reference)?;
@@ -9857,24 +9886,28 @@ async fn user_history(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let account = account_alias(params.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let page = access
+        .provider
         .user_history(
             reference.id(),
             &PlaybackHistoryRequest {
                 period,
                 limit,
                 offset,
-                account: Some(account.clone()),
+                account: Some(access.required_account().to_owned()),
             },
         )
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -30758,6 +30791,52 @@ mod tests {
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn public_user_libraries_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-user-library",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for path in [
+            "/v1/users/netease:32953014/favorites/tracks",
+            "/v1/users/netease:32953014/playlists/created",
+            "/v1/users/netease:32953014/favorites/playlists",
+            "/v1/users/netease:32953014/favorites/albums",
+            "/v1/users/netease:32953014/favorites/videos",
+            "/v1/users/netease:32953014/following/artists",
+            "/v1/users/netease:32953014/history?period=week",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(
+                !response["data"]
+                    .as_array()
+                    .expect("library data")
+                    .is_empty()
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        for path in [
+            "/v1/users/netease:32953014/favorites/tracks?account=viewer",
+            "/v1/users/netease:32953014/history?account=viewer",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
