@@ -1,0 +1,25 @@
+[package]
+name = "tuneweave-provider-bilibili"
+description = "Bilibili provider for TuneWeave"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+qrcode.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tuneweave-core.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

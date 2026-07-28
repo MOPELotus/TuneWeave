@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tuneweave-core",
+    "crates/tuneweave-provider-bilibili",
     "crates/tuneweave-provider-netease",
     "crates/tuneweave-provider-qq",
     "crates/tuneweave-server",
@@ -46,6 +47,7 @@ tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tuneweave-core = { path = "crates/tuneweave-core" }
+tuneweave-provider-bilibili = { path = "crates/tuneweave-provider-bilibili" }
 tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
 tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
 url = "2.5.8"
