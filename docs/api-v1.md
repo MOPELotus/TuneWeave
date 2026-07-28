@@ -350,7 +350,9 @@ B 站 UGC 视频详情通过 `GET /v1/videos/bilibili:bvid:{bvid}` 或 `GET /v1/
 
 B 站分 P 目录通过 `GET /v1/videos/{ref}/parts` 读取，接受同一 AID/BVID 身份、`kind/type=video`、`account` 及统一 `limit/offset`。每个 `VideoPart` 以 `bilibili:cid:{cid}` 作为稳定分段引用，同时用规范 BVID `video_ref` 指回父视频，并保留从 1 开始的 `page`、标题、毫秒时长、尺寸、旋转状态和平台来源。详情响应中的全部分 P 会先完成身份、顺序、唯一 CID 和维度校验，再应用本地分页；多 P 视频不会只保留首 P，超过目录尾部返回空页而不是重复首 P。
 
-B 站字幕目录通过 `GET /v1/videos/{ref}/subtitles?part={part_ref}` 读取。`ref` 仍是 AID/BVID 父视频，`part` 必须是同平台分 P 目录返回的 `bilibili:cid:{cid}`，也兼容省略平台前缀的 `cid:{cid}`；跨平台分段引用会在发网前拒绝。响应 `VideoSubtitleList` 保留规范父视频和分段引用、登录要求、是否允许投稿、默认语言，以及每条字幕的稳定引用、语言、名称、格式和锁定状态。B 站的数字 ID、`id_str`、字幕类型及 AI 状态分开保存在扩展中，不凭未知数字枚举猜测“人工/AI”。目录提供的带签名资源 URL 不向调用方公开；后续正文端点只会重新从同一视频和 CID 的平台目录选择资源，不接受调用方提交下载 URL。
+B 站字幕目录通过 `GET /v1/videos/{ref}/subtitles?part={part_ref}` 读取。`ref` 仍是 AID/BVID 父视频，`part` 必须是同平台分 P 目录返回的 `bilibili:cid:{cid}`，也兼容省略平台前缀的 `cid:{cid}`；跨平台分段引用会在发网前拒绝。响应 `VideoSubtitleList` 保留规范父视频和分段引用、登录要求、是否允许投稿、默认语言，以及每条字幕的稳定引用、语言、名称、格式和锁定状态。B 站的数字 ID、`id_str`、字幕类型及 AI 状态分开保存在扩展中，不凭未知数字枚举猜测“人工/AI”。
+
+字幕正文通过 `GET /v1/videos/{ref}/subtitles/{subtitle_ref}?part={part_ref}` 读取，`subtitle_ref` 可使用目录返回的完整同平台引用或省略平台前缀的 `subtitle:{id}`。provider 会重新获取同一父视频和 CID 的目录并按稳定 ID 选择资源，不接受调用方提交 URL；资源仅允许固定 B 站 HTTPS 字幕 CDN 的旧版 JSON 路径或现行 AI 字幕路径，不跟随重定向、不发送账户 Cookie，并限制响应为 4 MiB。`VideoSubtitleDocument` 将来源语言、类型、版本、样式和每段字幕的毫秒起止时间、原始文本、位置及音乐置信度分开建模。目录中的临时签名 URL及其查询参数不会出现在响应、扩展或错误中。
 
 ### DigitalAlbum
 
@@ -1413,6 +1415,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
 | GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
+| GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 

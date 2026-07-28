@@ -95,8 +95,8 @@ use tuneweave_core::{
     Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
     VideoPartListRequest, VideoRecommendationKind, VideoRecommendationRequest,
     VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleList,
-    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
+    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -572,6 +572,10 @@ pub fn build_router(state: AppState) -> Router {
             get(video_streams_get).post(video_streams_post),
         )
         .route("/videos/{reference}/parts", get(video_parts))
+        .route(
+            "/videos/{reference}/subtitles/{subtitle}",
+            get(video_subtitle),
+        )
         .route("/videos/{reference}/subtitles", get(video_subtitles))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
@@ -9101,6 +9105,43 @@ async fn video_subtitles(
     Ok(Json(access.response(subtitles, platform)))
 }
 
+async fn video_subtitle(
+    State(state): State<AppState>,
+    Path((reference, subtitle)): Path<(String, String)>,
+    params: Result<Query<VideoSubtitleParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoSubtitleDocument>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let subtitle_id = normalize_video_subtitle_reference(subtitle, reference.platform())?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let part_id = normalize_video_part_reference(
+        params
+            .part
+            .ok_or_else(|| TuneWeaveError::invalid_request("part is required"))?,
+        reference.platform(),
+    )?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoSubtitleRequest::new(kind, part_id);
+    request.account.clone_from(&access.provider_account);
+    let document = access
+        .provider
+        .video_subtitle(reference.id(), &subtitle_id, &request)
+        .await?;
+    Ok(Json(access.response(document, platform)))
+}
+
 async fn video_details_get(
     State(state): State<AppState>,
     params: Result<Query<VideoDetailBatchParams>, QueryRejection>,
@@ -14478,6 +14519,35 @@ fn normalize_video_part_reference(
     Ok(reference.id().to_owned())
 }
 
+fn normalize_video_subtitle_reference(
+    subtitle: String,
+    expected_platform: Platform,
+) -> Result<String, TuneWeaveError> {
+    let subtitle = subtitle.trim();
+    if subtitle.is_empty() || subtitle.len() > 256 || subtitle.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "subtitle must contain a valid resource identity",
+        ));
+    }
+    let has_platform_prefix = subtitle
+        .split_once(':')
+        .is_some_and(|(prefix, _)| prefix.parse::<Platform>().is_ok());
+    if !has_platform_prefix {
+        return Ok(subtitle.to_owned());
+    }
+    let reference = parse_reference(subtitle.to_owned())?;
+    if reference.platform() != expected_platform {
+        return Err(TuneWeaveError::invalid_request(
+            "subtitle platform must match the parent video",
+        )
+        .with_details(json!({
+            "video_platform": expected_platform,
+            "subtitle_platform": reference.platform(),
+        })));
+    }
+    Ok(reference.id().to_owned())
+}
+
 fn parse_comment_target(kind: &str, reference: String) -> Result<CommentTarget, TuneWeaveError> {
     Ok(CommentTarget::new(
         parse_reference(reference)?,
@@ -17579,6 +17649,47 @@ mod tests {
                     ]),
                 }],
                 extensions: Extensions::new(),
+            })
+        }
+
+        async fn video_subtitle(
+            &self,
+            id: &str,
+            subtitle_id: &str,
+            request: &VideoSubtitleRequest,
+        ) -> Result<VideoSubtitleDocument> {
+            let mut list = self.video_subtitles(id, request).await?;
+            let subtitle = list
+                .items
+                .pop()
+                .filter(|subtitle| subtitle.id == subtitle_id)
+                .ok_or_else(|| {
+                    TuneWeaveError::new(ErrorCode::ResourceNotFound, "test subtitle was not found")
+                })?;
+            Ok(VideoSubtitleDocument {
+                subtitle,
+                source_language: Some("zh".to_owned()),
+                source_type: Some("subtitle".to_owned()),
+                source_version: Some("v1".to_owned()),
+                style: tuneweave_core::VideoSubtitleStyle {
+                    font_size: Some(0.4),
+                    font_color: Some("#FFFFFF".to_owned()),
+                    background_alpha: Some(0.5),
+                    background_color: Some("#000000".to_owned()),
+                    stroke: Some("none".to_owned()),
+                    extensions: Extensions::new(),
+                },
+                cues: vec![tuneweave_core::VideoSubtitleCue {
+                    index: 0,
+                    id: Some("1".to_owned()),
+                    start_ms: 1_250,
+                    end_ms: 3_500,
+                    text: "测试字幕".to_owned(),
+                    position: Some(2),
+                    music_confidence: Some(0.25),
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -26227,6 +26338,55 @@ mod tests {
             "/v1/videos/netease:opaque/subtitles?part=qq:cid:1",
             "/v1/videos/netease:opaque/subtitles?part=segment:1&kind=unknown",
             "/v1/videos/netease:opaque/subtitles?part=segment:1&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_subtitle_body_accepts_full_or_local_refs_and_forwards_account() {
+        let video = "D1C2B3A40987654321ABCDEF12345678";
+        let subtitle = format!("subtitle:{video}:zh-CN");
+        for subtitle_ref in [subtitle.clone(), format!("netease:{subtitle}")] {
+            let path = format!(
+                "/v1/videos/netease:{video}/subtitles/{subtitle_ref}?part=segment:1&type=video&account=collector"
+            );
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"]["subtitle"]["ref"],
+                format!("netease:{subtitle}")
+            );
+            assert_eq!(
+                response["data"]["subtitle"]["video_ref"],
+                format!("netease:{video}")
+            );
+            assert_eq!(
+                response["data"]["subtitle"]["part_ref"],
+                "netease:segment:1"
+            );
+            assert_eq!(response["data"]["source_language"], "zh");
+            assert_eq!(response["data"]["style"]["font_size"], 0.4);
+            assert_eq!(response["data"]["cues"][0]["start_ms"], 1_250);
+            assert_eq!(response["data"]["cues"][0]["end_ms"], 3_500);
+            assert_eq!(response["data"]["cues"][0]["text"], "测试字幕");
+            assert_eq!(response["data"]["extensions"]["account"], "collector");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_subtitle_body_rejects_missing_foreign_and_unknown_inputs() {
+        for path in [
+            "/v1/videos/netease:opaque/subtitles/subtitle:opaque",
+            "/v1/videos/netease:opaque/subtitles/subtitle:opaque?part=",
+            "/v1/videos/netease:opaque/subtitles/qq:subtitle:opaque?part=segment:1",
+            "/v1/videos/netease:opaque/subtitles/subtitle:opaque?part=qq:segment:1",
+            "/v1/videos/netease:opaque/subtitles/subtitle:opaque?part=segment:1&kind=unknown",
+            "/v1/videos/netease:opaque/subtitles/subtitle:opaque?part=segment:1&unknown=true",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

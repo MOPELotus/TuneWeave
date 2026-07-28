@@ -3413,6 +3413,39 @@ pub struct VideoSubtitleList {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitleStyle {
+    pub font_size: Option<f64>,
+    pub font_color: Option<String>,
+    pub background_alpha: Option<f64>,
+    pub background_color: Option<String>,
+    pub stroke: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitleCue {
+    pub index: u32,
+    pub id: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+    pub position: Option<u32>,
+    pub music_confidence: Option<f64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitleDocument {
+    pub subtitle: VideoSubtitle,
+    pub source_language: Option<String>,
+    pub source_type: Option<String>,
+    pub source_version: Option<String>,
+    pub style: VideoSubtitleStyle,
+    pub cues: Vec<VideoSubtitleCue>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
     pub width: Option<u32>,
@@ -6621,6 +6654,53 @@ mod tests {
             "bilibili:subtitle:13643112644608002"
         );
         assert_eq!(value["items"][0]["language"], "zh-Hans");
+
+        let document = VideoSubtitleDocument {
+            subtitle: VideoSubtitle {
+                resource_ref: ResourceRef::new(Platform::Bilibili, "subtitle:13643112644608002")
+                    .expect("valid subtitle reference"),
+                video_ref: part.video_ref.clone(),
+                part_ref: part.resource_ref.clone(),
+                platform: Platform::Bilibili,
+                id: "subtitle:13643112644608002".to_owned(),
+                language: "zh-Hans".to_owned(),
+                label: "中文（简体）".to_owned(),
+                format: "bilibili_json".to_owned(),
+                locked: Some(true),
+                extensions: Extensions::new(),
+            },
+            source_language: Some("zh".to_owned()),
+            source_type: Some("AIsubtitle".to_owned()),
+            source_version: Some("v1.7.0.4".to_owned()),
+            style: VideoSubtitleStyle {
+                font_size: Some(0.4),
+                font_color: Some("#FFFFFF".to_owned()),
+                background_alpha: Some(0.5),
+                background_color: Some("#9C27B0".to_owned()),
+                stroke: Some("none".to_owned()),
+                extensions: Extensions::new(),
+            },
+            cues: vec![VideoSubtitleCue {
+                index: 0,
+                id: Some("1".to_owned()),
+                start_ms: 12_180,
+                end_ms: 18_180,
+                text: "♪ 字幕正文 ♪".to_owned(),
+                position: Some(2),
+                music_confidence: Some(0.9999),
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(document).expect("serialize subtitle document");
+        assert_eq!(
+            value["subtitle"]["ref"],
+            "bilibili:subtitle:13643112644608002"
+        );
+        assert_eq!(value["source_type"], "AIsubtitle");
+        assert_eq!(value["style"]["background_alpha"], 0.5);
+        assert_eq!(value["cues"][0]["start_ms"], 12_180);
+        assert_eq!(value["cues"][0]["text"], "♪ 字幕正文 ♪");
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,

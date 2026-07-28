@@ -115,8 +115,8 @@ pub use model::{
     VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoRecommendationKind,
     VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
     VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream,
-    VideoStreamRequest, VideoSubtitle, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    VideoStreamRequest, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoSubtitleStyle, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

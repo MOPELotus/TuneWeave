@@ -70,6 +70,7 @@ const FAVORITE_MEDIA_PAGE_SIZE: u32 = 20;
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_SUBTITLE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const WBI_CACHE_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 const WEB_TICKET_HMAC_KEY: &[u8] = b"XgwSnGZ1p";
 const WEB_TICKET_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -394,6 +395,29 @@ pub(crate) struct BilibiliSubtitle {
     pub subtitle_type: i64,
     pub ai_type: i64,
     pub ai_status: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BilibiliSubtitleBody {
+    pub source_language: Option<String>,
+    pub source_type: Option<String>,
+    pub source_version: Option<String>,
+    pub font_size: Option<f64>,
+    pub font_color: Option<String>,
+    pub background_alpha: Option<f64>,
+    pub background_color: Option<String>,
+    pub stroke: Option<String>,
+    pub cues: Vec<BilibiliSubtitleCue>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BilibiliSubtitleCue {
+    pub id: Option<String>,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+    pub position: Option<u32>,
+    pub music_confidence: Option<f64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1013,6 +1037,42 @@ struct VideoPlayerSubtitle {
     subtitle_type: i64,
     ai_type: i64,
     ai_status: i64,
+}
+
+#[derive(Deserialize)]
+struct SubtitleBodyData {
+    #[serde(default)]
+    font_size: Option<f64>,
+    #[serde(default)]
+    font_color: Option<String>,
+    #[serde(default)]
+    background_alpha: Option<f64>,
+    #[serde(default)]
+    background_color: Option<String>,
+    #[serde(default, rename = "Stroke")]
+    stroke: Option<String>,
+    #[serde(default, rename = "type")]
+    source_type: Option<FlexibleText>,
+    #[serde(default)]
+    lang: Option<FlexibleText>,
+    #[serde(default)]
+    version: Option<FlexibleText>,
+    body: Vec<SubtitleCueData>,
+}
+
+#[derive(Deserialize)]
+struct SubtitleCueData {
+    #[serde(rename = "from")]
+    start_seconds: f64,
+    #[serde(rename = "to")]
+    end_seconds: f64,
+    #[serde(default)]
+    sid: Option<FlexibleText>,
+    #[serde(default)]
+    location: Option<u32>,
+    content: String,
+    #[serde(default)]
+    music: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -1883,6 +1943,57 @@ impl BilibiliClient {
             ));
         }
         parse_video_subtitle_catalog(&bytes, aid, bvid, cid)
+    }
+
+    pub(crate) async fn subtitle_body(
+        &self,
+        resource_url: &Url,
+        bvid: &str,
+    ) -> Result<BilibiliSubtitleBody> {
+        let resource_url = normalize_bilibili_subtitle_url(resource_url.as_str())?;
+        if !matches!(
+            crate::BilibiliVideoIdentity::parse(bvid),
+            Ok(crate::BilibiliVideoIdentity::Bvid(ref value)) if value == bvid
+        ) {
+            return Err(invalid_bilibili_request(
+                "Bilibili subtitle body request contains an invalid BVID",
+            ));
+        }
+        let mut response = self
+            .http
+            .get(resource_url)
+            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili subtitle body", status));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle body response exceeded the size limit",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or_default()
+                .min(MAX_SUBTITLE_RESPONSE_BYTES),
+        );
+        while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili subtitle body response exceeded the size limit",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        parse_subtitle_body(&bytes)
     }
 
     pub(crate) async fn created_favorite_folders(
@@ -2856,6 +2967,70 @@ fn parse_video_subtitle_catalog(
         default_language,
         default_language_label,
         subtitles,
+    })
+}
+
+fn parse_subtitle_body(bytes: &[u8]) -> Result<BilibiliSubtitleBody> {
+    let data: SubtitleBodyData = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili subtitle body returned invalid JSON"))?;
+    if data.body.len() > 100_000 {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle body exceeded the cue limit",
+        ));
+    }
+    let font_size = validate_optional_subtitle_ratio(data.font_size, "font size", 100.0)?;
+    let background_alpha =
+        validate_optional_subtitle_ratio(data.background_alpha, "background alpha", 1.0)?;
+    let source_language = optional_flexible_subtitle_text(data.lang, "source language", 32)?;
+    if let Some(language) = source_language.as_deref() {
+        validate_subtitle_language(language, "subtitle body source language")?;
+    }
+    let source_type = optional_flexible_subtitle_text(data.source_type, "source type", 128)?;
+    let source_version = optional_flexible_subtitle_text(data.version, "source version", 128)?;
+    let font_color = optional_subtitle_style_text(data.font_color, "font color")?;
+    let background_color = optional_subtitle_style_text(data.background_color, "background color")?;
+    let stroke = optional_subtitle_style_text(data.stroke, "stroke")?;
+    let mut cues = Vec::with_capacity(data.body.len());
+    for item in data.body {
+        validate_subtitle_seconds(item.start_seconds, "cue start")?;
+        validate_subtitle_seconds(item.end_seconds, "cue end")?;
+        if item.end_seconds < item.start_seconds {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle body returned a cue with a negative duration",
+            ));
+        }
+        if item.location.is_some_and(|position| position > 1000) {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle body returned an invalid cue position",
+            ));
+        }
+        if item
+            .music
+            .is_some_and(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle body returned an invalid music confidence",
+            ));
+        }
+        cues.push(BilibiliSubtitleCue {
+            id: optional_flexible_subtitle_text(item.sid, "cue ID", 64)?,
+            start_seconds: item.start_seconds,
+            end_seconds: item.end_seconds,
+            text: validated_subtitle_cue_text(&item.content)?,
+            position: item.location,
+            music_confidence: item.music,
+        });
+    }
+    Ok(BilibiliSubtitleBody {
+        source_language,
+        source_type,
+        source_version,
+        font_size,
+        font_color,
+        background_alpha,
+        background_color,
+        stroke,
+        cues,
     })
 }
 
@@ -3941,6 +4116,61 @@ fn optional_subtitle_language(value: &str, context: &str) -> Result<Option<Strin
     validate_subtitle_language(value, context).map(Some)
 }
 
+fn optional_flexible_subtitle_text(
+    value: Option<FlexibleText>,
+    context: &str,
+    limit: usize,
+) -> Result<Option<String>> {
+    value
+        .map(FlexibleText::into_string)
+        .map_or(Ok(None), |value| {
+            optional_bounded_text(&value, context, limit)
+        })
+}
+
+fn optional_subtitle_style_text(value: Option<String>, context: &str) -> Result<Option<String>> {
+    value.map_or(Ok(None), |value| {
+        optional_bounded_text(&value, context, 128)
+    })
+}
+
+fn validate_optional_subtitle_ratio(
+    value: Option<f64>,
+    context: &str,
+    maximum: f64,
+) -> Result<Option<f64>> {
+    if value.is_some_and(|value| !value.is_finite() || value < 0.0 || value > maximum) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili subtitle body returned an invalid {context}"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_subtitle_seconds(value: f64, context: &str) -> Result<()> {
+    const MAX_SUBTITLE_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
+    if !value.is_finite() || !(0.0..=MAX_SUBTITLE_SECONDS).contains(&value) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili subtitle body returned an invalid {context}"
+        )));
+    }
+    Ok(())
+}
+
+fn validated_subtitle_cue_text(value: &str) -> Result<String> {
+    if value.trim().is_empty()
+        || value.len() > 64 * 1024
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle body returned invalid cue text",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn normalize_bilibili_subtitle_url(value: &str) -> Result<Url> {
     let value = value.trim();
     if value.is_empty() || value.len() > 8 * 1024 || value.chars().any(char::is_control) {
@@ -3964,21 +4194,38 @@ fn normalize_bilibili_subtitle_url(value: &str) -> Result<Url> {
                 | "s1.hdslb.com"
         )
     );
+    let path = url.path();
+    let legacy_path = path
+        .strip_prefix("/bfs/subtitle/")
+        .is_some_and(|suffix| subtitle_path_suffix_allowed(suffix) && suffix.ends_with(".json"));
+    let ai_path = path
+        .strip_prefix("/bfs/ai_subtitle/prod/")
+        .is_some_and(subtitle_path_suffix_allowed);
     if url.scheme() != "https"
         || !allowed_host
         || url.port().is_some()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || !url.path().starts_with("/bfs/subtitle/")
-        || !url.path().ends_with(".json")
-        || url.path().len() > 1024
+        || !(legacy_path || ai_path)
+        || path.len() > 2048
     {
         return Err(bilibili_upstream_error(
             "Bilibili subtitle catalog returned a disallowed resource URL",
         ));
     }
     Ok(url)
+}
+
+fn subtitle_path_suffix_allowed(suffix: &str) -> bool {
+    !suffix.is_empty()
+        && suffix.len() <= 1024
+        && suffix
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
 }
 
 fn normalize_bilibili_image_url(value: &str, context: &str) -> Result<Option<String>> {
@@ -5497,7 +5744,7 @@ mod tests {
                         "lan": "zh-Hans",
                         "lan_doc": "中文（简体）",
                         "is_lock": true,
-                        "subtitle_url": "//aisubtitle.hdslb.com/bfs/subtitle/c49b18a284739d99df1e3723cdf72c0c82db98e0.json?auth_key=redacted",
+                        "subtitle_url": "//aisubtitle.hdslb.com/bfs/ai_subtitle/prod/c49b18a284739d99df1e3723cdf72c0c82db98e0?auth_key=redacted",
                         "type": 0,
                         "ai_type": 0,
                         "ai_status": 0
@@ -5550,6 +5797,112 @@ mod tests {
                 parse_video_subtitle_catalog(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
                     .expect_err("subtitle catalog drift");
             assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn subtitle_body_preserves_current_ai_schema_as_typed_cues() {
+        let bytes = serde_json::to_vec(&json!({
+            "font_size": 0.4,
+            "font_color": "#FFFFFF",
+            "background_alpha": 0.5,
+            "background_color": "#9C27B0",
+            "Stroke": "none",
+            "type": "AIsubtitle",
+            "lang": "zh",
+            "version": "v1.7.0.4",
+            "body": [{
+                "from": 12.18,
+                "to": 18.18,
+                "sid": 1,
+                "location": 2,
+                "content": "♪ 保留字幕正文中的空白 ♪",
+                "music": 0.9999
+            }, {
+                "from": 18.2,
+                "to": 20.0,
+                "sid": "2",
+                "content": "第二句"
+            }]
+        }))
+        .expect("subtitle body fixture");
+
+        let body = parse_subtitle_body(&bytes).expect("subtitle body");
+        assert_eq!(body.source_language.as_deref(), Some("zh"));
+        assert_eq!(body.source_type.as_deref(), Some("AIsubtitle"));
+        assert_eq!(body.source_version.as_deref(), Some("v1.7.0.4"));
+        assert_eq!(body.font_size, Some(0.4));
+        assert_eq!(body.font_color.as_deref(), Some("#FFFFFF"));
+        assert_eq!(body.background_alpha, Some(0.5));
+        assert_eq!(body.background_color.as_deref(), Some("#9C27B0"));
+        assert_eq!(body.stroke.as_deref(), Some("none"));
+        assert_eq!(body.cues.len(), 2);
+        assert_eq!(body.cues[0].id.as_deref(), Some("1"));
+        assert_eq!(body.cues[0].start_seconds, 12.18);
+        assert_eq!(body.cues[0].end_seconds, 18.18);
+        assert_eq!(body.cues[0].position, Some(2));
+        assert_eq!(body.cues[0].music_confidence, Some(0.9999));
+        assert_eq!(body.cues[1].id.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn subtitle_body_rejects_invalid_style_timing_and_cue_fields() {
+        let fixture = json!({
+            "font_size": 0.4,
+            "background_alpha": 0.5,
+            "lang": "zh",
+            "body": [{
+                "from": 1.0,
+                "to": 2.0,
+                "sid": 1,
+                "location": 2,
+                "content": "有效字幕",
+                "music": 0.25
+            }]
+        });
+
+        for (pointer, value) in [
+            ("/font_size", json!(-0.1)),
+            ("/background_alpha", json!(1.1)),
+            ("/lang", json!("zh\nredirect")),
+            ("/body/0/from", json!(-1.0)),
+            ("/body/0/to", json!(0.5)),
+            ("/body/0/location", json!(1001)),
+            ("/body/0/content", json!(" \t ")),
+            ("/body/0/music", json!(1.1)),
+        ] {
+            let mut malformed = fixture.clone();
+            *malformed.pointer_mut(pointer).expect("fixture field") = value;
+            let bytes = serde_json::to_vec(&malformed).expect("malformed subtitle body fixture");
+            let error = parse_subtitle_body(&bytes).expect_err("subtitle body drift");
+            assert_eq!(error.code, ErrorCode::UpstreamError, "{pointer}");
+        }
+    }
+
+    #[test]
+    fn subtitle_resource_urls_allow_only_fixed_https_cdn_paths() {
+        for allowed in [
+            "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/opaque-id?auth_key=secret",
+            "//i0.hdslb.com/bfs/subtitle/opaque.json",
+        ] {
+            let url = normalize_bilibili_subtitle_url(allowed).expect("trusted subtitle URL");
+            assert_eq!(url.scheme(), "https");
+        }
+
+        for rejected in [
+            "http://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/opaque",
+            "https://example.test/bfs/ai_subtitle/prod/opaque",
+            "https://127.0.0.1/bfs/subtitle/opaque.json",
+            "https://aisubtitle.hdslb.com:8443/bfs/ai_subtitle/prod/opaque",
+            "https://user@aisubtitle.hdslb.com/bfs/ai_subtitle/prod/opaque",
+            "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/../opaque",
+            "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/%2e%2e/opaque",
+            "https://aisubtitle.hdslb.com/bfs/other/opaque.json",
+            "file:///bfs/subtitle/opaque.json",
+        ] {
+            let error =
+                normalize_bilibili_subtitle_url(rejected).expect_err("disallowed subtitle URL");
+            assert_eq!(error.code, ErrorCode::UpstreamError, "{rejected}");
         }
     }
 
