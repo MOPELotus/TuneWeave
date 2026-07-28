@@ -27,8 +27,9 @@ use tuneweave_core::{
     MusicGeneGroove, MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGeneMainDescription,
     MusicGenePersonality, MusicGenePreferences, MusicGeneStatus, MusicGeneStatusEntry,
     MusicGeneTempo, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
-    MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, PlatformApiRequest,
+    PlatformBatchRequest, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
     PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
     ProviderQrPoll, ProviderQrStart, Quality, RecommendationFeed, RecommendationFeedAction,
@@ -157,6 +158,50 @@ const QQ_CREDENTIAL_KIND: &str = "qq_credential_v1";
 const MAX_SONG_URL_ITEMS: usize = 100;
 const MAX_MV_URL_ITEMS: usize = 100;
 const MAX_MV_DETAIL_ITEMS: usize = 100;
+const MAX_EXTENSION_BATCH_ITEMS: usize = 20;
+const MAX_EXTENSION_PARAM_BYTES: usize = 1024 * 1024;
+const MAX_EXTENSION_PARAM_DEPTH: usize = 32;
+const MAX_EXTENSION_PARAM_NODES: usize = 20_000;
+const MAX_EXTENSION_ALLOWED_CODES: usize = 32;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqExtensionOptions {
+    #[serde(default = "empty_qq_extension_param")]
+    param: Value,
+    #[serde(default)]
+    preserve_booleans: bool,
+    #[serde(default)]
+    allow_error_codes: Vec<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqExtensionBatchCall {
+    module: String,
+    method: String,
+    #[serde(default = "empty_qq_extension_param")]
+    param: Value,
+    #[serde(default)]
+    preserve_booleans: bool,
+    #[serde(default)]
+    allow_error_codes: Vec<i64>,
+}
+
+struct PreparedQqExtensionCall {
+    request: QqApiRequest,
+    allow_error_codes: BTreeSet<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct QqExtensionProtocol {
+    web: bool,
+    signed: bool,
+}
+
+fn empty_qq_extension_param() -> Value {
+    Value::Object(serde_json::Map::new())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QqAudioFileSpec {
@@ -3742,6 +3787,322 @@ pub struct QqProvider {
     qr_transactions: QqQrTransactions,
 }
 
+fn prepare_qq_extension_api_call(uri: &str, data: Value) -> Result<PreparedQqExtensionCall> {
+    let (module, method) = split_qq_extension_uri(uri)?;
+    let options = serde_json::from_value::<QqExtensionOptions>(data).map_err(|_| {
+        TuneWeaveError::invalid_request(
+            "QQ extension data must contain only param, preserve_booleans, and allow_error_codes",
+        )
+        .with_platform(Platform::Qq)
+    })?;
+    prepare_qq_extension_call(
+        module,
+        method,
+        options.param,
+        options.preserve_booleans,
+        options.allow_error_codes,
+    )
+}
+
+fn prepare_qq_extension_batch_call(label: &str, value: Value) -> Result<PreparedQqExtensionCall> {
+    let call = serde_json::from_value::<QqExtensionBatchCall>(value).map_err(|_| {
+        TuneWeaveError::invalid_request(format!(
+            "QQ extension batch request {label} has an invalid shape"
+        ))
+        .with_platform(Platform::Qq)
+    })?;
+    prepare_qq_extension_call(
+        &call.module,
+        &call.method,
+        call.param,
+        call.preserve_booleans,
+        call.allow_error_codes,
+    )
+}
+
+fn prepare_qq_extension_call(
+    module: &str,
+    method: &str,
+    param: Value,
+    preserve_booleans: bool,
+    allow_error_codes: Vec<i64>,
+) -> Result<PreparedQqExtensionCall> {
+    validate_qq_extension_identifier(module, "module")?;
+    validate_qq_extension_identifier(method, "method")?;
+    validate_qq_extension_param(&param)?;
+    let allow_error_codes = validate_qq_extension_error_codes(allow_error_codes)?;
+    let request = QqApiRequest::new(module, method, param);
+    Ok(PreparedQqExtensionCall {
+        request: if preserve_booleans {
+            request.preserving_booleans()
+        } else {
+            request
+        },
+        allow_error_codes,
+    })
+}
+
+fn split_qq_extension_uri(uri: &str) -> Result<(&str, &str)> {
+    let uri = uri.trim();
+    let Some((module, method)) = uri.split_once('/') else {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ extension uri must use module/method form",
+        )
+        .with_platform(Platform::Qq));
+    };
+    if method.contains('/') {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ extension uri must contain exactly one separator",
+        )
+        .with_platform(Platform::Qq));
+    }
+    validate_qq_extension_identifier(module, "module")?;
+    validate_qq_extension_identifier(method, "method")?;
+    Ok((module, method))
+}
+
+fn validate_qq_extension_identifier(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 128 {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension {field} must contain 1 to 128 bytes"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension {field} contains unsupported characters"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
+fn validate_qq_extension_label(label: &str) -> Result<()> {
+    if label.is_empty() || label.len() > 64 {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ extension batch labels must contain 1 to 64 bytes",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if !label
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ extension batch labels contain unsupported characters",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(())
+}
+
+fn validate_qq_extension_param(param: &Value) -> Result<()> {
+    if !param.is_object() {
+        return Err(
+            TuneWeaveError::invalid_request("QQ extension param must be a JSON object")
+                .with_platform(Platform::Qq),
+        );
+    }
+    let size = serde_json::to_vec(param)
+        .map_err(|_| qq_data_error("QQ extension param could not be serialized"))?
+        .len();
+    if size > MAX_EXTENSION_PARAM_BYTES {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension param cannot exceed {MAX_EXTENSION_PARAM_BYTES} bytes"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    let mut nodes = 0;
+    validate_qq_extension_value(param, 0, &mut nodes)
+}
+
+fn validate_qq_extension_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
+    if depth > MAX_EXTENSION_PARAM_DEPTH {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension param cannot exceed {MAX_EXTENSION_PARAM_DEPTH} nested levels"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_EXTENSION_PARAM_NODES {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension param cannot exceed {MAX_EXTENSION_PARAM_NODES} JSON values"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                validate_qq_extension_value(value, depth + 1, nodes)?;
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if qq_extension_sensitive_key(key) {
+                    return Err(TuneWeaveError::invalid_request(format!(
+                        "QQ extension param cannot override sensitive field {key}"
+                    ))
+                    .with_platform(Platform::Qq));
+                }
+                if key.len() > 256 {
+                    return Err(TuneWeaveError::invalid_request(
+                        "QQ extension param keys cannot exceed 256 bytes",
+                    )
+                    .with_platform(Platform::Qq));
+                }
+                validate_qq_extension_value(value, depth + 1, nodes)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn qq_extension_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-' | '.'))
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    qq_extension_credential_key(&normalized)
+        || matches!(
+            normalized.as_str(),
+            "comm"
+                | "domain"
+                | "endpoint"
+                | "headers"
+                | "host"
+                | "proxy"
+                | "realip"
+                | "timeout"
+                | "ua"
+                | "url"
+                | "useragent"
+                | "xforwardedfor"
+        )
+}
+
+fn qq_extension_credential_key(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "accesstoken"
+            | "authst"
+            | "authorization"
+            | "cookie"
+            | "cookies"
+            | "credential"
+            | "credentials"
+            | "musickey"
+            | "openid"
+            | "pskey"
+            | "pt4token"
+            | "qimei"
+            | "qimei36"
+            | "qmkeyst"
+            | "qqmusickey"
+            | "refreshtoken"
+            | "sid"
+            | "skey"
+            | "token"
+            | "unionid"
+            | "vkey"
+    )
+}
+
+fn validate_qq_extension_error_codes(codes: Vec<i64>) -> Result<BTreeSet<i64>> {
+    if codes.len() > MAX_EXTENSION_ALLOWED_CODES {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "QQ extension allow_error_codes cannot exceed {MAX_EXTENSION_ALLOWED_CODES} values"
+        ))
+        .with_platform(Platform::Qq));
+    }
+    let mut unique = BTreeSet::new();
+    for code in codes {
+        if code == 0 {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ extension allow_error_codes cannot contain success code 0",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if !unique.insert(code) {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ extension allow_error_codes cannot contain duplicates",
+            )
+            .with_platform(Platform::Qq));
+        }
+    }
+    Ok(unique)
+}
+
+fn parse_qq_extension_protocol(protocol: Option<&str>) -> Result<QqExtensionProtocol> {
+    match protocol.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("android") => Ok(QqExtensionProtocol {
+            web: false,
+            signed: false,
+        }),
+        Some("android_signed") => Ok(QqExtensionProtocol {
+            web: false,
+            signed: true,
+        }),
+        Some("web") => Ok(QqExtensionProtocol {
+            web: true,
+            signed: false,
+        }),
+        Some("web_signed") => Ok(QqExtensionProtocol {
+            web: true,
+            signed: true,
+        }),
+        Some(_) => Err(TuneWeaveError::invalid_request(
+            "QQ extension protocol must be android, android_signed, web, or web_signed",
+        )
+        .with_platform(Platform::Qq)),
+    }
+}
+
+fn map_qq_extension_response(
+    response: QqBusinessResponse,
+    allow_error_codes: &BTreeSet<i64>,
+    context: &str,
+) -> Result<Value> {
+    if response.code != 0 && !allow_error_codes.contains(&response.code) {
+        return Err(qq_login_business_error(
+            response.code,
+            &format!("{context} failed"),
+        ));
+    }
+    let mut raw = response.raw;
+    redact_qq_extension_value(&mut raw);
+    Ok(raw)
+}
+
+fn redact_qq_extension_value(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                redact_qq_extension_value(value);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                let normalized = key
+                    .chars()
+                    .filter(|character| !matches!(character, '_' | '-' | '.'))
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>();
+                if qq_extension_credential_key(&normalized) {
+                    *value = Value::String("[redacted]".to_owned());
+                } else {
+                    redact_qq_extension_value(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl QqProvider {
     pub fn new(config: QqConfig) -> Result<Self> {
         let credential_store = config.credential_store.clone();
@@ -3836,6 +4197,8 @@ impl MusicProvider for QqProvider {
             Capability::AccountFollowingArtists,
             Capability::AccountDislikes,
             Capability::AccountDislikeWrite,
+            Capability::PlatformApi,
+            Capability::PlatformBatch,
         ])
     }
 
@@ -5780,6 +6143,105 @@ impl MusicProvider for QqProvider {
             .with_platform(Platform::Qq)
             .with_details(json!({ "upstream_state": upstream_state }))
         })
+    }
+
+    async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
+        let protocol = parse_qq_extension_protocol(request.protocol.as_deref())?;
+        let prepared = prepare_qq_extension_api_call(&request.uri, request.data.clone())?;
+        if protocol.web
+            && request
+                .account
+                .as_deref()
+                .is_some_and(|account| !account.trim().is_empty())
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ web extension requests do not accept an account",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let mut responses = self
+            .client
+            .request_extension_batch(
+                std::slice::from_ref(&prepared.request),
+                credential.as_ref(),
+                protocol.web,
+                protocol.signed,
+            )
+            .await?;
+        let response = responses
+            .pop()
+            .ok_or_else(|| qq_data_error("QQ extension returned no response"))?;
+        map_qq_extension_response(response, &prepared.allow_error_codes, &request.uri)
+    }
+
+    async fn platform_batch(&self, request: &PlatformBatchRequest) -> Result<Value> {
+        if request.encrypted_response {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ extension batches do not support encrypted_response",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request.requests.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ extension batch requires at least one request",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if request.requests.len() > MAX_EXTENSION_BATCH_ITEMS {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "QQ extension batch cannot exceed {MAX_EXTENSION_BATCH_ITEMS} requests"
+            ))
+            .with_platform(Platform::Qq));
+        }
+
+        let protocol = parse_qq_extension_protocol(request.protocol.as_deref())?;
+        let mut labels = Vec::with_capacity(request.requests.len());
+        let mut prepared = Vec::with_capacity(request.requests.len());
+        for (label, value) in &request.requests {
+            validate_qq_extension_label(label)?;
+            labels.push(label.clone());
+            prepared.push(prepare_qq_extension_batch_call(label, value.clone())?);
+        }
+        if protocol.web
+            && request
+                .account
+                .as_deref()
+                .is_some_and(|account| !account.trim().is_empty())
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ web extension requests do not accept an account",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let credential = self.qq_credential(request.account.as_deref())?;
+        let api_requests = prepared
+            .iter()
+            .map(|call| call.request.clone())
+            .collect::<Vec<_>>();
+        let responses = self
+            .client
+            .request_extension_batch(
+                &api_requests,
+                credential.as_ref(),
+                protocol.web,
+                protocol.signed,
+            )
+            .await?;
+        if responses.len() != prepared.len() {
+            return Err(qq_data_error(
+                "QQ extension batch returned a different response count",
+            ));
+        }
+        let mut output = serde_json::Map::new();
+        for ((label, call), response) in labels.into_iter().zip(prepared).zip(responses) {
+            let context = format!("QQ extension batch request {label}");
+            output.insert(
+                label,
+                map_qq_extension_response(response, &call.allow_error_codes, &context)?,
+            );
+        }
+        Ok(Value::Object(output))
     }
 }
 
@@ -18212,6 +18674,198 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qq_extension_prepares_fixed_module_method_and_options() {
+        let prepared = prepare_qq_extension_api_call(
+            "music.musicToplist.Toplist/GetAll",
+            json!({
+                "param": { "flag": false },
+                "preserve_booleans": true,
+                "allow_error_codes": [20261, -1]
+            }),
+        )
+        .expect("valid QQ extension call");
+        assert_eq!(prepared.request.module, "music.musicToplist.Toplist");
+        assert_eq!(prepared.request.method, "GetAll");
+        assert_eq!(prepared.request.param, json!({ "flag": false }));
+        assert!(prepared.request.preserves_booleans());
+        assert_eq!(prepared.allow_error_codes, BTreeSet::from([-1, 20_261]));
+
+        let protocol =
+            parse_qq_extension_protocol(Some("web_signed")).expect("supported fixed protocol");
+        assert!(protocol.web);
+        assert!(protocol.signed);
+
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::PlatformApi));
+        assert!(provider.capabilities().contains(&Capability::PlatformBatch));
+    }
+
+    #[test]
+    fn qq_extension_rejects_target_and_sensitive_parameter_overrides() {
+        for (uri, data) in [
+            ("https://example.com/GetAll", json!({})),
+            ("music.module/GetAll/again", json!({})),
+            ("music.module/Get All", json!({})),
+            (
+                "music.module/GetAll",
+                json!({ "param": { "nested": { "qm_keyst": "secret" } } }),
+            ),
+            (
+                "music.module/GetAll",
+                json!({ "param": { "transport": { "url": "https://example.com" } } }),
+            ),
+            (
+                "music.module/GetAll",
+                json!({ "param": [], "allow_error_codes": [] }),
+            ),
+            (
+                "music.module/GetAll",
+                json!({ "param": {}, "allow_error_codes": [1000, 1000] }),
+            ),
+            (
+                "music.module/GetAll",
+                json!({ "param": {}, "allow_error_codes": [0] }),
+            ),
+        ] {
+            let Err(error) = prepare_qq_extension_api_call(uri, data) else {
+                panic!("unsafe QQ extension input was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert_eq!(error.platform, Some(Platform::Qq));
+        }
+
+        for protocol in ["api", "linuxapi", "https://u.y.qq.com", "android/signed"] {
+            let Err(error) = parse_qq_extension_protocol(Some(protocol)) else {
+                panic!("unsafe QQ extension protocol was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        for label in ["", "slash/label", "space label"] {
+            let Err(error) = validate_qq_extension_label(label) else {
+                panic!("unsafe QQ extension label was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let oversized = json!({ "value": "x".repeat(MAX_EXTENSION_PARAM_BYTES) });
+        let Err(error) = validate_qq_extension_param(&oversized) else {
+            panic!("oversized QQ extension param was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let mut deeply_nested = json!({});
+        for _ in 0..=MAX_EXTENSION_PARAM_DEPTH {
+            deeply_nested = json!({ "value": deeply_nested });
+        }
+        let Err(error) = validate_qq_extension_param(&deeply_nested) else {
+            panic!("deeply nested QQ extension param was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn qq_extension_allows_selected_business_codes_and_redacts_credentials() {
+        let response = QqBusinessResponse {
+            code: 20_261,
+            data: json!({}),
+            raw: json!({
+                "code": 20261,
+                "data": {
+                    "pageToken": "ordinary-cursor",
+                    "url": "https://example.test/media.m4a",
+                    "musickey": "private-key",
+                    "nested": { "access_token": "private-token", "name": "safe" }
+                }
+            }),
+        };
+        let mapped =
+            map_qq_extension_response(response, &BTreeSet::from([20_261]), "QQ extension test")
+                .expect("explicit business code is returned");
+        assert_eq!(mapped["code"], 20_261);
+        assert_eq!(mapped["data"]["pageToken"], "ordinary-cursor");
+        assert_eq!(mapped["data"]["url"], "https://example.test/media.m4a");
+        assert_eq!(mapped["data"]["musickey"], "[redacted]");
+        assert_eq!(mapped["data"]["nested"]["access_token"], "[redacted]");
+        assert_eq!(mapped["data"]["nested"]["name"], "safe");
+
+        let response = QqBusinessResponse {
+            code: 104_604,
+            data: json!({}),
+            raw: json!({ "code": 104604 }),
+        };
+        let Err(error) = map_qq_extension_response(response, &BTreeSet::new(), "QQ extension test")
+        else {
+            panic!("unselected business error was returned as success");
+        };
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert!(error.retryable);
+        assert_eq!(error.details["platform_code"], 104_604);
+    }
+
+    #[tokio::test]
+    async fn qq_extension_batch_rejects_bounds_before_account_or_network_access() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        for request in [
+            PlatformBatchRequest {
+                requests: BTreeMap::new(),
+                protocol: Some("android".to_owned()),
+                encrypted_response: false,
+                account: Some("missing".to_owned()),
+            },
+            PlatformBatchRequest {
+                requests: (0..=MAX_EXTENSION_BATCH_ITEMS)
+                    .map(|index| {
+                        (
+                            format!("request-{index}"),
+                            json!({ "module": "music.test", "method": "Get" }),
+                        )
+                    })
+                    .collect(),
+                protocol: Some("android".to_owned()),
+                encrypted_response: false,
+                account: Some("missing".to_owned()),
+            },
+            PlatformBatchRequest {
+                requests: BTreeMap::from([(
+                    "request".to_owned(),
+                    json!({ "module": "music.test", "method": "Get" }),
+                )]),
+                protocol: Some("android".to_owned()),
+                encrypted_response: true,
+                account: Some("missing".to_owned()),
+            },
+        ] {
+            let Err(error) = MusicProvider::platform_batch(&provider, &request).await else {
+                panic!("invalid QQ extension batch was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let request = PlatformApiRequest {
+            uri: "music.test/Get".to_owned(),
+            data: json!({}),
+            protocol: Some("web".to_owned()),
+            account: Some("missing".to_owned()),
+        };
+        let Err(error) = MusicProvider::platform_api(&provider, &request).await else {
+            panic!("authenticated QQ web extension was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let request = PlatformApiRequest {
+            uri: "music.test/Get".to_owned(),
+            data: json!({}),
+            protocol: Some("android".to_owned()),
+            account: Some("missing".to_owned()),
+        };
+        let Err(error) = MusicProvider::platform_api(&provider, &request).await else {
+            panic!("missing exact QQ account reached the network");
+        };
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
     fn sample_track(id: u64, mid: &str, title: &str) -> Value {
         json!({
             "id": id,
@@ -30372,6 +31026,63 @@ mod tests {
         assert!(gene.ai_interpretation.is_some());
         assert!(!gene.sort_order.is_empty());
         assert!(!gene.card_order.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_extension_single_and_batch_use_fixed_anonymous_transports() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let single = MusicProvider::platform_api(
+            &provider,
+            &PlatformApiRequest {
+                uri: "music.musicToplist.Toplist/GetAll".to_owned(),
+                data: json!({ "param": {}, "preserve_booleans": true }),
+                protocol: Some("android_signed".to_owned()),
+                account: None,
+            },
+        )
+        .await
+        .expect("live signed QQ extension request");
+        assert_eq!(single["code"], 0);
+        assert!(single["data"].is_object());
+
+        let batch = MusicProvider::platform_batch(
+            &provider,
+            &PlatformBatchRequest {
+                requests: BTreeMap::from([
+                    (
+                        "first".to_owned(),
+                        json!({
+                            "module": "music.musicToplist.Toplist",
+                            "method": "GetAll",
+                            "param": {}
+                        }),
+                    ),
+                    (
+                        "second".to_owned(),
+                        json!({
+                            "module": "music.musicToplist.Toplist",
+                            "method": "GetAll",
+                            "param": {},
+                            "preserve_booleans": true
+                        }),
+                    ),
+                ]),
+                protocol: Some("web".to_owned()),
+                encrypted_response: false,
+                account: None,
+            },
+        )
+        .await
+        .expect("live web QQ extension batch");
+        assert_eq!(batch["first"]["code"], 0);
+        assert_eq!(batch["second"]["code"], 0);
+        assert!(batch["first"]["data"].is_object());
+        assert!(batch["second"]["data"].is_object());
     }
 
     #[tokio::test]

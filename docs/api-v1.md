@@ -1698,6 +1698,8 @@ QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用
 | POST | `/v1/extensions/netease/api` | 在固定网易云域名上调用指定 `/api/...` 路径，支持 `eapi/weapi/api/linuxapi/xeapi` |
 | GET | `/v1/extensions/netease/batch` | 以参考项目的查询参数形式批量调用网易云 `/api/...` 路径 |
 | POST | `/v1/extensions/netease/batch` | 以 JSON 对象批量调用网易云 `/api/...` 路径 |
+| POST | `/v1/extensions/qq/api` | 使用固定 QQ Android/Web 普通或签名 CGI 档案调用一个 `module + method + param` |
+| POST | `/v1/extensions/qq/batch` | 在一次固定 QQ CGI 请求中执行最多 20 个有键子请求并保持键与响应对应关系 |
 | GET | `/v1/extensions/netease/partner/tasks` | 查询音乐合伙人当日任务与待评作品 |
 | POST | `/v1/extensions/netease/partner/run` | 按服务端策略执行合伙人任务并返回逐账户报告 |
 
@@ -1754,6 +1756,27 @@ POST 也兼容参考项目把 `"/api/..."` 直接放在顶层的写法；GET 则
 上游真实批量协议要求每个子请求参数最终是 JSON 文本。调用者传入对象、数组、数字、布尔或 `null` 时适配器会自动序列化，已传入的字符串保持原样，因此参考项目的 GET 字符串形式和 POST 对象形式均可用。响应不重排或折叠子请求结果，上游顶层 `code` 及各 `/api/...` 键原样位于统一包络的 `data` 中。
 
 每个批量键都会独立校验为固定网易云域名下的非空 `/api/...` 路径；空批次、重复键以及原始 Cookie、域名、代理、请求头、UA、伪造 IP、客户端超时或检查令牌覆盖都会被拒绝。当前账户凭据只通过 `account` 别名选择；调用方托管能力接入后可改用专用请求头中的对应平台封装，但仍不能在批量体内注入原始凭据。`e_r=true` 的响应解密由适配器内部完成。
+
+QQ 通用扩展以结构化字段选择 CGI 服务，不接受 URL：
+
+```json
+{
+  "module": "music.musicToplist.Toplist",
+  "method": "GetAll",
+  "param": {},
+  "client": "android",
+  "signed": false,
+  "preserve_booleans": false,
+  "allow_error_codes": [],
+  "account": "default"
+}
+```
+
+`client` 只接受 `android` 或 `web`；`signed=true` 仍由服务端固定选择 `musics.fcg`、生成时间戳和 `zzc` 签名，调用方不能覆盖目标域名或签名输入。Android 请求可以省略账户保持匿名，或用 `account` 精确选择已保存的 `(qq, account)` 凭据；Web 档案当前只允许匿名，避免把未经真实确认的 Web 登录参数伪装成可用能力。`param` 省略时为空对象，兼容输入名 `params/data`；默认按 QQ 移动协议递归把布尔值转换为 `0/1`，只有已知需要原生 JSON 布尔的调用才设置 `preserve_booleans=true`。
+
+批量请求把相同字段放在 `requests` 的有键对象中，并在批次顶层统一选择 `client/signed/account`。批次不能为空且最多 20 项，每个标签、模块和方法均采用有界安全字符集；每个参数对象限制为 1 MiB、32 层和 20000 个 JSON 节点。顶层与任意嵌套层的 Cookie、token、QQ 音乐密钥、OAuth 标识、`comm`、QIMEI、目标 URL/域名、代理、请求头及 UA 字段都会在读取账户或访问网络前拒绝。响应按调用方标签返回；其中的凭据、Cookie、会话密钥和设备身份字段会递归替换为 `[redacted]`，正常媒体/图片 URL 与分页等组合字段（例如 `pageToken`）不会被误删。
+
+QQ 子请求的非零业务码默认映射为统一认证、参数、权限、冲突、限流或上游错误。只有调用方明确列入 `allow_error_codes` 的非零码才作为原始响应返回；成功码 `0`、重复项和超过 32 个显式码会被拒绝。该机制用于平台特有的“非零码也是可解释状态”，不能跳过顶层批请求失败，也不能改变统一错误语义。
 
 ## 跨平台回退流程
 

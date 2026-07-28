@@ -682,6 +682,8 @@ pub fn build_router(state: AppState) -> Router {
             "/extensions/netease/register/checktoken/v3",
             get(netease_check_token_v3).post(netease_check_token_v3_refresh),
         )
+        .route("/extensions/qq/api", post(qq_extension_api))
+        .route("/extensions/qq/batch", post(qq_extension_batch))
         .route("/extensions/netease/api", post(netease_extension_api))
         .route(
             "/extensions/netease/batch",
@@ -12574,6 +12576,129 @@ async fn netease_calendar(
     Ok(Json(response))
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QqExtensionClient {
+    #[default]
+    Android,
+    Web,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqExtensionApiBody {
+    module: String,
+    method: String,
+    #[serde(default = "empty_json_object", alias = "params", alias = "data")]
+    param: Value,
+    #[serde(default)]
+    client: QqExtensionClient,
+    #[serde(default)]
+    signed: bool,
+    #[serde(default)]
+    preserve_booleans: bool,
+    #[serde(default)]
+    allow_error_codes: Vec<i64>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqExtensionBatchCallBody {
+    module: String,
+    method: String,
+    #[serde(default = "empty_json_object", alias = "params", alias = "data")]
+    param: Value,
+    #[serde(default)]
+    preserve_booleans: bool,
+    #[serde(default)]
+    allow_error_codes: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QqExtensionBatchBody {
+    requests: BTreeMap<String, QqExtensionBatchCallBody>,
+    #[serde(default)]
+    client: QqExtensionClient,
+    #[serde(default)]
+    signed: bool,
+    account: Option<String>,
+}
+
+async fn qq_extension_api(
+    State(state): State<AppState>,
+    payload: Result<Json<QqExtensionApiBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let body = json_body(payload)?;
+    let account = optional_trimmed(body.account);
+    let provider = state.registry.require(Platform::Qq)?;
+    let data = provider
+        .platform_api(&PlatformApiRequest {
+            uri: format!("{}/{}", body.module, body.method),
+            data: json!({
+                "param": body.param,
+                "preserve_booleans": body.preserve_booleans,
+                "allow_error_codes": body.allow_error_codes,
+            }),
+            protocol: Some(qq_extension_protocol(body.client, body.signed).to_owned()),
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(data).with_platform(Platform::Qq);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn qq_extension_batch(
+    State(state): State<AppState>,
+    payload: Result<Json<QqExtensionBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Value>>, ApiError> {
+    let body = json_body(payload)?;
+    let account = optional_trimmed(body.account);
+    let requests = body
+        .requests
+        .into_iter()
+        .map(|(label, call)| {
+            (
+                label,
+                json!({
+                    "module": call.module,
+                    "method": call.method,
+                    "param": call.param,
+                    "preserve_booleans": call.preserve_booleans,
+                    "allow_error_codes": call.allow_error_codes,
+                }),
+            )
+        })
+        .collect();
+    let provider = state.registry.require(Platform::Qq)?;
+    let data = provider
+        .platform_batch(&PlatformBatchRequest {
+            requests,
+            protocol: Some(qq_extension_protocol(body.client, body.signed).to_owned()),
+            encrypted_response: false,
+            account: account.clone(),
+        })
+        .await?;
+    let mut response = ApiResponse::new(data).with_platform(Platform::Qq);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+const fn qq_extension_protocol(client: QqExtensionClient, signed: bool) -> &'static str {
+    match (client, signed) {
+        (QqExtensionClient::Android, false) => "android",
+        (QqExtensionClient::Android, true) => "android_signed",
+        (QqExtensionClient::Web, false) => "web",
+        (QqExtensionClient::Web, true) => "web_signed",
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NeteaseExtensionApiBody {
@@ -13866,6 +13991,7 @@ mod tests {
         SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
         TrackLabel, VideoResolution,
     };
+    use tuneweave_provider_qq::{QqConfig, QqProvider};
 
     use super::*;
 
@@ -17491,6 +17617,8 @@ mod tests {
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
                 Capability::VideoCatalog,
+                Capability::PlatformApi,
+                Capability::PlatformBatch,
             ])
         }
 
@@ -18825,6 +18953,24 @@ mod tests {
                     .collect(),
                 pagination: page.pagination,
             })
+        }
+
+        async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {
+            Ok(json!({
+                "uri": request.uri,
+                "data": request.data,
+                "protocol": request.protocol,
+                "account": request.account,
+            }))
+        }
+
+        async fn platform_batch(&self, request: &PlatformBatchRequest) -> Result<Value> {
+            Ok(json!({
+                "requests": request.requests,
+                "protocol": request.protocol,
+                "encrypted_response": request.encrypted_response,
+                "account": request.account,
+            }))
         }
     }
 
@@ -28884,6 +29030,148 @@ mod tests {
         assert_eq!(json["data"]["crypto"], "linuxapi");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "green-diamond");
+    }
+
+    #[tokio::test]
+    async fn qq_extension_api_uses_fixed_protocol_and_standard_envelope() {
+        let (status, json) = json_request_from(
+            test_app_with_import_providers(),
+            Method::POST,
+            "/v1/extensions/qq/api",
+            Some(json!({
+                "module": "music.musicToplist.Toplist",
+                "method": "GetAll",
+                "params": { "flag": false },
+                "client": "android",
+                "signed": true,
+                "preserve_booleans": true,
+                "allow_error_codes": [20261],
+                "account": "qq-vip"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["uri"], "music.musicToplist.Toplist/GetAll");
+        assert_eq!(json["data"]["data"]["param"]["flag"], false);
+        assert_eq!(json["data"]["data"]["preserve_booleans"], true);
+        assert_eq!(json["data"]["data"]["allow_error_codes"], json!([20261]));
+        assert_eq!(json["data"]["protocol"], "android_signed");
+        assert_eq!(json["data"]["account"], "qq-vip");
+        assert_eq!(json["meta"]["platform"], "qq");
+        assert_eq!(json["meta"]["account"], "qq-vip");
+    }
+
+    #[tokio::test]
+    async fn qq_extension_batch_preserves_caller_keys_and_web_profile() {
+        let (status, json) = json_request_from(
+            test_app_with_import_providers(),
+            Method::POST,
+            "/v1/extensions/qq/batch",
+            Some(json!({
+                "requests": {
+                    "catalog": {
+                        "module": "music.musicToplist.Toplist",
+                        "method": "GetAll"
+                    },
+                    "suggestion": {
+                        "module": "music.smartboxCgi.SmartBoxCgi",
+                        "method": "GetSmartBoxResult",
+                        "data": { "query": "TuneWeave" },
+                        "preserve_booleans": false
+                    }
+                },
+                "client": "web",
+                "signed": true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["protocol"], "web_signed");
+        assert_eq!(
+            json["data"]["requests"]["catalog"]["module"],
+            "music.musicToplist.Toplist"
+        );
+        assert_eq!(
+            json["data"]["requests"]["suggestion"]["param"]["query"],
+            "TuneWeave"
+        );
+        assert_eq!(json["data"]["encrypted_response"], false);
+        assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn qq_extension_http_shape_rejects_transport_and_credential_overrides() {
+        for field in ["cookie", "headers", "proxy", "url", "domain", "token"] {
+            let mut body = serde_json::Map::from_iter([
+                (
+                    "module".to_owned(),
+                    Value::String("music.musicToplist.Toplist".to_owned()),
+                ),
+                ("method".to_owned(), Value::String("GetAll".to_owned())),
+            ]);
+            body.insert(field.to_owned(), Value::String("forbidden".to_owned()));
+            let (status, json) = json_request_from(
+                test_app_with_import_providers(),
+                Method::POST,
+                "/v1/extensions/qq/api",
+                Some(Value::Object(body)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{field}");
+        }
+
+        let (status, json) = json_request_from(
+            test_app_with_import_providers(),
+            Method::POST,
+            "/v1/extensions/qq/batch",
+            Some(json!({
+                "requests": {
+                    "unsafe": {
+                        "module": "music.musicToplist.Toplist",
+                        "method": "GetAll",
+                        "headers": { "Cookie": "raw-secret" }
+                    }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_qq_extension_reaches_fixed_upstream_through_unified_http() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(
+                QqProvider::new(QqConfig {
+                    device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+                    ..QqConfig::default()
+                })
+                .expect("QQ provider"),
+            )
+            .expect("register QQ provider");
+        let app = build_router(AppState::new(registry, Platform::Qq));
+        let (status, json) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/extensions/qq/api",
+            Some(json!({
+                "module": "music.musicToplist.Toplist",
+                "method": "GetAll",
+                "client": "android",
+                "signed": true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["meta"]["platform"], "qq");
+        assert_eq!(json["data"]["code"], 0);
+        assert!(json["data"]["data"].is_object());
     }
 
     #[tokio::test]

@@ -510,6 +510,71 @@ impl QqClient {
             .await
     }
 
+    pub(crate) async fn request_extension_batch(
+        &self,
+        requests: &[QqApiRequest],
+        credential: Option<&QqCredential>,
+        web: bool,
+        signed: bool,
+    ) -> Result<Vec<QqBusinessResponse>> {
+        if requests.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ extension batch must contain at least one request",
+            )
+            .with_platform(Platform::Qq));
+        }
+        if web && credential.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ web extension requests do not accept an account",
+            )
+            .with_platform(Platform::Qq));
+        }
+
+        if web {
+            let responses = self
+                .post_api_with_user_agent_options(
+                    &web_comm(),
+                    requests,
+                    Some(WEB_USER_AGENT),
+                    None,
+                    true,
+                    signed,
+                )
+                .await?;
+            return business_responses(responses, "QQ web extension");
+        }
+
+        self.ensure_android_session().await?;
+        let responses = self
+            .request_android_extension_once(requests, credential, signed)
+            .await?;
+        if credential.is_none()
+            && responses
+                .iter()
+                .any(|response| response_has_anonymous_session_rejection(&response.raw))
+        {
+            self.invalidate_android_session()?;
+            self.ensure_android_session().await?;
+            let responses = self
+                .request_android_extension_once(requests, None, signed)
+                .await?;
+            return business_responses(responses, "QQ Android extension");
+        }
+        business_responses(responses, "QQ Android extension")
+    }
+
+    async fn request_android_extension_once(
+        &self,
+        requests: &[QqApiRequest],
+        credential: Option<&QqCredential>,
+        signed: bool,
+    ) -> Result<Vec<QqApiResponse>> {
+        let device = self.lock_device()?.device().clone();
+        let comm = android_comm(&device, credential);
+        self.post_api_with_user_agent_options(&comm, requests, None, credential, true, signed)
+            .await
+    }
+
     pub(crate) async fn request_quick_search(&self, keyword: &str) -> Result<Value> {
         let mut endpoint = reqwest::Url::parse(QUICK_SEARCH_ENDPOINT).map_err(|error| {
             TuneWeaveError::new(
@@ -960,6 +1025,39 @@ fn parse_api_responses(
             })
         })
         .collect()
+}
+
+fn business_responses(
+    responses: Vec<QqApiResponse>,
+    context: &str,
+) -> Result<Vec<QqBusinessResponse>> {
+    responses
+        .into_iter()
+        .enumerate()
+        .map(|(index, response)| {
+            let code = response
+                .raw
+                .get("code")
+                .and_then(platform_code)
+                .ok_or_else(|| {
+                    qq_data_error(format!(
+                        "{context} response {index} is missing a valid code"
+                    ))
+                })?;
+            Ok(QqBusinessResponse {
+                code,
+                data: response.data,
+                raw: response.raw,
+            })
+        })
+        .collect()
+}
+
+fn response_has_anonymous_session_rejection(response: &Value) -> bool {
+    matches!(
+        response.get("code").and_then(platform_code),
+        Some(1000 | 104_400 | 104_401)
+    )
 }
 
 fn is_anonymous_session_rejection(error: &TuneWeaveError) -> bool {
