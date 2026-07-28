@@ -2895,6 +2895,7 @@ struct AlbumListParams {
 async fn albums(
     State(state): State<AppState>,
     Query(params): Query<AlbumListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -2903,18 +2904,20 @@ async fn albums(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = AlbumListRequest::new(limit, offset);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.area = optional_trimmed(params.area);
     request.catalog = optional_trimmed(params.catalog);
-    let page = provider.albums(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let page = access.provider.albums(&request).await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -2922,6 +2925,7 @@ async fn album(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Album>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
@@ -2930,19 +2934,24 @@ async fn album(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let album = provider.album(reference.id(), account).await?;
-    let mut response = ApiResponse::new(album).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account,
+        AccountSelection::Optional,
+    )?;
+    let album = access
+        .provider
+        .album(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(album, platform)))
 }
 
 async fn album_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
@@ -2957,23 +2966,26 @@ async fn album_tracks(
         .filter(|account| !account.is_empty())
         .map(str::to_owned);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .album_tracks(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -2981,6 +2993,7 @@ async fn album_stats(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<AlbumStats>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
@@ -2989,19 +3002,24 @@ async fn album_stats(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let stats = provider.album_stats(reference.id(), account).await?;
-    let mut response = ApiResponse::new(stats).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account,
+        AccountSelection::Optional,
+    )?;
+    let stats = access
+        .provider
+        .album_stats(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(stats, platform)))
 }
 
 async fn album_track_entitlements(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<TrackEntitlement>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
@@ -3011,23 +3029,26 @@ async fn album_track_entitlements(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .album_track_entitlements(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -24214,6 +24235,65 @@ mod tests {
             albums["meta"]["pagination"]["extensions"]["account"],
             "green-vip"
         );
+    }
+
+    #[tokio::test]
+    async fn album_reads_accept_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let qq = qq_caller_credential(None);
+
+        let (status, album) =
+            caller_json_request(app.clone(), Method::GET, "/v1/albums/qq:100", None, &qq).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(album["data"]["extensions"]["account"], "default");
+        assert!(album["meta"].get("account").is_none());
+
+        let (status, tracks) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/albums/qq:100/tracks?limit=2",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            tracks["meta"]["pagination"]["extensions"]["account"],
+            "default"
+        );
+        assert!(tracks["meta"].get("account").is_none());
+
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-album-reader",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        for path in [
+            "/v1/albums?platform=netease&catalog=new",
+            "/v1/albums/netease:32311/stats",
+            "/v1/albums/netease:168223858/track-entitlements?limit=2",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &netease).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/albums/qq:100?account=green-vip",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
