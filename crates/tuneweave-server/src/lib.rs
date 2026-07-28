@@ -192,6 +192,7 @@ fn auth_store_error() -> TuneWeaveError {
 pub struct AppState {
     registry: ProviderRegistry,
     resolver: StreamResolver,
+    fallback_platforms: Vec<Platform>,
     auth_transactions: AuthTransactions,
     uni_playlists: Arc<dyn UniPlaylistStore>,
     default_platform: Platform,
@@ -305,6 +306,42 @@ impl CallerCredentialSet {
             provider_account,
         })
     }
+
+    fn scoped_state(&self, state: &AppState) -> Result<AppState, TuneWeaveError> {
+        if self.providers.is_empty() {
+            return Ok(state.clone());
+        }
+        let mut registry = ProviderRegistry::new();
+        for descriptor in state.registry.descriptors() {
+            let provider = if let Some(provider) = self.providers.get(&descriptor.platform) {
+                Arc::clone(provider)
+            } else {
+                state.registry.require(descriptor.platform)?
+            };
+            registry.register_arc(provider)?;
+        }
+        Ok(state.with_registry(registry))
+    }
+
+    fn apply_stream_accounts(
+        &self,
+        accounts: &mut BTreeMap<Platform, String>,
+    ) -> Result<(), TuneWeaveError> {
+        for platform in self.credentials.keys() {
+            if accounts.contains_key(platform) {
+                return Err(TuneWeaveError::invalid_request(
+                    "caller credentials cannot be combined with a server account alias",
+                )
+                .with_platform(*platform));
+            }
+        }
+        accounts.extend(
+            self.credentials
+                .keys()
+                .map(|platform| (*platform, "default".to_owned())),
+        );
+        Ok(())
+    }
 }
 
 impl AppState {
@@ -329,7 +366,8 @@ impl AppState {
         fallback_platforms: Vec<Platform>,
     ) -> Self {
         Self {
-            resolver: StreamResolver::new(registry.clone(), fallback_platforms),
+            resolver: StreamResolver::new(registry.clone(), fallback_platforms.clone()),
+            fallback_platforms,
             auth_transactions: AuthTransactions::default(),
             uni_playlists: Arc::new(MemoryUniPlaylistStore::default()),
             registry,
@@ -342,6 +380,18 @@ impl AppState {
     pub fn with_uni_playlist_store(mut self, store: Arc<dyn UniPlaylistStore>) -> Self {
         self.uni_playlists = store;
         self
+    }
+
+    fn with_registry(&self, registry: ProviderRegistry) -> Self {
+        Self {
+            resolver: StreamResolver::new(registry.clone(), self.fallback_platforms.clone()),
+            registry,
+            fallback_platforms: self.fallback_platforms.clone(),
+            auth_transactions: self.auth_transactions.clone(),
+            uni_playlists: Arc::clone(&self.uni_playlists),
+            default_platform: self.default_platform,
+            started_at: self.started_at,
+        }
     }
 }
 
@@ -3963,10 +4013,12 @@ fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls
 
 async fn track_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<StreamParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MediaStream>>, ApiError> {
     let params = query_params(params)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let reference = parse_reference(reference)?;
     let controls = parse_stream_controls(StreamControlInput {
         quality: params.quality.as_deref(),
@@ -3980,12 +4032,14 @@ async fn track_stream(
         source: params.source.as_deref(),
         account: params.account.as_deref(),
     })?;
-    let request = controls.resolve_request(reference.platform());
+    let mut request = controls.resolve_request(reference.platform());
+    credentials.apply_stream_accounts(&mut request.accounts)?;
+    let state = credentials.scoped_state(&state)?;
 
     let origin_provider = state.registry.require(reference.platform())?;
-    let origin_request = controls.provider_request(reference.platform());
+    let origin_account = request.accounts.get(&reference.platform());
     let origin = origin_provider
-        .track(reference.id(), origin_request.account.as_deref())
+        .track(reference.id(), origin_account.map(String::as_str))
         .await?;
     let stream = state.resolver.resolve(&origin, &request).await?;
     let resolved_platform = stream.resolved_platform;
@@ -26500,6 +26554,79 @@ mod tests {
         assert_eq!(json["data"]["attempts"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["data"]["attempts"][0]["status"], "success");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn track_stream_scopes_caller_credentials_across_playback_platforms() {
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=private-netease-session",
+                None,
+            )
+            .expect("NetEase provider credential"),
+        )
+        .expect("NetEase caller credential");
+        let direct = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/netease:2709812973/stream?fallback=false")
+                    .header(CALLER_CREDENTIAL_HEADER, netease.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(direct.status(), StatusCode::OK);
+        let body = to_bytes(direct.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["headers"]["x-test-origin-account"], "default");
+        assert_eq!(json["data"]["attempts"][0]["account"], "default");
+        assert!(json["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        let mut request = Request::builder()
+            .uri("/v1/tracks/netease:2709812973/stream?playback_platform=qq&fallback=false")
+            .body(Body::empty())
+            .expect("build request");
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            netease.value.parse().expect("NetEase header value"),
+        );
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ header value"),
+        );
+        let response = test_app_with_import_providers()
+            .oneshot(request)
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["resolved_platform"], "qq");
+        assert_eq!(json["data"]["headers"]["x-test-stream-account"], "default");
+        assert_eq!(json["data"]["attempts"][0]["platform"], "qq");
+        assert_eq!(json["data"]["attempts"][0]["account"], "default");
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-netease-session"));
+
+        let conflict = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/netease:2709812973/stream?account=default")
+                    .header(CALLER_CREDENTIAL_HEADER, netease.value)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(conflict.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
