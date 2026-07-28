@@ -9676,22 +9676,25 @@ fn validate_listening_rights_type_ids(
 async fn listening_rights_ads(
     State(state): State<AppState>,
     params: Result<Query<ListeningRightsAdParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ListeningRightsAdCatalog>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let catalog = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let catalog = access
+        .provider
         .listening_rights_ads(&ListeningRightsAdRequest {
             type_ids: parse_listening_rights_type_ids(params.type_ids.as_deref())?,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(catalog).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(catalog, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9768,10 +9771,17 @@ struct ListeningRightsGainBody {
 async fn listening_rights_gain_get(
     State(state): State<AppState>,
     params: Result<Query<ListeningRightsGainQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let app_info = params
         .app_info
         .as_deref()
@@ -9815,20 +9825,27 @@ async fn listening_rights_gain_get(
         app_info,
         installed: parse_optional_i64_parameter("installed", params.installed.as_deref())?,
         type_ids: parse_listening_rights_type_ids(params.type_ids.as_deref())?,
-        account: account.clone(),
+        account: access.provider_account.clone(),
     };
-    listening_rights_gain_response(&state, platform, account, request).await
+    listening_rights_gain_response(access, platform, request).await
 }
 
 async fn listening_rights_gain_post(
     State(state): State<AppState>,
     params: Result<Query<ListeningRightsGainAccountQuery>, QueryRejection>,
+    headers: HeaderMap,
     body: Result<Json<ListeningRightsGainBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
     let params = query_params(params)?;
     let body = json_body(body)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let request = ListeningRightsGainRequest {
         request_uid: body.request_uid,
         creative_type: body.creative_type.unwrap_or(2),
@@ -9846,9 +9863,9 @@ async fn listening_rights_gain_post(
         type_ids: validate_listening_rights_type_ids(
             body.type_ids.unwrap_or_else(|| vec!["400002_0".to_owned()]),
         )?,
-        account: account.clone(),
+        account: access.provider_account.clone(),
     };
-    listening_rights_gain_response(&state, platform, account, request).await
+    listening_rights_gain_response(access, platform, request).await
 }
 
 fn reference_listening_rights_timestamp(value: Option<String>) -> Option<ListeningRightsTimestamp> {
@@ -9858,18 +9875,12 @@ fn reference_listening_rights_timestamp(value: Option<String>) -> Option<Listeni
 }
 
 async fn listening_rights_gain_response(
-    state: &AppState,
+    access: ProviderAccess,
     platform: Platform,
-    account: Option<String>,
     request: ListeningRightsGainRequest,
 ) -> Result<Json<ApiResponse<ListeningRightsGainResult>>, ApiError> {
-    let provider = state.registry.require(platform)?;
-    let result = provider.gain_listening_rights(&request).await?;
-    let mut response = ApiResponse::new(result).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let result = access.provider.gain_listening_rights(&request).await?;
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -32021,6 +32032,61 @@ mod tests {
         assert_eq!(post["data"]["extensions"]["click_time"], "1784194692003");
         assert_eq!(post["data"]["extensions"]["rights_gain_method"], 2);
         assert_eq!(post["meta"]["account"], "post-user");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-listening-rights",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, ads) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/listening-rights/ads?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ads["data"]["extensions"]["account"], "default");
+        assert!(ads["meta"].get("account").is_none());
+
+        for (method, body) in [
+            (Method::GET, None),
+            (Method::POST, Some(json!({"request_uid": "caller-rights"}))),
+        ] {
+            let (status, gained) = caller_json_request(
+                app.clone(),
+                method,
+                "/v1/listening-rights/gains?platform=netease",
+                body,
+                &credential,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(gained["data"]["extensions"]["account"], "default");
+            assert!(gained["meta"].get("account").is_none());
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/listening-rights/ads?platform=netease&account=ad-user",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
