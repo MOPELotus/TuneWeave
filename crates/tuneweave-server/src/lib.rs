@@ -3505,18 +3505,21 @@ async fn set_artist_subscription(
 
 async fn track_lyrics(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricsParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let word_synced =
         parse_bool_parameter("word_synced/qrc", params.word_synced.as_deref(), false)?;
     let translated = parse_bool_parameter("translated/trans", params.translated.as_deref(), false)?;
@@ -3535,12 +3538,12 @@ async fn track_lyrics(
                 romanized,
                 singing_annotations,
                 song_type: params.song_type,
-                account: account.map(str::to_owned),
+                account,
             },
         )
         .await?;
     let mut response = ApiResponse::new(lyrics).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
 
@@ -3549,23 +3552,26 @@ async fn track_lyrics(
 
 async fn track_singing_annotations_availability(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricResourceParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SingingAnnotationsAvailability>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let availability = provider
-        .singing_annotations_availability(reference.id(), account)
+        .singing_annotations_availability(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(availability).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -3573,23 +3579,26 @@ async fn track_singing_annotations_availability(
 
 async fn track_multi_style_lyric_translations(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricResourceParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MultiStyleLyricTranslations>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let translations = provider
-        .multi_style_lyric_translations(reference.id(), account)
+        .multi_style_lyric_translations(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(translations).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -3597,23 +3606,26 @@ async fn track_multi_style_lyric_translations(
 
 async fn track_ai_lyric_dictionary_availability(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricResourceParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<AiLyricDictionaryAvailability>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let availability = provider
-        .ai_lyric_dictionary_availability(reference.id(), account)
+        .ai_lyric_dictionary_availability(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(availability).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -3621,23 +3633,26 @@ async fn track_ai_lyric_dictionary_availability(
 
 async fn track_ai_lyric_dictionary(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricResourceParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<AiLyricDictionary>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let provider = access.provider;
+    let account = access.provider_account;
     let dictionary = provider
-        .ai_lyric_dictionary(reference.id(), account)
+        .ai_lyric_dictionary(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(dictionary).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -26013,6 +26028,56 @@ mod tests {
         assert_eq!(json["data"]["track_ref"], "netease:185809");
         assert_eq!(json["data"]["format"], "lrc");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn lyric_routes_use_caller_credentials_and_reject_server_account_conflicts() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/netease:185809/lyrics?qrc=true")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            json["data"]["extensions"]["requested_options"]["account"],
+            "default"
+        );
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+
+        for path in [
+            "/v1/tracks/netease:185809/lyrics?account=default",
+            "/v1/tracks/netease:185809/lyrics/singing-annotations/availability?account=default",
+            "/v1/tracks/netease:185809/lyrics/translations/styles?account=default",
+            "/v1/tracks/netease:185809/lyrics/ai-dictionary/availability?account=default",
+            "/v1/tracks/netease:185809/lyrics/ai-dictionary?account=default",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     #[tokio::test]
