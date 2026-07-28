@@ -12181,27 +12181,32 @@ async fn account_playlists(
 
 async fn account_albums(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_albums(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -12218,27 +12223,32 @@ struct AccountVideoQuery {
 async fn account_videos(
     State(state): State<AppState>,
     params: Result<Query<AccountVideoQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_videos(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -12283,17 +12293,22 @@ fn parse_account_radio_station_catalog(
 async fn account_radio_stations(
     State(state): State<AppState>,
     params: Result<Query<AccountRadioStationQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<RadioStation>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let catalog = parse_account_radio_station_catalog(params.catalog.as_deref())?;
-    let provider = state.registry.require(platform)?;
     let page = match catalog {
         AccountRadioStationCatalog::Broadcast => {
             if params.sources.is_some() {
@@ -12302,11 +12317,12 @@ async fn account_radio_stations(
                 )
                 .into());
             }
-            provider
+            access
+                .provider
                 .account_radio_stations(&PageRequest {
                     limit,
                     offset,
-                    account: Some(account.clone()),
+                    account: Some(access.required_account().to_owned()),
                 })
                 .await?
         }
@@ -12317,47 +12333,52 @@ async fn account_radio_stations(
                 )
                 .into());
             }
-            provider
+            access
+                .provider
                 .account_styled_radio_stations(&StyledRadioStationLibraryRequest {
                     sources: parse_radio_style_sources(params.sources.as_deref())?,
                     limit,
                     offset,
-                    account: Some(account.clone()),
+                    account: Some(access.required_account().to_owned()),
                 })
                 .await?
         }
     };
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_podcasts(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_podcasts(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -12373,26 +12394,31 @@ struct AccountCreatedPodcastsParams {
 async fn account_created_podcasts(
     State(state): State<AppState>,
     params: Result<Query<AccountCreatedPodcastsParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
     if limit == 0 {
         return Err(TuneWeaveError::invalid_request("limit must be greater than zero").into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_created_podcasts(&PageRequest {
             limit,
             offset: 0,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -12424,10 +12450,16 @@ struct AccountPodcastEpisodeSearchParams {
 async fn account_podcast_episode_search(
     State(state): State<AppState>,
     params: Result<Query<AccountPodcastEpisodeSearchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 200)?;
     if !(1..=200).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 200").into());
@@ -12435,8 +12467,8 @@ async fn account_podcast_episode_search(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let query = optional_trimmed(params.query);
     let podcast_id = parse_optional_podcast_filter(platform, params.podcast)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .search_podcast_episodes_workbench(&PodcastEpisodeWorkbenchSearchRequest {
             query,
             display_status: parse_podcast_episode_display_status(params.display_status.as_deref())?,
@@ -12445,13 +12477,12 @@ async fn account_podcast_episode_search(
             podcast_id,
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -30043,6 +30074,79 @@ mod tests {
             json["meta"]["pagination"]["extensions"]["response"]["code"],
             200
         );
+    }
+
+    #[tokio::test]
+    async fn account_media_libraries_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-library-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, reference) in [
+            (
+                "/v1/account/library/albums?platform=netease&limit=25",
+                "netease:32311",
+            ),
+            (
+                "/v1/account/library/videos?platform=netease&limit=25",
+                "netease:22695250",
+            ),
+            (
+                "/v1/account/library/radio-stations?platform=netease&limit=25",
+                "netease:362",
+            ),
+            (
+                "/v1/account/library/podcasts?platform=netease&limit=30",
+                "netease:336355127",
+            ),
+            (
+                "/v1/account/podcasts/created?platform=netease&limit=20",
+                "netease:336355127",
+            ),
+            (
+                "/v1/account/podcast-episodes?platform=netease&query=episode",
+                "netease:2058695201",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"][0]["ref"], reference, "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, styled) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/library/radio-stations?platform=netease&catalog=styled",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            styled["meta"]["pagination"]["extensions"]["request"]["account"],
+            "default"
+        );
+        assert!(styled["meta"].get("account").is_none());
+
+        for path in [
+            "/v1/account/library/albums?platform=netease&account=personal",
+            "/v1/account/podcast-episodes?platform=netease&account=studio",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
