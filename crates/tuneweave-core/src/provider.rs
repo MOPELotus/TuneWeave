@@ -51,7 +51,7 @@ use crate::{
     SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
     StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement,
-    TrackLabelList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    TrackLabelList, TrackVersionList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
     VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
     VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
 };
@@ -765,6 +765,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::RelatedVideos,
+        ))
+    }
+
+    async fn track_versions(&self, _id: &str, _account: Option<&str>) -> Result<TrackVersionList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::TrackVersions,
         ))
     }
 

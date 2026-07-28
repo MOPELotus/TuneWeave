@@ -40,9 +40,9 @@ use tuneweave_core::{
     SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
     SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
     StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrackLabel, TrackLabelList, TrialWindow,
-    TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    TrackDetailRequestItem, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -74,6 +74,8 @@ const SIMILAR_TRACK_METHOD: &str = "GetSimilarSongs";
 const TRACK_LABEL_METHOD: &str = "GetSongLabels";
 const RELATED_PLAYLIST_METHOD: &str = "GetRelatedPlaylist";
 const RELATED_MV_METHOD: &str = "GetSongRelatedMv";
+const TRACK_VERSION_MODULE: &str = "music.musichallSong.OtherVersionServer";
+const TRACK_VERSION_METHOD: &str = "GetOtherVersionSongs";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1196,6 +1198,18 @@ struct QqRelatedMvResponse {
     has_more: bool,
     #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
     list: Vec<QqRelatedMv>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqTrackVersionResponse {
+    #[serde(
+        rename = "versionList",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    version_list: Vec<Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3381,6 +3395,7 @@ impl MusicProvider for QqProvider {
             Capability::TrackLabels,
             Capability::RelatedPlaylists,
             Capability::RelatedVideos,
+            Capability::TrackVersions,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3876,6 +3891,19 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ related MV request returned no response"))?;
         map_qq_related_videos(id.trim(), song_id, previous_id, response)
+    }
+
+    async fn track_versions(&self, id: &str, account: Option<&str>) -> Result<TrackVersionList> {
+        let identifier = parse_qq_track_version_identifier(id)?;
+        self.validate_public_account(account)?;
+        let response = self
+            .client
+            .request_android(&[qq_track_versions_request(&identifier)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ track version request returned no response"))?;
+        map_qq_track_versions(id.trim(), &identifier, response)
     }
 
     async fn artist_tracks(
@@ -7776,6 +7804,79 @@ fn validate_qq_related_video_response(
         ));
     }
     Ok(())
+}
+
+fn qq_track_versions_request(identifier: &QqTrackIdentifier) -> QqApiRequest {
+    let param = match identifier {
+        QqTrackIdentifier::Numeric(id) => json!({"songid": id}),
+        QqTrackIdentifier::Mid(mid) => json!({"songmid": mid}),
+    };
+    QqApiRequest::new(TRACK_VERSION_MODULE, TRACK_VERSION_METHOD, param)
+}
+
+fn parse_qq_track_version_identifier(value: &str) -> Result<QqTrackIdentifier> {
+    let identifier = parse_qq_track_identifier(value)?;
+    match &identifier {
+        QqTrackIdentifier::Numeric(0) => {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ numeric track ID must be a positive integer",
+            )
+            .with_platform(Platform::Qq));
+        }
+        QqTrackIdentifier::Numeric(_) => {}
+        QqTrackIdentifier::Mid(mid) => validate_qq_media_id(mid, "track MID")?,
+    }
+    Ok(identifier)
+}
+
+fn map_qq_track_versions(
+    requested_id: &str,
+    identifier: &QqTrackIdentifier,
+    response: QqApiResponse,
+) -> Result<TrackVersionList> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqTrackVersionResponse>(response_data).map_err(|error| {
+            qq_data_error(format!("QQ track version response is malformed: {error}"))
+        })?;
+    if parsed.version_list.len() > 1_000 {
+        return Err(qq_data_error(
+            "QQ track version response exceeded its safe item bound",
+        ));
+    }
+    let mut tracks = Vec::with_capacity(parsed.version_list.len());
+    for (index, raw) in parsed.version_list.into_iter().enumerate() {
+        if !raw.is_object() {
+            return Err(qq_data_error(
+                "QQ track version response contains a non-object track",
+            ));
+        }
+        let mut track = map_track(raw)?;
+        track
+            .extensions
+            .insert("version_index".to_owned(), json!(index));
+        tracks.push(track);
+    }
+    let result_count = tracks.len();
+    Ok(TrackVersionList {
+        track_ref: qq_ref(requested_id, "track version source")?,
+        tracks,
+        extensions: Extensions::from([
+            (
+                "requested_identifier_kind".to_owned(),
+                json!(match identifier {
+                    QqTrackIdentifier::Numeric(_) => "numeric_id",
+                    QqTrackIdentifier::Mid(_) => "mid",
+                }),
+            ),
+            ("result_count".to_owned(), json!(result_count)),
+            ("extra".to_owned(), json!(parsed.extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
 }
 
 fn validate_qq_song_tag(tag: &QqRecommendationNewTrackTag, context: &str) -> Result<()> {
@@ -26544,6 +26645,89 @@ mod tests {
         assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
+    #[test]
+    fn track_version_requests_keep_numeric_and_mid_branches_and_map_complete_tracks() {
+        let numeric = qq_track_versions_request(&QqTrackIdentifier::Numeric(97_773));
+        assert_eq!(numeric.module, TRACK_VERSION_MODULE);
+        assert_eq!(numeric.method, TRACK_VERSION_METHOD);
+        assert_eq!(numeric.param, json!({"songid": 97773}));
+
+        let mid = qq_track_versions_request(&QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()));
+        assert_eq!(mid.param, json!({"songmid": "0039MnYb0qxYhV"}));
+
+        let data = json!({
+            "versionList": [
+                sample_track(97_774, "001version00001", "晴天 (现场版)"),
+                sample_track(97_775, "001version00002", "晴天 (重制版)")
+            ],
+            "futureResponseField": true
+        });
+        let list = map_qq_track_versions(
+            "0039MnYb0qxYhV",
+            &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ track versions");
+        assert_eq!(list.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(list.tracks.len(), 2);
+        assert_eq!(
+            list.tracks[0].resource_ref.to_string(),
+            "qq:001version00001"
+        );
+        assert_eq!(list.tracks[0].extensions["version_index"], 0);
+        assert_eq!(list.tracks[1].extensions["version_index"], 1);
+        assert_eq!(list.extensions["requested_identifier_kind"], "mid");
+        assert_eq!(list.extensions["result_count"], 2);
+        assert_eq!(list.extensions["extra"]["futureResponseField"], true);
+        assert_eq!(
+            list.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn track_version_mapping_accepts_real_empty_list_but_rejects_malformed_items_and_bounds() {
+        let empty = map_qq_track_versions(
+            "97773",
+            &QqTrackIdentifier::Numeric(97_773),
+            response(json!({"versionList": null})),
+        )
+        .expect("map empty QQ track versions");
+        assert!(empty.tracks.is_empty());
+
+        for data in [
+            json!({"versionList": ["not-a-track"]}),
+            json!({"versionList": [{}]}),
+            json!({"versionList": vec![sample_track(100, "001version00001", "版本"); 1001]}),
+        ] {
+            let error =
+                map_qq_track_versions("97773", &QqTrackIdentifier::Numeric(97_773), response(data))
+                    .expect_err("invalid QQ track version response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn track_versions_validate_identity_before_exact_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::TrackVersions));
+        for id in ["0", "invalid-mid!", "\n"] {
+            let error = provider
+                .track_versions(id, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ track identity");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let missing = provider
+            .track_versions("97773", Some("missing-account"))
+            .await
+            .expect_err("missing QQ track version account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -27787,6 +27971,33 @@ mod tests {
                 .is_some_and(|video| video.extensions["numeric_id"] != previous_id)
         );
         assert_ne!(second.next_id.as_deref(), Some(previous_id.as_str()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_track_versions_keep_numeric_and_mid_source_identity() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let list = provider
+                .track_versions(id, None)
+                .await
+                .expect("live QQ track versions");
+            assert_eq!(list.track_ref.id(), id);
+            assert!(!list.tracks.is_empty());
+            assert!(list.tracks.iter().all(|track| {
+                !track.id.is_empty()
+                    && !track.name.is_empty()
+                    && track
+                        .extensions
+                        .get("version_index")
+                        .and_then(Value::as_u64)
+                        .is_some()
+            }));
+        }
     }
 
     #[tokio::test]

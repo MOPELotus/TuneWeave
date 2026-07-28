@@ -2837,6 +2837,13 @@ pub struct RelatedVideoList {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackVersionList {
+    pub track_ref: ResourceRef,
+    pub tracks: Vec<Track>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
     pub count: u64,
@@ -6026,6 +6033,33 @@ mod tests {
         assert_eq!(value["sections"][1]["kind"], "audience");
         assert_eq!(value["next_ids"], serde_json::json!(["201"]));
         assert_eq!(value["has_more"], true);
+    }
+
+    #[test]
+    fn track_version_contract_keeps_source_and_ordered_tracks_distinct() {
+        let source =
+            ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("valid source track reference");
+        let list = TrackVersionList {
+            track_ref: source,
+            tracks: vec![
+                Track::new(
+                    ResourceRef::new(Platform::Qq, "001version00001")
+                        .expect("valid first version reference"),
+                    "晴天 (现场版)",
+                ),
+                Track::new(
+                    ResourceRef::new(Platform::Qq, "001version00002")
+                        .expect("valid second version reference"),
+                    "晴天 (重制版)",
+                ),
+            ],
+            extensions: Extensions::from([("result_count".to_owned(), serde_json::json!(2))]),
+        };
+        let value = serde_json::to_value(list).expect("serialize track version list");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["tracks"][0]["ref"], "qq:001version00001");
+        assert_eq!(value["tracks"][1]["ref"], "qq:001version00002");
+        assert_eq!(value["extensions"]["result_count"], 2);
     }
 
     #[test]

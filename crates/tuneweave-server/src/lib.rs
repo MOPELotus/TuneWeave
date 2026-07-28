@@ -83,7 +83,7 @@ use tuneweave_core::{
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
     TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
-    TrackLabelList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
+    TrackLabelList, TrackVersionList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
     UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
     UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
     UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
@@ -290,6 +290,7 @@ pub fn build_router(state: AppState) -> Router {
             get(related_playlists),
         )
         .route("/tracks/{reference}/related-videos", get(related_videos))
+        .route("/tracks/{reference}/versions", get(track_versions))
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7436,6 +7437,12 @@ struct TrackLabelParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TrackVersionParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelatedPlaylistParams {
     #[serde(
         alias = "last",
@@ -7565,6 +7572,26 @@ async fn related_videos(
         )
         .await?;
     let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_versions(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackVersionParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<TrackVersionList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let versions = provider
+        .track_versions(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(versions).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -17136,6 +17163,7 @@ mod tests {
                 Capability::TrackLabels,
                 Capability::RelatedPlaylists,
                 Capability::RelatedVideos,
+                Capability::TrackVersions,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17704,6 +17732,29 @@ mod tests {
                 extensions: Extensions::from([
                     ("previous_id".to_owned(), json!(request.previous_id)),
                     ("account".to_owned(), json!(request.account)),
+                ]),
+            })
+        }
+
+        async fn track_versions(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<TrackVersionList> {
+            let source = ResourceRef::new(self.platform(), id)
+                .expect("valid QQ track version source reference");
+            let mut live = Track::new(
+                ResourceRef::new(Platform::Qq, "001version00001")
+                    .expect("valid related QQ track version reference"),
+                "晴天 (现场版)",
+            );
+            live.extensions.insert("version_index".to_owned(), json!(0));
+            Ok(TrackVersionList {
+                track_ref: source,
+                tracks: vec![live],
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(account)),
+                    ("requested_identifier_kind".to_owned(), json!("numeric_id")),
                 ]),
             })
         }
@@ -22017,6 +22068,36 @@ mod tests {
             "/v1/tracks/qq:97773/related-videos?previous_id=t0020sme302",
             "/v1/tracks/qq:97773/related-videos?unknown=true",
             "/v1/tracks/not-a-reference/related-videos",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_track_versions_keep_source_order_account_and_strict_query_shape() {
+        let app = test_app_with_import_providers();
+        let (status, versions) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:97773/versions?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{versions}");
+        assert_eq!(versions["data"]["track_ref"], "qq:97773");
+        assert_eq!(versions["data"]["tracks"][0]["ref"], "qq:001version00001");
+        assert_eq!(versions["data"]["tracks"][0]["name"], "晴天 (现场版)");
+        assert_eq!(
+            versions["data"]["tracks"][0]["extensions"]["version_index"],
+            0
+        );
+        assert_eq!(versions["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(versions["meta"]["platform"], "qq");
+        assert_eq!(versions["meta"]["account"], "green-vip");
+
+        for path in [
+            "/v1/tracks/qq:97773/versions?unknown=true",
+            "/v1/tracks/not-a-reference/versions",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");

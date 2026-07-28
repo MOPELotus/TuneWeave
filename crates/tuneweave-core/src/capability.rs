@@ -79,6 +79,7 @@ pub enum Capability {
     TrackLabels,
     RelatedPlaylists,
     RelatedVideos,
+    TrackVersions,
     ArtistOverview,
     ArtistStats,
     ArtistCatalog,
@@ -187,6 +188,11 @@ mod tests {
             serde_json::to_value(Capability::RelatedVideos)
                 .expect("serialize related video capability"),
             serde_json::json!("related_videos")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::TrackVersions)
+                .expect("serialize track version capability"),
+            serde_json::json!("track_versions")
         );
     }
 

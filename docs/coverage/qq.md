@@ -11,7 +11,7 @@
 - `implemented`：代码与离线测试已完成，仍缺真实网络或账户前置验证。
 - `verified`：统一端点、测试以及相应真实网络路径均已验证。
 
-当前统计：`pending=33`、`partial=0`、`implemented=27`、`verified=44`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
+当前统计：`pending=32`、`partial=0`、`implemented=27`、`verified=45`。其中 QQ Basic 为 77 项，QQ 全量后续项为 27 项。2026-07-25 上游新增彩铃搜索/文件规格、搜索 selectors、助唱标注及 4 个歌词方法，并扩展批量歌曲查询；缺失的新分支已如实退回 `partial` 或登记为 `pending`，其中彩铃/selectors、逐项歌曲查询和助唱标注已完成修正与真实验证。实施顺序按普通音乐 App 的使用频率、播放依赖和底层必要性排列，不按类名或方法名字母排序。
 
 | 编号 | 类别 | 上游公开方法 | Basic | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | ---: | --- | --- |
@@ -33,7 +33,7 @@
 | Q016 | 内容展示 | `SongApi.get_labels` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/labels` 固定调用 Android `music.recommend.TrackRelationServer/GetSongLabels` 并精确提交正数 `songid`；数字 ID 直接使用，MID 复用已验证的 Web 富详情解析同一数字身份，路径引用仍保持调用方身份。统一 `TrackLabelList` 把平台 ID 建模为可扩展字符串，文字、图标和动作独立可选，`tagType/species` 明确保留为 `platform_type/platform_category`，不在语义未证实时猜测类别名称。真实响应合法包含 `id=0`、空文字但有图标、无任何展示字段但有 taxonomy，以及含换行的多项奖项；所有项都保留，不会被通用非零/非空过滤器误删。图标仅接受无凭据 HTTP(S)，动作仅接受安全 QQ Music/HTTP(S) scheme；畸形字段、非法控制字符、危险 URL 和超大目录均拒绝。原生空目录遵循参考模型返回真实空列表，完整原项、实验、未来字段和平台响应进入扩展且不伪造续页。2026-07-26 真实探测数字 ID `97773` 返回 11 项，数字 ID/MID 两条 Rust provider 链路均保留零 ID 与仅图标项 |
 | Q017 | 内容展示 | `SongApi.get_related_songlist` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/related-playlists` 固定调用 Android `music.recommend.TrackRelationServer/GetRelatedPlaylist`，精确提交正数 `songid` 与上一批 `vecPlaylist`。统一 `previous_ids` 同时接受参考 `last`、原生 `vecPlaylist/vec_playlist`、通用 `cursor` 及 JSON 数组/逗号列表；空项、重复项、超过 100 项和零/非法 QQ 歌单 ID 均在联网前拒绝。真实响应同时包含 3 项可换批 `vecPlaylist` 直接结果与 7 项带标题的稳定 `vecPlaylistNew` 听众分组；参考模型只展开后者并错误地从稳定分组生成游标，回传后两支结果原样重复。TuneWeave 以 `direct/audience` 强类型分区保留两支，只用直接分支生成 `next_ids`，`hasMore` 却没有直接批次或下一集合与上一集合相同时拒绝为假续页。每项保留标题、安全封面、创建者、歌曲数、可选播放量和完整原项；空播放量保持缺省，不伪造成零。分组标题/内容、`extra_info`、消息、未来字段及完整响应全部保留。2026-07-26 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 首批真实通过，回传首批直接 ID 后得到推进的新批次；参考游标缺陷已差分确认并修正 |
 | Q018 | 内容展示 | `SongApi.get_related_mv` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/related-videos` 固定调用 Android `MvService.MvInfoProServer/GetSongRelatedMv`，精确提交字符串 `songid`、`songtype=1` 与数字 `lastmvid`，首批为 0；数字歌曲 ID 直接使用，MID 先解析同一数字身份，调用方原引用保持在 `track_ref`。参考参数注释把上一项写成 VID，但响应模型实际从数字 MV ID 取游标；真实差分也确认 `lastmvid` 使用数字 `mvid`，因此统一 `previous_id/lastmvid/last_mvid/cursor` 只接受正整数，输出 MV 则以真正 VID 建立 `qq:<vid>` 资源引用，数字 ID 仅保留在扩展。标题、封面、播放量、歌手身份/头像、未知字段和完整响应均保留；假续页、游标不前进、重复数字 ID/VID、畸形歌手、危险 URL 和超界目录均拒绝。2026-07-28 数字 ID/MID 的真实 provider 首批及 release HTTP 两个连续 3 项页面均通过，第二页游标前进且资源身份保持 VID |
-| Q019 | 内容展示 | `SongApi.get_other_version` | 是 | `pending` | 同曲其他版本 |
+| Q019 | 内容展示 | `SongApi.get_other_version` | 是 | `verified` | `GET /v1/tracks/{qq-ref}/versions` 固定调用 Android `music.musichallSong.OtherVersionServer/GetOtherVersionSongs`；数字 ID 原样提交正数 `songid`，MID 原样提交 `songmid`，不会互相改写，来源 `track_ref` 保持调用方身份。不可续页的 `versionList` 映射为有序完整 `Track[]`，每项复用歌曲强类型映射并保留 `version_index`、数字 ID/MID、歌手、专辑、文件规格、权益状态和完整原项；合法 `null` 目录返回空列表，非对象/畸形歌曲和超 1000 项异常响应拒绝，顶层未来字段及完整响应不丢失。公开请求匿名，显式账户只校验精确别名。2026-07-28 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 Provider 和统一 HTTP 均返回 10 项版本，两种来源引用、条目顺序和索引一致 |
 | Q020 | 内容展示 | `SongApi.get_producer` | 是 | `pending` | 制作人信息；排在高频链路之后 |
 | Q021 | 内容展示 | `SongApi.get_sheet` | 是 | `pending` | 曲谱详情；排在高频链路之后 |
 | Q022 | 内容展示 | `SongApi.has_sheet` | 是 | `pending` | 曲谱存在性；排在高频链路之后 |

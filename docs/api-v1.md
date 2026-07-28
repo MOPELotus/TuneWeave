@@ -1170,6 +1170,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/tracks/{ref}/labels` | `account?` | `TrackLabelList`；保留零 ID、空展示字段、多行文本、图标、动作及平台原生类型/分类，不猜测未知 taxonomy |
 | GET | `/v1/tracks/{ref}/related-playlists` | `previous_ids?`（也接受 `last/vecPlaylist/vec_playlist/cursor`，JSON 数组或逗号列表）、`account?` | `RelatedPlaylistList`；分离直接/听众分组，`next_ids` 是平台真实换批游标 |
 | GET | `/v1/tracks/{ref}/related-videos` | `previous_id?`（也接受 `lastmvid/last_mvid/cursor`）、`account?` | `RelatedVideoList`；相关 MV 使用 VID 作为资源身份、数字 `mvid` 作为真实换批游标 |
+| GET | `/v1/tracks/{ref}/versions` | `account?` | `TrackVersionList`；同曲其他版本的有序完整歌曲列表，不伪装成相似推荐或搜索结果 |
 | GET | `/v1/tracks/{ref}/availability` | `account?`、`bitrate?`（默认 999000，也接受 `br`） | `TrackAvailability`；不可播仍返回成功包络与 `playable=false` |
 | GET | `/v1/albums` | `platform?`、`account?`、`catalog=new|newest`、`area?`、分页 | `Album[]`；QQ 只支持真实 `catalog=new`，地区见下文 |
 | GET | `/v1/albums/{ref}` | `account?` | `Album`；QQ 数字 ID 和 MID 共用同一端点并返回平台规范 MID 身份 |
@@ -1303,6 +1304,8 @@ QQ 歌曲标签使用 `GET /v1/tracks/{qq-ref}/labels`，固定调用同一 Andr
 QQ 相关歌单使用 `GET /v1/tracks/{qq-ref}/related-playlists`，固定调用 Android `TrackRelationServer/GetRelatedPlaylist`，提交正数 `songid` 和上一批 `vecPlaylist`。统一输入 `previous_ids` 兼容参考 `last`、原生 `vecPlaylist/vec_playlist` 与 `cursor`，可用 JSON 数组或逗号列表；超过 100 项、空项、重复项、零/非法 QQ 歌单 ID 均在联网前拒绝。平台响应实际包含两支：`vecPlaylist` 是 3 项可换批直接结果，`vecPlaylistNew` 是带“喜欢这首歌的人也爱”标题的 7 项稳定分组；参考模型只展开后者，并错误地从稳定分组生成下一游标，回传后会原样重复。TuneWeave 以 `direct/audience` 强类型分区完整保留两支，只从直接结果生成 `next_ids`，并拒绝 `hasMore` 但空批或游标集合不前进的假续页。歌单保留标题、安全封面、创建者、歌曲数、可选播放量、完整原项、分组标题/附加字段和完整响应；空播放量不会被伪造成零。2026-07-26 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 首批真实通过，随后把首批 3 个直接 ID 回传得到不同的下一批，参考游标缺陷经差分验证确认。
 
 QQ 相关 MV 使用 `GET /v1/tracks/{qq-ref}/related-videos`，固定调用 Android `MvService.MvInfoProServer/GetSongRelatedMv`，提交字符串 `songid`、`songtype=1` 和数字 `lastmvid`；首批固定为 `0`。数字歌曲 ID 直接使用，MID 先解析为同一数字身份，响应 `track_ref` 始终保留调用方原引用。参考方法把 `last_mvid` 注释为 VID，但其响应模型实际从数字 MV ID 生成游标，真实平台也只接受并推进数字 `mvid`；TuneWeave 因此把可选 `previous_id/lastmvid/last_mvid/cursor` 严格建模为正整数，而每个可播放 MV 仍以字母数字 VID 形成 `qq:<vid>` 资源引用，数字 ID 只进入 `extensions.numeric_id`。`hasmore` 仅在非空列表提供 `next_id`，假续页、游标不前进、重复数字 ID/VID、畸形歌手、危险图片地址和超界目录均明确失败。标题、封面、播放量、歌手身份与头像、响应未知字段和完整原文均保留。2026-07-28 数字 ID 与 MID 的真实 provider 首批均通过；release HTTP 连续两页各返回 3 个 MV，第二页数字游标前进且资源身份保持 VID。
+
+QQ 同曲其他版本使用 `GET /v1/tracks/{qq-ref}/versions`，固定调用 Android `music.musichallSong.OtherVersionServer/GetOtherVersionSongs`。数字引用原样提交正数 `songid`，MID 原样提交 `songmid`，不会先把一种身份改写成另一种；响应 `track_ref` 也保持调用方来源身份。`versionList` 作为不可续页的有序完整 `Track[]` 返回，每项复用 QQ 完整歌曲映射并保留从 0 开始的 `version_index`、数字 ID、MID、歌手、专辑、文件规格、付费状态和原始条目；平台合法的 `null` 目录映射为空列表，不伪造存在版本。非对象或畸形歌曲和超过 1000 项的异常响应明确失败，顶层未来字段及完整响应进入列表扩展。公开请求可匿名，显式账户只验证精确别名而不向不需要凭据的请求注入密钥。2026-07-28 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 Provider 和统一 HTTP 均返回相同规模的 10 项非空版本列表，两种来源引用及平台顺序保持正确。
 
 首页视频推荐以 `kind/view` 保留三个不同上游能力：`mv/featured` 对应 WeAPI `/api/personalized/mv`，`exclusive/featured`（别名 `privatecontent/entry`）对应 `/api/personalized/privatecontent`，二者都是不可续页快照；`exclusive/catalog`（也接受 `view=list/all`）对应 `/api/v2/privatecontent/list`，精确提交 `offset/limit/total="true"` 并按真实 `more` 生成下一偏移。平台没有个性化 MV 分页目录，因此 `mv/catalog` 会明确拒绝，不会拿独家放送替代。条目统一为 `Video`，MV 艺人、封面、正时长、播放量、收藏态和独家放送时间按可用字段映射，入口与分页包装完整保留在扩展。
 
