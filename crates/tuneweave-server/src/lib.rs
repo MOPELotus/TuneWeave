@@ -74,15 +74,16 @@ use tuneweave_core::{
     RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
     RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
-    ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSelector, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
-    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
-    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement,
-    TrackIdentifierKind, TrackLabelList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
+    RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
+    ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, SimilarArtistList, SimilarArtistRequest,
+    SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
+    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
+    TrackLabelList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
     UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
     UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
     UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
@@ -288,6 +289,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tracks/{reference}/related-playlists",
             get(related_playlists),
         )
+        .route("/tracks/{reference}/related-videos", get(related_videos))
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7445,6 +7447,14 @@ struct RelatedPlaylistParams {
     account: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelatedVideoParams {
+    #[serde(alias = "lastmvid", alias = "last_mvid", alias = "cursor")]
+    previous_id: Option<String>,
+    account: Option<String>,
+}
+
 async fn similar_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -7511,6 +7521,45 @@ async fn related_playlists(
             reference.id(),
             &RelatedPlaylistRequest {
                 previous_ids,
+                account: account.clone(),
+            },
+        )
+        .await?;
+    let mut response = ApiResponse::new(list).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn related_videos(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<RelatedVideoParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<RelatedVideoList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let previous_id = params
+        .previous_id
+        .map(|id| {
+            let id = id.trim();
+            if id.is_empty() {
+                Err(TuneWeaveError::invalid_request(
+                    "previous_id must not be empty when provided",
+                ))
+            } else {
+                Ok(id.to_owned())
+            }
+        })
+        .transpose()?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let list = provider
+        .related_videos(
+            reference.id(),
+            &RelatedVideoRequest {
+                previous_id,
                 account: account.clone(),
             },
         )
@@ -17086,6 +17135,7 @@ mod tests {
                 Capability::SimilarTracks,
                 Capability::TrackLabels,
                 Capability::RelatedPlaylists,
+                Capability::RelatedVideos,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17602,6 +17652,57 @@ mod tests {
                 has_more: true,
                 extensions: Extensions::from([
                     ("previous_ids".to_owned(), json!(request.previous_ids)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
+            })
+        }
+
+        async fn related_videos(
+            &self,
+            id: &str,
+            request: &RelatedVideoRequest,
+        ) -> Result<RelatedVideoList> {
+            if request.previous_id.as_deref().is_some_and(|cursor| {
+                cursor
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .is_none()
+            }) {
+                return Err(TuneWeaveError::invalid_request(
+                    "QQ related MV cursor must be a positive unsigned integer",
+                )
+                .with_platform(Platform::Qq));
+            }
+            Ok(RelatedVideoList {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid QQ related MV source reference"),
+                videos: vec![Video {
+                    resource_ref: ResourceRef::new(Platform::Qq, "w0026q7f01a")
+                        .expect("valid related QQ MV reference"),
+                    platform: Platform::Qq,
+                    id: "w0026q7f01a".to_owned(),
+                    title: "晴天".to_owned(),
+                    creators: vec![CreatorSummary {
+                        resource_ref: Some(
+                            ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                                .expect("valid QQ MV singer reference"),
+                        ),
+                        name: "周杰伦".to_owned(),
+                        avatar_url: Some("https://y.qq.com/singer.jpg".to_owned()),
+                    }],
+                    description: String::new(),
+                    cover_url: Some("https://y.qq.com/mv.jpg".to_owned()),
+                    duration_ms: None,
+                    published_at: None,
+                    play_count: Some(120_128_272),
+                    subscribed: None,
+                    extensions: Extensions::from([("numeric_id".to_owned(), json!(293_791))]),
+                }],
+                next_id: Some("293791".to_owned()),
+                has_more: true,
+                extensions: Extensions::from([
+                    ("previous_id".to_owned(), json!(request.previous_id)),
                     ("account".to_owned(), json!(request.account)),
                 ]),
             })
@@ -21872,6 +21973,53 @@ mod tests {
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_related_mvs_use_numeric_cursor_aliases_and_preserve_vid_identity() {
+        let app = test_app_with_import_providers();
+        let (status, list) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:97773/related-videos?lastmvid=765058&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["data"]["track_ref"], "qq:97773");
+        assert_eq!(list["data"]["videos"][0]["ref"], "qq:w0026q7f01a");
+        assert_eq!(list["data"]["videos"][0]["id"], "w0026q7f01a");
+        assert_eq!(list["data"]["videos"][0]["title"], "晴天");
+        assert_eq!(
+            list["data"]["videos"][0]["creators"][0]["ref"],
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(
+            list["data"]["videos"][0]["extensions"]["numeric_id"],
+            293_791
+        );
+        assert_eq!(list["data"]["next_id"], "293791");
+        assert_eq!(list["data"]["has_more"], true);
+        assert_eq!(list["data"]["extensions"]["previous_id"], "765058");
+        assert_eq!(list["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(list["meta"]["platform"], "qq");
+        assert_eq!(list["meta"]["account"], "green-vip");
+
+        for alias in ["last_mvid", "cursor", "previous_id"] {
+            let path = format!("/v1/tracks/qq:97773/related-videos?{alias}=765058");
+            let (status, response) = json_response_from(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(response["data"]["extensions"]["previous_id"], "765058");
+        }
+
+        for path in [
+            "/v1/tracks/qq:97773/related-videos?previous_id=",
+            "/v1/tracks/qq:97773/related-videos?previous_id=t0020sme302",
+            "/v1/tracks/qq:97773/related-videos?unknown=true",
+            "/v1/tracks/not-a-reference/related-videos",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
     }

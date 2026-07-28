@@ -2805,6 +2805,37 @@ pub struct RelatedPlaylistList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RelatedVideoRequest {
+    pub previous_id: Option<String>,
+    pub account: Option<String>,
+}
+
+impl RelatedVideoRequest {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            previous_id: None,
+            account: None,
+        }
+    }
+}
+
+impl Default for RelatedVideoRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelatedVideoList {
+    pub track_ref: ResourceRef,
+    pub videos: Vec<Video>,
+    pub next_id: Option<String>,
+    pub has_more: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,

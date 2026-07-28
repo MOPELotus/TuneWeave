@@ -33,11 +33,11 @@ use tuneweave_core::{
     RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
     RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
     RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
-    RelatedPlaylistSection, RelatedPlaylistSectionKind, ResourceRef, Result, SearchItem,
-    SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    RelatedPlaylistSection, RelatedPlaylistSectionKind, RelatedVideoList, RelatedVideoRequest,
+    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
     SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
     StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
     TrackDetailRequestItem, TrackIdentifierKind, TrackLabel, TrackLabelList, TrialWindow,
@@ -73,6 +73,7 @@ const SIMILAR_TRACK_MODULE: &str = "music.recommend.TrackRelationServer";
 const SIMILAR_TRACK_METHOD: &str = "GetSimilarSongs";
 const TRACK_LABEL_METHOD: &str = "GetSongLabels";
 const RELATED_PLAYLIST_METHOD: &str = "GetRelatedPlaylist";
+const RELATED_MV_METHOD: &str = "GetSongRelatedMv";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1159,6 +1160,42 @@ struct QqRelatedPlaylistResponse {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     groups: Vec<QqRelatedPlaylistGroup>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRelatedMvSinger {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    id: u64,
+    mid: String,
+    name: String,
+    picurl: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqRelatedMv {
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    mvid: u64,
+    vid: String,
+    title: String,
+    picurl: String,
+    #[serde(deserialize_with = "deserialize_qq_u64")]
+    playcnt: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    singers: Vec<QqRelatedMvSinger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqRelatedMvResponse {
+    #[serde(rename = "hasmore", deserialize_with = "deserialize_qq_binary_bool")]
+    has_more: bool,
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    list: Vec<QqRelatedMv>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3343,6 +3380,7 @@ impl MusicProvider for QqProvider {
             Capability::SimilarTracks,
             Capability::TrackLabels,
             Capability::RelatedPlaylists,
+            Capability::RelatedVideos,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3819,6 +3857,25 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ related playlist request returned no response"))?;
         map_qq_related_playlists(id.trim(), song_id, &previous_ids, response)
+    }
+
+    async fn related_videos(
+        &self,
+        id: &str,
+        request: &RelatedVideoRequest,
+    ) -> Result<RelatedVideoList> {
+        let previous_id = validate_qq_related_video_request(request)?;
+        let (_, song_id) = self
+            .resolve_lyric_song_id(id, request.account.as_deref())
+            .await?;
+        let response = self
+            .client
+            .request_android(&[qq_related_videos_request(song_id, previous_id)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ related MV request returned no response"))?;
+        map_qq_related_videos(id.trim(), song_id, previous_id, response)
     }
 
     async fn artist_tracks(
@@ -7527,6 +7584,197 @@ fn validate_qq_related_playlist(playlist: &QqRelatedPlaylist) -> Result<()> {
         first_qq_display_url(&[(&playlist.cover, "related playlist cover")])?;
     }
     qq_related_playlist_play_count(&playlist.play_count)?;
+    Ok(())
+}
+
+fn validate_qq_related_video_request(request: &RelatedVideoRequest) -> Result<Option<u64>> {
+    request
+        .previous_id
+        .as_deref()
+        .map(str::trim)
+        .map(|id| parse_qq_playlist_number(id, "related MV cursor"))
+        .transpose()
+}
+
+fn qq_related_videos_request(song_id: u64, previous_id: Option<u64>) -> QqApiRequest {
+    QqApiRequest::new(
+        SINGER_MV_MODULE,
+        RELATED_MV_METHOD,
+        json!({
+            "songid": song_id.to_string(),
+            "songtype": 1,
+            "lastmvid": previous_id.unwrap_or(0)
+        }),
+    )
+}
+
+fn map_qq_related_videos(
+    requested_id: &str,
+    song_id: u64,
+    previous_id: Option<u64>,
+    response: QqApiResponse,
+) -> Result<RelatedVideoList> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqRelatedMvResponse>(response_data)
+        .map_err(|error| qq_data_error(format!("QQ related MV response is malformed: {error}")))?;
+    validate_qq_related_video_response(&parsed, previous_id)?;
+    let QqRelatedMvResponse {
+        has_more,
+        list,
+        extra,
+    } = parsed;
+    let next_numeric_id = list.last().map(|video| video.mvid);
+    let next_id = has_more.then(|| {
+        next_numeric_id
+            .expect("QQ continuation response was validated to contain a cursor")
+            .to_string()
+    });
+    let videos = list
+        .into_iter()
+        .map(map_qq_related_video)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RelatedVideoList {
+        track_ref: qq_ref(requested_id, "related MV source")?,
+        videos,
+        next_id,
+        has_more,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(song_id)),
+            ("previous_id".to_owned(), json!(previous_id)),
+            ("cursor_source".to_owned(), json!("mvid")),
+            ("resource_id_source".to_owned(), json!("vid")),
+            (
+                "reference_cursor_annotation_corrected".to_owned(),
+                json!(true),
+            ),
+            ("extra".to_owned(), json!(extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_related_video(video: QqRelatedMv) -> Result<Video> {
+    let raw = serde_json::to_value(&video)
+        .map_err(|_| qq_data_error("failed to preserve QQ related MV entry"))?;
+    let vid = video.vid.trim();
+    validate_qq_media_id(vid, "related MV VID")
+        .map_err(|_| qq_data_error("QQ related MV response returned an invalid VID"))?;
+    let title = video.title.trim();
+    if title.is_empty() {
+        return Err(qq_data_error(
+            "QQ related MV response contains a video without a title",
+        ));
+    }
+    let creators = video
+        .singers
+        .iter()
+        .map(|singer| {
+            let identifier = if singer.mid.trim().is_empty() {
+                singer.id.to_string()
+            } else {
+                singer.mid.trim().to_owned()
+            };
+            Ok(CreatorSummary {
+                resource_ref: Some(qq_ref(&identifier, "related MV singer")?),
+                name: singer.name.trim().to_owned(),
+                avatar_url: first_qq_display_url(&[(&singer.picurl, "related MV singer avatar")])?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Video {
+        resource_ref: qq_ref(vid, "related MV")?,
+        platform: Platform::Qq,
+        id: vid.to_owned(),
+        title: title.to_owned(),
+        creators,
+        description: String::new(),
+        cover_url: first_qq_display_url(&[(&video.picurl, "related MV cover")])?,
+        duration_ms: None,
+        published_at: None,
+        play_count: Some(video.playcnt),
+        subscribed: None,
+        extensions: Extensions::from([
+            ("numeric_id".to_owned(), json!(video.mvid)),
+            ("kind".to_owned(), json!("mv")),
+            ("raw".to_owned(), raw),
+        ]),
+    })
+}
+
+fn validate_qq_related_video_response(
+    response: &QqRelatedMvResponse,
+    previous_id: Option<u64>,
+) -> Result<()> {
+    if response.list.len() > 100 {
+        return Err(qq_data_error(
+            "QQ related MV response exceeded its safe item bound",
+        ));
+    }
+    if response.has_more && response.list.is_empty() {
+        return Err(qq_data_error(
+            "QQ related MV response claimed continuation without a cursor item",
+        ));
+    }
+    let mut numeric_ids = BTreeSet::new();
+    let mut vids = BTreeSet::new();
+    for video in &response.list {
+        if video.mvid == 0
+            || !numeric_ids.insert(video.mvid)
+            || video.title.trim().is_empty()
+            || video.title.len() > 8_192
+            || video.title.chars().any(char::is_control)
+        {
+            return Err(qq_data_error(
+                "QQ related MV response has invalid or duplicate video identity metadata",
+            ));
+        }
+        let vid = video.vid.trim();
+        validate_qq_media_id(vid, "related MV VID")
+            .map_err(|_| qq_data_error("QQ related MV response returned an invalid VID"))?;
+        if !vids.insert(vid) {
+            return Err(qq_data_error(
+                "QQ related MV response contains duplicate VIDs",
+            ));
+        }
+        if !video.picurl.trim().is_empty() {
+            first_qq_display_url(&[(&video.picurl, "related MV cover")])?;
+        }
+        if video.singers.len() > 100 {
+            return Err(qq_data_error(
+                "QQ related MV response exceeded its safe singer bound",
+            ));
+        }
+        for singer in &video.singers {
+            if singer.id == 0
+                || singer.name.trim().is_empty()
+                || singer.name.len() > 8_192
+                || singer.name.chars().any(char::is_control)
+            {
+                return Err(qq_data_error(
+                    "QQ related MV response has invalid singer identity metadata",
+                ));
+            }
+            if !singer.mid.trim().is_empty() {
+                validate_qq_media_id(singer.mid.trim(), "related MV singer MID").map_err(|_| {
+                    qq_data_error("QQ related MV response returned an invalid singer MID")
+                })?;
+            }
+            if !singer.picurl.trim().is_empty() {
+                first_qq_display_url(&[(&singer.picurl, "related MV singer avatar")])?;
+            }
+        }
+    }
+    if response.has_more
+        && previous_id.is_some()
+        && response.list.last().map(|video| video.mvid) == previous_id
+    {
+        return Err(qq_data_error(
+            "QQ related MV response did not advance its numeric cursor",
+        ));
+    }
     Ok(())
 }
 
@@ -26195,6 +26443,136 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    fn related_mv_item(mvid: u64, vid: &str, title: &str) -> Value {
+        json!({
+            "mvid": mvid,
+            "vid": vid,
+            "title": title,
+            "picurl": format!("https://y.qq.com/mv/{vid}.jpg"),
+            "playcnt": 120_000,
+            "singers": [{
+                "id": 4558,
+                "mid": "0025NhlN2yWrP4",
+                "name": "周杰伦",
+                "picurl": "https://y.qq.com/singer.jpg",
+                "futureSingerField": true
+            }],
+            "futureMvField": true
+        })
+    }
+
+    #[test]
+    fn related_mv_request_and_mapping_use_numeric_cursor_but_preserve_vid_identity() {
+        let first = qq_related_videos_request(97773, None);
+        assert_eq!(first.module, SINGER_MV_MODULE);
+        assert_eq!(first.method, RELATED_MV_METHOD);
+        assert_eq!(
+            first.param,
+            json!({"songid": "97773", "songtype": 1, "lastmvid": 0})
+        );
+        let next = qq_related_videos_request(97773, Some(765_058));
+        assert_eq!(next.param["lastmvid"], 765_058);
+
+        let data = json!({
+            "hasmore": 1,
+            "list": [
+                related_mv_item(293_791, "w0026q7f01a", "晴天"),
+                related_mv_item(765_058, "t0020sme302", "晴天 (现场版)")
+            ],
+            "futureResponseField": true
+        });
+        let list = map_qq_related_videos(
+            "0039MnYb0qxYhV",
+            97773,
+            None,
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ related MVs");
+        assert_eq!(list.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert!(list.has_more);
+        assert_eq!(list.next_id.as_deref(), Some("765058"));
+        assert_eq!(list.videos[0].resource_ref.to_string(), "qq:w0026q7f01a");
+        assert_eq!(list.videos[0].id, "w0026q7f01a");
+        assert_eq!(list.videos[0].creators[0].name, "周杰伦");
+        assert_eq!(
+            list.videos[0].creators[0]
+                .resource_ref
+                .as_ref()
+                .expect("singer reference")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(list.videos[0].extensions["numeric_id"], 293_791);
+        assert_eq!(list.videos[0].extensions["raw"]["futureMvField"], true);
+        assert_eq!(list.extensions["cursor_source"], "mvid");
+        assert_eq!(list.extensions["resource_id_source"], "vid");
+        assert_eq!(
+            list.extensions["reference_cursor_annotation_corrected"],
+            true
+        );
+        assert_eq!(
+            list.extensions["response"]["data"]["futureResponseField"],
+            true
+        );
+    }
+
+    #[test]
+    fn related_mv_mapping_rejects_false_continuation_duplicates_unsafe_urls_and_nonprogress() {
+        let valid = || related_mv_item(765_058, "t0020sme302", "晴天");
+        let mut fixtures = vec![json!({})];
+        fixtures.push(json!({"hasmore": 1, "list": []}));
+        fixtures.push(json!({"hasmore": 1, "list": [valid(), valid()]}));
+        let mut unsafe_cover = valid();
+        unsafe_cover["picurl"] = json!("javascript:alert(1)");
+        fixtures.push(json!({"hasmore": 1, "list": [unsafe_cover]}));
+        let mut invalid_singer = valid();
+        invalid_singer["singers"][0]["id"] = json!(0);
+        fixtures.push(json!({"hasmore": 1, "list": [invalid_singer]}));
+
+        for fixture in fixtures {
+            let error = map_qq_related_videos("97773", 97773, None, response(fixture))
+                .expect_err("invalid QQ related MV response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let nonprogress = json!({"hasmore": 1, "list": [valid()]});
+        let error = map_qq_related_videos("97773", 97773, Some(765_058), response(nonprogress))
+            .expect_err("non-progressing QQ related MV cursor");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[tokio::test]
+    async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::RelatedVideos));
+        let invalid = provider
+            .related_videos(
+                "97773",
+                &RelatedVideoRequest {
+                    previous_id: Some("t0020sme302".to_owned()),
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("QQ related MV VID cursor must be rejected");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+
+        let missing = provider
+            .related_videos(
+                "97773",
+                &RelatedVideoRequest {
+                    previous_id: None,
+                    account: Some("missing-account".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing QQ related MV account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[test]
     fn recommended_playlist_mapping_preserves_cursor_metadata_and_complete_response() {
         let data = json!({
@@ -27360,6 +27738,55 @@ mod tests {
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_related_mvs_resolve_numeric_and_mid_tracks_and_advance_numeric_cursor() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let first = provider
+                .related_videos(id, &RelatedVideoRequest::new())
+                .await
+                .expect("first live QQ related MV page");
+            assert!(!first.videos.is_empty());
+            assert!(first.videos.iter().all(|video| {
+                !video.id.is_empty()
+                    && !video.title.is_empty()
+                    && video
+                        .extensions
+                        .get("numeric_id")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|id| id > 0)
+            }));
+        }
+
+        let first = provider
+            .related_videos("97773", &RelatedVideoRequest::new())
+            .await
+            .expect("first live QQ related MV cursor page");
+        let previous_id = first.next_id.expect("live QQ related MV cursor");
+        let second = provider
+            .related_videos(
+                "97773",
+                &RelatedVideoRequest {
+                    previous_id: Some(previous_id.clone()),
+                    account: None,
+                },
+            )
+            .await
+            .expect("second live QQ related MV cursor page");
+        assert!(
+            second
+                .videos
+                .first()
+                .is_some_and(|video| video.extensions["numeric_id"] != previous_id)
+        );
+        assert_ne!(second.next_id.as_deref(), Some(previous_id.as_str()));
     }
 
     #[tokio::test]
