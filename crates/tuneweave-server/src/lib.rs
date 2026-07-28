@@ -13844,25 +13844,28 @@ struct NeteaseExtensionApiBody {
 
 async fn netease_extension_api(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<NeteaseExtensionApiBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let body = json_body(payload)?;
     let account = optional_trimmed(body.account);
     let protocol = optional_trimmed(body.crypto);
-    let provider = state.registry.require(Platform::Netease)?;
-    let data = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        Platform::Netease,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let data = access
+        .provider
         .platform_api(&PlatformApiRequest {
             uri: body.uri,
             data: body.data,
             protocol,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(data, Platform::Netease)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -13887,12 +13890,14 @@ struct NeteaseBatchInput {
 
 async fn netease_extension_batch_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<NeteaseExtensionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let body = json_body(payload)?;
     let requests = merge_netease_batch_requests(body.requests, body.direct_requests)?;
     execute_netease_batch(
         &state,
+        &headers,
         NeteaseBatchInput {
             requests,
             protocol: body.crypto,
@@ -13905,6 +13910,7 @@ async fn netease_extension_batch_post(
 
 async fn netease_extension_batch_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(mut query): Query<BTreeMap<String, String>>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let protocol = take_netease_batch_alias(&mut query, "crypto", "protocol")?;
@@ -13923,6 +13929,7 @@ async fn netease_extension_batch_get(
     let requests = merge_netease_batch_requests(requests, direct_requests)?;
     execute_netease_batch(
         &state,
+        &headers,
         NeteaseBatchInput {
             requests,
             protocol,
@@ -13935,25 +13942,28 @@ async fn netease_extension_batch_get(
 
 async fn execute_netease_batch(
     state: &AppState,
+    headers: &HeaderMap,
     input: NeteaseBatchInput,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let account = optional_trimmed(input.account);
     let protocol = optional_trimmed(input.protocol);
     let encrypted_response = parse_json_bool("encrypted_response", input.encrypted_response)?;
-    let provider = state.registry.require(Platform::Netease)?;
-    let data = provider
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        Platform::Netease,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let data = access
+        .provider
         .platform_batch(&PlatformBatchRequest {
             requests: input.requests,
             protocol,
             encrypted_response,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(data, Platform::Netease)))
 }
 
 fn merge_netease_batch_requests(
@@ -20967,6 +20977,13 @@ mod tests {
         let material =
             ProviderCredential::new(Platform::Qq, "qq_credential_v1", secret, expires_at)
                 .expect("provider credential");
+        CallerCredential::issue(&material).expect("caller credential")
+    }
+
+    fn netease_caller_credential() -> CallerCredential {
+        let material =
+            ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("NetEase provider credential");
         CallerCredential::issue(&material).expect("caller credential")
     }
 
@@ -33804,6 +33821,70 @@ mod tests {
         assert_eq!(json["data"]["data"], json!({}));
         assert!(json["data"]["crypto"].is_null());
         assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn netease_extensions_accept_caller_credentials_without_server_aliases() {
+        let credential = netease_caller_credential();
+        let app = test_app_with_provider();
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/extensions/netease/api",
+            Some(json!({
+                "uri": "/api/search/get",
+                "data": { "s": "TuneWeave", "type": 1 },
+                "crypto": "linuxapi"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, post_batch) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/extensions/netease/batch",
+            Some(json!({
+                "requests": {
+                    "/api/v2/banner/get": { "clientType": "pc" }
+                }
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(post_batch["data"]["account"], "default");
+        assert!(post_batch["meta"].get("account").is_none());
+
+        let (status, get_batch) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/extensions/netease/batch?%2Fapi%2Fv2%2Fbanner%2Fget=%7B%7D",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(get_batch["data"]["account"], "default");
+        assert!(get_batch["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::POST,
+            "/v1/extensions/netease/api",
+            Some(json!({
+                "uri": "/api/search/get",
+                "account": "server-account"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
