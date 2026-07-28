@@ -1478,20 +1478,23 @@ struct RadioTaxonomyParams {
 async fn radio_taxonomy(
     State(state): State<AppState>,
     Query(params): Query<RadioTaxonomyParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RadioTaxonomy>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let taxonomy = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let taxonomy = access
+        .provider
         .radio_taxonomy(&RadioTaxonomyRequest {
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(taxonomy).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(taxonomy, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1548,22 +1551,25 @@ fn parse_radio_style_sources(value: Option<&str>) -> Result<Vec<u32>, TuneWeaveE
 async fn radio_styles(
     State(state): State<AppState>,
     params: Result<Query<RadioStyleCatalogParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RadioStyleCatalog>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let catalog = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let catalog = access
+        .provider
         .radio_style_catalog(&RadioStyleCatalogRequest {
             sources: parse_radio_style_sources(params.sources.as_deref())?,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(catalog).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(catalog, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1577,6 +1583,7 @@ async fn radio_playback_queue(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<RadioPlaybackQueueParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RadioPlaybackQueue>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -1586,21 +1593,23 @@ async fn radio_playback_queue(
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
-    let provider = state.registry.require(platform)?;
-    let queue = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let queue = access
+        .provider
         .radio_playback_queue(
             reference.id(),
             &RadioPlaybackQueueRequest {
                 limit,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(queue).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(queue, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1621,6 +1630,7 @@ struct RadioStationListParams {
 async fn radio_stations(
     State(state): State<AppState>,
     Query(params): Query<RadioStationListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<RadioStation>>>, ApiError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
     if !(1..=100).contains(&limit) {
@@ -1641,23 +1651,26 @@ async fn radio_stations(
     };
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .radio_stations(&RadioStationListRequest {
             limit,
             offset,
             category_id,
             region_id,
             cursor,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -1665,21 +1678,22 @@ async fn radio_station(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RadioStation>>, ApiError> {
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
+    let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let station = provider.radio_station(reference.id(), account).await?;
-    let mut response = ApiResponse::new(station).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let station = access
+        .provider
+        .radio_station(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(station, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -22603,6 +22617,65 @@ mod tests {
         );
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "radio-listener");
+    }
+
+    #[tokio::test]
+    async fn radio_reads_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-radio-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, account_pointer) in [
+            (
+                "/v1/radio/taxonomy?platform=netease",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/radio/styles?platform=netease&sources=0,1",
+                "/data/extensions/request/account",
+            ),
+            (
+                "/v1/radio/stations/netease:difm:0:10505/tracks?limit=7",
+                "/data/extensions/request/account",
+            ),
+            (
+                "/v1/radio/stations?platform=netease&categoryId=1",
+                "/meta/pagination/extensions/request/account",
+            ),
+            (
+                "/v1/radio/stations/netease:362",
+                "/data/extensions/current_info/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/radio/stations/netease:362?account=radio-listener",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
