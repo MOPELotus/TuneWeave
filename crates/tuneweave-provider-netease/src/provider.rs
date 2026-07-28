@@ -34,10 +34,10 @@ use tuneweave_core::{
     CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
     CommentThreadStats, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCode, CountryCallingCodeGroup, CountryCallingCodeListRequest, CreatorSummary,
-    DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
-    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAd,
+    CredentialMode, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
+    DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
+    DimensionChartRequest, DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode,
+    Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAd,
     ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
     ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
     LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary,
@@ -61,8 +61,8 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
     PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
     PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality,
-    RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
+    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderQrPoll, ProviderQrStart,
+    Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
     RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
     RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
@@ -395,8 +395,46 @@ impl NeteaseProvider {
         login: NeteaseLoginResult,
     ) -> Result<NeteaseAccountSummary> {
         let summary = login.account.clone();
-        self.install_session(account, login.into_session_cookie())?;
+        self.finish_netease_authentication(account, login, CredentialMode::Server)?;
         Ok(summary)
+    }
+
+    fn finish_netease_authentication(
+        &self,
+        account: &str,
+        login: NeteaseLoginResult,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        let summary = login.account.clone();
+        self.finish_netease_session(account, Some(summary), login.into_session_cookie(), mode)
+    }
+
+    fn finish_netease_session(
+        &self,
+        account: &str,
+        summary: Option<NeteaseAccountSummary>,
+        cookie: String,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        let account = validate_netease_login_account(account, mode)?.to_owned();
+        validate_session_cookie(&cookie)?;
+        let caller_credential = mode
+            .returns_to_caller()
+            .then(|| {
+                ProviderCredential::new(Platform::Netease, NETEASE_CREDENTIAL_KIND, &cookie, None)
+            })
+            .transpose()?;
+        if mode.persists_on_server() {
+            self.install_session(&account, cookie)?;
+        }
+        let profile = summary.map_or_else(
+            || AccountProfile::authenticated(Platform::Netease, &account),
+            |summary| map_account_profile(&account, summary),
+        );
+        Ok(ProviderAuthResult {
+            profile,
+            credential: caller_credential,
+        })
     }
 
     fn client_for(&self, account: Option<&str>) -> Result<NeteaseClient> {
@@ -686,6 +724,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::QrLogin,
             Capability::PasswordLogin,
             Capability::PhoneLogin,
+            Capability::CallerManagedCredentials,
             Capability::CountryCallingCodes,
             Capability::ChallengeValidation,
             Capability::PrincipalStatus,
@@ -2984,7 +3023,18 @@ impl MusicProvider for NeteaseProvider {
         provider_transaction_id: &str,
         account: &str,
     ) -> Result<ProviderQrPoll> {
-        let check = NeteaseProvider::check_qr_login(self, provider_transaction_id, account).await?;
+        self.poll_qr_login_with_mode(provider_transaction_id, account, CredentialMode::Server)
+            .await
+    }
+
+    async fn poll_qr_login_with_mode(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrPoll> {
+        validate_netease_login_account(account, mode)?;
+        let check = self.client.check_qr_login(provider_transaction_id).await?;
         let state = match check.state {
             NeteaseQrState::Waiting => AuthState::Waiting,
             NeteaseQrState::Scanned => AuthState::Scanned,
@@ -2992,55 +3042,64 @@ impl MusicProvider for NeteaseProvider {
             NeteaseQrState::Expired => AuthState::Expired,
             NeteaseQrState::Failed => AuthState::Failed,
         };
+        let authentication = if state == AuthState::Confirmed {
+            let cookie = check.session_cookie().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase confirmed QR login without returning MUSIC_U",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            Some(self.finish_netease_session(account, None, cookie.to_owned(), mode)?)
+        } else {
+            None
+        };
         Ok(ProviderQrPoll {
             state,
             message: check.message,
-            profile: (state == AuthState::Confirmed)
-                .then(|| AccountProfile::authenticated(Platform::Netease, account)),
-            credential: None,
+            profile: authentication.as_ref().map(|result| result.profile.clone()),
+            credential: authentication.and_then(|result| result.credential),
         })
     }
 
     async fn password_login(&self, request: &PasswordLoginRequest) -> Result<AccountProfile> {
+        Ok(self
+            .password_login_with_mode(request, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn password_login_with_mode(
+        &self,
+        request: &PasswordLoginRequest,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        validate_netease_login_account(&request.account, mode)?;
         let country_code = request.country_code.as_deref().unwrap_or("86");
-        let summary = match (request.principal_type, request.password_format) {
+        let login = match (request.principal_type, request.password_format) {
             (PrincipalType::Email, PasswordFormat::Plain) => {
-                NeteaseProvider::login_with_email_password(
-                    self,
-                    &request.account,
-                    &request.principal,
-                    &request.password,
-                )
-                .await?
+                self.client
+                    .login_with_email_password(&request.principal, &request.password)
+                    .await?
             }
             (PrincipalType::Email, PasswordFormat::Md5) => {
-                NeteaseProvider::login_with_email_md5(
-                    self,
-                    &request.account,
-                    &request.principal,
-                    &request.password,
-                )
-                .await?
+                self.client
+                    .login_with_email_md5(&request.principal, &request.password)
+                    .await?
             }
             (PrincipalType::Phone, PasswordFormat::Plain) => {
-                NeteaseProvider::login_with_phone_password(
-                    self,
-                    &request.account,
-                    &request.principal,
-                    country_code,
-                    &request.password,
-                )
-                .await?
+                self.client
+                    .login_with_phone_password(&request.principal, country_code, &request.password)
+                    .await?
             }
             (PrincipalType::Phone, PasswordFormat::Md5) => {
-                NeteaseProvider::login_with_phone_password_md5(
-                    self,
-                    &request.account,
-                    &request.principal,
-                    country_code,
-                    &request.password,
-                )
-                .await?
+                self.client
+                    .login_with_phone_password_md5(
+                        &request.principal,
+                        country_code,
+                        &request.password,
+                    )
+                    .await?
             }
             (PrincipalType::Username, _) => {
                 return Err(TuneWeaveError::invalid_request(
@@ -3049,7 +3108,7 @@ impl MusicProvider for NeteaseProvider {
                 .with_platform(Platform::Netease));
             }
         };
-        Ok(map_account_profile(&request.account, summary))
+        self.finish_netease_authentication(&request.account, login, mode)
     }
 
     async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
@@ -3139,19 +3198,30 @@ impl MusicProvider for NeteaseProvider {
         request: &AuthChallengeRequest,
         code: &str,
     ) -> Result<AccountProfile> {
-        let summary = match request.method {
+        Ok(self
+            .verify_auth_challenge_with_mode(request, code, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn verify_auth_challenge_with_mode(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        validate_netease_login_account(&request.account, mode)?;
+        let country_code = request.country_code.as_deref().unwrap_or("86");
+        let login = match request.method {
             ChallengeMethod::Sms => {
-                NeteaseProvider::login_with_phone_captcha(
-                    self,
-                    &request.account,
-                    &request.principal,
-                    request.country_code.as_deref().unwrap_or("86"),
-                    code,
-                )
-                .await?
+                self.captcha_client(&request.principal, country_code)?
+                    .login_with_phone_captcha(&request.principal, country_code, code)
+                    .await?
             }
         };
-        Ok(map_account_profile(&request.account, summary))
+        let result = self.finish_netease_authentication(&request.account, login, mode)?;
+        self.remove_pending_captcha_client(&request.principal, country_code)?;
+        Ok(result)
     }
 
     async fn logout(&self, account: &str) -> Result<bool> {
@@ -10654,6 +10724,17 @@ fn normalize_account_label(account: Option<&str>) -> Result<&str> {
             TuneWeaveError::invalid_request("account alias cannot exceed 64 bytes")
                 .with_platform(Platform::Netease),
         );
+    }
+    Ok(account)
+}
+
+fn validate_netease_login_account(account: &str, mode: CredentialMode) -> Result<&str> {
+    let account = normalize_account_label(Some(account))?;
+    if mode == CredentialMode::Client && account != "default" {
+        return Err(TuneWeaveError::invalid_request(
+            "client credential mode does not accept a server account alias",
+        )
+        .with_platform(Platform::Netease));
     }
     Ok(account)
 }
@@ -26941,6 +27022,85 @@ mod tests {
             assert_eq!(error.code, ErrorCode::InvalidRequest);
             assert!(!error.message.contains("caller-session"));
         }
+    }
+
+    #[test]
+    fn netease_login_credential_modes_separate_client_and_server_ownership() {
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("persistent provider");
+
+        let client = provider
+            .finish_netease_session(
+                "default",
+                None,
+                "MUSIC_U=client-session; __csrf=client-csrf".to_owned(),
+                CredentialMode::Client,
+            )
+            .expect("client-owned session");
+        assert_eq!(client.profile.account, "default");
+        let caller_credential = client.credential.expect("caller credential");
+        assert_eq!(caller_credential.platform, Platform::Netease);
+        assert_eq!(caller_credential.kind, NETEASE_CREDENTIAL_KIND);
+        assert_eq!(
+            caller_credential.secret(),
+            "MUSIC_U=client-session; __csrf=client-csrf"
+        );
+        assert!(
+            store
+                .load_platform(Platform::Netease)
+                .expect("stored credentials")
+                .is_empty()
+        );
+        assert!(
+            !provider
+                .client_for(Some("default"))
+                .expect("default client")
+                .is_authenticated()
+        );
+        assert_eq!(
+            provider
+                .finish_netease_session(
+                    "named",
+                    None,
+                    "MUSIC_U=rejected-session".to_owned(),
+                    CredentialMode::Client,
+                )
+                .expect_err("client mode rejects aliases")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let both = provider
+            .finish_netease_session(
+                "personal",
+                None,
+                "MUSIC_U=both-session; __csrf=both-csrf".to_owned(),
+                CredentialMode::Both,
+            )
+            .expect("both-owned session");
+        let caller_credential = both.credential.expect("both caller credential");
+        let stored = store
+            .load_platform(Platform::Netease)
+            .expect("stored credentials");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].account, "personal");
+        assert_eq!(stored[0].secret(), caller_credential.secret());
+        assert!(
+            provider
+                .client_for(Some("personal"))
+                .expect("personal client")
+                .is_authenticated()
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::CallerManagedCredentials)
+        );
     }
 
     #[test]
