@@ -13675,6 +13675,7 @@ fn parse_anti_cheat_token_version(value: Option<&str>) -> Result<AntiCheatTokenV
 
 async fn netease_calendar(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<NeteaseCalendarQuery>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let now = unix_time_millis()?;
@@ -13683,8 +13684,14 @@ async fn netease_calendar(
     let end_time =
         parse_optional_u64_parameter("end_time", params.end_time.as_deref())?.unwrap_or(now);
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(Platform::Netease)?;
-    let data = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        Platform::Netease,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let data = access
+        .provider
         .platform_api(&PlatformApiRequest {
             uri: "/api/mcalendar/detail".to_owned(),
             data: json!({
@@ -13692,14 +13699,10 @@ async fn netease_calendar(
                 "endTime": end_time,
             }),
             protocol: Some("weapi".to_owned()),
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(data).with_platform(Platform::Netease);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(data, Platform::Netease)))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -33552,6 +33555,34 @@ mod tests {
         assert_eq!(json["data"]["data"]["endTime"], 1_609_430_399_998_u64);
         assert!(json["data"]["account"].is_null());
         assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn netease_calendar_accepts_caller_credentials_without_server_aliases() {
+        let credential = netease_caller_credential();
+        let app = test_app_with_provider();
+        let (status, calendar) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/extensions/netease/calendar?startTime=1606752000000&endTime=1609430399999",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calendar["data"]["account"], "default");
+        assert!(calendar["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/extensions/netease/calendar?account=server-account",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
