@@ -23,7 +23,7 @@
 
 当路径中的引用已经带平台时，引用平台是内容来源；查询参数 `platform` 不能覆盖它。账户端点没有内容引用，因此通过 `platform` 选择账户平台。
 
-账户别名的作用域是平台，同名的 `netease/personal` 与 `qq/personal` 是两份独立登录态。兼容模式由服务器保存登录后的必要凭据，重启时按 `platform/account` 恢复；不存在的非默认别名不会回退到 `default`。QQ 与网易云登录同时支持 [`调用方托管凭证契约`](credential-ownership.md) 的 `credential_mode=server|client|both`：调用方可选择保持服务器托管、完全不落盘而接收凭证，或同时保存和返回同一代际；后续请求可通过专用请求头携带一至多平台凭证。密码、验证码和二维码事务本身始终不持久化；两平台的调用方凭证刷新、退出均已接通，刷新失败不会覆盖旧代际，`both` 会在发网前校验调用方与账户别名身份一致。
+账户别名的作用域是平台，同名的 `netease/personal`、`qq/personal` 与 `bilibili/personal` 是三份独立登录态。兼容模式由服务器保存登录后的必要凭据，重启时按 `platform/account` 恢复；不存在的非默认别名不会回退到 `default`。QQ、网易云与 B 站登录同时支持 [`调用方托管凭证契约`](credential-ownership.md) 的 `credential_mode=server|client|both`：调用方可选择保持服务器托管、完全不落盘而接收凭证，或同时保存和返回同一代际；后续请求可通过专用请求头携带一至多平台凭证。密码、验证码和二维码事务本身始终不持久化；QQ 与网易云的调用方凭证刷新、退出均已接通，刷新失败不会覆盖旧代际，`both` 会在发网前校验调用方与账户别名身份一致。B 站从二维码链路开始遵循同一归属边界，刷新、退出及业务请求随对应能力逐项接入。
 
 ### 分页
 
@@ -1468,7 +1468,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 
 ### 登录与账户
 
-QQ 与网易云当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。两平台当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
+QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。QQ 与网易云当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；B 站目前完成二维码登录的导入导出边界，业务端点随 Basic 顺序逐项接通。这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
@@ -1566,7 +1566,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 
 二维码与验证码端点返回的 `transaction_id` 是 TuneWeave 生成的随机不透明标识，不是上游二维码 key、手机号或 token。敏感字段仅在请求生命周期或短期事务仓库内使用；保存后的平台凭据只通过账户别名引用，版本化 `caller_credential` 也只会在平台已支持且显式选择 `client/both` 的成功响应中出现。密码、验证码、原始 Cookie 与上游事务标识不会写入普通响应。
 
-`POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云当前返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。QQ 音乐支持 `login_type=qq/default`、`wx/wechat/weixin` 和 `mobile/app`，分别返回 QQ 互联 PNG、微信 JPEG 和 QQ 音乐客户端 PNG；这些平台二维码没有可安全复用的独立扫码文本，因此 `url` 与 `image_data_url` 均为同一自包含图片。移动端二维码在图片返回前已建立持久 MQTT 订阅，后续 GET 轮询可跨请求接收扫码、取消、过期、失败和确认事件，不会在两次请求间临时断开订阅。QQ 互联登录的 Cookie 按协议分段隔离：二维码轮询只发送 `qrsig`，签名交换不继承轮询 Cookie；签名交换仅在固定 QQ Graph HTTPS 主机间手动跟随最多 10 次跳转，逐跳携带和汇总非空 Cookie，不允许后续同名域清理 Cookie 覆盖此前有效的 `p_skey`；OAuth 收到完整签名跳转链的 Cookie。平台最终仍未下发 `p_skey` 时明确失败，不用空哈希伪造授权。QQ 的 qrsig、微信 uuid、移动端二维码 ID、OAuth code、MQTT token 和临时 Cookie 只存在于 10 分钟进程内事务，HTTP 响应仍只暴露随机外层事务 ID；确认成功后由首请求固定的 `credential_mode` 决定按 `(qq, account)` 保存、只返回调用方或保存并返回同一凭证代际。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。2026-07-28 已分别真实完成 QQ 互联、微信和 QQ 音乐客户端三类扫码确认；QQ 凭据在服务重启后仍通过平台会话检查，微信临时凭据在验证后已通过统一退出端点删除。
+`POST /v1/auth/qr` 的 `image_data_url` 是可直接显示的自包含图片；网易云与 B 站返回 `data:image/svg+xml;base64,...`，二维码编码在进程内完成，不会把登录 URL 发送给第三方图片服务。B 站支持 `login_type=default/web/bilibili`，固定使用 BBDown 的 Web Passport 创建与轮询链，区分未扫码、已扫码待确认、过期、确认和平台失败；重复 `Set-Cookie` 优先于固定 `crossDomain` 回填，二维码 key 与 Cookie 只存在于服务端事务或选定凭证归属中。2026-07-28 已真实完成创建与未扫码轮询，扫码成功态仍待账户联合验收。QQ 音乐支持 `login_type=qq/default`、`wx/wechat/weixin` 和 `mobile/app`，分别返回 QQ 互联 PNG、微信 JPEG 和 QQ 音乐客户端 PNG；这些平台二维码没有可安全复用的独立扫码文本，因此 `url` 与 `image_data_url` 均为同一自包含图片。移动端二维码在图片返回前已建立持久 MQTT 订阅，后续 GET 轮询可跨请求接收扫码、取消、过期、失败和确认事件，不会在两次请求间临时断开订阅。QQ 互联登录的 Cookie 按协议分段隔离：二维码轮询只发送 `qrsig`，签名交换不继承轮询 Cookie；签名交换仅在固定 QQ Graph HTTPS 主机间手动跟随最多 10 次跳转，逐跳携带和汇总非空 Cookie，不允许后续同名域清理 Cookie 覆盖此前有效的 `p_skey`；OAuth 收到完整签名跳转链的 Cookie。平台最终仍未下发 `p_skey` 时明确失败，不用空哈希伪造授权。QQ 的 qrsig、微信 uuid、移动端二维码 ID、OAuth code、MQTT token 和临时 Cookie 只存在于 10 分钟进程内事务，HTTP 响应仍只暴露随机外层事务 ID；确认成功后由首请求固定的 `credential_mode` 决定按 `(qq, account)` 保存、只返回调用方或保存并返回同一凭证代际。二维码 key 和业务码按首个可解析的非空候选映射，空顶层兼容字段不会遮住 `data` 中的有效值。2026-07-28 已分别真实完成 QQ 互联、微信和 QQ 音乐客户端三类扫码确认；QQ 凭据在服务重启后仍通过平台会话检查，微信临时凭据在验证后已通过统一退出端点删除。
 
 文件账户后端默认位于 `.local/data/accounts`，可用 `TUNEWEAVE_DATA_DIR` 改变其父目录。账号别名在路径中使用 UTF-8 十六进制编码，不能构造路径穿越；每次更新先在同目录写入私有临时文件并同步，再以原子重命名发布新代际，启动只读取最新完整代际。Unix 权限为目录 `0700`、文件 `0600`，Windows 继承数据目录 ACL。文件内的平台会话凭据目前不做静态加密，因此运维必须保护该目录且不得同步或提交；除显式 `client/both` 登录或刷新产生的调用方凭证外，凭据从不进入 Debug、普通错误、HTTP 响应或日志。服务器托管的网易云 `DELETE /v1/auth/session` 保持既有兼容语义：即使上游退出请求不可达也清除本地凭据，并以错误详情 `local_session_removed` 明确结果；调用方模式不会删除调用方存储，只有上游确认退出后才返回 `caller_credential_discard_required=true`，`both` 同时删除身份匹配的精确服务器别名。
 

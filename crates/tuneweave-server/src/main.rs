@@ -14,6 +14,7 @@ use tuneweave_core::{
     AccountCredentialStore, FileAccountCredentialStore, FileUniPlaylistStore, Platform,
     ProviderRegistry, UniPlaylistStore,
 };
+use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_server::{AppState, build_router};
@@ -60,6 +61,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
         device_path: Some(data_dir.join("qq-device.json")),
+        credential_store: Some(credential_store.clone()),
+    })?)?;
+    registry.register(BilibiliProvider::new(BilibiliConfig {
+        proxy_url: env::var("TUNEWEAVE_BILIBILI_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
         credential_store: Some(credential_store),
     })?)?;
     let state =

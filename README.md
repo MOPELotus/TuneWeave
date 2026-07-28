@@ -7,7 +7,7 @@ TuneWeave 使用 Rust 构建，目标是在保持较小存储体积、较低运�
 ## 设计方向
 
 - 同一种业务能力使用相同端点和统一输入输出结构。
-- 账户请求可通过 `platform + account` 选择服务器持久化的多账户登录态，也可通过 `X-TuneWeave-Credential` 按请求携带调用方自管凭证。QQ 与网易云登录均支持 `credential_mode=server|client|both`，分别对应仅保存、仅返回或保存并返回同一凭证代际；两者当前已实现的公开业务端点、跨平台回退和安全原始扩展均已按[调用方托管凭证契约](docs/credential-ownership.md)接通。
+- 账户请求可通过 `platform + account` 选择服务器持久化的多账户登录态，也可通过 `X-TuneWeave-Credential` 按请求携带调用方自管凭证。QQ、网易云与 B 站登录均支持 `credential_mode=server|client|both`，分别对应仅保存、仅返回或保存并返回同一凭证代际；各平台已实现的账户与业务端点按[调用方托管凭证契约](docs/credential-ownership.md)逐项接通。
 - 内容来源与播放来源解耦：歌单来自一个平台时，音频可按策略从其他平台解析。
 - 指定或默认平台播放失败后，可按可配置顺序回退到其他平台。
 - 平台适配器按能力声明接入，不要求每个平台实现不存在的功能。
@@ -36,6 +36,7 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_NETEASE_REAL_IP`：可选的服务端固定 IPv4 请求身份，同时写入网易云协议请求的 `X-Real-IP` 与 `X-Forwarded-For`。
 - `TUNEWEAVE_NETEASE_RANDOM_CN_IP`：设为 `true/yes/on/1` 时，启动网易云 provider 时生成一个中国 IPv4 请求身份，并像参考实现的 `global.cnIp` 一样由该实例的所有协议请求复用；短信验证码发送、校验与登录还会在同一 10 分钟事务窗口内固定匿名设备会话；不能与固定真实 IP 同时启用。
 - `TUNEWEAVE_QQ_PROXY`：可选的 QQ 音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。QQ Android 设备、QIMEI 和匿名会话自动原子保存到私有数据目录的 `qq-device.json`，服务重启后复用。
+- `TUNEWEAVE_BILIBILI_PROXY`：可选的 B 站服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 
 默认数据目录已由 Git 忽略。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
 

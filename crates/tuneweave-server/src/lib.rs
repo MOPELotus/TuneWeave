@@ -394,6 +394,7 @@ impl AppState {
             vec![
                 Platform::Netease,
                 Platform::Qq,
+                Platform::Bilibili,
                 Platform::Kugou,
                 Platform::Migu,
             ],
