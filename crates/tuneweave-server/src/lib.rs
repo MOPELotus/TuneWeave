@@ -9389,53 +9389,68 @@ async fn user_profile(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserProfileParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
     let account = optional_trimmed(params.account);
     let backend = parse_user_profile_backend(params.backend.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let profile = provider
-        .user_profile(reference.id(), backend, account.as_deref())
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let profile = access
+        .provider
+        .user_profile(reference.id(), backend, access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(profile).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(profile, platform)))
 }
 
 async fn user_music_gene(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserMusicGeneParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<UserMusicGene>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let gene = provider
-        .user_music_gene(reference.id(), account.as_deref())
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let gene = access
+        .provider
+        .user_music_gene(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(gene).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(gene, platform)))
 }
 
 async fn account_user_profile(
     State(state): State<AppState>,
     params: Result<Query<AccountUserProfileParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
     let backend = parse_user_profile_backend(params.backend.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let session = provider.session_profile(&account).await?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account();
+    let session = access.provider.session_profile(account).await?;
     if !session.authenticated {
         return Err(TuneWeaveError::new(
             tuneweave_core::ErrorCode::AuthenticationRequired,
@@ -9457,16 +9472,13 @@ async fn account_user_profile(
                 format!("{platform} account profile did not contain a usable user id"),
             )
             .with_platform(platform)
-            .with_details(json!({ "account": account.clone() }))
+            .with_details(json!({ "account": access.response_account }))
         })?;
-    let profile = provider
-        .user_profile(&user_id, backend, Some(&account))
+    let profile = access
+        .provider
+        .user_profile(&user_id, backend, Some(account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(profile)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(profile, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9514,54 +9526,63 @@ async fn user_membership(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<UserMembershipParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
     let backend = parse_membership_backend(params.backend.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account();
     let membership = match backend {
         MembershipBackend::Front => {
-            provider
-                .user_membership(Some(reference.id()), Some(&account))
+            access
+                .provider
+                .user_membership(Some(reference.id()), Some(account))
                 .await?
         }
         MembershipBackend::Client => {
-            provider
-                .user_membership_client_info(Some(reference.id()), Some(&account))
+            access
+                .provider
+                .user_membership_client_info(Some(reference.id()), Some(account))
                 .await?
         }
     };
-    Ok(Json(
-        ApiResponse::new(membership)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(membership, platform)))
 }
 
 async fn account_membership(
     State(state): State<AppState>,
     params: Result<Query<AccountMembershipParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
     let backend = parse_membership_backend(params.backend.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account();
     let membership = match backend {
-        MembershipBackend::Front => provider.user_membership(None, Some(&account)).await?,
+        MembershipBackend::Front => access.provider.user_membership(None, Some(account)).await?,
         MembershipBackend::Client => {
-            provider
-                .user_membership_client_info(None, Some(&account))
+            access
+                .provider
+                .user_membership_client_info(None, Some(account))
                 .await?
         }
     };
-    Ok(Json(
-        ApiResponse::new(membership)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(membership, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10927,7 +10948,13 @@ async fn account_avatar(
 ) -> Result<Json<ApiResponse<ImageUploadResult>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let request = parse_image_upload_request(
         headers,
         payload,
@@ -10937,17 +10964,12 @@ async fn account_avatar(
             image_size: params.image_size.as_deref(),
             crop_x: params.crop_x.as_deref(),
             crop_y: params.crop_y.as_deref(),
-            account: account.clone(),
+            account: access.required_account().to_owned(),
             max_bytes: MAX_AVATAR_UPLOAD_BYTES,
         },
     )?;
-    let provider = state.registry.require(platform)?;
-    let result = provider.upload_account_avatar(&request).await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let result = access.provider.upload_account_avatar(&request).await?;
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -28942,6 +28964,78 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn identity_routes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-identity-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, account_pointer) in [
+            (
+                "/v1/users/netease:32953014?backend=legacy",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/users/netease:32953014/music-gene",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/account/profile?platform=netease",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/users/netease:32953014/membership?backend=client",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/account/membership?platform=netease&backend=client",
+                "/data/extensions/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, avatar) = caller_binary_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/avatar?platform=netease&filename=avatar.png",
+            "image/png",
+            vec![0x89, b'P', b'N', b'G'],
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(avatar["data"]["extensions"]["account"], "default");
+        assert!(avatar["meta"].get("account").is_none());
+
+        for path in [
+            "/v1/users/netease:32953014?account=viewer",
+            "/v1/account/profile?platform=netease&account=personal",
+            "/v1/account/membership?platform=netease&account=vip-user",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
