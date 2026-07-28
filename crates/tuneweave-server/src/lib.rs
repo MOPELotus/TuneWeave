@@ -3248,18 +3248,20 @@ struct ChartCatalogParams {
 async fn chart_catalog(
     State(state): State<AppState>,
     Query(params): Query<ChartCatalogParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ChartCatalog>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ChartCatalogRequest::new(parse_chart_catalog_view(params.view.as_deref())?);
-    request.account.clone_from(&account);
-    let catalog = provider.chart_catalog(&request).await?;
-    let mut response = ApiResponse::new(catalog).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    request.account.clone_from(&access.provider_account);
+    let catalog = access.provider.chart_catalog(&request).await?;
+    Ok(Json(access.response(catalog, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3283,6 +3285,7 @@ async fn chart_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<ChartTracksParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit/num", params.limit.as_deref(), 10)?;
@@ -3308,18 +3311,23 @@ async fn chart_tracks(
     };
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ChartTrackListRequest::new(limit, offset);
     request.include_tags =
         parse_bool_parameter("tag/include_tags", params.include_tags.as_deref(), true)?;
-    request.account.clone_from(&account);
-    let page = provider.chart_tracks(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    request.account.clone_from(&access.provider_account);
+    let page = access
+        .provider
+        .chart_tracks(reference.id(), &request)
+        .await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -3335,19 +3343,21 @@ struct ArtistChartParams {
 async fn artist_chart(
     State(state): State<AppState>,
     Query(params): Query<ArtistChartParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ArtistChart>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
     let area = resolve_artist_chart_area(params.area.as_deref(), params.kind.as_deref())?;
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ArtistChartRequest::new(area);
-    request.account.clone_from(&account);
-    let chart = provider.artist_chart(&request).await?;
-    let mut response = ApiResponse::new(chart).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    request.account.clone_from(&access.provider_account);
+    let chart = access.provider.artist_chart(&request).await?;
+    Ok(Json(access.response(chart, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3364,30 +3374,36 @@ async fn dimension_chart(
     State(state): State<AppState>,
     Path(chart_code): Path<String>,
     Query(params): Query<DimensionChartParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<DimensionChart>>, ApiError> {
-    let (platform, account, request) = dimension_chart_request(&state, chart_code, params)?;
-    let provider = state.registry.require(platform)?;
-    let chart = provider.dimension_chart(&request).await?;
-    let mut response = ApiResponse::new(chart).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let (platform, account, mut request) = dimension_chart_request(&state, chart_code, params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account.clone_from(&access.provider_account);
+    let chart = access.provider.dimension_chart(&request).await?;
+    Ok(Json(access.response(chart, platform)))
 }
 
 async fn dimension_chart_tracks(
     State(state): State<AppState>,
     Path(chart_code): Path<String>,
     Query(params): Query<DimensionChartParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<DimensionChartTrackSnapshot>>, ApiError> {
-    let (platform, account, request) = dimension_chart_request(&state, chart_code, params)?;
-    let provider = state.registry.require(platform)?;
-    let snapshot = provider.dimension_chart_tracks(&request).await?;
-    let mut response = ApiResponse::new(snapshot).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let (platform, account, mut request) = dimension_chart_request(&state, chart_code, params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account.clone_from(&access.provider_account);
+    let snapshot = access.provider.dimension_chart_tracks(&request).await?;
+    Ok(Json(access.response(snapshot, platform)))
 }
 
 fn dimension_chart_request(
@@ -27377,6 +27393,62 @@ mod tests {
         assert_eq!(chart["data"]["period_label"], "每周更新");
         assert_eq!(chart["data"]["extensions"]["account"], "vip");
         assert!(chart["meta"].get("pagination").is_none());
+    }
+
+    #[tokio::test]
+    async fn chart_reads_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-chart-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, account_pointer) in [
+            ("/v1/charts?platform=netease", "/data/extensions/account"),
+            (
+                "/v1/charts/netease:19723756/tracks?limit=2",
+                "/meta/pagination/extensions/account",
+            ),
+            (
+                "/v1/charts/artists?platform=netease&area=western",
+                "/data/entries/0/extensions/account",
+            ),
+            (
+                "/v1/charts/dimensions/CITY_SONG_CHART?platform=netease&targetId=110000&targetType=CITY",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/charts/dimensions/CITY_STYLE_SONG_CHART/tracks?platform=netease&target_id=110000_1020&target_type=CITY_STYLE",
+                "/data/extensions/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/charts?platform=netease&account=vip",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
