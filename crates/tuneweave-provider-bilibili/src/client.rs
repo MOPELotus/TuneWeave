@@ -46,9 +46,12 @@ const WEB_TICKET_ENDPOINT: &str =
 const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/type";
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
+const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
+    "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const WEB_REFERER: &str = "https://www.bilibili.com/";
 const VIDEO_SEARCH_REFERER: &str = "https://search.bilibili.com/";
 const VIDEO_SEARCH_WEB_LOCATION: &str = "1430654";
+const FAVORITE_FOLDER_WEB_LOCATION: &str = "333.1387";
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -200,6 +203,25 @@ pub(crate) struct BilibiliSearchVideo {
     pub paid: Option<bool>,
     pub collaborative: Option<bool>,
     pub rank_score: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliCreatedFavoriteFolders {
+    pub owner_id: u64,
+    pub folders: Vec<BilibiliCreatedFavoriteFolder>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliCreatedFavoriteFolder {
+    pub media_id: u64,
+    pub folder_id: u64,
+    pub owner_id: u64,
+    pub attributes: u64,
+    pub title: String,
+    pub favorite_state: bool,
+    pub media_count: u64,
+    pub child_friendly: bool,
+    pub child_friendly_description: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -569,6 +591,30 @@ struct VideoSearchItem {
     is_union_video: Option<FlexibleU64>,
     #[serde(default)]
     rank_score: Option<FlexibleU64>,
+}
+
+#[derive(Deserialize)]
+struct CreatedFavoriteFoldersData {
+    count: u64,
+    #[serde(default)]
+    list: Option<Vec<CreatedFavoriteFolderItem>>,
+    #[serde(default, rename = "season")]
+    _season: Option<()>,
+}
+
+#[derive(Deserialize)]
+struct CreatedFavoriteFolderItem {
+    id: u64,
+    fid: u64,
+    mid: u64,
+    attr: u64,
+    title: String,
+    fav_state: u64,
+    media_count: u64,
+    #[serde(default)]
+    is_kid_playlist: bool,
+    #[serde(default)]
+    kid_playlist_desc: String,
 }
 
 #[derive(Deserialize)]
@@ -1029,6 +1075,46 @@ impl BilibiliClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) async fn created_favorite_folders(
+        &self,
+        owner_id: u64,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliCreatedFavoriteFolders> {
+        if owner_id == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili favorite folder owner ID must be positive",
+            ));
+        }
+        let mut endpoint = Url::parse(CREATED_FAVORITE_FOLDERS_ENDPOINT).map_err(|_| {
+            bilibili_internal_error("Bilibili created favorite folders endpoint is invalid")
+        })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("up_mid", &owner_id.to_string())
+            .append_pair("type", "2")
+            .append_pair("web_location", FAVORITE_FOLDER_WEB_LOCATION);
+        let referer = format!("https://space.bilibili.com/{owner_id}/favlist");
+        let mut request = self.http.get(endpoint).header(REFERER, referer);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error(
+                "Bilibili created favorite folders",
+                status,
+            ));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili created favorite folders response exceeded the size limit",
+            ));
+        }
+        parse_created_favorite_folders_response(&bytes, owner_id)
     }
 
     async fn search_videos_compatibility_page(
@@ -1542,6 +1628,90 @@ fn parse_video_search_response(
     })
 }
 
+fn parse_created_favorite_folders_response(
+    bytes: &[u8],
+    requested_owner_id: u64,
+) -> Result<BilibiliCreatedFavoriteFolders> {
+    let response: PassportResponse<CreatedFavoriteFoldersData> = serde_json::from_slice(bytes)
+        .map_err(|_| {
+            bilibili_upstream_error("Bilibili created favorite folders returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili created favorite folders",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "Bilibili user favorite folders are not publicly visible",
+        )
+        .with_platform(Platform::Bilibili)
+        .with_details(json!({ "platform_code": 0, "hidden": true }))
+    })?;
+    if data.count > 10_000 {
+        return Err(bilibili_upstream_error(
+            "Bilibili created favorite folder count exceeded the supported limit",
+        ));
+    }
+    let items = data.list.unwrap_or_default();
+    if items.len() as u64 != data.count {
+        return Err(bilibili_upstream_error(
+            "Bilibili created favorite folder count was inconsistent",
+        ));
+    }
+    let mut media_ids = std::collections::BTreeSet::new();
+    let mut folders = Vec::with_capacity(items.len());
+    for item in items {
+        if item.id == 0
+            || item.fid == 0
+            || item.mid != requested_owner_id
+            || item.attr > u64::from(u32::MAX)
+            || !media_ids.insert(item.id)
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili created favorite folders returned an invalid identity",
+            ));
+        }
+        let favorite_state = match item.fav_state {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(bilibili_upstream_error(
+                    "Bilibili created favorite folders returned an invalid favorite state",
+                ));
+            }
+        };
+        let title = validated_bilibili_text(&item.title, "favorite folder title", 1024)?;
+        let child_friendly_description = if item.kid_playlist_desc.trim().is_empty() {
+            String::new()
+        } else {
+            validated_bilibili_text(
+                &item.kid_playlist_desc,
+                "child-friendly favorite folder description",
+                4096,
+            )?
+        };
+        folders.push(BilibiliCreatedFavoriteFolder {
+            media_id: item.id,
+            folder_id: item.fid,
+            owner_id: item.mid,
+            attributes: item.attr,
+            title,
+            favorite_state,
+            media_count: item.media_count,
+            child_friendly: item.is_kid_playlist,
+            child_friendly_description,
+        });
+    }
+    Ok(BilibiliCreatedFavoriteFolders {
+        owner_id: requested_owner_id,
+        folders,
+    })
+}
+
 fn is_video_search_risk_challenge(error: &TuneWeaveError) -> bool {
     error.code == ErrorCode::RateLimited
         && error.details.get("risk_challenge").and_then(Value::as_bool) == Some(true)
@@ -1672,6 +1842,16 @@ fn validated_search_text(value: &str, context: &str, limit: usize) -> Result<Str
     if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
         return Err(bilibili_upstream_error(format!(
             "Bilibili video search returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn validated_bilibili_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
         )));
     }
     Ok(value.to_owned())
@@ -3065,6 +3245,80 @@ mod tests {
         assert_eq!(malformed.code, ErrorCode::UpstreamError);
     }
 
+    #[test]
+    fn created_favorite_folders_preserve_typed_identity_and_visibility() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "count": 2,
+                "list": [{
+                    "id": 44233921,
+                    "fid": 442339,
+                    "mid": 7792521,
+                    "attr": 0,
+                    "title": "默认收藏夹",
+                    "fav_state": 0,
+                    "media_count": 178,
+                    "is_kid_playlist": false,
+                    "kid_playlist_desc": ""
+                }, {
+                    "id": 90210021,
+                    "fid": 902100,
+                    "mid": 7792521,
+                    "attr": 3,
+                    "title": "私有音乐",
+                    "fav_state": 1,
+                    "media_count": 12,
+                    "is_kid_playlist": true,
+                    "kid_playlist_desc": "适合青少年"
+                }],
+                "season": null
+            }
+        }))
+        .expect("favorite folders fixture");
+        let folders =
+            parse_created_favorite_folders_response(&response, 7_792_521).expect("folders");
+        assert_eq!(folders.owner_id, 7_792_521);
+        assert_eq!(folders.folders.len(), 2);
+        assert_eq!(folders.folders[0].media_id, 44_233_921);
+        assert_eq!(folders.folders[0].folder_id, 442_339);
+        assert!(!folders.folders[0].favorite_state);
+        assert_eq!(folders.folders[1].attributes, 3);
+        assert!(folders.folders[1].favorite_state);
+        assert!(folders.folders[1].child_friendly);
+    }
+
+    #[test]
+    fn created_favorite_folders_distinguish_privacy_from_empty_and_reject_drift() {
+        let hidden = parse_created_favorite_folders_response(
+            br#"{"code":0,"message":"OK","data":null}"#,
+            7_792_521,
+        )
+        .expect_err("hidden folders");
+        assert_eq!(hidden.code, ErrorCode::PermissionDenied);
+        assert_eq!(hidden.details["hidden"], true);
+
+        let empty = parse_created_favorite_folders_response(
+            br#"{"code":0,"message":"OK","data":{"count":0,"list":null,"season":null}}"#,
+            7_792_521,
+        )
+        .expect("empty visible folders");
+        assert!(empty.folders.is_empty());
+
+        for malformed in [
+            br#"{"code":0,"message":"OK","data":{"count":2,"list":[],"season":null}}"#.as_slice(),
+            br#"{"code":0,"message":"OK","data":{"count":1,"list":[{"id":1,"fid":1,"mid":9,"attr":0,"title":"x","fav_state":0,"media_count":0}],"season":null}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"count":1,"list":[{"id":1,"fid":1,"mid":7792521,"attr":0,"title":"x","fav_state":2,"media_count":0}],"season":null}}"#
+                .as_slice(),
+        ] {
+            let error = parse_created_favorite_folders_response(malformed, 7_792_521)
+                .expect_err("malformed favorite folders");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_qr_creation_returns_a_trusted_scannable_url() {
@@ -3114,5 +3368,23 @@ mod tests {
         assert_eq!(page.page, 1);
         assert_eq!(page.page_size, VIDEO_SEARCH_PAGE_SIZE);
         assert!(!page.videos.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili favorite folder access"]
+    async fn live_public_created_favorite_folders_are_available_anonymously() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let folders = client
+            .created_favorite_folders(7_792_521, None)
+            .await
+            .expect("live public favorite folders");
+        assert_eq!(folders.owner_id, 7_792_521);
+        assert!(!folders.folders.is_empty());
+        assert!(
+            folders
+                .folders
+                .iter()
+                .all(|folder| folder.owner_id == 7_792_521)
+        );
     }
 }
