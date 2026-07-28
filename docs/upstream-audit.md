@@ -12,7 +12,7 @@
 | 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `004bbff438bc811f0f28a9ddf4181e8b77a510ba` | 2026-07-22 | Lotus-ReFactor Source-Available Proprietary License |
 | QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | 2026-07-25 | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | 2026-06-30 | MIT |
-| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `3d1e82dfb763fb28d53353f845605be16bed8a0d` | 2026-07-25 | Apache-2.0 |
+| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `7759dae9b0364d969060961d319415e836c0b506` | 2026-07-28 | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | 2023-07-26 | Apache-2.0；README 未声明替代许可证，忽略误写为 ISC 的 `package.json` 元数据 |
 | B 站 | `MOPELotus/BBDown` | `259a5558cee0a349a7ebb60bd31e40c88e5bc1ed` | 2026-01-10 | MIT |
 | B 站 API 文档 | `bilibili-plugins/bilibili-api-collect` | `cfc5fddcc8a94b74d91970bb5b4eaeb349addc47` | 2026-01-23 | CC BY-NC 4.0 |
@@ -68,6 +68,14 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 - QQ 从 `261326e` 更新到 `873255f`。上游移除未使用的 JCE/Tars 基础并更新依赖和 Actions 固定提交，没有新增、删除或修改 104 个公开业务方法；TuneWeave 当前使用 JSON CGI，不受移除影响，覆盖分母保持 104/77。
 - 咪咕从 `14c55ff` 更新到 `3d1e82d`（v2.10.0），`src/modules` 由 71 增至 81。新增栏目新碟/新歌/详情、演唱会信息/详情/评论/播放、自建歌单歌曲增删、MV HLS、广播歌曲和短视频用户资料；`playlist_square` 更名为分页模块，排行榜路由并入栏目结构，播放 URL 增加降级查询，配置可自动持久化。咪咕阶段必须按 81 个模块和服务级缓存/配置端点建立逐项账本，不把路由合并误判为能力删除。
 
+## 2026-07-28 增量同步
+
+完成调用方凭证账户资料、媒体库及个人曲库桥接后 fetch 全部 8 个参考仓库。咪咕工作树干净并安全 fast-forward，网易云、QQ 当前只读快照、酷狗、酷我、BBDown、B 站 API 文档和 Lotus-ReFactor 均无新提交；保留的 QQ 旧分叉不作为当前快照：
+
+- 咪咕从 `3d1e82d` 更新到 `7759dae`，公开模块由 81 增至 82。新增 `/playlist/match`，以外部歌单 URL 请求咪咕的导入匹配服务；该能力与 Uni Playlist 的跨平台导入直接相关，咪咕阶段必须把 URL 输入边界、双重编码风险、超时和返回匹配身份纳入强类型设计，不能直接转发任意 URL。
+- `url_v2` 补充 Android 客户端、活动、来源、签名与时间戳请求头，并移除固定定位头；咪咕播放链接入时以新头部组合为当前协议基线。版本查询同时换到 `/column/client/version/v1.0` 并取消调用方可控的渠道、UA 与版本参数，TuneWeave 不保留已经失效的可注入参数。
+- 其余变更集中在 Cloudflare Workers、Deno、存储和工程配置，不新增音乐实体能力；服务级部署适配不计入 82 个公开音乐模块。
+
 后续按 [实施顺序与持续上游同步](implementation-plan.md) 执行：每完成 3 个上游 API 模块检查活跃参考仓库；阶段切换和发布前检查全部参考仓库，并同步固定 SHA、模块数与覆盖状态。
 
 ### 定期检查记录
@@ -99,6 +107,7 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 | 2026-07-28 | 完成 QQ 歌曲相关 MV 并执行定期检查 | `QQMusicApi` | `873255f→873255f` | 远端 `main` 无更新，104 个公开方法及 Q018 请求协议未变化；参考参数注释称 `last_mvid` 为 VID，但响应模型和真实连续页均确认换批游标来自数字 `mvid`。TuneWeave 分离数字游标与 VID 资源身份，数字 ID/MID 及统一 HTTP 两页真实通过 |
 | 2026-07-28 | 完成 QQ 同曲版本、收藏人数及制作信息后检查 | `QQMusicApi` | `873255f→873255f` | 远端 `main` 无更新，104 个公开方法及 Q019/Q023/Q020 协议未变化；TuneWeave 已分别保留版本请求身份分支、收藏人数原生批量语义和制作角色分组，数字 ID/MID 的 Provider 与统一 HTTP 均真实通过 |
 | 2026-07-28 | 完成 QQ 曲谱存在性、曲谱详情及音乐基因后检查 | `QQMusicApi` | `873255f→873255f` | 远端 `main` 无更新，104 个公开方法及 Q022/Q021/Q069 协议未变化；TuneWeave 已分别保留五个独立曲谱标志、用户/AI/外部三条曲谱来源和完整音乐基因强类型维度，Provider 与统一 HTTP 均真实通过，QQ Basic 的 77 个公开业务方法全部完成 |
+| 2026-07-28 | 完成调用方凭证账户资料、媒体库及个人曲库桥接后检查 | 全部 8 个参考仓库 | 咪咕 `3d1e82d→7759dae`；其余当前快照无变化 | 咪咕 81→82 个公开模块，新增外部歌单匹配；`url_v2` 请求头与版本查询协议更新，已同步后续咪咕与 Uni Playlist 审计要求 |
 
 ## 完整覆盖验收基线
 
