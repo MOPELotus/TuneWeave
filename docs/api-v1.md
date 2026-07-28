@@ -356,6 +356,8 @@ B 站字幕目录通过 `GET /v1/videos/{ref}/subtitles?part={part_ref}` 读取�
 
 B 站完整播放清单通过 `GET /v1/videos/{ref}/playback?part={part_ref}` 读取，父视频和分 P 身份规则与字幕相同；可选 `audio_language`（兼容上游名 `cur_language`）请求平台列出的 AI 音轨。响应 `VideoPlaybackManifest` 同时保留可用清晰度说明、DASH 的 AVC/HEVC/AV1 视频轨、普通/杜比/Hi-Res 音轨和兼容 DURL 分段，不会在这一层擅自替调用方选择或混流。每条轨道分开提供 MIME、编码、带宽、尺寸、帧率、SegmentBase、主/备用 URL，清单还保留播放进度、音轨语言目录和所有媒体 URL 中最早的 `deadline`。媒体 URL 仅允许 B 站视频 CDN 的 HTTPS 地址，服务端不代理媒体字节；`headers` 只包含媒体请求必需的 `Referer`，绝不回传账户 Cookie。后续 `/stream`、仅音频和下载端点从这份强类型清单执行选择与回退。
 
+B 站视频的仅音频轨道通过 `GET /v1/videos/{ref}/audio-stream` 选择。`part` 可使用同平台 `bilibili:cid:{cid}` 或省略平台前缀；省略时选择详情目录中的第一 P。`quality` 使用统一音质枚举，`codec` 可指定 `aac/mp4a`、`dolby/eac3`、`flac/lossless` 或平台返回的精确编码，`audio_language/cur_language` 和 `account` 沿用播放清单语义。自动选择按 Hi-Res、杜比、普通音轨顺序查找；普通轨优先以平台稳定 ID `30216/30232/30280` 区分低、标准和较高音质，同时保留实际 `bandwidth`，避免把内容相关的可变平均带宽误当成平台等级。响应分别给出 `requested_quality`、`actual_quality`、`tier`、平台音频 ID 和 `downgraded`：例如请求 `high` 但最高仅有 `30280` 时返回实际 `higher` 并明确标记降级，请求 `master` 回落到 B 站 Hi-Res 时也不会伪装为母带。主/备用签名 URL、最早到期时间、MIME、编码、带宽、时长及必要 `Referer` 原样保留；服务端不下载、混流或代理媒体字节，未匹配错误也不回显签名 URL。
+
 ### DigitalAlbum
 
 ```json
@@ -1417,6 +1419,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
 | GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
 | GET | `/v1/videos/{ref}/playback` | 必填 `part`，`kind/type=video`、`audio_language/cur_language?`、`account?` | `VideoPlaybackManifest`；完整 DASH/DURL、多编码和音轨清单 |
+| GET | `/v1/videos/{ref}/audio-stream` | `part?`、`kind/type=video`、`quality?`、`codec?`、`audio_language/cur_language?`、`account?` | `VideoAudioStream`；选择单条音轨并显式返回实际等级、降级、主/备用 URL 和媒体请求头 |
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
 | GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 

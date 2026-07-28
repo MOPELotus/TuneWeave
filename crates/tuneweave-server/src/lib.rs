@@ -92,12 +92,12 @@ use tuneweave_core::{
     UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
     UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
-    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
-    VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
-    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    Video, VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest,
+    VideoPlaybackRequest, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
+    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
+    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -574,6 +574,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/videos/{reference}/parts", get(video_parts))
         .route("/videos/{reference}/playback", get(video_playback_manifest))
+        .route("/videos/{reference}/audio-stream", get(video_audio_stream))
         .route(
             "/videos/{reference}/subtitles/{subtitle}",
             get(video_subtitle),
@@ -8948,6 +8949,19 @@ struct VideoPlaybackParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoAudioStreamParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    part: Option<String>,
+    quality: Option<String>,
+    codec: Option<String>,
+    #[serde(alias = "cur_language")]
+    audio_language: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoDetailBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -9202,6 +9216,68 @@ async fn video_playback_manifest(
         .video_playback_manifest(reference.id(), &request)
         .await?;
     Ok(Json(access.response(manifest, platform)))
+}
+
+async fn video_audio_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoAudioStreamParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoAudioStream>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let part_id = params
+        .part
+        .map(|part| normalize_video_part_reference(part, reference.platform()))
+        .transpose()?;
+    let quality = parse_quality(params.quality.as_deref())?;
+    let codec = params
+        .codec
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+                return Err(TuneWeaveError::invalid_request(
+                    "codec must contain a valid codec preference",
+                ));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
+    let audio_language = params
+        .audio_language
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 32 || value.chars().any(char::is_control) {
+                return Err(TuneWeaveError::invalid_request(
+                    "audio_language must contain a valid language tag",
+                ));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoAudioStreamRequest::new(kind, quality);
+    request.part_id = part_id;
+    request.codec = codec;
+    request.audio_language = audio_language;
+    request.account.clone_from(&access.provider_account);
+    let stream = access
+        .provider
+        .video_audio_stream(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(stream, platform)))
 }
 
 async fn video_details_get(
@@ -15831,6 +15907,7 @@ mod tests {
                 Capability::VideoParts,
                 Capability::VideoSubtitles,
                 Capability::VideoPlaybackManifest,
+                Capability::VideoAudioStream,
                 Capability::VideoStats,
                 Capability::VideoStream,
                 Capability::VideoSubscriptionWrite,
@@ -17846,6 +17923,47 @@ mod tests {
                 extensions: Extensions::from([
                     ("kind".to_owned(), json!(request.kind)),
                     ("account".to_owned(), json!(request.account)),
+                ]),
+            })
+        }
+
+        async fn video_audio_stream(
+            &self,
+            id: &str,
+            request: &VideoAudioStreamRequest,
+        ) -> Result<VideoAudioStream> {
+            let video_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid test video reference");
+            let part_id = request.part_id.as_deref().unwrap_or("segment:1");
+            let part_ref = ResourceRef::new(Platform::Netease, part_id)
+                .expect("valid test video part reference");
+            Ok(VideoAudioStream {
+                video_ref,
+                part_ref,
+                platform: Platform::Netease,
+                available: true,
+                url: Some("https://audio.example.test/video-audio.m4s".to_owned()),
+                backup_urls: vec!["https://backup.example.test/video-audio.m4s".to_owned()],
+                headers: BTreeMap::from([(
+                    "Referer".to_owned(),
+                    "https://example.test/video".to_owned(),
+                )]),
+                expires_at_epoch_seconds: Some(2_000_000_000),
+                mime_type: Some("audio/mp4".to_owned()),
+                codec: Some("mp4a.40.2".to_owned()),
+                bandwidth: Some(192_000),
+                duration_ms: Some(212_000),
+                requested_quality: request.quality,
+                actual_quality: Some(Quality::High),
+                tier: Some(tuneweave_core::VideoAudioTier::Normal),
+                platform_quality_id: Some(30_280),
+                downgraded: false,
+                message: None,
+                extensions: Extensions::from([
+                    ("kind".to_owned(), json!(request.kind)),
+                    ("account".to_owned(), json!(request.account)),
+                    ("codec".to_owned(), json!(request.codec)),
+                    ("audio_language".to_owned(), json!(request.audio_language)),
                 ]),
             })
         }
@@ -26593,6 +26711,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_audio_stream_forwards_selection_and_defaults_to_primary_part() {
+        for part in ["&part=netease:segment:1", ""] {
+            let path = format!(
+                "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678/audio-stream?type=video&quality=high&codec=aac&cur_language=en&account=collector{part}"
+            );
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"]["video_ref"],
+                "netease:D1C2B3A40987654321ABCDEF12345678"
+            );
+            assert_eq!(response["data"]["part_ref"], "netease:segment:1");
+            assert_eq!(response["data"]["requested_quality"], "high");
+            assert_eq!(response["data"]["actual_quality"], "high");
+            assert_eq!(response["data"]["tier"], "normal");
+            assert_eq!(response["data"]["platform_quality_id"], 30_280);
+            assert_eq!(response["data"]["codec"], "mp4a.40.2");
+            assert_eq!(response["data"]["extensions"]["kind"], "video");
+            assert_eq!(response["data"]["extensions"]["account"], "collector");
+            assert_eq!(response["data"]["extensions"]["codec"], "aac");
+            assert_eq!(response["data"]["extensions"]["audio_language"], "en");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_audio_stream_rejects_foreign_empty_and_unknown_inputs() {
+        for path in [
+            "/v1/videos/netease:opaque/audio-stream?quality=unknown",
+            "/v1/videos/netease:opaque/audio-stream?part=qq:segment:1",
+            "/v1/videos/netease:opaque/audio-stream?part=",
+            "/v1/videos/netease:opaque/audio-stream?codec=",
+            "/v1/videos/netease:opaque/audio-stream?audio_language=",
+            "/v1/videos/netease:opaque/audio-stream?kind=unknown",
+            "/v1/videos/netease:opaque/audio-stream?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
     async fn live_bilibili_video_parts_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -26681,6 +26843,48 @@ mod tests {
             response["data"]["headers"]["Referer"],
             "https://www.bilibili.com/video/BV1Jt411P77c"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili playback access"]
+    async fn live_bilibili_video_audio_stream_selects_anonymous_aac() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV1Jt411P77c/audio-stream?part=bilibili:cid:106101299&quality=high&codec=aac",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["part_ref"], "bilibili:cid:106101299");
+        assert_eq!(response["data"]["requested_quality"], "high");
+        assert_eq!(response["data"]["actual_quality"], "higher");
+        assert_eq!(response["data"]["tier"], "normal");
+        assert_eq!(response["data"]["platform_quality_id"], 30_280);
+        assert_eq!(response["data"]["downgraded"], true);
+        assert!(
+            response["data"]["url"]
+                .as_str()
+                .expect("selected audio URL")
+                .starts_with("https://")
+        );
+        assert!(
+            response["data"]["codec"]
+                .as_str()
+                .expect("selected codec")
+                .starts_with("mp4a.")
+        );
+        assert_eq!(
+            response["data"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert!(response["data"]["headers"].get("Cookie").is_none());
     }
 
     #[tokio::test]

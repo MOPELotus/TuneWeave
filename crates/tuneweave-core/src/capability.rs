@@ -111,6 +111,7 @@ pub enum Capability {
     VideoParts,
     VideoSubtitles,
     VideoPlaybackManifest,
+    VideoAudioStream,
     VideoStats,
     VideoStream,
     VideoSubscriptionWrite,
@@ -400,6 +401,11 @@ mod tests {
             serde_json::to_value(Capability::VideoPlaybackManifest)
                 .expect("serialize video playback manifest capability"),
             serde_json::json!("video_playback_manifest")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::VideoAudioStream)
+                .expect("serialize video audio stream capability"),
+            serde_json::json!("video_audio_stream")
         );
         assert_eq!(
             serde_json::to_value(Capability::VideoStats).expect("serialize video stats capability"),

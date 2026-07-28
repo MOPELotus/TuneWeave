@@ -54,10 +54,11 @@ use crate::{
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackEntitlement,
     TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserMusicGene,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
-    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyRequest,
+    UserProfile, UserProfileBackend, Video, VideoAudioStream, VideoAudioStreamRequest,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoPart, VideoPartListRequest,
+    VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationRequest, VideoResourceKind,
+    VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -983,6 +984,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::VideoPlaybackManifest,
+        ))
+    }
+
+    async fn video_audio_stream(
+        &self,
+        _id: &str,
+        _request: &VideoAudioStreamRequest,
+    ) -> Result<VideoAudioStream> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoAudioStream,
         ))
     }
 

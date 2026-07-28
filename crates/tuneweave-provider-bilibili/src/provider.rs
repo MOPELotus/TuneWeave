@@ -10,14 +10,15 @@ use tuneweave_core::{
     AccountCredentialStore, AccountProfile, ArtistSummary, AuthState, Capability, CreatorSummary,
     CredentialMode, ErrorCode, Extensions, MusicProvider, Page, PageMeta, PageRequest, Platform,
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
-    ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
-    SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
-    VideoDetailRequest, VideoPart, VideoPartListRequest, VideoPlaybackFormat,
-    VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
-    VideoPlaybackProgressiveSegment, VideoPlaybackRequest, VideoPlaybackSegmentBase,
-    VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoSubtitleStyle,
+    ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
+    SearchQuery, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
+    VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoDetail, VideoDetailRequest,
+    VideoPart, VideoPartListRequest, VideoPlaybackFormat, VideoPlaybackLanguage,
+    VideoPlaybackLanguageCatalog, VideoPlaybackManifest, VideoPlaybackProgressiveSegment,
+    VideoPlaybackRequest, VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind,
+    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoSubtitle,
+    VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest,
+    VideoSubtitleStyle,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -108,6 +109,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::VideoParts,
             Capability::VideoSubtitles,
             Capability::VideoPlaybackManifest,
+            Capability::VideoAudioStream,
         ])
     }
 
@@ -319,42 +321,34 @@ impl MusicProvider for BilibiliProvider {
         id: &str,
         request: &VideoPlaybackRequest,
     ) -> Result<VideoPlaybackManifest> {
-        if request.kind != VideoResourceKind::Video {
-            return Err(bilibili_invalid_request(
-                "Bilibili archive playback requires kind=video",
-            ));
-        }
-        let identity = BilibiliVideoIdentity::parse(id)?;
-        if matches!(
-            identity,
-            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
-        ) {
-            return Err(bilibili_invalid_request(
-                "Bilibili archive playback requires an AID or BVID",
-            ));
-        }
-        let cid = parse_bilibili_part_id(&request.part_id)?;
-        let credential = self.optional_request_credential(request.account.as_deref())?;
-        let view = self
-            .client
-            .video_view(&identity, credential.as_ref())
-            .await?;
-        if !view.parts.iter().any(|part| part.cid == cid) {
-            return Err(bilibili_invalid_request(
-                "Bilibili playback part does not belong to the requested video",
-            ));
+        self.playback_manifest(
+            id,
+            request.kind,
+            Some(&request.part_id),
+            request.audio_language.as_deref(),
+            request.account.as_deref(),
+        )
+        .await
+    }
+
+    async fn video_audio_stream(
+        &self,
+        id: &str,
+        request: &VideoAudioStreamRequest,
+    ) -> Result<VideoAudioStream> {
+        if let Some(codec) = request.codec.as_deref() {
+            validate_bilibili_audio_codec(codec)?;
         }
         let manifest = self
-            .client
             .playback_manifest(
-                view.aid,
-                &view.bvid,
-                cid,
+                id,
+                request.kind,
+                request.part_id.as_deref(),
                 request.audio_language.as_deref(),
-                credential.as_ref(),
+                request.account.as_deref(),
             )
             .await?;
-        map_bilibili_playback_manifest(manifest, &view.parts)
+        select_bilibili_audio_stream(manifest, request)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -824,6 +818,60 @@ impl MusicProvider for BilibiliProvider {
 }
 
 impl BilibiliProvider {
+    async fn playback_manifest(
+        &self,
+        id: &str,
+        kind: VideoResourceKind,
+        part_id: Option<&str>,
+        audio_language: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<VideoPlaybackManifest> {
+        let audio_language = audio_language
+            .map(validate_bilibili_playback_language)
+            .transpose()?;
+        if kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive playback requires kind=video",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive playback requires an AID or BVID",
+            ));
+        }
+        let requested_cid = part_id.map(parse_bilibili_part_id).transpose()?;
+        let credential = self.optional_request_credential(account)?;
+        let view = self
+            .client
+            .video_view(&identity, credential.as_ref())
+            .await?;
+        let default_cid =
+            view.parts.first().map(|part| part.cid).ok_or_else(|| {
+                bilibili_data_error("Bilibili video did not contain a primary part")
+            })?;
+        let cid = requested_cid.unwrap_or(default_cid);
+        if !view.parts.iter().any(|part| part.cid == cid) {
+            return Err(bilibili_invalid_request(
+                "Bilibili playback part does not belong to the requested video",
+            ));
+        }
+        let manifest = self
+            .client
+            .playback_manifest(
+                view.aid,
+                &view.bvid,
+                cid,
+                audio_language.as_deref(),
+                credential.as_ref(),
+            )
+            .await?;
+        map_bilibili_playback_manifest(manifest, &view.parts)
+    }
+
     async fn subtitle_catalog(
         &self,
         id: &str,
@@ -2065,6 +2113,235 @@ fn map_bilibili_playback_languages(
         close_message: catalog.close_message,
         default_title: catalog.default_title,
         extensions: Extensions::new(),
+    }
+}
+
+fn select_bilibili_audio_stream(
+    manifest: VideoPlaybackManifest,
+    request: &VideoAudioStreamRequest,
+) -> Result<VideoAudioStream> {
+    let codec = request
+        .codec
+        .as_deref()
+        .map(validate_bilibili_audio_codec)
+        .transpose()?;
+    let tier_order = bilibili_audio_tier_order(request.quality);
+    let mut selected = None;
+    for tier in tier_order {
+        let tracks = match tier {
+            VideoAudioTier::Normal => &manifest.audio_tracks,
+            VideoAudioTier::Dolby => &manifest.dolby_audio_tracks,
+            VideoAudioTier::Lossless => &manifest.lossless_audio_tracks,
+        };
+        let candidates = tracks
+            .iter()
+            .filter(|track| {
+                codec
+                    .as_deref()
+                    .is_none_or(|codec| bilibili_audio_codec_matches(&track.codecs, codec))
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            continue;
+        }
+        selected = Some((
+            *tier,
+            select_bilibili_audio_candidate(&candidates, request.quality),
+        ));
+        break;
+    }
+    let Some((tier, selected)) = selected else {
+        return Err(TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Bilibili playback manifest did not contain a matching audio track",
+        )
+        .with_platform(Platform::Bilibili)
+        .with_details(json!({
+            "requested_quality": request.quality,
+            "requested_codec": codec,
+            "normal_track_ids": manifest.audio_tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            "dolby_track_ids": manifest.dolby_audio_tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            "lossless_track_ids": manifest.lossless_audio_tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+        })));
+    };
+    let selected = (*selected).clone();
+    let actual_quality = bilibili_audio_actual_quality(tier, &selected);
+    let downgraded = bilibili_audio_downgraded(request.quality, tier, actual_quality);
+    Ok(VideoAudioStream {
+        video_ref: manifest.video_ref.clone(),
+        part_ref: manifest.part_ref.clone(),
+        platform: Platform::Bilibili,
+        available: true,
+        url: Some(selected.url.clone()),
+        backup_urls: selected.backup_urls.clone(),
+        headers: manifest.headers,
+        expires_at_epoch_seconds: manifest.expires_at_epoch_seconds,
+        mime_type: Some(selected.mime_type.clone()),
+        codec: Some(selected.codecs.clone()),
+        bandwidth: Some(selected.bandwidth),
+        duration_ms: Some(manifest.duration_ms),
+        requested_quality: request.quality,
+        actual_quality: Some(actual_quality),
+        tier: Some(tier),
+        platform_quality_id: Some(selected.id),
+        downgraded,
+        message: downgraded.then(|| {
+            "requested Bilibili audio tier was unavailable; selected a lower tier".to_owned()
+        }),
+        extensions: Extensions::from([
+            ("source".to_owned(), json!("video_playback_manifest")),
+            (
+                "current_video_quality".to_owned(),
+                json!(manifest.current_quality),
+            ),
+            ("selected_track_id".to_owned(), json!(selected.id)),
+            ("selected_codec_id".to_owned(), json!(selected.codec_id)),
+            (
+                "selected_audio_language".to_owned(),
+                json!(manifest.selected_audio_language),
+            ),
+            ("requested_codec".to_owned(), json!(codec)),
+        ]),
+    })
+}
+
+fn bilibili_audio_tier_order(quality: Quality) -> &'static [VideoAudioTier] {
+    const NORMAL: &[VideoAudioTier] = &[VideoAudioTier::Normal];
+    const DOLBY: &[VideoAudioTier] = &[VideoAudioTier::Dolby, VideoAudioTier::Normal];
+    const LOSSLESS: &[VideoAudioTier] = &[
+        VideoAudioTier::Lossless,
+        VideoAudioTier::Dolby,
+        VideoAudioTier::Normal,
+    ];
+    match quality {
+        Quality::Auto => LOSSLESS,
+        Quality::Lossless | Quality::Hires | Quality::Master => LOSSLESS,
+        Quality::Surround | Quality::Spatial | Quality::Dolby => DOLBY,
+        Quality::Low | Quality::Standard | Quality::Higher | Quality::High => NORMAL,
+    }
+}
+
+fn select_bilibili_audio_candidate<'a>(
+    tracks: &[&'a VideoPlaybackTrack],
+    quality: Quality,
+) -> &'a VideoPlaybackTrack {
+    let preferred_id = match quality {
+        Quality::Low => Some(30_216),
+        Quality::Standard => Some(30_232),
+        Quality::Higher => Some(30_280),
+        _ => None,
+    };
+    if let Some(track) =
+        preferred_id.and_then(|id| tracks.iter().copied().find(|track| track.id == id))
+    {
+        return track;
+    }
+    match quality {
+        Quality::Low => tracks
+            .iter()
+            .copied()
+            .min_by_key(|track| track.bandwidth)
+            .expect("audio candidates are non-empty"),
+        Quality::Standard => tracks
+            .iter()
+            .copied()
+            .min_by_key(|track| track.bandwidth.abs_diff(132_000))
+            .expect("audio candidates are non-empty"),
+        Quality::Higher => tracks
+            .iter()
+            .copied()
+            .min_by_key(|track| track.bandwidth.abs_diff(192_000))
+            .expect("audio candidates are non-empty"),
+        _ => tracks
+            .iter()
+            .copied()
+            .max_by_key(|track| (bilibili_audio_track_rank(track), track.bandwidth))
+            .expect("audio candidates are non-empty"),
+    }
+}
+
+fn bilibili_audio_track_rank(track: &VideoPlaybackTrack) -> u8 {
+    match track.id {
+        30_216 => 1,
+        30_232 => 2,
+        30_280 => 3,
+        _ if track.bandwidth <= 80_000 => 1,
+        _ if track.bandwidth <= 160_000 => 2,
+        _ if track.bandwidth <= 256_000 => 3,
+        _ => 4,
+    }
+}
+
+fn bilibili_audio_actual_quality(tier: VideoAudioTier, track: &VideoPlaybackTrack) -> Quality {
+    match tier {
+        VideoAudioTier::Lossless => Quality::Hires,
+        VideoAudioTier::Dolby => Quality::Dolby,
+        VideoAudioTier::Normal if track.id == 30_216 => Quality::Low,
+        VideoAudioTier::Normal if track.id == 30_232 => Quality::Standard,
+        VideoAudioTier::Normal if track.id == 30_280 => Quality::Higher,
+        VideoAudioTier::Normal if track.bandwidth <= 80_000 => Quality::Low,
+        VideoAudioTier::Normal if track.bandwidth <= 160_000 => Quality::Standard,
+        VideoAudioTier::Normal if track.bandwidth <= 256_000 => Quality::Higher,
+        VideoAudioTier::Normal => Quality::High,
+    }
+}
+
+fn bilibili_audio_downgraded(requested: Quality, tier: VideoAudioTier, actual: Quality) -> bool {
+    match requested {
+        Quality::Auto | Quality::Low => false,
+        Quality::Lossless | Quality::Hires => tier != VideoAudioTier::Lossless,
+        Quality::Master => true,
+        Quality::Surround | Quality::Spatial | Quality::Dolby => tier != VideoAudioTier::Dolby,
+        Quality::Standard => actual == Quality::Low,
+        Quality::Higher => matches!(actual, Quality::Low | Quality::Standard),
+        Quality::High => actual != Quality::High,
+    }
+}
+
+fn validate_bilibili_audio_codec(value: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty()
+        || value.len() > 128
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(bilibili_invalid_request(
+            "Bilibili audio codec preference is invalid",
+        ));
+    }
+    Ok(match value.as_str() {
+        "aac" | "m4a" | "mp4a" => "aac".to_owned(),
+        "dolby" | "eac3" | "e-ac-3" => "ec-3".to_owned(),
+        "hires" | "lossless" => "flac".to_owned(),
+        value => value.to_owned(),
+    })
+}
+
+fn validate_bilibili_playback_language(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 32
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-')
+    {
+        return Err(bilibili_invalid_request(
+            "Bilibili playback audio language is invalid",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn bilibili_audio_codec_matches(codec: &str, preference: &str) -> bool {
+    let codec = codec.to_ascii_lowercase();
+    match preference {
+        "aac" => codec.starts_with("mp4a."),
+        "ec-3" => codec == "ec-3",
+        "flac" => codec == "flac",
+        preference => codec == preference,
     }
 }
 
@@ -3655,6 +3932,54 @@ mod tests {
                 .capabilities()
                 .contains(&Capability::VideoPlaybackManifest)
         );
+        let wrong_audio_kind = provider
+            .video_audio_stream(
+                "bvid:BV117411r7R1",
+                &VideoAudioStreamRequest::new(VideoResourceKind::Mv, Quality::Auto),
+            )
+            .await
+            .expect_err("audio MV kind");
+        assert_eq!(wrong_audio_kind.code, ErrorCode::InvalidRequest);
+        let mut invalid_audio_part =
+            VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        invalid_audio_part.part_id = Some("page:1".to_owned());
+        let invalid_audio_part = provider
+            .video_audio_stream("bvid:BV117411r7R1", &invalid_audio_part)
+            .await
+            .expect_err("invalid audio part");
+        assert_eq!(invalid_audio_part.code, ErrorCode::InvalidRequest);
+        let mut invalid_audio_codec =
+            VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        invalid_audio_codec.codec = Some("aac\ncookie".to_owned());
+        let invalid_audio_codec = provider
+            .video_audio_stream("bvid:BV117411r7R1", &invalid_audio_codec)
+            .await
+            .expect_err("invalid audio codec");
+        assert_eq!(invalid_audio_codec.code, ErrorCode::InvalidRequest);
+        let mut invalid_audio_language =
+            VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        invalid_audio_language.audio_language = Some("../en".to_owned());
+        let invalid_audio_language = provider
+            .video_audio_stream("bvid:BV117411r7R1", &invalid_audio_language)
+            .await
+            .expect_err("invalid audio language");
+        assert_eq!(invalid_audio_language.code, ErrorCode::InvalidRequest);
+        let mut missing_audio_account =
+            VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        missing_audio_account.account = Some("missing".to_owned());
+        let missing_audio_account = provider
+            .video_audio_stream("bvid:BV117411r7R1", &missing_audio_account)
+            .await
+            .expect_err("missing audio account");
+        assert_eq!(
+            missing_audio_account.code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::VideoAudioStream)
+        );
     }
 
     #[test]
@@ -3926,6 +4251,183 @@ mod tests {
         );
         assert_eq!(manifest.extensions["fnval"], 4048);
         assert_eq!(manifest.extensions["cid"], 106_101_299);
+    }
+
+    fn playback_audio_track(
+        kind: VideoPlaybackTrackKind,
+        id: u32,
+        bandwidth: u64,
+        codec: &str,
+    ) -> VideoPlaybackTrack {
+        VideoPlaybackTrack {
+            kind,
+            id,
+            url: format!("https://media.example/{id}.m4s?deadline=2000000000"),
+            backup_urls: vec![format!(
+                "https://backup.example/{id}.m4s?deadline=1999999999"
+            )],
+            bandwidth,
+            mime_type: "audio/mp4".to_owned(),
+            codecs: codec.to_owned(),
+            width: None,
+            height: None,
+            frame_rate: None,
+            sample_aspect_ratio: None,
+            start_with_sap: Some(0),
+            segment_base: None,
+            codec_id: Some(0),
+            extensions: Extensions::new(),
+        }
+    }
+
+    fn playback_audio_manifest(
+        include_dolby: bool,
+        include_lossless: bool,
+    ) -> VideoPlaybackManifest {
+        VideoPlaybackManifest {
+            video_ref: ResourceRef::new(Platform::Bilibili, "bvid:BV1Jt411P77c")
+                .expect("video reference"),
+            part_ref: ResourceRef::new(Platform::Bilibili, "cid:106101299")
+                .expect("part reference"),
+            platform: Platform::Bilibili,
+            duration_ms: 212_000,
+            current_quality: 64,
+            format: "flv720".to_owned(),
+            accepted_formats: vec!["flv720".to_owned()],
+            accepted_qualities: vec![64],
+            formats: Vec::new(),
+            video_codec_id: Some(7),
+            seek_parameter: Some("start".to_owned()),
+            seek_type: Some("offset".to_owned()),
+            minimum_buffer_time: Some(1.5),
+            video_tracks: Vec::new(),
+            audio_tracks: vec![
+                playback_audio_track(VideoPlaybackTrackKind::Audio, 30_216, 31_705, "mp4a.40.5"),
+                playback_audio_track(VideoPlaybackTrackKind::Audio, 30_232, 76_436, "mp4a.40.2"),
+                playback_audio_track(VideoPlaybackTrackKind::Audio, 30_280, 154_889, "mp4a.40.2"),
+            ],
+            dolby_audio_tracks: if include_dolby {
+                vec![playback_audio_track(
+                    VideoPlaybackTrackKind::DolbyAudio,
+                    30_250,
+                    448_000,
+                    "ec-3",
+                )]
+            } else {
+                Vec::new()
+            },
+            lossless_audio_tracks: if include_lossless {
+                vec![playback_audio_track(
+                    VideoPlaybackTrackKind::LosslessAudio,
+                    30_251,
+                    1_500_000,
+                    "fLaC",
+                )]
+            } else {
+                Vec::new()
+            },
+            dolby_type: include_dolby.then_some(2),
+            lossless_display: include_lossless.then_some(true),
+            progressive_segments: Vec::new(),
+            selected_audio_language: None,
+            selected_production_type: None,
+            languages: None,
+            last_play_time_ms: None,
+            last_play_part_ref: None,
+            expires_at_epoch_seconds: Some(1_999_999_999),
+            headers: BTreeMap::from([(
+                "Referer".to_owned(),
+                "https://www.bilibili.com/video/BV1Jt411P77c".to_owned(),
+            )]),
+            extensions: Extensions::new(),
+        }
+    }
+
+    #[test]
+    fn audio_selection_respects_tiers_bitrates_codecs_and_visible_downgrades() {
+        let auto = select_bilibili_audio_stream(
+            playback_audio_manifest(true, true),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto),
+        )
+        .expect("automatic audio");
+        assert_eq!(auto.tier, Some(VideoAudioTier::Lossless));
+        assert_eq!(auto.platform_quality_id, Some(30_251));
+        assert_eq!(auto.actual_quality, Some(Quality::Hires));
+        assert!(!auto.downgraded);
+
+        let standard = select_bilibili_audio_stream(
+            playback_audio_manifest(true, true),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Standard),
+        )
+        .expect("standard audio");
+        assert_eq!(standard.tier, Some(VideoAudioTier::Normal));
+        assert_eq!(standard.platform_quality_id, Some(30_232));
+        assert_eq!(standard.actual_quality, Some(Quality::Standard));
+
+        let mut ranked_manifest = playback_audio_manifest(false, false);
+        ranked_manifest.audio_tracks[0].bandwidth = 400_000;
+        ranked_manifest.audio_tracks[2].bandwidth = 20_000;
+        let ranked = select_bilibili_audio_stream(
+            ranked_manifest,
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto),
+        )
+        .expect("platform-ranked audio");
+        assert_eq!(ranked.platform_quality_id, Some(30_280));
+        assert_eq!(ranked.actual_quality, Some(Quality::Higher));
+
+        let higher = select_bilibili_audio_stream(
+            playback_audio_manifest(true, true),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Higher),
+        )
+        .expect("higher audio");
+        assert_eq!(higher.platform_quality_id, Some(30_280));
+        assert_eq!(higher.actual_quality, Some(Quality::Higher));
+        assert!(!higher.downgraded);
+
+        let high = select_bilibili_audio_stream(
+            playback_audio_manifest(true, true),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::High),
+        )
+        .expect("high audio fallback");
+        assert_eq!(high.platform_quality_id, Some(30_280));
+        assert_eq!(high.actual_quality, Some(Quality::Higher));
+        assert!(high.downgraded);
+
+        let mut aac_request = VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        aac_request.codec = Some("aac".to_owned());
+        let aac = select_bilibili_audio_stream(playback_audio_manifest(true, true), &aac_request)
+            .expect("AAC audio");
+        assert_eq!(aac.tier, Some(VideoAudioTier::Normal));
+        assert_eq!(aac.platform_quality_id, Some(30_280));
+        assert_eq!(aac.codec.as_deref(), Some("mp4a.40.2"));
+
+        let dolby_fallback = select_bilibili_audio_stream(
+            playback_audio_manifest(false, false),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Dolby),
+        )
+        .expect("Dolby fallback");
+        assert_eq!(dolby_fallback.tier, Some(VideoAudioTier::Normal));
+        assert_eq!(dolby_fallback.actual_quality, Some(Quality::Higher));
+        assert!(dolby_fallback.downgraded);
+        assert!(dolby_fallback.message.is_some());
+
+        let master_fallback = select_bilibili_audio_stream(
+            playback_audio_manifest(true, true),
+            &VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Master),
+        )
+        .expect("master fallback");
+        assert_eq!(master_fallback.actual_quality, Some(Quality::Hires));
+        assert!(master_fallback.downgraded);
+
+        let mut unavailable = VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
+        unavailable.codec = Some("flac".to_owned());
+        let error =
+            select_bilibili_audio_stream(playback_audio_manifest(false, false), &unavailable)
+                .expect_err("missing FLAC audio");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+        let serialized = format!("{error:?}");
+        assert!(!serialized.contains("media.example"));
+        assert!(!serialized.contains("deadline"));
     }
 
     #[tokio::test]

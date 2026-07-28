@@ -3573,6 +3573,61 @@ pub struct VideoPlaybackManifest {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoAudioStreamRequest {
+    pub kind: VideoResourceKind,
+    pub part_id: Option<String>,
+    pub quality: Quality,
+    pub codec: Option<String>,
+    pub audio_language: Option<String>,
+    pub account: Option<String>,
+}
+
+impl VideoAudioStreamRequest {
+    #[must_use]
+    pub fn new(kind: VideoResourceKind, quality: Quality) -> Self {
+        Self {
+            kind,
+            part_id: None,
+            quality,
+            codec: None,
+            audio_language: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoAudioTier {
+    Normal,
+    Dolby,
+    Lossless,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoAudioStream {
+    pub video_ref: ResourceRef,
+    pub part_ref: ResourceRef,
+    pub platform: Platform,
+    pub available: bool,
+    pub url: Option<String>,
+    pub backup_urls: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub expires_at_epoch_seconds: Option<u64>,
+    pub mime_type: Option<String>,
+    pub codec: Option<String>,
+    pub bandwidth: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub requested_quality: Quality,
+    pub actual_quality: Option<Quality>,
+    pub tier: Option<VideoAudioTier>,
+    pub platform_quality_id: Option<u32>,
+    pub downgraded: bool,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
@@ -6898,6 +6953,48 @@ mod tests {
             value["video_tracks"][0]["segment_base"]["index_range"],
             "995-2370"
         );
+
+        let mut audio_request =
+            VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Hires);
+        audio_request.part_id = Some("cid:146044693".to_owned());
+        audio_request.codec = Some("flac".to_owned());
+        audio_request.audio_language = Some("zh-CN".to_owned());
+        audio_request.account = Some("listener".to_owned());
+        assert_eq!(audio_request.quality, Quality::Hires);
+        assert_eq!(audio_request.part_id.as_deref(), Some("cid:146044693"));
+
+        let audio_stream = VideoAudioStream {
+            video_ref: part.video_ref.clone(),
+            part_ref: part.resource_ref.clone(),
+            platform: Platform::Bilibili,
+            available: true,
+            url: Some("https://example.test/audio.m4s".to_owned()),
+            backup_urls: vec!["https://backup.example.test/audio.m4s".to_owned()],
+            headers: BTreeMap::from([(
+                "Referer".to_owned(),
+                "https://www.bilibili.com/video/BV117411r7R1".to_owned(),
+            )]),
+            expires_at_epoch_seconds: Some(2_000_000_000),
+            mime_type: Some("audio/mp4".to_owned()),
+            codec: Some("flac".to_owned()),
+            bandwidth: Some(1_500_000),
+            duration_ms: Some(212_000),
+            requested_quality: Quality::Master,
+            actual_quality: Some(Quality::Hires),
+            tier: Some(VideoAudioTier::Lossless),
+            platform_quality_id: Some(30_251),
+            downgraded: true,
+            message: Some("requested quality was unavailable".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(audio_stream).expect("serialize video audio stream");
+        assert_eq!(value["video_ref"], "bilibili:bvid:BV117411r7R1");
+        assert_eq!(value["part_ref"], "bilibili:cid:146044693");
+        assert_eq!(value["requested_quality"], "master");
+        assert_eq!(value["actual_quality"], "hires");
+        assert_eq!(value["tier"], "lossless");
+        assert_eq!(value["downgraded"], true);
+        assert_eq!(value["platform_quality_id"], 30_251);
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,
