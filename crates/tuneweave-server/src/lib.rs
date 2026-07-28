@@ -221,6 +221,22 @@ struct ProviderAccess {
     response_account: Option<String>,
 }
 
+impl ProviderAccess {
+    fn required_account(&self) -> &str {
+        self.provider_account
+            .as_deref()
+            .expect("default account selection always yields an account")
+    }
+
+    fn response<T>(&self, data: T, platform: Platform) -> ApiResponse<T> {
+        let mut response = ApiResponse::new(data).with_platform(platform);
+        if let Some(account) = &self.response_account {
+            response = response.with_account(account.clone());
+        }
+        response
+    }
+}
+
 impl CallerCredentialSet {
     fn parse_headers(
         headers: &HeaderMap,
@@ -3271,20 +3287,23 @@ struct AlbumSubscriptionBatchBody {
 
 async fn albums_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
-    set_album_subscriptions(state, payload, true).await
+    set_album_subscriptions(state, headers, payload, true).await
 }
 
 async fn albums_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
-    set_album_subscriptions(state, payload, false).await
+    set_album_subscriptions(state, headers, payload, false).await
 }
 
 async fn set_album_subscriptions(
     state: AppState,
+    headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
@@ -3310,72 +3329,81 @@ async fn set_album_subscriptions(
         .with_details(json!({ "refs": references }))
         .into());
     }
-    let account = account_alias(body.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
     let ids = references
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let provider = state.registry.require(platform)?;
-    let results = provider
+    let results = access
+        .provider
         .set_album_subscriptions(&ids, subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(results)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(results, platform)))
 }
 
 async fn album_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, reference, query_params(params)?, true).await
+    set_album_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
 async fn album_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, reference, query_params(params)?, false).await
+    set_album_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
 async fn set_album_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: AlbumSubscriptionParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_album_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn track_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_track_subscription(state, reference, query_params(params)?, true).await
+    set_track_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
 async fn track_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_track_subscription(state, reference, query_params(params)?, false).await
+    set_track_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3386,38 +3414,43 @@ struct TrackSubscriptionParams {
 
 async fn set_track_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: TrackSubscriptionParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_track_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlist_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_playlist_subscription(state, reference, query_params(params)?, true).await
+    set_playlist_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
 async fn playlist_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_playlist_subscription(state, reference, query_params(params)?, false).await
+    set_playlist_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3428,22 +3461,25 @@ struct PlaylistSubscriptionParams {
 
 async fn set_playlist_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: PlaylistSubscriptionParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_playlist_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3456,147 +3492,167 @@ struct VideoSubscriptionParams {
 
 async fn video_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<VideoSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_video_subscription(state, reference, query_params(params)?, true).await
+    set_video_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
 async fn video_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<VideoSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_video_subscription(state, reference, query_params(params)?, false).await
+    set_video_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
 async fn set_video_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: VideoSubscriptionParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
     let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_video_subscription(reference.id(), kind, subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn radio_station_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_radio_station_subscription(state, reference, params, true).await
+    set_radio_station_subscription(state, headers, reference, params, true).await
 }
 
 async fn radio_station_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_radio_station_subscription(state, reference, params, false).await
+    set_radio_station_subscription(state, headers, reference, params, false).await
 }
 
 async fn set_radio_station_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: AccountParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_radio_station_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn podcast_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_podcast_subscription(state, reference, params, true).await
+    set_podcast_subscription(state, headers, reference, params, true).await
 }
 
 async fn podcast_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_podcast_subscription(state, reference, params, false).await
+    set_podcast_subscription(state, headers, reference, params, false).await
 }
 
 async fn set_podcast_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: AccountParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_podcast_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn artist_subscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_artist_subscription(state, reference, params, true).await
+    set_artist_subscription(state, headers, reference, params, true).await
 }
 
 async fn artist_unsubscribe(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_artist_subscription(state, reference, params, false).await
+    set_artist_subscription(state, headers, reference, params, false).await
 }
 
 async fn set_artist_subscription(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     params: AccountParams,
     subscribed: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .set_artist_subscription(reference.id(), subscribed, Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn track_lyrics(
@@ -20228,6 +20284,35 @@ mod tests {
         (status, headers, json)
     }
 
+    async fn caller_json_request(
+        app: Router,
+        method: Method,
+        path: &str,
+        json_body: Option<Value>,
+        credential: &CallerCredential,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(CALLER_CREDENTIAL_HEADER, credential.value.clone());
+        let body = if let Some(json_body) = json_body {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&json_body).expect("serialize request JSON"))
+        } else {
+            Body::empty()
+        };
+        let response = app
+            .oneshot(request.body(body).expect("build caller request"))
+            .await
+            .expect("caller request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read caller response body");
+        let json = serde_json::from_slice(&body).expect("valid caller response JSON");
+        (status, json)
+    }
+
     async fn binary_request_from(
         app: Router,
         path: &str,
@@ -24756,6 +24841,96 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn library_subscription_writes_accept_caller_credentials_without_account_aliases() {
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-library-session",
+                None,
+            )
+            .expect("NetEase provider credential"),
+        )
+        .expect("NetEase caller credential");
+        let app = test_app_with_import_providers();
+        for (method, path) in [
+            (Method::PUT, "/v1/account/library/albums/netease:32311"),
+            (Method::DELETE, "/v1/account/library/albums/netease:32311"),
+            (
+                Method::PUT,
+                "/v1/account/library/videos/netease:22695250?kind=mv",
+            ),
+            (
+                Method::PUT,
+                "/v1/account/library/radio-stations/netease:175",
+            ),
+            (
+                Method::PUT,
+                "/v1/account/library/podcasts/netease:336355127",
+            ),
+            (Method::PUT, "/v1/account/following/artists/netease:6452"),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, None, &netease).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"]["extensions"]["account"], "default");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, batch) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/library/albums",
+            Some(json!({ "refs": ["netease:32311", "netease:7"] })),
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(batch["data"].as_array().map(Vec::len), Some(2));
+        assert_eq!(batch["data"][0]["extensions"]["account"], "default");
+        assert!(batch["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        for path in [
+            "/v1/account/favorites/tracks/qq:0039MnYb0qxYhV",
+            "/v1/account/favorites/playlists/qq:7039749142",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::PUT, path, None, &qq).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"]["extensions"]["account"], "default");
+            assert_eq!(response["meta"]["platform"], "qq");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/library/albums/netease:32311?account=default",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::PUT,
+            "/v1/account/library/albums",
+            Some(json!({
+                "refs": ["netease:32311"],
+                "account": "default"
+            })),
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
