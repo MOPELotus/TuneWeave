@@ -1961,28 +1961,34 @@ async fn podcast(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PodcastParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Podcast>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let backend = parse_podcast_detail_backend(params.backend.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let podcast = match backend {
         PodcastDetailBackend::Default => {
-            provider.podcast(reference.id(), account.as_deref()).await?
+            access
+                .provider
+                .podcast(reference.id(), access.provider_account.as_deref())
+                .await?
         }
         PodcastDetailBackend::Workbench => {
-            provider
-                .podcast_workbench(reference.id(), account.as_deref())
+            access
+                .provider
+                .podcast_workbench(reference.id(), access.provider_account.as_deref())
                 .await?
         }
     };
-    let mut response = ApiResponse::new(podcast).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(podcast, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2001,6 +2007,7 @@ async fn podcast_episodes(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PodcastEpisodeListParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -2026,29 +2033,35 @@ async fn podcast_episodes(
     }
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let request = PodcastEpisodeListRequest {
         limit,
         offset,
         ascending,
-        account: account.clone(),
+        account: access.provider_account.clone(),
     };
     let page = match backend {
         PodcastDetailBackend::Default => {
-            provider.podcast_episodes(reference.id(), &request).await?
+            access
+                .provider
+                .podcast_episodes(reference.id(), &request)
+                .await?
         }
         PodcastDetailBackend::Workbench => {
-            provider
+            access
+                .provider
                 .podcast_episodes_workbench(reference.id(), &request)
                 .await?
         }
     };
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -2064,30 +2077,34 @@ async fn podcast_episode(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PodcastEpisodeParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<PodcastEpisode>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let backend = parse_podcast_detail_backend(params.backend.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let episode = match backend {
         PodcastDetailBackend::Default => {
-            provider
-                .podcast_episode(reference.id(), account.as_deref())
+            access
+                .provider
+                .podcast_episode(reference.id(), access.provider_account.as_deref())
                 .await?
         }
         PodcastDetailBackend::Workbench => {
-            provider
-                .podcast_episode_workbench(reference.id(), account.as_deref())
+            access
+                .provider
+                .podcast_episode_workbench(reference.id(), access.provider_account.as_deref())
                 .await?
         }
     };
-    let mut response = ApiResponse::new(episode).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(episode, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2100,20 +2117,23 @@ async fn podcast_episode_lyrics(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PodcastEpisodeLyricsParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<PodcastEpisodeLyrics>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let lyrics = provider
-        .podcast_episode_lyrics(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let lyrics = access
+        .provider
+        .podcast_episode_lyrics(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(lyrics).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(lyrics, platform)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -23074,6 +23094,53 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_details_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-podcast-detail-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for path in [
+            "/v1/podcasts/netease:336355127",
+            "/v1/podcasts/netease:336355127?backend=workbench",
+            "/v1/podcasts/netease:336355127/episodes?limit=25",
+            "/v1/podcasts/netease:336355127/episodes?backend=workbench",
+            "/v1/episodes/netease:1367665101",
+            "/v1/episodes/netease:2058695201?backend=workbench",
+            "/v1/episodes/netease:1367665101/lyrics",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            let data = response["data"]
+                .as_array()
+                .map_or(&response["data"], |items| {
+                    items.first().expect("podcast episode page")
+                });
+            assert_eq!(data["extensions"]["account"], "default", "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/podcasts/netease:336355127?account=podcast-user",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
