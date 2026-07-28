@@ -144,7 +144,7 @@ impl QqQrTransactions {
             return Ok(outcome);
         }
         let outcome = match transaction.kind {
-            QqQrLoginKind::Qq => poll_qq_qr(client, &mut transaction).await?,
+            QqQrLoginKind::Qq => poll_qq_qr(client, &transaction).await?,
             QqQrLoginKind::Wechat => poll_wechat_qr(client, &mut transaction).await?,
             QqQrLoginKind::Mobile => poll_mobile_qr(client, &mut transaction).await?,
         };
@@ -438,10 +438,7 @@ pub(crate) async fn logout_qq_credential(
     logout_outcome(response.code)
 }
 
-async fn poll_qq_qr(
-    client: &QqClient,
-    transaction: &mut QqQrTransaction,
-) -> Result<QqQrPollOutcome> {
+async fn poll_qq_qr(client: &QqClient, transaction: &QqQrTransaction) -> Result<QqQrPollOutcome> {
     let mut endpoint = fixed_url(QQ_QR_POLL_ENDPOINT)?;
     let token = hash33(&transaction.identifier, 0);
     let action = format!("0-0-{}", unix_millis()?);
@@ -467,13 +464,15 @@ async fn poll_qq_qr(
         .login_http()
         .get(endpoint)
         .header(header::REFERER, QQ_LOGIN_REFERER)
-        .header(header::COOKIE, cookie_header(&transaction.cookies)?)
+        .header(
+            header::COOKIE,
+            cookie_header(&qq_qr_poll_cookies(&transaction.identifier)?)?,
+        )
         .timeout(LOGIN_REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(login_network_error)?;
     ensure_login_http_status(response.status(), "QQ QR status")?;
-    merge_response_cookies(&mut transaction.cookies, &response)?;
     let body = response.text().await.map_err(login_network_error)?;
     let args = parse_qq_status_arguments(&body)?;
     let status = args[0]
@@ -503,7 +502,7 @@ async fn poll_qq_qr(
                 .map(|value| value.as_ref())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| login_data_error("QQ QR success callback is missing ptsigx"))?;
-            let credential = authorize_qq_qr(client, uin, sigx, &mut transaction.cookies).await?;
+            let credential = authorize_qq_qr(client, uin, sigx).await?;
             Ok(QqQrPollOutcome::Confirmed(Box::new(credential)))
         }
         _ => Err(login_data_error(format!(
@@ -1026,12 +1025,7 @@ fn header_contains_token(
     })
 }
 
-async fn authorize_qq_qr(
-    client: &QqClient,
-    uin: &str,
-    sigx: &str,
-    cookies: &mut BTreeMap<String, String>,
-) -> Result<QqCredential> {
+async fn authorize_qq_qr(client: &QqClient, uin: &str, sigx: &str) -> Result<QqCredential> {
     let mut endpoint = fixed_url(QQ_CHECK_SIG_ENDPOINT)?;
     endpoint.query_pairs_mut().extend_pairs([
         ("uin", uin),
@@ -1057,14 +1051,13 @@ async fn authorize_qq_qr(
         .login_http()
         .get(endpoint)
         .header(header::REFERER, QQ_LOGIN_REFERER)
-        .header(header::COOKIE, cookie_header(cookies)?)
         .timeout(LOGIN_REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(login_network_error)?;
     ensure_redirect_or_success(response.status(), "QQ login signature exchange")?;
-    merge_response_cookies(cookies, &response)?;
-    let p_skey = cookies
+    let oauth_cookies = response_cookies(&response)?;
+    let p_skey = oauth_cookies
         .get("p_skey")
         .cloned()
         .ok_or_else(|| login_data_error("QQ login signature exchange is missing p_skey"))?;
@@ -1072,7 +1065,7 @@ async fn authorize_qq_qr(
     let response = client
         .login_http()
         .post(QQ_OAUTH_ENDPOINT)
-        .header(header::COOKIE, cookie_header(cookies)?)
+        .header(header::COOKIE, cookie_header(&oauth_cookies)?)
         .form(&[
             ("response_type", "code".to_owned()),
             ("client_id", "100497308".to_owned()),
@@ -1097,7 +1090,6 @@ async fn authorize_qq_qr(
         .await
         .map_err(login_network_error)?;
     ensure_redirect_or_success(response.status(), "QQ OAuth authorization")?;
-    merge_response_cookies(cookies, &response)?;
     let location = response
         .headers()
         .get(header::LOCATION)
@@ -1123,6 +1115,11 @@ async fn authorize_qq_qr(
         )
         .await?;
     parse_login_credential(response.data)
+}
+
+fn qq_qr_poll_cookies(qrsig: &str) -> Result<BTreeMap<String, String>> {
+    validate_cookie_value(qrsig)?;
+    Ok(BTreeMap::from([("qrsig".to_owned(), qrsig.to_owned())]))
 }
 
 async fn authorize_wechat_qr(client: &QqClient, code: &str) -> Result<QqCredential> {
@@ -1630,6 +1627,20 @@ mod tests {
         assert!(validate_cookie_value("safe/value").is_ok());
         assert!(validate_cookie_value("unsafe;next=value").is_err());
         assert!(validate_cookie_value("unsafe\r\nheader").is_err());
+    }
+
+    #[test]
+    fn qq_qr_polling_isolates_qrsig_from_accumulated_login_cookies() {
+        let cookies = qq_qr_poll_cookies("qr-signature").expect("QQ QR poll cookies");
+        assert_eq!(
+            cookies,
+            BTreeMap::from([("qrsig".to_owned(), "qr-signature".to_owned())])
+        );
+        assert_eq!(
+            cookie_header(&cookies).expect("QQ QR poll cookie header"),
+            "qrsig=qr-signature"
+        );
+        assert!(qq_qr_poll_cookies("unsafe;cookie").is_err());
     }
 
     #[test]
