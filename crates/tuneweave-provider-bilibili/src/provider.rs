@@ -8,7 +8,8 @@ use tuneweave_core::{
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
     SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
-    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder,
+    VideoDetailRequest, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
+    VideoSearchOrder,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -19,7 +20,7 @@ use crate::client::{
     BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome, BilibiliQrPoll,
     BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist,
     BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration,
-    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
+    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder, BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -92,6 +93,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::SessionManagement,
             Capability::SearchVideos,
             Capability::PlaylistRead,
+            Capability::VideoDetail,
         ])
     }
 
@@ -205,6 +207,28 @@ impl MusicProvider for BilibiliProvider {
                 extensions,
             },
         })
+    }
+
+    async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive details require kind=video",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive details require an AID or BVID",
+            ));
+        }
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        self.client
+            .video_view(&identity, credential.as_ref())
+            .await
+            .and_then(map_bilibili_video_view)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1381,6 +1405,100 @@ fn map_bilibili_search_video(item: BilibiliSearchVideo) -> Result<Video> {
         play_count: item.play_count,
         subscribed: None,
         extensions,
+    })
+}
+
+fn map_bilibili_video_view(view: BilibiliVideoView) -> Result<VideoDetail> {
+    let identity = BilibiliVideoIdentity::Bvid(view.bvid.clone());
+    let resource_ref = identity.resource_ref()?;
+    let owner_ref = ResourceRef::new(Platform::Bilibili, format!("user:{}", view.owner.id))
+        .map_err(|_| bilibili_data_error("Bilibili video owner identity was invalid"))?;
+    let duration_ms = view
+        .duration_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| bilibili_data_error("Bilibili video duration overflowed"))?;
+    let first_part = view
+        .parts
+        .first()
+        .ok_or_else(|| bilibili_data_error("Bilibili video did not contain a first part"))?;
+    let copyright = match view.copyright {
+        1 => "original",
+        2 => "repost",
+        3 => "unspecified",
+        _ => unreachable!("client accepted an unknown copyright value"),
+    };
+    let mut extensions = Extensions::from([
+        ("aid".to_owned(), json!(view.aid)),
+        ("bvid".to_owned(), json!(view.bvid)),
+        ("state".to_owned(), json!(view.state)),
+        ("copyright".to_owned(), json!(copyright)),
+        ("category_id".to_owned(), json!(view.category_id)),
+        ("dynamic_text".to_owned(), json!(view.dynamic_text)),
+        ("part_count".to_owned(), json!(view.parts.len())),
+        ("first_cid".to_owned(), json!(first_part.cid)),
+        ("first_part_title".to_owned(), json!(first_part.title)),
+        (
+            "first_part_duration_seconds".to_owned(),
+            json!(first_part.duration_seconds),
+        ),
+        ("first_part_source".to_owned(), json!(first_part.source)),
+        ("first_part_width".to_owned(), json!(first_part.width)),
+        ("first_part_height".to_owned(), json!(first_part.height)),
+        ("first_part_rotated".to_owned(), json!(first_part.rotated)),
+        ("danmaku_count".to_owned(), json!(view.stats.danmaku)),
+        ("comment_count".to_owned(), json!(view.stats.reply)),
+        ("favorite_count".to_owned(), json!(view.stats.favorite)),
+        ("coin_count".to_owned(), json!(view.stats.coin)),
+        ("share_count".to_owned(), json!(view.stats.share)),
+        ("like_count".to_owned(), json!(view.stats.like)),
+        ("current_rank".to_owned(), json!(view.stats.now_rank)),
+        ("historic_rank".to_owned(), json!(view.stats.his_rank)),
+        ("download_allowed".to_owned(), json!(view.rights.download)),
+        ("movie".to_owned(), json!(view.rights.movie)),
+        ("pay".to_owned(), json!(view.rights.pay)),
+        ("high_bitrate".to_owned(), json!(view.rights.high_bitrate)),
+        ("no_reprint".to_owned(), json!(view.rights.no_reprint)),
+        ("ugc_pay".to_owned(), json!(view.rights.ugc_pay)),
+        ("cooperation".to_owned(), json!(view.rights.cooperation)),
+        ("interactive".to_owned(), json!(view.rights.interactive)),
+        ("panoramic".to_owned(), json!(view.rights.panoramic)),
+        ("no_share".to_owned(), json!(view.rights.no_share)),
+        ("free_watch".to_owned(), json!(view.rights.free_watch)),
+    ]);
+    insert_optional(&mut extensions, "category_id_v2", view.category_id_v2);
+    insert_optional(&mut extensions, "category_name", view.category_name);
+    insert_optional(&mut extensions, "category_name_v2", view.category_name_v2);
+    if view.created_at > 0 {
+        extensions.insert("ctime".to_owned(), json!(view.created_at));
+    }
+    let video = Video {
+        id: resource_ref.id().to_owned(),
+        resource_ref,
+        platform: Platform::Bilibili,
+        title: view.title,
+        creators: vec![CreatorSummary {
+            resource_ref: Some(owner_ref),
+            name: view.owner.name,
+            avatar_url: view.owner.avatar_url,
+        }],
+        description: view.description,
+        cover_url: Some(view.cover_url),
+        duration_ms: Some(duration_ms),
+        published_at: (view.published_at > 0)
+            .then(|| bilibili_unix_rfc3339(view.published_at))
+            .flatten(),
+        play_count: Some(view.stats.view),
+        subscribed: None,
+        extensions,
+    };
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Video,
+        video,
+        resolutions: Vec::new(),
+        extensions: Extensions::from([
+            ("detail_source".to_owned(), json!("web_interface_view")),
+            ("resolutions_require_playurl".to_owned(), json!(true)),
+        ]),
     })
 }
 
@@ -2806,6 +2924,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_detail_rejects_wrong_kind_episode_and_missing_account_before_network() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let wrong_kind = provider
+            .video(
+                "bvid:BV117411r7R1",
+                &VideoDetailRequest::new(VideoResourceKind::Mv),
+            )
+            .await
+            .expect_err("MV kind");
+        assert_eq!(wrong_kind.code, ErrorCode::InvalidRequest);
+        let episode = provider
+            .video("ep:123", &VideoDetailRequest::new(VideoResourceKind::Video))
+            .await
+            .expect_err("episode identity");
+        assert_eq!(episode.code, ErrorCode::InvalidRequest);
+        let missing = provider
+            .video(
+                "bvid:BV117411r7R1",
+                &VideoDetailRequest {
+                    kind: VideoResourceKind::Video,
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert!(provider.capabilities().contains(&Capability::VideoDetail));
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_provider_creates_a_qr_image_without_exposing_the_poll_key() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
@@ -2995,6 +3143,48 @@ mod tests {
                 assert_eq!(returned, 98);
             }
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
+    async fn live_video_detail_resolves_aid_and_bvid_to_one_canonical_video() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let request = VideoDetailRequest::new(VideoResourceKind::Video);
+        let by_bvid = provider
+            .video("bvid:BV117411r7R1", &request)
+            .await
+            .expect("video detail by BVID");
+        let by_aid = provider
+            .video("aid:85440373", &request)
+            .await
+            .expect("video detail by AID");
+        assert_eq!(by_aid.video.resource_ref, by_bvid.video.resource_ref);
+        assert_eq!(
+            by_bvid.video.resource_ref.to_string(),
+            "bilibili:bvid:BV117411r7R1"
+        );
+        assert_eq!(by_bvid.video.extensions["aid"], 85_440_373);
+        assert_eq!(by_bvid.video.extensions["first_cid"], 146_044_693);
+        assert_eq!(by_bvid.video.extensions["part_count"], 1);
+        assert!(
+            by_bvid
+                .video
+                .cover_url
+                .as_deref()
+                .unwrap()
+                .starts_with("https://")
+        );
+        assert!(!by_bvid.video.creators[0].name.is_empty());
+        assert_eq!(
+            by_bvid.video.creators[0]
+                .resource_ref
+                .as_ref()
+                .unwrap()
+                .platform(),
+            Platform::Bilibili
+        );
+        assert!(by_bvid.resolutions.is_empty());
+        assert_eq!(by_bvid.extensions["resolutions_require_playurl"], true);
     }
 
     #[tokio::test]

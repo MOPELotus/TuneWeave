@@ -346,6 +346,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/items` 和 `GET /v1/playlists/{ref}/tracks` 访问；目录中出现的 `series:` 身份保持独立，待系列详情能力接入后才宣告可读取，不会误走 Season 协议。Season 详情只需 `bilibili:season:{season_id}`，provider 使用平台支持的零 owner 参数解析并校验真实 `mid`；收藏夹详情使用 `bilibili:favorite:{media_id}`，同时保留完整 `media_id`、原始 `fid` 和 owner mid。公开内容默认匿名，私有收藏夹由 `account` 或调用方凭证选择精确 B 站登录态，权限不足与不存在不会变成空结果。`/items` 将合集及收藏夹档案保持为强类型 `VideoDetail`，供 Uni Playlist 保存真正的视频项目；`/tracks` 是纯音乐客户端的兼容视图，并以 `normalized_from_video=true` 明示转换。两者都在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid` 和可用的 `extensions.bvid` 中保留列表协议实际返回的视频身份；收藏夹额外保留失效状态、分 P 数量和收藏时间。上游分页可能为被过滤内容留下空洞，因此续页使用原始页坐标而非简单返回数累加。列表协议没有的 CID 与清晰度不会猜测，后续由 `/v1/videos/{ref}` 详情链补全。
 
+B 站 UGC 视频详情通过 `GET /v1/videos/bilibili:bvid:{bvid}` 或 `GET /v1/videos/bilibili:aid:{aid}` 读取，`kind` 只能为 `video`。两种输入都会由平台响应交叉校验并规范化为 BVID 引用；EP/SS 保持独立，待 PGC 详情链接入前不会误用 UGC 端点。详情返回标题、简介、可信封面、UP 主、时间、时长、首 CID、分 P 数、分区、公开统计、状态和下载/付费/互动等 rights。`resolutions` 在 playurl 接入前保持空，并以 `resolutions_require_playurl=true` 明示，因为投稿尺寸不是账户当前真正可用的清晰度。
+
 ### DigitalAlbum
 
 ```json

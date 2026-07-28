@@ -46,6 +46,7 @@ const WEB_TICKET_ENDPOINT: &str =
 const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/type";
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
+const VIDEO_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/view";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const FAVORITE_FOLDER_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/folder/info";
@@ -304,6 +305,69 @@ pub(crate) struct BilibiliFavoriteMedia {
     pub created_at: u64,
     pub published_at: u64,
     pub favorited_at: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoView {
+    pub aid: u64,
+    pub bvid: String,
+    pub title: String,
+    pub description: String,
+    pub dynamic_text: String,
+    pub cover_url: String,
+    pub duration_seconds: u64,
+    pub published_at: u64,
+    pub created_at: u64,
+    pub state: i64,
+    pub category_id: u64,
+    pub category_id_v2: Option<u64>,
+    pub category_name: Option<String>,
+    pub category_name_v2: Option<String>,
+    pub copyright: u64,
+    pub owner: BilibiliCollectedPlaylistOwner,
+    pub stats: BilibiliVideoViewStats,
+    pub rights: BilibiliVideoRights,
+    pub parts: Vec<BilibiliVideoPart>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoViewStats {
+    pub view: u64,
+    pub danmaku: u64,
+    pub reply: u64,
+    pub favorite: u64,
+    pub coin: u64,
+    pub share: u64,
+    pub like: u64,
+    pub now_rank: u64,
+    pub his_rank: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoRights {
+    pub download: bool,
+    pub movie: bool,
+    pub pay: bool,
+    pub high_bitrate: bool,
+    pub no_reprint: bool,
+    pub ugc_pay: bool,
+    pub cooperation: bool,
+    pub interactive: bool,
+    pub panoramic: bool,
+    pub no_share: bool,
+    pub free_watch: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoPart {
+    pub cid: u64,
+    pub page: u64,
+    pub source: String,
+    pub title: String,
+    pub duration_seconds: u64,
+    pub width: u64,
+    pub height: u64,
+    pub rotated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -783,6 +847,109 @@ struct VideoSearchItem {
     is_union_video: Option<FlexibleU64>,
     #[serde(default)]
     rank_score: Option<FlexibleU64>,
+}
+
+#[derive(Deserialize)]
+struct VideoViewData {
+    aid: u64,
+    bvid: String,
+    videos: u64,
+    tid: u64,
+    #[serde(default)]
+    tid_v2: Option<u64>,
+    tname: String,
+    #[serde(default)]
+    tname_v2: String,
+    copyright: u64,
+    pic: String,
+    title: String,
+    #[serde(default)]
+    pubdate: u64,
+    #[serde(default)]
+    ctime: u64,
+    #[serde(default)]
+    desc: String,
+    state: i64,
+    duration: u64,
+    rights: VideoViewRights,
+    owner: CollectedPlaylistOwner,
+    stat: VideoViewStats,
+    #[serde(default)]
+    dynamic: String,
+    cid: u64,
+    #[serde(default)]
+    pages: Vec<VideoViewPart>,
+}
+
+#[derive(Deserialize)]
+struct VideoViewRights {
+    #[serde(default)]
+    download: u64,
+    #[serde(default)]
+    movie: u64,
+    #[serde(default)]
+    pay: u64,
+    #[serde(default)]
+    hd5: u64,
+    #[serde(default)]
+    no_reprint: u64,
+    #[serde(default)]
+    ugc_pay: u64,
+    #[serde(default)]
+    is_cooperation: u64,
+    #[serde(default)]
+    is_stein_gate: u64,
+    #[serde(default)]
+    is_360: u64,
+    #[serde(default)]
+    no_share: u64,
+    #[serde(default)]
+    free_watch: u64,
+}
+
+#[derive(Deserialize)]
+struct VideoViewStats {
+    aid: u64,
+    #[serde(default)]
+    view: u64,
+    #[serde(default)]
+    danmaku: u64,
+    #[serde(default)]
+    reply: u64,
+    #[serde(default)]
+    favorite: u64,
+    #[serde(default)]
+    coin: u64,
+    #[serde(default)]
+    share: u64,
+    #[serde(default)]
+    now_rank: u64,
+    #[serde(default)]
+    his_rank: u64,
+    #[serde(default)]
+    like: u64,
+}
+
+#[derive(Deserialize)]
+struct VideoViewPart {
+    cid: u64,
+    page: u64,
+    #[serde(rename = "from")]
+    source: String,
+    part: String,
+    duration: u64,
+    #[serde(default)]
+    dimension: VideoViewDimension,
+}
+
+#[derive(Default, Deserialize)]
+struct VideoViewDimension {
+    #[serde(default)]
+    width: u64,
+    #[serde(default)]
+    height: u64,
+    #[serde(default)]
+    rotate: u64,
 }
 
 #[derive(Deserialize)]
@@ -1572,6 +1739,42 @@ impl BilibiliClient {
         }
     }
 
+    pub(crate) async fn video_view(
+        &self,
+        identity: &crate::BilibiliVideoIdentity,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliVideoView> {
+        let (parameter, value) = match identity {
+            crate::BilibiliVideoIdentity::Aid(aid) => ("aid", aid.to_string()),
+            crate::BilibiliVideoIdentity::Bvid(bvid) => ("bvid", bvid.clone()),
+            crate::BilibiliVideoIdentity::Episode(_) | crate::BilibiliVideoIdentity::Season(_) => {
+                return Err(invalid_bilibili_request(
+                    "Bilibili archive details require an AID or BVID",
+                ));
+            }
+        };
+        let mut endpoint = Url::parse(VIDEO_DETAIL_ENDPOINT)
+            .map_err(|_| bilibili_internal_error("Bilibili video detail endpoint is invalid"))?;
+        endpoint.query_pairs_mut().append_pair(parameter, &value);
+        let referer = format!("https://www.bilibili.com/video/{value}");
+        let mut request = self.http.get(endpoint).header(REFERER, referer);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili video detail", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili video detail response exceeded the size limit",
+            ));
+        }
+        parse_video_view_response(&bytes, identity)
+    }
+
     pub(crate) async fn created_favorite_folders(
         &self,
         owner_id: u64,
@@ -2330,6 +2533,139 @@ fn parse_video_search_response(
         page_count: data.num_pages,
         search_id: validated_search_text(&data.seid.into_string(), "search ID", 256)?,
         videos,
+    })
+}
+
+fn parse_video_view_response(
+    bytes: &[u8],
+    requested_identity: &crate::BilibiliVideoIdentity,
+) -> Result<BilibiliVideoView> {
+    let response: PassportResponse<VideoViewData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili video detail returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili video detail",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili video detail response did not contain data")
+    })?;
+    let bvid = match crate::BilibiliVideoIdentity::parse(&data.bvid)
+        .map_err(|_| bilibili_upstream_error("Bilibili video detail returned an invalid BVID"))?
+    {
+        crate::BilibiliVideoIdentity::Bvid(value) => value,
+        _ => unreachable!("BVID parser returned another identity type"),
+    };
+    let identity_matches = match requested_identity {
+        crate::BilibiliVideoIdentity::Aid(aid) => *aid == data.aid,
+        crate::BilibiliVideoIdentity::Bvid(requested) => requested == &bvid,
+        crate::BilibiliVideoIdentity::Episode(_) | crate::BilibiliVideoIdentity::Season(_) => false,
+    };
+    if !identity_matches
+        || data.aid == 0
+        || data.videos == 0
+        || data.videos > 100_000
+        || data.pages.len() as u64 != data.videos
+        || data.cid == 0
+        || data.tid == 0
+        || data.copyright == 0
+        || data.copyright > 3
+        || data.owner.mid == 0
+        || data.stat.aid != data.aid
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili video detail returned an invalid or conflicting identity",
+        ));
+    }
+    let mut cids = std::collections::BTreeSet::new();
+    let mut parts = Vec::with_capacity(data.pages.len());
+    for (index, part) in data.pages.into_iter().enumerate() {
+        let expected_page = index as u64 + 1;
+        if part.cid == 0
+            || part.page != expected_page
+            || !cids.insert(part.cid)
+            || !matches!(part.dimension.rotate, 0 | 1)
+            || ((part.dimension.width == 0) != (part.dimension.height == 0))
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili video detail returned invalid part metadata",
+            ));
+        }
+        parts.push(BilibiliVideoPart {
+            cid: part.cid,
+            page: part.page,
+            source: validated_bilibili_text(&part.source, "video part source", 128)?,
+            title: validated_bilibili_text(&part.part, "video part title", 4096)?,
+            duration_seconds: part.duration,
+            width: part.dimension.width,
+            height: part.dimension.height,
+            rotated: part.dimension.rotate == 1,
+        });
+    }
+    if parts.first().map(|part| part.cid) != Some(data.cid) {
+        return Err(bilibili_upstream_error(
+            "Bilibili video detail returned a conflicting first CID",
+        ));
+    }
+    let owner = BilibiliCollectedPlaylistOwner {
+        id: data.owner.mid,
+        name: validated_bilibili_text(&data.owner.name, "video owner name", 512)?,
+        avatar_url: normalize_bilibili_image_url(&data.owner.face, "video owner avatar")?,
+    };
+    let rights = BilibiliVideoRights {
+        download: validated_binary_state(data.rights.download, "video download right")?,
+        movie: validated_binary_state(data.rights.movie, "video movie right")?,
+        pay: validated_binary_state(data.rights.pay, "video pay right")?,
+        high_bitrate: validated_binary_state(data.rights.hd5, "video high bitrate right")?,
+        no_reprint: validated_binary_state(data.rights.no_reprint, "video reprint right")?,
+        ugc_pay: validated_binary_state(data.rights.ugc_pay, "video UGC pay right")?,
+        cooperation: validated_binary_state(data.rights.is_cooperation, "video cooperation right")?,
+        interactive: validated_binary_state(data.rights.is_stein_gate, "interactive video right")?,
+        panoramic: validated_binary_state(data.rights.is_360, "panoramic video right")?,
+        no_share: validated_binary_state(data.rights.no_share, "video share right")?,
+        free_watch: validated_binary_state(data.rights.free_watch, "video free watch right")?,
+    };
+    Ok(BilibiliVideoView {
+        aid: data.aid,
+        bvid,
+        title: validated_bilibili_text(&data.title, "video title", 4096)?,
+        description: validated_bilibili_multiline_text(
+            &data.desc,
+            "video description",
+            256 * 1024,
+        )?,
+        dynamic_text: validated_bilibili_multiline_text(
+            &data.dynamic,
+            "video dynamic text",
+            64 * 1024,
+        )?,
+        cover_url: normalize_bilibili_image_url(&data.pic, "video cover")?
+            .ok_or_else(|| bilibili_upstream_error("Bilibili video detail omitted its cover"))?,
+        duration_seconds: data.duration,
+        published_at: data.pubdate,
+        created_at: data.ctime,
+        state: data.state,
+        category_id: data.tid,
+        category_id_v2: data.tid_v2.filter(|id| *id > 0),
+        category_name: optional_bounded_text(&data.tname, "video category name", 512)?,
+        category_name_v2: optional_bounded_text(&data.tname_v2, "video category v2 name", 512)?,
+        copyright: data.copyright,
+        owner,
+        stats: BilibiliVideoViewStats {
+            view: data.stat.view,
+            danmaku: data.stat.danmaku,
+            reply: data.stat.reply,
+            favorite: data.stat.favorite,
+            coin: data.stat.coin,
+            share: data.stat.share,
+            like: data.stat.like,
+            now_rank: data.stat.now_rank,
+            his_rank: data.stat.his_rank,
+        },
+        rights,
+        parts,
     })
 }
 
@@ -4116,7 +4452,7 @@ fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeave
     let error_code = match code {
         -101 | -111 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
         -400 | -304 | 400 => ErrorCode::InvalidRequest,
-        -403 => ErrorCode::PermissionDenied,
+        -403 | 62004 | 62012 => ErrorCode::PermissionDenied,
         -404 | 11010 | 62002 => ErrorCode::ResourceNotFound,
         -352 | -412 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
@@ -4774,6 +5110,102 @@ mod tests {
         )
         .expect_err("changed page size");
         assert_eq!(malformed.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn video_view_preserves_identity_parts_rights_and_rejects_drift() {
+        let fixture = json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "aid": 85440373,
+                "bvid": "BV117411r7R1",
+                "videos": 1,
+                "tid": 28,
+                "tid_v2": 2061,
+                "tname": "",
+                "tname_v2": "人力VOCALOID",
+                "copyright": 1,
+                "pic": "http://i1.hdslb.com/bfs/archive/cover.jpg",
+                "title": "视频标题",
+                "pubdate": 1580377255,
+                "ctime": 1580212263,
+                "desc": "第一行\n第二行",
+                "state": 0,
+                "duration": 486,
+                "rights": {
+                    "download": 1,
+                    "movie": 0,
+                    "pay": 0,
+                    "hd5": 1,
+                    "no_reprint": 1,
+                    "ugc_pay": 0,
+                    "is_cooperation": 0,
+                    "is_stein_gate": 0,
+                    "is_360": 0,
+                    "no_share": 0,
+                    "free_watch": 1
+                },
+                "owner": {
+                    "mid": 101,
+                    "name": "UP 主",
+                    "face": "//i0.hdslb.com/bfs/face/avatar.jpg"
+                },
+                "stat": {
+                    "aid": 85440373,
+                    "view": 100,
+                    "danmaku": 20,
+                    "reply": 10,
+                    "favorite": 9,
+                    "coin": 8,
+                    "share": 7,
+                    "now_rank": 0,
+                    "his_rank": 3,
+                    "like": 30
+                },
+                "dynamic": "动态文本",
+                "cid": 146044693,
+                "pages": [{
+                    "cid": 146044693,
+                    "page": 1,
+                    "from": "vupload",
+                    "part": "正片",
+                    "duration": 486,
+                    "dimension": {"width": 1920, "height": 1080, "rotate": 0}
+                }]
+            }
+        });
+        let bytes = serde_json::to_vec(&fixture).expect("video view fixture");
+        let view = parse_video_view_response(
+            &bytes,
+            &crate::BilibiliVideoIdentity::Bvid("BV117411r7R1".to_owned()),
+        )
+        .expect("video view");
+        assert_eq!(view.aid, 85_440_373);
+        assert_eq!(view.category_name, None);
+        assert_eq!(view.category_name_v2.as_deref(), Some("人力VOCALOID"));
+        assert_eq!(view.parts[0].cid, 146_044_693);
+        assert_eq!(view.parts[0].width, 1920);
+        assert!(view.rights.download);
+        assert!(view.rights.high_bitrate);
+        assert_eq!(view.cover_url, "https://i1.hdslb.com/bfs/archive/cover.jpg");
+
+        for (pointer, value) in [
+            ("/data/stat/aid", json!(1)),
+            ("/data/pages/0/page", json!(2)),
+            ("/data/rights/download", json!(2)),
+            ("/data/bvid", json!("BV1Q541167Qg")),
+        ] {
+            let mut malformed = fixture.clone();
+            *malformed.pointer_mut(pointer).expect("fixture field") = value;
+            let bytes = serde_json::to_vec(&malformed).expect("malformed fixture");
+            let error = parse_video_view_response(
+                &bytes,
+                &crate::BilibiliVideoIdentity::Bvid("BV117411r7R1".to_owned()),
+            )
+            .expect_err("video view drift");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
     }
 
     #[test]
