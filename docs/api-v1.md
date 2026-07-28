@@ -23,7 +23,7 @@
 
 当路径中的引用已经带平台时，引用平台是内容来源；查询参数 `platform` 不能覆盖它。账户端点没有内容引用，因此通过 `platform` 选择账户平台。
 
-账户别名的作用域是平台，同名的 `netease/personal`、`qq/personal` 与 `bilibili/personal` 是三份独立登录态。兼容模式由服务器保存登录后的必要凭据，重启时按 `platform/account` 恢复；不存在的非默认别名不会回退到 `default`。QQ、网易云与 B 站登录同时支持 [`调用方托管凭证契约`](credential-ownership.md) 的 `credential_mode=server|client|both`：调用方可选择保持服务器托管、完全不落盘而接收凭证，或同时保存和返回同一代际；后续请求可通过专用请求头携带一至多平台凭证。密码、验证码和二维码事务本身始终不持久化；QQ 与网易云的调用方凭证刷新、退出均已接通，刷新失败不会覆盖旧代际，`both` 会在发网前校验调用方与账户别名身份一致。B 站从二维码链路开始遵循同一归属边界，刷新、退出及业务请求随对应能力逐项接入。
+账户别名的作用域是平台，同名的 `netease/personal`、`qq/personal` 与 `bilibili/personal` 是三份独立登录态。兼容模式由服务器保存登录后的必要凭据，重启时按 `platform/account` 恢复；不存在的非默认别名不会回退到 `default`。QQ、网易云与 B 站登录同时支持 [`调用方托管凭证契约`](credential-ownership.md) 的 `credential_mode=server|client|both`：调用方可选择保持服务器托管、完全不落盘而接收凭证，或同时保存和返回同一代际；后续请求可通过专用请求头携带一至多平台凭证。密码、验证码和二维码事务本身始终不持久化；三者的调用方凭证刷新与退出均已接通，刷新失败不会覆盖旧代际，`both` 会在发网前校验调用方与账户别名身份一致。
 
 ### 分页
 
@@ -1468,7 +1468,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 
 ### 登录与账户
 
-QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。QQ 与网易云当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；B 站目前完成二维码登录的导入导出边界，业务端点随 Basic 顺序逐项接通。这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
+QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。QQ 与网易云当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；B 站已覆盖二维码登录、会话状态、账户资料、刷新和退出，其他业务端点随 Basic 顺序逐项接通。这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
@@ -1545,6 +1545,8 @@ QQ 手机验证码使用 `music.login.LoginServer` 的 Android 链路。`princip
 QQ 会话状态固定调用 Android `music.UserInfo.userInfoServer/GetLoginUserInfo`，服务端凭据失效码返回正常的 `authenticated=false` 账户资料。不存在的 QQ 账户别名同样返回未认证资料，不会把缺失别名静默替换为 `default`。凭据自带的创建时间和有效秒数只有同时存在时才计算本地到期扩展，服务端检查结果始终具有更高优先级。
 
 B 站会话状态固定调用 Web `x/web-interface/nav`，只把强类型凭证生成的站点 Cookie 放入请求；二维码刷新令牌不会进入普通业务 Cookie。平台 `-101` 或 `isLogin=false` 返回正常的 `authenticated=false`，登录成功时 UID 必须与选中凭证一致，并映射昵称、受限头像 URL、邮箱/手机验证、等级、认证、挂件、大会员、钱包和 WBI 口令等已知账户字段。不存在的精确账户别名不访问上游且不回退 `default`，调用方托管凭证使用同一映射链路。
+
+B 站刷新先以当前 Cookie 查询 `x/passport-login/web/cookie/info`。平台声明无需刷新时仍验证当前会话，并在 `client/both` 模式返回同一凭证代际；需要刷新时使用平台时间戳和官方固定公钥生成 RSA-OAEP SHA-256 `correspondPath`，从固定 `www.bilibili.com/correspond/1/...` 页面提取严格校验的实时 CSRF，再依次提交 Cookie 刷新和旧 refresh token 确认。新响应必须同时提供完整 Cookie、新 refresh token 和相同 UID，确认后还要通过 `nav`，全部成功后才能按归属模式原子发布。退出固定调用 `passport.bilibili.com/login/exit/v2`；上游确认成功或明确表明凭据已失效时才删除服务器精确别名并提示调用方丢弃自管凭证，网络、CSRF 或未知响应失败时保留旧代际。
 
 QQ 会话刷新调用 Android `music.login.LoginServer/Login` 并固定 `loginMode=2`。`loginType=1`、`loginType=2` 和其他登录类型分别保留微信、QQ 及移动端/验证码凭据所需的不同字段集合，`comm.tmeLoginType` 与原凭据一致；旧凭据同时进入 Android `comm` 和 Cookie。只有平台返回成功且新凭据完整通过强类型校验后，才原子替换同一 `(qq, account)` 的凭据代际；网络、业务码、响应解析或写盘失败都不会预先删除旧凭据。
 

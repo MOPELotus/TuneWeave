@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, AuthState, Capability, CredentialMode, ErrorCode,
-    MusicProvider, Platform, ProviderAuthResult, ProviderCredential, ProviderQrPoll,
-    ProviderQrStart, Result, StoredAccountCredential, TuneWeaveError,
+    MusicProvider, Platform, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
+    ProviderQrPoll, ProviderQrStart, Result, StoredAccountCredential, TuneWeaveError,
 };
 
 use crate::client::{
-    BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliQrPoll, BilibiliSessionStatus,
+    BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliCredentialRefresh,
+    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSessionStatus,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -79,6 +80,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::QrLogin,
             Capability::CallerManagedCredentials,
             Capability::AccountProfile,
+            Capability::SessionManagement,
         ])
     }
 
@@ -168,6 +170,78 @@ impl MusicProvider for BilibiliProvider {
         };
         let status = self.client.session_status(Some(&credential)).await?;
         Ok(map_bilibili_session_profile(account, &credential, status))
+    }
+
+    async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
+        Ok(self
+            .refresh_session_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn refresh_session_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        let credential = bilibili_refresh_source(self, account, source_credential, mode)?;
+        let BilibiliCredentialRefresh {
+            credential,
+            status,
+            refreshed,
+        } = self.client.refresh_credential(&credential).await?;
+        let mut result = self.finish_authentication(account, &credential, mode)?;
+        result.profile = map_bilibili_session_profile(account, &credential, status);
+        result
+            .profile
+            .extensions
+            .insert("refreshed".to_owned(), json!(refreshed));
+        Ok(result)
+    }
+
+    async fn logout(&self, account: &str) -> Result<bool> {
+        Ok(self
+            .logout_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .removed)
+    }
+
+    async fn logout_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderLogoutResult> {
+        let caller_credential_discard_required = source_credential.is_some();
+        let Some(credential) = bilibili_logout_source(self, account, source_credential, mode)?
+        else {
+            return Ok(ProviderLogoutResult {
+                removed: false,
+                caller_credential_discard_required,
+            });
+        };
+        let outcome = self.client.logout(&credential).await?;
+        let removed = if mode.persists_on_server() {
+            self.remove_bilibili_credential(account).map_err(|_| {
+                let upstream_state = match outcome {
+                    BilibiliLogoutOutcome::LoggedOut => "logged_out",
+                    BilibiliLogoutOutcome::CredentialExpired => "credential_expired",
+                };
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "Bilibili account was closed upstream but local credential removal failed",
+                )
+                .with_platform(Platform::Bilibili)
+                .with_details(json!({ "upstream_state": upstream_state }))
+            })?
+        } else {
+            false
+        };
+        Ok(ProviderLogoutResult {
+            removed,
+            caller_credential_discard_required,
+        })
     }
 }
 
@@ -279,6 +353,17 @@ impl BilibiliProvider {
             })
             .map(Some)
     }
+
+    fn remove_bilibili_credential(&self, account: &str) -> Result<bool> {
+        let store = self.credential_store.as_ref().ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Bilibili account storage is not configured",
+            )
+            .with_platform(Platform::Bilibili)
+        })?;
+        store.remove(Platform::Bilibili, account.trim())
+    }
 }
 
 fn validate_bilibili_login_account(account: &str, mode: CredentialMode) -> Result<()> {
@@ -298,6 +383,87 @@ fn validate_bilibili_login_account(account: &str, mode: CredentialMode) -> Resul
     if mode == CredentialMode::Client && account != "default" {
         return Err(TuneWeaveError::invalid_request(
             "client credential mode does not accept a server account alias",
+        )
+        .with_platform(Platform::Bilibili));
+    }
+    Ok(())
+}
+
+fn bilibili_refresh_source(
+    provider: &BilibiliProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<BilibiliCredential> {
+    validate_bilibili_login_account(account, mode)?;
+    match source_credential {
+        None if mode == CredentialMode::Client => Err(TuneWeaveError::invalid_request(
+            "client credential refresh requires a caller credential",
+        )
+        .with_platform(Platform::Bilibili)),
+        None => provider
+            .selected_credential_optional(account)?
+            .ok_or_else(|| {
+                bilibili_authentication_required(account, "Bilibili account was not found")
+            }),
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot refresh a server-only session",
+        )
+        .with_platform(Platform::Bilibili)),
+        Some(source) => {
+            let caller = parse_bilibili_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider
+                    .selected_credential_optional(account)?
+                    .ok_or_else(|| {
+                        bilibili_authentication_required(account, "Bilibili account was not found")
+                    })?;
+                ensure_matching_bilibili_identity(&caller, &stored)?;
+            }
+            Ok(caller)
+        }
+    }
+}
+
+fn bilibili_logout_source(
+    provider: &BilibiliProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<Option<BilibiliCredential>> {
+    validate_bilibili_login_account(account, mode)?;
+    match source_credential {
+        None if mode != CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "caller-managed logout requires a caller credential",
+        )
+        .with_platform(Platform::Bilibili)),
+        None => provider.selected_credential_optional(account),
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot close a server-only session",
+        )
+        .with_platform(Platform::Bilibili)),
+        Some(source) => {
+            let caller = parse_bilibili_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider
+                    .selected_credential_optional(account)?
+                    .ok_or_else(|| {
+                        bilibili_authentication_required(account, "Bilibili account was not found")
+                    })?;
+                ensure_matching_bilibili_identity(&caller, &stored)?;
+            }
+            Ok(Some(caller))
+        }
+    }
+}
+
+fn ensure_matching_bilibili_identity(
+    caller: &BilibiliCredential,
+    stored: &BilibiliCredential,
+) -> Result<()> {
+    if caller.user_id() != stored.user_id() {
+        return Err(TuneWeaveError::invalid_request(
+            "caller credential and server account refer to different Bilibili identities",
         )
         .with_platform(Platform::Bilibili));
     }
@@ -419,6 +585,16 @@ mod tests {
         .expect("sample credential")
     }
 
+    fn caller_material(credential: &BilibiliCredential) -> ProviderCredential {
+        ProviderCredential::new(
+            Platform::Bilibili,
+            BILIBILI_CREDENTIAL_KIND,
+            serde_json::to_string(credential).expect("credential JSON"),
+            None,
+        )
+        .expect("caller credential")
+    }
+
     #[test]
     fn qr_login_supports_server_client_and_both_credential_ownership() {
         let credential = sample_credential();
@@ -515,7 +691,59 @@ mod tests {
         assert!(profile.user_id.is_none());
         let capabilities = provider.capabilities();
         assert!(capabilities.contains(&Capability::AccountProfile));
-        assert!(!capabilities.contains(&Capability::SessionManagement));
+        assert!(capabilities.contains(&Capability::SessionManagement));
+    }
+
+    #[test]
+    fn session_management_sources_enforce_ownership_and_identity() {
+        let store = Arc::new(RecordingCredentialStore::default());
+        let provider = BilibiliProvider::new(BilibiliConfig {
+            credential_store: Some(store.clone()),
+            ..BilibiliConfig::default()
+        })
+        .expect("provider");
+        let credential = sample_credential();
+        provider
+            .finish_authentication("personal", &credential, CredentialMode::Server)
+            .expect("store credential");
+
+        assert_eq!(
+            bilibili_refresh_source(&provider, "personal", None, CredentialMode::Server)
+                .expect("server refresh source"),
+            credential
+        );
+        assert_eq!(
+            bilibili_logout_source(&provider, "missing", None, CredentialMode::Server)
+                .expect("missing server logout source"),
+            None
+        );
+        assert_eq!(
+            bilibili_refresh_source(&provider, "default", None, CredentialMode::Client)
+                .expect_err("client refresh requires a credential")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let caller = caller_material(&credential);
+        assert_eq!(
+            bilibili_refresh_source(&provider, "personal", Some(&caller), CredentialMode::Both,)
+                .expect("matching both refresh source"),
+            credential
+        );
+        assert_eq!(
+            bilibili_logout_source(&provider, "personal", Some(&caller), CredentialMode::Server,)
+                .expect_err("server mode rejects caller logout")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let mut other = credential.clone();
+        other.dede_user_id = "999".to_owned();
+        let other = caller_material(&other);
+        let mismatch =
+            bilibili_refresh_source(&provider, "personal", Some(&other), CredentialMode::Both)
+                .expect_err("both mode rejects a different identity");
+        assert_eq!(mismatch.code, ErrorCode::InvalidRequest);
     }
 
     #[test]

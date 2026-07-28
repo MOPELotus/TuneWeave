@@ -1,6 +1,11 @@
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use aws_lc_rs::digest::{SHA256, digest};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD},
+};
+use num_bigint::BigUint;
 use qrcode::{QrCode, render::svg};
 use reqwest::{
     Client, Proxy, StatusCode,
@@ -16,9 +21,22 @@ const PASSPORT_QR_GENERATE_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/qrcode/generate?source=main-fe-header";
 const PASSPORT_QR_POLL_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
+const COOKIE_INFO_ENDPOINT: &str = "https://passport.bilibili.com/x/passport-login/web/cookie/info";
+const COOKIE_CORRESPOND_ENDPOINT: &str = "https://www.bilibili.com/correspond/1/";
+const COOKIE_REFRESH_ENDPOINT: &str =
+    "https://passport.bilibili.com/x/passport-login/web/cookie/refresh";
+const COOKIE_CONFIRM_ENDPOINT: &str =
+    "https://passport.bilibili.com/x/passport-login/web/confirm/refresh";
+const LOGOUT_ENDPOINT: &str = "https://passport.bilibili.com/login/exit/v2";
 const NAV_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/nav";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
+const COOKIE_REFRESH_RSA_MODULUS_BASE64URL: &str = concat!(
+    "y4HdjgJHBlbaBN04VERG4qNBIFHP6a3GozCl75AihQloSWCXC5HDNgyinEnhaQ_4",
+    "-gaMud_GF50elYXLlCToR9se9Z8z433U3KjM-3Yx7ptKkmQNAMggQwAVKgq3zYAoi",
+    "dNEWuxpkY_mAitTSRLnsJW-NCTa0bqBFF6Wm1MxgfE",
+);
+const COOKIE_REFRESH_RSA_EXPONENT: u32 = 65_537;
 
 #[derive(Clone, Default)]
 pub struct BilibiliConfig {
@@ -67,6 +85,19 @@ pub(crate) enum BilibiliQrPoll {
         code: i64,
         message: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BilibiliCredentialRefresh {
+    pub credential: BilibiliCredential,
+    pub status: BilibiliSessionStatus,
+    pub refreshed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BilibiliLogoutOutcome {
+    LoggedOut,
+    CredentialExpired,
 }
 
 impl fmt::Debug for BilibiliQrPoll {
@@ -233,6 +264,29 @@ struct QrPollData {
     #[serde(default)]
     timestamp: Option<u64>,
     code: i64,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct CookieInfoData {
+    refresh: bool,
+    timestamp: u64,
+}
+
+#[derive(Deserialize)]
+struct CookieRefreshData {
+    status: i64,
+    #[serde(default)]
+    message: String,
+    refresh_token: String,
+}
+
+#[derive(Deserialize)]
+struct LogoutResponse {
+    code: i64,
+    #[serde(default)]
+    status: Option<bool>,
     #[serde(default)]
     message: String,
 }
@@ -509,6 +563,459 @@ impl BilibiliClient {
         }
         parse_session_response(&bytes, credential.map(BilibiliCredential::user_id))
     }
+
+    pub(crate) async fn refresh_credential(
+        &self,
+        credential: &BilibiliCredential,
+    ) -> Result<BilibiliCredentialRefresh> {
+        let info = self.cookie_refresh_info(credential).await?;
+        if !info.refresh {
+            let status = require_authenticated_session(
+                self.session_status(Some(credential)).await?,
+                "Bilibili credential is no longer authenticated",
+            )?;
+            return Ok(BilibiliCredentialRefresh {
+                credential: credential.clone(),
+                status,
+                refreshed: false,
+            });
+        }
+        if info.timestamp == 0 {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie refresh did not return a valid timestamp",
+            ));
+        }
+
+        let correspond_path = cookie_correspond_path(info.timestamp)?;
+        let refresh_csrf = self
+            .cookie_refresh_csrf(credential, &correspond_path)
+            .await?;
+        let refreshed = self.rotate_cookie(credential, &refresh_csrf).await?;
+        if refreshed.user_id() != credential.user_id() {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie refresh returned a different account identity",
+            ));
+        }
+        self.confirm_cookie_refresh(&refreshed, &credential.refresh_token)
+            .await?;
+        let status = require_authenticated_session(
+            self.session_status(Some(&refreshed)).await?,
+            "Bilibili refreshed credential was not authenticated",
+        )?;
+        Ok(BilibiliCredentialRefresh {
+            credential: refreshed,
+            status,
+            refreshed: true,
+        })
+    }
+
+    pub(crate) async fn logout(
+        &self,
+        credential: &BilibiliCredential,
+    ) -> Result<BilibiliLogoutOutcome> {
+        let response = self
+            .http
+            .post(LOGOUT_ENDPOINT)
+            .header(COOKIE, credential.cookie_header())
+            .form(&[("biliCSRF", credential.bili_jct.as_str())])
+            .send()
+            .await
+            .map_err(passport_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(passport_http_error(status));
+        }
+        let bytes = response.bytes().await.map_err(passport_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili logout response exceeded the size limit",
+            ));
+        }
+        parse_logout_response(&bytes)
+    }
+
+    async fn cookie_refresh_info(&self, credential: &BilibiliCredential) -> Result<CookieInfoData> {
+        let response = self
+            .http
+            .get(COOKIE_INFO_ENDPOINT)
+            .header(COOKIE, credential.cookie_header())
+            .send()
+            .await
+            .map_err(passport_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(passport_http_error(status));
+        }
+        let bytes = response.bytes().await.map_err(passport_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie status response exceeded the size limit",
+            ));
+        }
+        parse_cookie_info_response(&bytes)
+    }
+
+    async fn cookie_refresh_csrf(
+        &self,
+        credential: &BilibiliCredential,
+        correspond_path: &str,
+    ) -> Result<String> {
+        validate_correspond_path(correspond_path)?;
+        let endpoint = format!("{COOKIE_CORRESPOND_ENDPOINT}{correspond_path}");
+        let response = self
+            .http
+            .get(endpoint)
+            .header(COOKIE, credential.cookie_header())
+            .send()
+            .await
+            .map_err(passport_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(passport_http_error(status));
+        }
+        let bytes = response.bytes().await.map_err(passport_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie correspondence response exceeded the size limit",
+            ));
+        }
+        parse_refresh_csrf_html(&bytes)
+    }
+
+    async fn rotate_cookie(
+        &self,
+        credential: &BilibiliCredential,
+        refresh_csrf: &str,
+    ) -> Result<BilibiliCredential> {
+        validate_refresh_csrf(refresh_csrf)?;
+        let response = self
+            .http
+            .post(COOKIE_REFRESH_ENDPOINT)
+            .header(COOKIE, credential.cookie_header())
+            .form(&[
+                ("csrf", credential.bili_jct.as_str()),
+                ("refresh_csrf", refresh_csrf),
+                ("source", "main_web"),
+                ("refresh_token", credential.refresh_token.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(passport_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(passport_http_error(status));
+        }
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.map_err(passport_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie refresh response exceeded the size limit",
+            ));
+        }
+        parse_cookie_refresh_response(&bytes, &headers, credential.user_id())
+    }
+
+    async fn confirm_cookie_refresh(
+        &self,
+        credential: &BilibiliCredential,
+        previous_refresh_token: &str,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(COOKIE_CONFIRM_ENDPOINT)
+            .header(COOKIE, credential.cookie_header())
+            .form(&[
+                ("csrf", credential.bili_jct.as_str()),
+                ("refresh_token", previous_refresh_token),
+            ])
+            .send()
+            .await
+            .map_err(passport_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(passport_http_error(status));
+        }
+        let bytes = response.bytes().await.map_err(passport_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili cookie confirmation response exceeded the size limit",
+            ));
+        }
+        parse_cookie_confirm_response(&bytes)
+    }
+}
+
+fn parse_cookie_info_response(bytes: &[u8]) -> Result<CookieInfoData> {
+    let response: PassportResponse<CookieInfoData> =
+        serde_json::from_slice(bytes).map_err(|_| {
+            bilibili_upstream_error("Bilibili cookie status endpoint returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili cookie status check",
+            response.code,
+            &response.message,
+        ));
+    }
+    response
+        .data
+        .ok_or_else(|| bilibili_upstream_error("Bilibili cookie status did not contain data"))
+}
+
+fn cookie_correspond_path(timestamp_ms: u64) -> Result<String> {
+    if timestamp_ms == 0 {
+        return Err(bilibili_upstream_error(
+            "Bilibili cookie refresh timestamp was invalid",
+        ));
+    }
+    let modulus_bytes = BASE64_URL_SAFE_NO_PAD
+        .decode(COOKIE_REFRESH_RSA_MODULUS_BASE64URL)
+        .map_err(|_| bilibili_internal_error("Bilibili cookie refresh key is invalid"))?;
+    if modulus_bytes.len() != 128 {
+        return Err(bilibili_internal_error(
+            "Bilibili cookie refresh key has an invalid size",
+        ));
+    }
+    let plaintext = format!("refresh_{timestamp_ms}");
+    let seed = rand::random::<[u8; 32]>();
+    let encoded = oaep_sha256_encode(plaintext.as_bytes(), &seed, modulus_bytes.len())?;
+    let modulus = BigUint::from_bytes_be(&modulus_bytes);
+    let message = BigUint::from_bytes_be(&encoded);
+    if message >= modulus {
+        return Err(bilibili_internal_error(
+            "Bilibili cookie refresh message exceeded its public key",
+        ));
+    }
+    let encrypted = message.modpow(&BigUint::from(COOKIE_REFRESH_RSA_EXPONENT), &modulus);
+    let encrypted = encrypted.to_bytes_be();
+    if encrypted.len() > modulus_bytes.len() {
+        return Err(bilibili_internal_error(
+            "Bilibili cookie refresh ciphertext exceeded its public key",
+        ));
+    }
+    let mut padded = vec![0_u8; modulus_bytes.len() - encrypted.len()];
+    padded.extend_from_slice(&encrypted);
+    let path = hex::encode(padded);
+    validate_correspond_path(&path)?;
+    Ok(path)
+}
+
+fn oaep_sha256_encode(message: &[u8], seed: &[u8; 32], encoded_len: usize) -> Result<Vec<u8>> {
+    const HASH_LEN: usize = 32;
+    let minimum = HASH_LEN
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| bilibili_internal_error("Bilibili OAEP size calculation overflowed"))?;
+    let padding_len = encoded_len
+        .checked_sub(minimum)
+        .and_then(|value| value.checked_sub(message.len()))
+        .ok_or_else(|| {
+            bilibili_internal_error("Bilibili cookie refresh message is too large for its key")
+        })?;
+
+    let mut database = Vec::with_capacity(encoded_len - HASH_LEN - 1);
+    database.extend_from_slice(digest(&SHA256, b"").as_ref());
+    database.resize(database.len() + padding_len, 0);
+    database.push(1);
+    database.extend_from_slice(message);
+
+    let database_mask = mgf1_sha256(seed, database.len())?;
+    for (value, mask) in database.iter_mut().zip(database_mask) {
+        *value ^= mask;
+    }
+    let seed_mask = mgf1_sha256(&database, HASH_LEN)?;
+    let mut masked_seed = *seed;
+    for (value, mask) in masked_seed.iter_mut().zip(seed_mask) {
+        *value ^= mask;
+    }
+
+    let mut encoded = Vec::with_capacity(encoded_len);
+    encoded.push(0);
+    encoded.extend_from_slice(&masked_seed);
+    encoded.extend_from_slice(&database);
+    if encoded.len() != encoded_len {
+        return Err(bilibili_internal_error(
+            "Bilibili OAEP encoding produced an invalid size",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn mgf1_sha256(seed: &[u8], output_len: usize) -> Result<Vec<u8>> {
+    let blocks = output_len.div_ceil(32);
+    if blocks > u32::MAX as usize {
+        return Err(bilibili_internal_error(
+            "Bilibili OAEP mask length exceeded its limit",
+        ));
+    }
+    let mut output = Vec::with_capacity(blocks.saturating_mul(32));
+    let mut input = Vec::with_capacity(seed.len().saturating_add(4));
+    for counter in 0..blocks {
+        input.clear();
+        input.extend_from_slice(seed);
+        input.extend_from_slice(&(counter as u32).to_be_bytes());
+        output.extend_from_slice(digest(&SHA256, &input).as_ref());
+    }
+    output.truncate(output_len);
+    Ok(output)
+}
+
+fn validate_correspond_path(value: &str) -> Result<()> {
+    if value.len() != 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili cookie correspondence path was invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_refresh_csrf_html(bytes: &[u8]) -> Result<String> {
+    let html = std::str::from_utf8(bytes).map_err(|_| {
+        bilibili_upstream_error("Bilibili cookie correspondence returned invalid text")
+    })?;
+    let attribute = ["id=\"1-name\"", "id='1-name'"]
+        .into_iter()
+        .filter_map(|marker| html.find(marker))
+        .min()
+        .ok_or_else(|| {
+            bilibili_upstream_error(
+                "Bilibili cookie correspondence did not contain a refresh token",
+            )
+        })?;
+    let content_start = html[attribute..]
+        .find('>')
+        .map(|offset| attribute + offset + 1)
+        .ok_or_else(|| {
+            bilibili_upstream_error("Bilibili cookie correspondence returned malformed HTML")
+        })?;
+    let content_end = html[content_start..]
+        .find("</div>")
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| {
+            bilibili_upstream_error("Bilibili cookie correspondence returned malformed HTML")
+        })?;
+    let refresh_csrf = html[content_start..content_end].trim().to_owned();
+    validate_refresh_csrf(&refresh_csrf)?;
+    Ok(refresh_csrf)
+}
+
+fn validate_refresh_csrf(value: &str) -> Result<()> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(bilibili_upstream_error(
+            "Bilibili cookie correspondence returned an invalid refresh token",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_cookie_refresh_response(
+    bytes: &[u8],
+    headers: &HeaderMap,
+    expected_user_id: &str,
+) -> Result<BilibiliCredential> {
+    let response: PassportResponse<CookieRefreshData> =
+        serde_json::from_slice(bytes).map_err(|_| {
+            bilibili_upstream_error("Bilibili cookie refresh endpoint returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili cookie refresh",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response
+        .data
+        .ok_or_else(|| bilibili_upstream_error("Bilibili cookie refresh did not contain data"))?;
+    if data.status != 0 {
+        return Err(platform_business_error(
+            "Bilibili cookie refresh",
+            data.status,
+            &data.message,
+        ));
+    }
+    let mut values = response_cookie_pairs(headers)?;
+    let credential = BilibiliCredential {
+        dede_user_id: take_cookie(&mut values, "DedeUserID")?,
+        dede_user_id_ck_md5: take_cookie(&mut values, "DedeUserID__ckMd5")?,
+        sessdata: take_cookie(&mut values, "SESSDATA")?,
+        bili_jct: take_cookie(&mut values, "bili_jct")?,
+        sid: values.remove("sid"),
+        refresh_token: data.refresh_token,
+    }
+    .normalize()
+    .map_err(|_| bilibili_upstream_error("Bilibili cookie refresh returned invalid credentials"))?;
+    if credential.user_id() != expected_user_id {
+        return Err(bilibili_upstream_error(
+            "Bilibili cookie refresh returned a different account identity",
+        ));
+    }
+    Ok(credential)
+}
+
+fn parse_cookie_confirm_response(bytes: &[u8]) -> Result<()> {
+    let response: PassportResponse<Value> = serde_json::from_slice(bytes).map_err(|_| {
+        bilibili_upstream_error("Bilibili cookie confirmation endpoint returned invalid JSON")
+    })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili cookie confirmation",
+            response.code,
+            &response.message,
+        ));
+    }
+    Ok(())
+}
+
+fn parse_logout_response(bytes: &[u8]) -> Result<BilibiliLogoutOutcome> {
+    let response = match serde_json::from_slice::<LogoutResponse>(bytes) {
+        Ok(response) => response,
+        Err(_) if looks_like_html(bytes) => return Ok(BilibiliLogoutOutcome::CredentialExpired),
+        Err(_) => {
+            return Err(bilibili_upstream_error(
+                "Bilibili logout endpoint returned invalid JSON",
+            ));
+        }
+    };
+    if response.code == -101 {
+        return Ok(BilibiliLogoutOutcome::CredentialExpired);
+    }
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili logout",
+            response.code,
+            &response.message,
+        ));
+    }
+    if response.status != Some(true) {
+        return Err(bilibili_upstream_error(
+            "Bilibili logout did not confirm success",
+        ));
+    }
+    Ok(BilibiliLogoutOutcome::LoggedOut)
+}
+
+fn looks_like_html(bytes: &[u8]) -> bool {
+    let prefix = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
+    prefix.contains("<!doctype html") || prefix.contains("<html")
+}
+
+fn require_authenticated_session(
+    status: BilibiliSessionStatus,
+    message: &str,
+) -> Result<BilibiliSessionStatus> {
+    if status.authenticated {
+        Ok(status)
+    } else {
+        Err(
+            TuneWeaveError::new(ErrorCode::AuthenticationRequired, message)
+                .with_platform(Platform::Bilibili),
+        )
+    }
 }
 
 fn parse_qr_generate_response(bytes: &[u8]) -> Result<BilibiliQrStart> {
@@ -745,7 +1252,7 @@ fn response_cookie_pairs(headers: &HeaderMap) -> Result<BTreeMap<String, String>
     let mut cookies = BTreeMap::new();
     for header in headers.get_all(SET_COOKIE) {
         let value = header.to_str().map_err(|_| {
-            bilibili_upstream_error("Bilibili QR confirmation returned an invalid cookie header")
+            bilibili_upstream_error("Bilibili response returned an invalid cookie header")
         })?;
         let Some((name, value)) = value
             .split(';')
@@ -795,7 +1302,9 @@ fn trusted_confirmation_query(value: &str) -> Result<BTreeMap<String, String>> {
 
 fn take_cookie(values: &mut BTreeMap<String, String>, name: &str) -> Result<String> {
     values.remove(name).ok_or_else(|| {
-        bilibili_upstream_error(format!("Bilibili confirmed QR login did not return {name}"))
+        bilibili_upstream_error(format!(
+            "Bilibili authentication response did not return {name}"
+        ))
     })
 }
 
@@ -886,7 +1395,7 @@ fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
 
 fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeaveError {
     let error_code = match code {
-        -101 | -111 | -400 | 86038 => ErrorCode::AuthenticationRequired,
+        -101 | -111 | -400 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
         -412 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
@@ -905,6 +1414,10 @@ fn bilibili_upstream_error(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::UpstreamError, message)
         .with_platform(Platform::Bilibili)
         .retryable(true)
+}
+
+fn bilibili_internal_error(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::InternalError, message).with_platform(Platform::Bilibili)
 }
 
 fn invalid_credential(message: impl Into<String>) -> TuneWeaveError {
@@ -954,6 +1467,20 @@ mod tests {
             "data": data
         }))
         .expect("serialize nav fixture")
+    }
+
+    fn rotated_cookie_headers(user_id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for cookie in [
+            format!("DedeUserID={user_id}; Path=/"),
+            "DedeUserID__ckMd5=abcdef0123456789; Path=/".to_owned(),
+            "SESSDATA=rotated%2Csession; Path=/; HttpOnly; Secure".to_owned(),
+            "bili_jct=abcdef0123456789abcdef0123456789; Path=/".to_owned(),
+            "sid=rotated-sid; Path=/".to_owned(),
+        ] {
+            headers.append(SET_COOKIE, cookie.parse().expect("cookie header"));
+        }
+        headers
     }
 
     #[test]
@@ -1210,6 +1737,111 @@ mod tests {
         assert!(!cookie.contains("private-refresh"));
         let debug = format!("{credential:?}");
         assert!(!debug.contains("private"));
+    }
+
+    #[test]
+    fn cookie_refresh_status_preserves_required_flag_and_server_timestamp() {
+        let needed = parse_cookie_info_response(
+            br#"{"code":0,"message":"0","data":{"refresh":true,"timestamp":1684466082562}}"#,
+        )
+        .expect("refresh status");
+        assert!(needed.refresh);
+        assert_eq!(needed.timestamp, 1_684_466_082_562);
+
+        let current = parse_cookie_info_response(
+            br#"{"code":0,"message":"0","data":{"refresh":false,"timestamp":1684466082562}}"#,
+        )
+        .expect("current status");
+        assert!(!current.refresh);
+
+        let error =
+            parse_cookie_info_response(br#"{"code":-101,"message":"not logged in","data":null}"#)
+                .expect_err("expired cookie must fail refresh status");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn correspond_path_uses_fixed_rsa_oaep_shape() {
+        let first = cookie_correspond_path(1_684_466_082_562).expect("first path");
+        let second = cookie_correspond_path(1_684_466_082_562).expect("second path");
+        assert_eq!(first.len(), 256);
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        );
+        assert_ne!(first, second, "OAEP encryption must use fresh randomness");
+    }
+
+    #[test]
+    fn cookie_correspondence_extracts_only_a_valid_refresh_csrf() {
+        let csrf = parse_refresh_csrf_html(
+            br#"<html><body><div class="token" id="1-name">b0cc8411ded2f9db2cff2edb3123acac</div></body></html>"#,
+        )
+        .expect("refresh csrf");
+        assert_eq!(csrf, "b0cc8411ded2f9db2cff2edb3123acac");
+
+        for invalid in [
+            br#"<html><div id="other">b0cc8411ded2f9db2cff2edb3123acac</div></html>"#.as_slice(),
+            br#"<html><div id='1-name'>not-a-token</div></html>"#.as_slice(),
+            b"\xff\xfe".as_slice(),
+        ] {
+            assert!(parse_refresh_csrf_html(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn cookie_rotation_requires_a_complete_same_identity_generation() {
+        let response = br#"{"code":0,"message":"0","data":{"status":0,"message":"","refresh_token":"rotated-refresh"}}"#;
+        let credential = parse_cookie_refresh_response(
+            response,
+            &rotated_cookie_headers("47275982"),
+            "47275982",
+        )
+        .expect("rotated credential");
+        assert_eq!(credential.user_id(), "47275982");
+        assert_eq!(credential.sessdata, "rotated%2Csession");
+        assert_eq!(credential.refresh_token, "rotated-refresh");
+        assert!(!format!("{credential:?}").contains("rotated-refresh"));
+
+        let mismatch =
+            parse_cookie_refresh_response(response, &rotated_cookie_headers("999"), "47275982")
+                .expect_err("identity mismatch must fail");
+        assert!(mismatch.message.contains("different account identity"));
+
+        let missing = parse_cookie_refresh_response(response, &HeaderMap::new(), "47275982")
+            .expect_err("missing cookies must fail");
+        assert_eq!(missing.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn cookie_confirmation_and_logout_preserve_terminal_semantics() {
+        parse_cookie_confirm_response(br#"{"code":0,"message":"0","ttl":1}"#)
+            .expect("refresh confirmation");
+        let confirmation_error =
+            parse_cookie_confirm_response(br#"{"code":-111,"message":"csrf rejected","ttl":1}"#)
+                .expect_err("confirmation failure");
+        assert_eq!(confirmation_error.code, ErrorCode::AuthenticationRequired);
+
+        assert_eq!(
+            parse_logout_response(br#"{"code":0,"status":true,"ts":1663034005}"#)
+                .expect("logged out"),
+            BilibiliLogoutOutcome::LoggedOut
+        );
+        assert_eq!(
+            parse_logout_response(b"<!DOCTYPE html><html><body>login</body></html>")
+                .expect("expired HTML session"),
+            BilibiliLogoutOutcome::CredentialExpired
+        );
+        assert_eq!(
+            parse_logout_response(br#"{"code":-101,"message":"not logged in"}"#)
+                .expect("expired JSON session"),
+            BilibiliLogoutOutcome::CredentialExpired
+        );
+        let csrf_error =
+            parse_logout_response(br#"{"code":2202,"status":false,"message":"csrf rejected"}"#)
+                .expect_err("invalid csrf must fail without claiming logout");
+        assert_eq!(csrf_error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]

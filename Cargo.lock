@@ -1918,8 +1918,12 @@ name = "tuneweave-provider-bilibili"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "base64",
+ "hex",
+ "num-bigint",
  "qrcode",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",
