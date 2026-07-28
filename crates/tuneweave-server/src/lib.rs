@@ -7881,21 +7881,23 @@ struct ArtistCatalogParams {
 async fn artist_catalog(
     State(state): State<AppState>,
     Query(params): Query<ArtistCatalogParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ArtistCatalog>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ArtistCatalogRequest::new();
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.category = parse_artist_category(params.category.as_deref())?;
     request.area = parse_artist_area(params.area.as_deref())?;
     request.genre = parse_artist_genre(params.genre.as_deref())?;
-    let catalog = provider.artist_catalog(&request).await?;
-    let mut response = ApiResponse::new(catalog).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let catalog = access.provider.artist_catalog(&request).await?;
+    Ok(Json(access.response(catalog, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7914,6 +7916,7 @@ struct ArtistListParams {
 async fn artists(
     State(state): State<AppState>,
     Query(params): Query<ArtistListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -7922,20 +7925,22 @@ async fn artists(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ArtistListRequest::new(limit, offset);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.category = parse_artist_category(params.category.as_deref())?;
     request.area = parse_artist_area(params.area.as_deref())?;
     request.genre = parse_artist_genre(params.genre.as_deref())?;
     request.initial = optional_trimmed(params.initial);
-    let page = provider.artists(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let page = access.provider.artists(&request).await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -7943,6 +7948,7 @@ async fn artist(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Artist>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
@@ -7951,13 +7957,17 @@ async fn artist(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let artist = provider.artist(reference.id(), account).await?;
-    let mut response = ApiResponse::new(artist).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account,
+        AccountSelection::Optional,
+    )?;
+    let artist = access
+        .provider
+        .artist(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(artist, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7983,10 +7993,12 @@ struct ArtistDetailBatchBody {
 async fn artist_details_get(
     State(state): State<AppState>,
     params: Result<Query<ArtistDetailBatchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let params = query_params(params)?;
     artist_details_response(
         &state,
+        &headers,
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
         params.platform.as_deref(),
@@ -7997,11 +8009,13 @@ async fn artist_details_get(
 
 async fn artist_details_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<ArtistDetailBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let body = json_body(body)?;
     artist_details_response(
         &state,
+        &headers,
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(StreamReferenceInput::into_values),
         body.platform.as_deref(),
@@ -8012,6 +8026,7 @@ async fn artist_details_post(
 
 async fn artist_details_response(
     state: &AppState,
+    headers: &HeaderMap,
     refs: Option<Vec<String>>,
     ids: Option<Vec<String>>,
     platform: Option<&str>,
@@ -8046,9 +8061,15 @@ async fn artist_details_response(
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let provider = state.registry.require(selected_platform)?;
-    let artists = provider
-        .artist_descriptions(&ids, account.as_deref())
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        selected_platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let artists = access
+        .provider
+        .artist_descriptions(&ids, access.provider_account.as_deref())
         .await?;
     if artists.len() != references.len() {
         return Err(TuneWeaveError::new(
@@ -8075,11 +8096,7 @@ async fn artist_details_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    let mut response = ApiResponse::new(artists).with_platform(selected_platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(artists, selected_platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -25544,6 +25561,87 @@ mod tests {
         assert_eq!(artists["meta"]["pagination"]["offset"], 10);
         assert_eq!(artists["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(artists["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_directory_accepts_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-artist-directory",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+
+        let (status, catalog) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/artists/catalog?platform=netease",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(catalog["data"]["extensions"]["account"], "default");
+        assert!(catalog["meta"].get("account").is_none());
+
+        let (status, artists) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/artists?platform=netease&limit=2",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(artists["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        let (status, artist) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/artists/qq:0025NhlN2yWrP4",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(artist["data"]["extensions"]["account"], "default");
+        assert!(artist["meta"].get("account").is_none());
+
+        for (method, path, body) in [
+            (
+                Method::GET,
+                "/v1/artists/details?refs=qq:0025NhlN2yWrP4",
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/artists/details",
+                Some(json!({"refs": ["qq:0025NhlN2yWrP4"]})),
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, body, &qq).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"][0]["extensions"]["account"], "default");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/artists/qq:0025NhlN2yWrP4?account=green-vip",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
