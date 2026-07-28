@@ -11678,6 +11678,7 @@ async fn comment_thread_stats(
     State(state): State<AppState>,
     Path(kind): Path<String>,
     Query(params): Query<CommentThreadStatsQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentThreadStatsBatch>>, ApiError> {
     let platform = search_platform(&state, params.platform.as_deref())?;
     let kind = parse_comment_target_kind(&kind)?;
@@ -11696,19 +11697,21 @@ async fn comment_thread_stats(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let batch = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let batch = access
+        .provider
         .comment_thread_stats(&CommentThreadStatsRequest {
             kind,
             resource_refs,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(batch).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(batch, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -11745,6 +11748,7 @@ async fn comment_list(
     State(state): State<AppState>,
     Path((kind, reference)): Path<(String, String)>,
     Query(params): Query<CommentListQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentPageData>>, ApiError> {
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
@@ -11774,8 +11778,14 @@ async fn comment_list(
     let include_replies =
         parse_bool_parameter("include_replies", params.include_replies.as_deref(), true)?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page_result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page_result = access
+        .provider
         .comments(&CommentListRequest {
             target,
             view,
@@ -11787,7 +11797,7 @@ async fn comment_list(
             before_time_ms,
             parent_comment_id,
             include_replies,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
     let CommentPage {
@@ -11799,19 +11809,19 @@ async fn comment_list(
         pagination,
         extensions,
     } = page_result;
-    let mut response = ApiResponse::new(CommentPageData {
-        target,
-        comments,
-        hot_comments,
-        top_comments,
-        current_comment,
-        extensions,
-    })
-    .with_platform(platform)
-    .with_pagination(pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
+    let response = access
+        .response(
+            CommentPageData {
+                target,
+                comments,
+                hot_comments,
+                top_comments,
+                current_comment,
+                extensions,
+            },
+            platform,
+        )
+        .with_pagination(pagination);
     Ok(Json(response))
 }
 
@@ -11846,6 +11856,7 @@ async fn comment_reaction_list(
     State(state): State<AppState>,
     Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
     Query(params): Query<CommentReactionListQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentReactionPageData>>, ApiError> {
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
@@ -11866,9 +11877,14 @@ async fn comment_reaction_list(
     }
     let cursor = optional_trimmed(params.cursor);
     let id_cursor = optional_trimmed(params.id_cursor);
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let page_result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let page_result = access
+        .provider
         .comment_reactions(&CommentReactionListRequest {
             target,
             comment_id,
@@ -11878,7 +11894,7 @@ async fn comment_reaction_list(
             page,
             cursor,
             id_cursor,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     let CommentReactionPage {
@@ -11892,18 +11908,20 @@ async fn comment_reaction_list(
         extensions,
     } = page_result;
     Ok(Json(
-        ApiResponse::new(CommentReactionPageData {
-            target,
-            comment_id,
-            target_user_ref,
-            kind,
-            reactions,
-            current_comment,
-            extensions,
-        })
-        .with_platform(platform)
-        .with_account(account)
-        .with_pagination(pagination),
+        access
+            .response(
+                CommentReactionPageData {
+                    target,
+                    comment_id,
+                    target_user_ref,
+                    kind,
+                    reactions,
+                    current_comment,
+                    extensions,
+                },
+                platform,
+            )
+            .with_pagination(pagination),
     ))
 }
 
@@ -21758,6 +21776,74 @@ mod tests {
         assert_eq!(response["data"]["kind"], "like");
         assert_eq!(response["meta"]["account"], "default");
         assert_eq!(response["meta"]["pagination"]["limit"], 100);
+    }
+
+    #[tokio::test]
+    async fn comment_reads_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-comment-reader",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, stats) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/resources/track/comments/stats?platform=netease&ids=185809",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["data"]["extensions"]["request"]["account"], "default");
+        assert!(stats["meta"].get("account").is_none());
+
+        let (status, comments) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/resources/track/netease:185809/comments",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            comments["meta"]["pagination"]["extensions"]["request"]["account"],
+            "default"
+        );
+        assert!(comments["meta"].get("account").is_none());
+
+        let (status, reactions) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/resources/track/netease:863481066/comments/1167145843/reactions/hug?uid=285516405",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            reactions["meta"]["pagination"]["extensions"]["request"]["account"],
+            "default"
+        );
+        assert!(reactions["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/resources/track/netease:185809/comments?account=reader",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
