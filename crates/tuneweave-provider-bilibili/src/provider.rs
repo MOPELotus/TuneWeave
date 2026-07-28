@@ -1397,10 +1397,11 @@ fn map_season_archive_track(
         .ok_or_else(|| bilibili_data_error("Bilibili season archive duration overflowed"))?;
     let mut extensions = season_archive_extensions(&archive, season_id, owner_id, &resource_ref);
     extensions.insert("normalized_from_video".to_owned(), json!(true));
+    let id = resource_ref.id().to_owned();
     Ok(Track {
         resource_ref,
         platform: Platform::Bilibili,
-        id: archive.bvid,
+        id,
         name: archive.title,
         aliases: Vec::new(),
         artists: vec![ArtistSummary {
@@ -1429,10 +1430,11 @@ fn map_season_archive_video(
         .checked_mul(1_000)
         .ok_or_else(|| bilibili_data_error("Bilibili season archive duration overflowed"))?;
     let extensions = season_archive_extensions(&archive, season_id, owner_id, &resource_ref);
+    let id = resource_ref.id().to_owned();
     let video = Video {
         resource_ref,
         platform: Platform::Bilibili,
-        id: archive.bvid,
+        id,
         title: archive.title,
         creators: vec![CreatorSummary {
             resource_ref: Some(owner_ref),
@@ -1476,13 +1478,11 @@ fn map_favorite_media_track(media: BilibiliFavoriteMedia, media_id: u64) -> Resu
         .collect();
     let mut extensions = favorite_media_extensions(&media, media_id, &resource_ref);
     extensions.insert("normalized_from_video".to_owned(), json!(true));
+    let id = resource_ref.id().to_owned();
     Ok(Track {
         resource_ref,
         platform: Platform::Bilibili,
-        id: media
-            .bvid
-            .clone()
-            .unwrap_or_else(|| format!("aid:{}", media.aid)),
+        id,
         name: media.title,
         aliases: Vec::new(),
         artists,
@@ -1510,13 +1510,11 @@ fn map_favorite_media_video(media: BilibiliFavoriteMedia, media_id: u64) -> Resu
         .into_iter()
         .collect();
     let extensions = favorite_media_extensions(&media, media_id, &resource_ref);
+    let id = resource_ref.id().to_owned();
     let video = Video {
         resource_ref,
         platform: Platform::Bilibili,
-        id: media
-            .bvid
-            .clone()
-            .unwrap_or_else(|| format!("aid:{}", media.aid)),
+        id,
         title: media.title,
         creators,
         description: media.description,
@@ -1543,8 +1541,8 @@ fn map_favorite_media_video(media: BilibiliFavoriteMedia, media_id: u64) -> Resu
 
 fn favorite_media_ref(media: &BilibiliFavoriteMedia) -> Result<ResourceRef> {
     match &media.bvid {
-        Some(bvid) => ResourceRef::new(Platform::Bilibili, bvid),
-        None => ResourceRef::new(Platform::Bilibili, format!("aid:{}", media.aid)),
+        Some(bvid) => BilibiliVideoIdentity::Bvid(bvid.clone()).resource_ref(),
+        None => BilibiliVideoIdentity::Aid(media.aid).resource_ref(),
     }
     .map_err(|_| bilibili_data_error("Bilibili favorite media identity was invalid"))
 }
@@ -1604,7 +1602,8 @@ fn favorite_media_extensions(
 }
 
 fn bilibili_archive_ref(bvid: &str) -> Result<ResourceRef> {
-    ResourceRef::new(Platform::Bilibili, bvid)
+    BilibiliVideoIdentity::Bvid(bvid.to_owned())
+        .resource_ref()
         .map_err(|_| bilibili_data_error("Bilibili season archive identity was invalid"))
 }
 
@@ -2592,13 +2591,13 @@ mod tests {
         };
         let track =
             map_season_archive_track(archive.clone(), 3_629_748, 327_961_371).expect("track");
-        assert_eq!(track.resource_ref.to_string(), "bilibili:BV17x411w7KC");
+        assert_eq!(track.resource_ref.to_string(), "bilibili:bvid:BV17x411w7KC");
         assert_eq!(track.duration_ms, Some(185_000));
         assert_eq!(
             track.artists[0].resource_ref.as_ref().unwrap().to_string(),
             "bilibili:user:327961371"
         );
-        assert_eq!(track.extensions["video_ref"], "bilibili:BV17x411w7KC");
+        assert_eq!(track.extensions["video_ref"], "bilibili:bvid:BV17x411w7KC");
         assert_eq!(track.extensions["normalized_from_video"], true);
         assert_eq!(track.extensions["playback_position"], 42);
 
@@ -2607,7 +2606,7 @@ mod tests {
         assert_eq!(detail.kind, VideoResourceKind::Video);
         assert_eq!(
             detail.video.resource_ref.to_string(),
-            "bilibili:BV17x411w7KC"
+            "bilibili:bvid:BV17x411w7KC"
         );
         assert_eq!(detail.video.play_count, Some(123_456));
         assert_eq!(detail.video.extensions["aid"], 170_001);
@@ -3016,7 +3015,7 @@ mod tests {
             matches!(
                 item,
                 PlaylistPlayableItem::Video(detail)
-                    if detail.video.resource_ref.id().starts_with("BV")
+                    if detail.video.resource_ref.id().starts_with("bvid:BV")
                         && detail.video.extensions["video_ref"] == detail.video.resource_ref.to_string()
             )
         }));
