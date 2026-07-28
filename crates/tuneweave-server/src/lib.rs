@@ -8112,6 +8112,7 @@ async fn artist_homepage_tab(
     State(state): State<AppState>,
     Path((reference, tab)): Path<(String, String)>,
     params: Result<Query<ArtistHomepageTabParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ArtistHomepageTab>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -8125,23 +8126,25 @@ async fn artist_homepage_tab(
     }
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let tab = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let tab = access
+        .provider
         .artist_homepage_tab(
             reference.id(),
             &ArtistHomepageTabRequest {
                 kind: parse_artist_homepage_tab_kind(&tab)?,
                 page,
                 limit,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(tab).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(tab, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -8468,6 +8471,7 @@ async fn similar_artists(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<SimilarArtistParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<SimilarArtistList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -8477,46 +8481,52 @@ async fn similar_artists(
     }
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let list = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let list = access
+        .provider
         .similar_artists(
             reference.id(),
             &SimilarArtistRequest {
                 limit,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(list).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(list, platform)))
 }
 
 async fn artist_overview(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ArtistOverview>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let overview = provider
-        .artist_overview(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let overview = access
+        .provider
+        .artist_overview(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(overview).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(overview, platform)))
 }
 
 async fn artist_stats(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<ArtistStats>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
@@ -8525,19 +8535,24 @@ async fn artist_stats(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let stats = provider.artist_stats(reference.id(), account).await?;
-    let mut response = ApiResponse::new(stats).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account,
+        AccountSelection::Optional,
+    )?;
+    let stats = access
+        .provider
+        .artist_stats(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(stats, platform)))
 }
 
 async fn artist_albums(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
@@ -8547,23 +8562,26 @@ async fn artist_albums(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .artist_albums(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -8571,6 +8589,7 @@ async fn artist_fans(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<User>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
@@ -8580,23 +8599,26 @@ async fn artist_fans(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .artist_fans(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -8615,6 +8637,7 @@ async fn artist_videos(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<ArtistVideoListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
@@ -8624,19 +8647,24 @@ async fn artist_videos(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ArtistVideoListRequest::new(limit, offset);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.cursor = optional_trimmed(params.cursor);
     request.kind = parse_video_kind(params.kind.as_deref())?;
     request.order = optional_trimmed(params.order);
-    let page = provider.artist_videos(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let page = access
+        .provider
+        .artist_videos(reference.id(), &request)
+        .await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -9174,6 +9202,7 @@ async fn artist_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<ArtistTrackListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
@@ -9183,17 +9212,22 @@ async fn artist_tracks(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = ArtistTrackListRequest::new(limit, offset);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.order = parse_artist_track_order(params.order.as_deref())?;
-    let page = provider.artist_tracks(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let page = access
+        .provider
+        .artist_tracks(reference.id(), &request)
+        .await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -9201,20 +9235,24 @@ async fn artist_top_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let page = provider
-        .artist_top_tracks(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
+        .artist_top_tracks(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -24988,6 +25026,72 @@ mod tests {
         assert_eq!(videos["meta"]["pagination"]["offset"], 10);
         assert_eq!(videos["meta"]["pagination"]["next_offset"], 11);
         assert_eq!(videos["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn artist_page_accepts_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let qq = qq_caller_credential(None);
+
+        let (status, tab) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/artists/qq:0025NhlN2yWrP4/tabs/song?page=2&limit=2",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tab["data"]["extensions"]["account"], "default");
+        assert!(tab["meta"].get("account").is_none());
+
+        let (status, similar) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/artists/qq:0025NhlN2yWrP4/similar?limit=2",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(similar["data"]["extensions"]["account"], "default");
+        assert!(similar["meta"].get("account").is_none());
+
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-artist-page",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        for path in [
+            "/v1/artists/netease:6452/overview",
+            "/v1/artists/netease:6452/stats",
+            "/v1/artists/netease:6452/albums?limit=2",
+            "/v1/artists/netease:2116/fans?limit=2",
+            "/v1/artists/netease:6452/videos?type=mv&limit=2",
+            "/v1/artists/netease:6452/tracks?limit=2",
+            "/v1/artists/netease:6452/top-tracks",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &netease).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/artists/netease:6452/albums?account=collector",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
