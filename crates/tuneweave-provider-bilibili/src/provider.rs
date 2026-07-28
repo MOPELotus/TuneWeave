@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     AccountCredentialStore, AccountProfile, ArtistSummary, AuthState, Capability, CreatorSummary,
-    CredentialMode, ErrorCode, Extensions, MusicProvider, Page, PageMeta, Platform, Playlist,
-    ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
-    ResourceRef, Result, SearchItem, SearchKind, SearchQuery, SearchVariant,
-    StoredAccountCredential, TuneWeaveError, Video, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder,
+    CredentialMode, ErrorCode, Extensions, MusicProvider, Page, PageMeta, PageRequest, Platform,
+    Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
+    ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
+    SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
+    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -16,9 +16,10 @@ use crate::client::{
     BilibiliClient, BilibiliCollectedPlaylist, BilibiliCollectedPlaylistKind,
     BilibiliCollectedPlaylistPage, BilibiliConfig, BilibiliCreatedFavoriteFolder,
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
-    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSessionStatus,
-    BilibiliSpacePlaylist, BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage,
-    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
+    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSeasonArchive,
+    BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
+    BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
+    BilibiliVideoSearchOrder,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -228,6 +229,55 @@ impl MusicProvider for BilibiliProvider {
                     json!(first_page_count),
                 );
                 Ok(playlist)
+            }
+            BilibiliPlaylistLocator::FavoriteFolder(_) => {
+                Err(unsupported_bilibili_playlist_kind("favorite"))
+            }
+            BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
+        }
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let locator = parse_bilibili_playlist_locator(id)?;
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        match locator {
+            BilibiliPlaylistLocator::Season(season_id) => {
+                let (archives, pagination, owner_id) = self
+                    .season_archive_window(season_id, request, credential.as_ref())
+                    .await?;
+                let items = archives
+                    .into_iter()
+                    .map(|archive| map_season_archive_track(archive, season_id, owner_id))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Page { items, pagination })
+            }
+            BilibiliPlaylistLocator::FavoriteFolder(_) => {
+                Err(unsupported_bilibili_playlist_kind("favorite"))
+            }
+            BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
+        }
+    }
+
+    async fn playlist_playable_items(
+        &self,
+        id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        let locator = parse_bilibili_playlist_locator(id)?;
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        match locator {
+            BilibiliPlaylistLocator::Season(season_id) => {
+                let (archives, pagination, owner_id) = self
+                    .season_archive_window(season_id, request, credential.as_ref())
+                    .await?;
+                let items = archives
+                    .into_iter()
+                    .map(|archive| {
+                        map_season_archive_video(archive, season_id, owner_id)
+                            .map(PlaylistPlayableItem::Video)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Page { items, pagination })
             }
             BilibiliPlaylistLocator::FavoriteFolder(_) => {
                 Err(unsupported_bilibili_playlist_kind("favorite"))
@@ -566,6 +616,108 @@ impl MusicProvider for BilibiliProvider {
 }
 
 impl BilibiliProvider {
+    async fn season_archive_window(
+        &self,
+        season_id: u64,
+        request: &PageRequest,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<(Vec<BilibiliSeasonArchive>, PageMeta, u64)> {
+        const UPSTREAM_PAGE_SIZE: u32 = 30;
+        if !(1..=100).contains(&request.limit) {
+            return Err(bilibili_invalid_request(
+                "Bilibili playlist limit must be between 1 and 100",
+            ));
+        }
+        let first_page = request.offset / UPSTREAM_PAGE_SIZE + 1;
+        let first_skip = (request.offset % UPSTREAM_PAGE_SIZE) as usize;
+        let mut current_page = first_page;
+        let mut total = None;
+        let mut owner_id = None;
+        let mut fetched_pages = 0_u32;
+        let mut identities = BTreeSet::new();
+        let mut archives = Vec::with_capacity(request.limit as usize);
+
+        while archives.len() < request.limit as usize {
+            let page = self
+                .client
+                .season_archives_page(season_id, current_page, credential)
+                .await?;
+            if page.page != current_page
+                || page.page_size != UPSTREAM_PAGE_SIZE
+                || page.season.id != season_id
+                || page.season.track_count != page.total
+                || total.is_some_and(|expected| expected != page.total)
+                || owner_id.is_some_and(|expected| expected != page.season.owner_id)
+            {
+                return Err(bilibili_data_error(
+                    "Bilibili season archive pagination changed during traversal",
+                ));
+            }
+            total.get_or_insert(page.total);
+            owner_id.get_or_insert(page.season.owner_id);
+            fetched_pages = fetched_pages.saturating_add(1);
+            let skip = if current_page == first_page {
+                first_skip
+            } else {
+                0
+            };
+            if request.offset < u32::try_from(page.total).unwrap_or(u32::MAX)
+                && skip > page.archives.len()
+            {
+                return Err(bilibili_data_error(
+                    "Bilibili season archive page did not cover the requested offset",
+                ));
+            }
+            for archive in page.archives.into_iter().skip(skip) {
+                if archives.len() == request.limit as usize {
+                    break;
+                }
+                if !identities.insert((archive.aid, archive.bvid.clone())) {
+                    return Err(bilibili_data_error(
+                        "Bilibili season archive traversal returned a duplicate identity",
+                    ));
+                }
+                archives.push(archive);
+            }
+            if archives.len() == request.limit as usize || !page.has_more {
+                break;
+            }
+            current_page = current_page
+                .checked_add(1)
+                .ok_or_else(|| bilibili_data_error("Bilibili season archive page overflowed"))?;
+        }
+
+        let total = total.unwrap_or_default();
+        let owner_id = owner_id
+            .ok_or_else(|| bilibili_data_error("Bilibili season did not return an owner"))?;
+        let returned = u32::try_from(archives.len())
+            .map_err(|_| bilibili_data_error("Bilibili season archive page overflowed"))?;
+        let next_offset = request
+            .offset
+            .checked_add(returned)
+            .ok_or_else(|| bilibili_data_error("Bilibili season archive offset overflowed"))?;
+        let has_more = returned > 0 && u64::from(next_offset) < total;
+        Ok((
+            archives,
+            PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: Some(total),
+                next_offset: has_more.then_some(next_offset),
+                has_more,
+                extensions: Extensions::from([
+                    ("collection_kind".to_owned(), json!("season")),
+                    ("season_id".to_owned(), json!(season_id)),
+                    ("owner_mid".to_owned(), json!(owner_id)),
+                    ("media_type".to_owned(), json!("video")),
+                    ("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE)),
+                    ("upstream_pages_fetched".to_owned(), json!(fetched_pages)),
+                ]),
+            },
+            owner_id,
+        ))
+    }
+
     async fn space_playlist_window(
         &self,
         user_id: u64,
@@ -1065,6 +1217,127 @@ fn map_bilibili_search_video(item: BilibiliSearchVideo) -> Result<Video> {
         subscribed: None,
         extensions,
     })
+}
+
+fn map_season_archive_track(
+    archive: BilibiliSeasonArchive,
+    season_id: u64,
+    owner_id: u64,
+) -> Result<Track> {
+    let resource_ref = bilibili_archive_ref(&archive.bvid)?;
+    let owner_ref = bilibili_archive_owner_ref(owner_id)?;
+    let duration_ms = archive
+        .duration_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| bilibili_data_error("Bilibili season archive duration overflowed"))?;
+    let mut extensions = season_archive_extensions(&archive, season_id, owner_id, &resource_ref);
+    extensions.insert("normalized_from_video".to_owned(), json!(true));
+    Ok(Track {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id: archive.bvid,
+        name: archive.title,
+        aliases: Vec::new(),
+        artists: vec![ArtistSummary {
+            resource_ref: Some(owner_ref),
+            name: owner_id.to_string(),
+        }],
+        album: None,
+        duration_ms: Some(duration_ms),
+        isrc: None,
+        mv_ref: None,
+        playable: Some(archive.state == 0),
+        available_qualities: Vec::new(),
+        extensions,
+    })
+}
+
+fn map_season_archive_video(
+    archive: BilibiliSeasonArchive,
+    season_id: u64,
+    owner_id: u64,
+) -> Result<VideoDetail> {
+    let resource_ref = bilibili_archive_ref(&archive.bvid)?;
+    let owner_ref = bilibili_archive_owner_ref(owner_id)?;
+    let duration_ms = archive
+        .duration_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| bilibili_data_error("Bilibili season archive duration overflowed"))?;
+    let extensions = season_archive_extensions(&archive, season_id, owner_id, &resource_ref);
+    let video = Video {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id: archive.bvid,
+        title: archive.title,
+        creators: vec![CreatorSummary {
+            resource_ref: Some(owner_ref),
+            name: owner_id.to_string(),
+            avatar_url: None,
+        }],
+        description: String::new(),
+        cover_url: Some(archive.cover_url),
+        duration_ms: Some(duration_ms),
+        published_at: (archive.published_at > 0)
+            .then(|| bilibili_unix_rfc3339(archive.published_at))
+            .flatten(),
+        play_count: Some(archive.view_count),
+        subscribed: None,
+        extensions,
+    };
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Video,
+        video,
+        resolutions: Vec::new(),
+        extensions: Extensions::from([
+            ("detail_source".to_owned(), json!("season_archive")),
+            ("summary_only".to_owned(), json!(true)),
+            ("resolutions_resolved".to_owned(), json!(false)),
+        ]),
+    })
+}
+
+fn bilibili_archive_ref(bvid: &str) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Bilibili, bvid)
+        .map_err(|_| bilibili_data_error("Bilibili season archive identity was invalid"))
+}
+
+fn bilibili_archive_owner_ref(owner_id: u64) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Bilibili, format!("user:{owner_id}"))
+        .map_err(|_| bilibili_data_error("Bilibili season archive owner was invalid"))
+}
+
+fn season_archive_extensions(
+    archive: &BilibiliSeasonArchive,
+    season_id: u64,
+    owner_id: u64,
+    video_ref: &ResourceRef,
+) -> Extensions {
+    let mut extensions = Extensions::from([
+        ("video_ref".to_owned(), json!(video_ref)),
+        ("bilibili_playlist_kind".to_owned(), json!("season")),
+        ("season_id".to_owned(), json!(season_id)),
+        ("owner_mid".to_owned(), json!(owner_id)),
+        ("creator_name_unavailable".to_owned(), json!(true)),
+        ("aid".to_owned(), json!(archive.aid)),
+        ("bvid".to_owned(), json!(archive.bvid)),
+        ("interactive".to_owned(), json!(archive.interactive)),
+        ("state".to_owned(), json!(archive.state)),
+        ("paid".to_owned(), json!(archive.paid)),
+        ("view_count".to_owned(), json!(archive.view_count)),
+    ]);
+    insert_optional(
+        &mut extensions,
+        "playback_position",
+        archive.playback_position,
+    );
+    insert_optional(&mut extensions, "danmaku_count", archive.danmaku_count);
+    if archive.created_at > 0 {
+        extensions.insert("ctime".to_owned(), json!(archive.created_at));
+    }
+    if archive.published_at > 0 {
+        extensions.insert("pubdate".to_owned(), json!(archive.published_at));
+    }
+    extensions
 }
 
 #[cfg(test)]
@@ -1906,6 +2179,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn season_archive_maps_to_typed_video_and_track_compatibility_view() {
+        let archive = BilibiliSeasonArchive {
+            aid: 170_001,
+            bvid: "BV17x411w7KC".to_owned(),
+            title: "测试视频".to_owned(),
+            cover_url: "https://i0.hdslb.com/bfs/archive/test.jpg".to_owned(),
+            duration_seconds: 185,
+            created_at: 1_500_000_000,
+            published_at: 1_500_000_100,
+            interactive: true,
+            playback_position: Some(42),
+            state: 0,
+            paid: false,
+            view_count: 123_456,
+            danmaku_count: Some(789),
+        };
+        let track =
+            map_season_archive_track(archive.clone(), 3_629_748, 327_961_371).expect("track");
+        assert_eq!(track.resource_ref.to_string(), "bilibili:BV17x411w7KC");
+        assert_eq!(track.duration_ms, Some(185_000));
+        assert_eq!(
+            track.artists[0].resource_ref.as_ref().unwrap().to_string(),
+            "bilibili:user:327961371"
+        );
+        assert_eq!(track.extensions["video_ref"], "bilibili:BV17x411w7KC");
+        assert_eq!(track.extensions["normalized_from_video"], true);
+        assert_eq!(track.extensions["playback_position"], 42);
+
+        let detail =
+            map_season_archive_video(archive, 3_629_748, 327_961_371).expect("video detail");
+        assert_eq!(detail.kind, VideoResourceKind::Video);
+        assert_eq!(
+            detail.video.resource_ref.to_string(),
+            "bilibili:BV17x411w7KC"
+        );
+        assert_eq!(detail.video.play_count, Some(123_456));
+        assert_eq!(detail.video.extensions["aid"], 170_001);
+        assert_eq!(detail.video.extensions["interactive"], true);
+        assert_eq!(detail.extensions["summary_only"], true);
+        assert!(detail.resolutions.is_empty());
+    }
+
     #[tokio::test]
     async fn playlist_detail_validates_kind_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
@@ -1917,6 +2233,39 @@ mod tests {
         assert_eq!(unsupported.details["playlist_kind"], "favorite");
         let missing = provider
             .playlist("season:3629748", Some("missing"))
+            .await
+            .expect_err("missing selected account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn playlist_items_validate_kind_limit_and_account_before_network_access() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let unsupported = provider
+            .playlist_playable_items(
+                "favorite:2883236382",
+                &tuneweave_core::PageRequest::new(30, 0),
+            )
+            .await
+            .expect_err("favorite items are not implemented yet");
+        assert_eq!(unsupported.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(unsupported.details["playlist_kind"], "favorite");
+
+        let invalid_limit = provider
+            .playlist_tracks("season:3629748", &tuneweave_core::PageRequest::new(0, 0))
+            .await
+            .expect_err("zero limit");
+        assert_eq!(invalid_limit.code, ErrorCode::InvalidRequest);
+
+        let missing = provider
+            .playlist_playable_items(
+                "season:3629748",
+                &tuneweave_core::PageRequest {
+                    limit: 5,
+                    offset: 28,
+                    account: Some("missing".to_owned()),
+                },
+            )
             .await
             .expect_err("missing selected account");
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
@@ -2103,5 +2452,29 @@ mod tests {
         assert_eq!(playlist.extensions["owner_mid"], 327_961_371);
         assert_eq!(playlist.extensions["detail_source"], "season_archives");
         assert_eq!(playlist.extensions["first_page_archive_count"], 30);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili season access"]
+    async fn live_season_video_page_crosses_upstream_boundary() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let page = provider
+            .playlist_playable_items("season:3629748", &tuneweave_core::PageRequest::new(5, 28))
+            .await
+            .expect("live public season videos");
+        assert_eq!(page.items.len(), 5);
+        assert_eq!(page.pagination.offset, 28);
+        assert_eq!(page.pagination.total, Some(617));
+        assert_eq!(page.pagination.next_offset, Some(33));
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["upstream_pages_fetched"], 2);
+        assert!(page.items.iter().all(|item| {
+            matches!(
+                item,
+                PlaylistPlayableItem::Video(detail)
+                    if detail.video.resource_ref.id().starts_with("BV")
+                        && detail.video.extensions["video_ref"] == detail.video.resource_ref.to_string()
+            )
+        }));
     }
 }
