@@ -7,7 +7,7 @@ TuneWeave 使用 Rust 构建，目标是在保持较小存储体积、较低运�
 ## 设计方向
 
 - 同一种业务能力使用相同端点和统一输入输出结构。
-- 账户请求当前通过 `platform` 选择登录平台、通过 `account` 选择该平台内的持久化账户别名；每个平台可同时保存多个账户。QQ Basic 基础单元完成后将按[调用方托管凭证契约](docs/credential-ownership.md)增加不落盘返回调用方及保存并返回两种模式，供自行管理登录态的项目按请求携带。
+- 账户请求可通过 `platform + account` 选择服务器持久化的多账户登录态，也可通过 `X-TuneWeave-Credential` 按请求携带调用方自管凭证。QQ 登录已支持 `credential_mode=server|client|both`，分别对应仅保存、仅返回或保存并返回同一凭证代际；其余平台和账户端点按[调用方托管凭证契约](docs/credential-ownership.md)逐项接入。
 - 内容来源与播放来源解耦：歌单来自一个平台时，音频可按策略从其他平台解析。
 - 指定或默认平台播放失败后，可按可配置顺序回退到其他平台。
 - 平台适配器按能力声明接入，不要求每个平台实现不存在的功能。
@@ -21,7 +21,7 @@ TuneWeave 使用 Rust 构建，目标是在保持较小存储体积、较低运�
 5. 网易云全量、QQ 音乐全量、B 站音视频范围内全量
 6. 酷狗、咪咕、酷我（酷我接入前重新验证上游接口可用性）
 
-Basic 优先覆盖普通音乐 App 的搜索、展示、播放/VIP 权益、登录、个人音乐库、MV、云盘、播客和底层协议；网易云剩余工作中，云盘完整读写、下载和播放链路优先于播客目录及节目播放。网易云 Basic 与可导入任意平台歌单、混合添加并播放任意平台资源的 Uni Playlist 已收口；QQ Basic 的 77 个公开业务方法和 7 个平台基础单元代码均已收口，覆盖搜索、歌词、播放/下载、VIP、完整登录、多账户、个人音乐库、Uni 导入、公开目录、推荐、低频展示，以及固定 Android/Web 普通或签名档案的安全原始 API 单项与批量扩展。短信成功态和会话刷新保留为待真实账户联合验收，不虚标完成；当前按计划进入调用方托管凭证桥，最终全量要求不变，完整顺序、范围和定期上游检查规则见 [docs/implementation-plan.md](docs/implementation-plan.md)。
+Basic 优先覆盖普通音乐 App 的搜索、展示、播放/VIP 权益、登录、个人音乐库、MV、云盘、播客和底层协议；网易云剩余工作中，云盘完整读写、下载和播放链路优先于播客目录及节目播放。网易云 Basic 与可导入任意平台歌单、混合添加并播放任意平台资源的 Uni Playlist 已收口；QQ Basic 的 77 个公开业务方法和 7 个平台基础单元代码均已收口，覆盖搜索、歌词、播放/下载、VIP、完整登录、多账户、个人音乐库、Uni 导入、公开目录、推荐、低频展示，以及固定 Android/Web 普通或签名档案的安全原始 API 单项与批量扩展。短信成功态和会话刷新保留为待真实账户联合验收，不虚标完成；当前正在分阶段收口调用方托管凭证桥，QQ 登录导出与高频读取/播放链路已完成，刷新、退出、网易云登录导出和其余账户写端点继续实施，最终全量要求不变。完整顺序、范围和定期上游检查规则见 [docs/implementation-plan.md](docs/implementation-plan.md)。
 
 ## 本地运行
 
@@ -31,7 +31,7 @@ cargo run -p tuneweave-server --bin tuneweave
 
 - `TUNEWEAVE_BIND`：监听地址，默认 `127.0.0.1:7832`。
 - `TUNEWEAVE_DATA_DIR`：私有数据目录，默认 `.local/data`；成功登录的平台凭据按 `platform/account` 隔离保存并在重启时恢复。
-- `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云 `default` 账户启动 Cookie；不会写入响应或日志。当前服务器托管模式通过登录端点取得的账户凭据进入上述私有数据目录；后续调用方托管模式不会写入该目录。
+- `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云 `default` 账户启动 Cookie；不会写入响应或日志。服务器托管模式通过登录端点取得的账户凭据进入上述私有数据目录；调用方自管凭证只在支持的请求作用域内使用，不会写入该目录。
 - `TUNEWEAVE_NETEASE_PROXY`：可选的服务端 HTTP(S) 正向代理 URL；仅在启动配置中读取，API 调用方不能覆盖。
 - `TUNEWEAVE_NETEASE_REAL_IP`：可选的服务端固定 IPv4 请求身份，同时写入网易云协议请求的 `X-Real-IP` 与 `X-Forwarded-For`。
 - `TUNEWEAVE_NETEASE_RANDOM_CN_IP`：设为 `true/yes/on/1` 时，启动网易云 provider 时生成一个中国 IPv4 请求身份，并像参考实现的 `global.cnIp` 一样由该实例的所有协议请求复用；短信验证码发送、校验与登录还会在同一 10 分钟事务窗口内固定匿名设备会话；不能与固定真实 IP 同时启用。
