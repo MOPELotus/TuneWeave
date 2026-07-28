@@ -14,7 +14,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 | 单文件持久化 | `verified` | 生产绑定 `TUNEWEAVE_DATA_DIR/uni-playlists.json`，与账户凭据分离；内存快照、同目录临时文件、刷盘、跨平台发布及 Windows 中断恢复已实现，重启读取、重复 ID、未知版本和不覆盖损坏文件均有测试。 |
 | `POST /v1/uni/playlists` | `verified` | 创建空歌单，生成随机 `uni:pl_...` 引用，统一返回名称、描述、项目数及毫秒时间；长度、空值、未知 JSON/query 与碰撞重试边界已覆盖。 |
 | `GET /v1/uni/playlists/{ref}` | `verified` | 从同一存储读取元数据；完整身份往返、错误平台、畸形 ID、不存在资源和未知查询均使用统一响应。 |
-| `POST /v1/uni/playlists/imports` | `verified` | 一次接受 1–100 个有序来源，以 `ref+type` 或 `platform+type+id` 定位公开、账户可见或本地 Uni 歌单；`account` 逐来源可选，普通 `playlist` 为默认类型，provider 可扩展 `season/favorite_folder/favorite_tracks` 等可播放集合类型。逐来源完整翻页后按“来源顺序→来源内位置”合并，保留重复项、类型、来源引用、快照、来源索引和歌单级来源摘要，所有来源成功后才原子创建目标记录。已验证网易云与 QQ 公开来源、QQ 账户来源和本地 Uni 的跨来源合并、完整分页及重启恢复；非可播放的用户目录只用于选择具体歌单，不做无界展开。 |
+| `POST /v1/uni/playlists/imports` | `verified` | 一次接受 1–100 个有序来源，以 `ref+type` 或 `platform+type+id` 定位公开、账户可见或本地 Uni 歌单；`account` 逐来源可选，普通 `playlist` 为默认类型，provider 可扩展 `season/favorite_folder/favorite_tracks` 等可播放集合类型。逐来源完整翻页后按“来源顺序→来源内位置”合并，保留重复项、类型、来源引用、快照、来源索引和歌单级来源摘要，所有来源成功后才原子创建目标记录。已验证网易云与 QQ 公开来源、QQ 账户来源、本地 Uni，以及 B 站 `season/favorite_folder` 视频来源的跨来源合并、完整分页及重启恢复；B 站真实双来源按 617+98 原子写入 715 个视频项目。非可播放的用户目录只用于选择具体歌单，不做无界展开。 |
 | `GET /v1/uni/playlists/{ref}/items` | `verified` | 分页返回类型化项目、稳定项目 ID、零基位置和紧凑元数据快照；`limit=1..100/offset`、真实总数、续页、空列表、缺失歌单和未知查询均已测试，重复来源项不会被折叠。 |
 | `POST /v1/uni/playlists/{ref}/items` | `verified` | 一次原子追加 1–100 个 `track/mv/video/podcast_episode/radio_station`，逐项按来源 Provider 和分平台 `accounts` 解析真实快照，解析完成后才发布；错误平台/账户、`uni` 嵌套来源、空批次、未知字段、缺失目标和碰撞均有边界测试。歌曲重复项、MV、播客节目及广播电台的类型化快照和独立播放身份均已验收。 |
 | `DELETE /v1/uni/playlists/{ref}/items/{item_id}` | `verified` | 按某一次出现的稳定项目 ID 原子删除并重编号后续位置；同一来源的其他重复项保持独立，未知/畸形项目 ID、缺失歌单和未知查询均有测试，文件存储重启后保持删除结果。 |

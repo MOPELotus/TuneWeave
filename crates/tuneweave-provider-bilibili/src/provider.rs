@@ -304,6 +304,46 @@ impl MusicProvider for BilibiliProvider {
         }
     }
 
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        match source_type {
+            "playlist" => self.playlist(id, account).await,
+            "season" => {
+                let typed_id = bilibili_source_playlist_id(id, "season")?;
+                self.playlist(&typed_id, account).await
+            }
+            "favorite_folder" => {
+                let typed_id = bilibili_source_playlist_id(id, "favorite")?;
+                self.playlist(&typed_id, account).await
+            }
+            _ => Err(unsupported_bilibili_playlist_source_type(source_type)),
+        }
+    }
+
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        match source_type {
+            "playlist" => self.playlist_playable_items(id, request).await,
+            "season" => {
+                let typed_id = bilibili_source_playlist_id(id, "season")?;
+                self.playlist_playable_items(&typed_id, request).await
+            }
+            "favorite_folder" => {
+                let typed_id = bilibili_source_playlist_id(id, "favorite")?;
+                self.playlist_playable_items(&typed_id, request).await
+            }
+            _ => Err(unsupported_bilibili_playlist_source_type(source_type)),
+        }
+    }
+
     async fn user_created_playlists(
         &self,
         user_id: &str,
@@ -1138,6 +1178,21 @@ fn parse_bilibili_playlist_locator(value: &str) -> Result<BilibiliPlaylistLocato
 fn unsupported_bilibili_playlist_kind(kind: &str) -> TuneWeaveError {
     TuneWeaveError::unsupported(Platform::Bilibili, Capability::PlaylistRead)
         .with_details(json!({ "playlist_kind": kind }))
+}
+
+fn bilibili_source_playlist_id(id: &str, kind: &str) -> Result<String> {
+    let typed_id = format!("{kind}:{}", id.trim());
+    parse_bilibili_playlist_locator(&typed_id)?;
+    Ok(typed_id)
+}
+
+fn unsupported_bilibili_playlist_source_type(source_type: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::CapabilityNotSupported,
+        format!("Bilibili does not support playlist source type {source_type}"),
+    )
+    .with_platform(Platform::Bilibili)
+    .with_details(json!({ "source_type": source_type }))
 }
 
 fn bilibili_refresh_source(
@@ -2495,6 +2550,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn playlist_sources_require_supported_types_and_plain_numeric_ids() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let unsupported = provider
+            .playlist_source("1", "user_directory", None)
+            .await
+            .expect_err("unsupported source type");
+        assert_eq!(unsupported.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(unsupported.details["source_type"], "user_directory");
+        for (id, source_type) in [
+            ("season:3629748", "season"),
+            ("03629748", "season"),
+            ("favorite:2883236382", "favorite_folder"),
+            ("0", "favorite_folder"),
+        ] {
+            let error = provider
+                .playlist_source(id, source_type, None)
+                .await
+                .expect_err("invalid source ID");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
     #[test]
     fn season_archive_maps_to_typed_video_and_track_compatibility_view() {
         let archive = BilibiliSeasonArchive {
@@ -2870,6 +2948,54 @@ mod tests {
             .expect("page after an upstream pagination gap");
         assert_eq!(gap_page.items.len(), 5);
         assert_eq!(gap_page.pagination.next_offset, Some(45));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili playlist access"]
+    async fn live_uni_sources_traverse_complete_season_and_favorite_folder() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        for (id, source_type, expected_total) in [
+            ("3629748", "season", 617_u64),
+            ("2883236382", "favorite_folder", 99_u64),
+        ] {
+            let playlist = provider
+                .playlist_source(id, source_type, None)
+                .await
+                .expect("live playlist source");
+            assert_eq!(playlist.track_count, Some(expected_total));
+            let mut offset = 0;
+            let mut returned = 0_u64;
+            loop {
+                let page = provider
+                    .playlist_source_items(
+                        id,
+                        source_type,
+                        &tuneweave_core::PageRequest::new(100, offset),
+                    )
+                    .await
+                    .expect("live playlist source items");
+                assert!(
+                    page.items
+                        .iter()
+                        .all(|item| matches!(item, PlaylistPlayableItem::Video(_)))
+                );
+                returned += page.items.len() as u64;
+                if !page.pagination.has_more {
+                    break;
+                }
+                offset = page
+                    .pagination
+                    .next_offset
+                    .expect("continuing source page has next offset");
+            }
+            assert!(returned <= expected_total);
+            assert!(returned > 0);
+            if source_type == "season" {
+                assert_eq!(returned, expected_total);
+            } else {
+                assert_eq!(returned, 98);
+            }
+        }
     }
 
     #[tokio::test]
