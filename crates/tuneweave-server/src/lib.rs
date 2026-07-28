@@ -12778,10 +12778,16 @@ fn parse_account_dislike_mutation_ids(
 async fn account_dislikes(
     State(state): State<AppState>,
     params: Result<Query<AccountDislikeParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<AccountDislikeList>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let kind = parse_account_dislike_kind(
         params.kind.as_deref(),
         params.resource_type.as_deref(),
@@ -12792,94 +12798,96 @@ async fn account_dislikes(
         return Err(TuneWeaveError::invalid_request("page must be between 1 and 1000000").into());
     }
     let cursor = parse_account_dislike_cursor(params.cursor.as_deref(), params.last_id.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let list = provider
+    let list = access
+        .provider
         .account_dislikes(&AccountDislikeListRequest {
             kind,
             page,
             cursor,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(list)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(list, platform)))
 }
 
 async fn account_dislikes_add(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AccountDislikeMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
     let body = json_body(payload)?;
     let platform = account_platform(&state, body.platform.as_deref())?;
-    let account = account_alias(body.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let kind = parse_account_dislike_mutation_kind(
         body.kind.as_ref(),
         body.resource_type.as_ref(),
         body.id_type.as_ref(),
     )?;
     let ids = parse_account_dislike_mutation_ids(body.ids, body.values)?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let result = access
+        .provider
         .add_account_dislikes(&AccountDislikeMutationRequest {
             kind,
             ids,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn account_dislikes_remove(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AccountDislikeMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
     let body = json_body(payload)?;
     let platform = account_platform(&state, body.platform.as_deref())?;
-    let account = account_alias(body.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let kind = parse_account_dislike_mutation_kind(
         body.kind.as_ref(),
         body.resource_type.as_ref(),
         body.id_type.as_ref(),
     )?;
     let ids = parse_account_dislike_mutation_ids(body.ids, body.values)?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let result = access
+        .provider
         .remove_account_dislikes(&AccountDislikeMutationRequest {
             kind,
             ids,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn account_dislike_tracks_clear(
     State(state): State<AppState>,
     params: Result<Query<AccountDislikeClearParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<AccountDislikeMutationResult>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
-        .clear_account_dislike_tracks(Some(&account))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
+        .clear_account_dislike_tracks(Some(access.required_account()))
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -30582,6 +30590,92 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(response["error"]["code"], "invalid_request");
         }
+    }
+
+    #[tokio::test]
+    async fn account_dislikes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-dislike-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, list) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/dislikes?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["data"]["items"][0]["extensions"]["account"], "default");
+        assert!(list["meta"].get("account").is_none());
+
+        for (method, expected_action) in [(Method::POST, "add"), (Method::DELETE, "remove")] {
+            let (status, result) = caller_json_request(
+                app.clone(),
+                method,
+                "/v1/account/dislikes",
+                Some(json!({
+                    "platform": "netease",
+                    "kind": "track",
+                    "ids": [398282803]
+                })),
+                &credential,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{expected_action}");
+            assert_eq!(result["data"]["action"], expected_action);
+            assert_eq!(result["data"]["extensions"]["account"], "default");
+            assert!(result["meta"].get("account").is_none());
+        }
+
+        let (status, cleared) = caller_json_request(
+            app.clone(),
+            Method::DELETE,
+            "/v1/account/dislikes/tracks?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cleared["data"]["action"], "clear");
+        assert_eq!(cleared["data"]["extensions"]["account"], "default");
+        assert!(cleared["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/dislikes?platform=netease&account=personal",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::POST,
+            "/v1/account/dislikes",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "kind": "track",
+                "ids": [398282803]
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
