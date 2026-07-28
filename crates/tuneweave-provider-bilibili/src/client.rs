@@ -49,6 +49,7 @@ const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const FAVORITE_FOLDER_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/folder/info";
+const FAVORITE_FOLDER_MEDIA_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/resource/list";
 const COLLECTED_PLAYLISTS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/collected/list";
 const SPACE_PLAYLISTS_ENDPOINT: &str =
@@ -63,6 +64,7 @@ const COLLECTED_PLAYLIST_PAGE_SIZE: u32 = 70;
 const SPACE_PLAYLIST_PAGE_SIZE: u32 = 20;
 const SPACE_PLAYLIST_WEB_LOCATION: &str = "333.999";
 const SEASON_ARCHIVE_PAGE_SIZE: u32 = 30;
+const FAVORITE_MEDIA_PAGE_SIZE: u32 = 20;
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -273,6 +275,35 @@ pub(crate) struct BilibiliFavoriteFolderCounts {
     pub play: u64,
     pub thumb_up: u64,
     pub share: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliFavoriteMediaPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub has_more: bool,
+    pub folder: BilibiliFavoriteFolder,
+    pub medias: Vec<BilibiliFavoriteMedia>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliFavoriteMedia {
+    pub aid: u64,
+    pub bvid: Option<String>,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub description: String,
+    pub part_count: u64,
+    pub duration_seconds: u64,
+    pub owner: Option<BilibiliCollectedPlaylistOwner>,
+    pub invalid: bool,
+    pub collect_count: u64,
+    pub play_count: u64,
+    pub danmaku_count: u64,
+    pub created_at: u64,
+    pub published_at: u64,
+    pub favorited_at: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -836,6 +867,55 @@ struct FavoriteFolderCounts {
     thumb_up: u64,
     #[serde(default)]
     share: u64,
+}
+
+#[derive(Deserialize)]
+struct FavoriteMediaData {
+    info: FavoriteFolderData,
+    #[serde(default)]
+    medias: Option<Vec<FavoriteMediaItem>>,
+    has_more: bool,
+}
+
+#[derive(Deserialize)]
+struct FavoriteMediaItem {
+    id: u64,
+    #[serde(rename = "type")]
+    kind: u64,
+    title: String,
+    #[serde(default)]
+    cover: String,
+    #[serde(default)]
+    intro: String,
+    #[serde(default)]
+    page: u64,
+    #[serde(default)]
+    duration: u64,
+    #[serde(default)]
+    upper: Option<CollectedPlaylistOwner>,
+    attr: u64,
+    #[serde(default)]
+    cnt_info: FavoriteMediaCounts,
+    #[serde(default)]
+    ctime: u64,
+    #[serde(default)]
+    pubtime: u64,
+    #[serde(default)]
+    fav_time: u64,
+    #[serde(default)]
+    bv_id: String,
+    #[serde(default)]
+    bvid: String,
+}
+
+#[derive(Default, Deserialize)]
+struct FavoriteMediaCounts {
+    #[serde(default)]
+    collect: u64,
+    #[serde(default)]
+    play: u64,
+    #[serde(default)]
+    danmaku: u64,
 }
 
 #[derive(Deserialize)]
@@ -1563,6 +1643,47 @@ impl BilibiliClient {
             ));
         }
         parse_favorite_folder_response(&bytes, media_id)
+    }
+
+    pub(crate) async fn favorite_media_page(
+        &self,
+        media_id: u64,
+        page: u32,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliFavoriteMediaPage> {
+        if media_id == 0 || page == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili favorite folder media ID and page must be positive",
+            ));
+        }
+        let mut endpoint = Url::parse(FAVORITE_FOLDER_MEDIA_ENDPOINT)
+            .map_err(|_| bilibili_internal_error("Bilibili favorite media endpoint is invalid"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("media_id", &media_id.to_string())
+            .append_pair("pn", &page.to_string())
+            .append_pair("ps", &FAVORITE_MEDIA_PAGE_SIZE.to_string())
+            .append_pair("order", "mtime")
+            .append_pair("type", "0")
+            .append_pair("tid", "0")
+            .append_pair("keyword", "")
+            .append_pair("platform", "web");
+        let mut request = self.http.get(endpoint).header(REFERER, WEB_REFERER);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili favorite media", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili favorite media response exceeded the size limit",
+            ));
+        }
+        parse_favorite_media_response(&bytes, media_id, page, FAVORITE_MEDIA_PAGE_SIZE)
     }
 
     pub(crate) async fn collected_playlists_page(
@@ -2312,6 +2433,13 @@ fn parse_favorite_folder_response(
     let data = response.data.ok_or_else(|| {
         bilibili_upstream_error("Bilibili favorite folder response did not contain data")
     })?;
+    map_favorite_folder_data(data, requested_media_id)
+}
+
+fn map_favorite_folder_data(
+    data: FavoriteFolderData,
+    requested_media_id: u64,
+) -> Result<BilibiliFavoriteFolder> {
     let expected_media_id = data
         .fid
         .checked_mul(100)
@@ -2376,6 +2504,151 @@ fn parse_favorite_folder_response(
             thumb_up: data.cnt_info.thumb_up,
             share: data.cnt_info.share,
         },
+    })
+}
+
+fn parse_favorite_media_response(
+    bytes: &[u8],
+    requested_media_id: u64,
+    requested_page: u32,
+    requested_page_size: u32,
+) -> Result<BilibiliFavoriteMediaPage> {
+    let response: PassportResponse<FavoriteMediaData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili favorite media returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili favorite media",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili favorite media response did not contain data")
+    })?;
+    let folder = map_favorite_folder_data(data.info, requested_media_id)?;
+    if requested_page == 0 || requested_page_size != FAVORITE_MEDIA_PAGE_SIZE {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media returned invalid pagination",
+        ));
+    }
+    let items = data.medias.unwrap_or_default();
+    if items.len() > requested_page_size as usize {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media page exceeded the requested size",
+        ));
+    }
+    let page_start = u64::from(requested_page - 1) * u64::from(requested_page_size);
+    let page_end = page_start
+        .checked_add(items.len() as u64)
+        .ok_or_else(|| bilibili_upstream_error("Bilibili favorite media page overflowed"))?;
+    if page_end > folder.media_count
+        || (page_start < folder.media_count && items.is_empty())
+        || data.has_more != (page_end < folder.media_count)
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media continuation was inconsistent",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let mut medias = Vec::with_capacity(items.len());
+    for item in items {
+        let media = map_favorite_media(item)?;
+        if !identities.insert(media.aid) {
+            return Err(bilibili_upstream_error(
+                "Bilibili favorite media page contained duplicate identities",
+            ));
+        }
+        medias.push(media);
+    }
+    Ok(BilibiliFavoriteMediaPage {
+        page: requested_page,
+        page_size: requested_page_size,
+        total: folder.media_count,
+        has_more: data.has_more,
+        folder,
+        medias,
+    })
+}
+
+fn map_favorite_media(item: FavoriteMediaItem) -> Result<BilibiliFavoriteMedia> {
+    if item.id == 0 || item.kind != 2 || item.page > 100_000 {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media returned an unsupported type or identity",
+        ));
+    }
+    let invalid = match item.attr {
+        0 => false,
+        1 | 9 => true,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili favorite media returned an invalid state",
+            ));
+        }
+    };
+    let raw_bvid = [item.bvid.trim(), item.bv_id.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    if raw_bvid.len() > 1 {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media returned conflicting BVIDs",
+        ));
+    }
+    let bvid = raw_bvid
+        .into_iter()
+        .next()
+        .map(|value| {
+            match crate::BilibiliVideoIdentity::parse(value).map_err(|_| {
+                bilibili_upstream_error("Bilibili favorite media returned an invalid BVID")
+            })? {
+                crate::BilibiliVideoIdentity::Bvid(value) => Ok(value),
+                _ => unreachable!("BVID parser returned another identity type"),
+            }
+        })
+        .transpose()?;
+    if !invalid && (bvid.is_none() || item.page == 0) {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite media omitted a playable video identity",
+        ));
+    }
+    let owner = match item.upper {
+        Some(owner) if owner.mid > 0 && !owner.name.trim().is_empty() => {
+            Some(BilibiliCollectedPlaylistOwner {
+                id: owner.mid,
+                name: validated_bilibili_text(&owner.name, "favorite media owner name", 512)?,
+                avatar_url: normalize_bilibili_image_url(
+                    &owner.face,
+                    "favorite media owner avatar",
+                )?,
+            })
+        }
+        Some(_) | None if invalid => None,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili favorite media omitted its owner",
+            ));
+        }
+    };
+    Ok(BilibiliFavoriteMedia {
+        aid: item.id,
+        bvid,
+        title: validated_bilibili_text(&item.title, "favorite media title", 4096)?,
+        cover_url: normalize_bilibili_image_url(&item.cover, "favorite media cover")?,
+        description: validated_bilibili_multiline_text(
+            &item.intro,
+            "favorite media description",
+            64 * 1024,
+        )?,
+        part_count: item.page,
+        duration_seconds: item.duration,
+        owner,
+        invalid,
+        collect_count: item.cnt_info.collect,
+        play_count: item.cnt_info.play,
+        danmaku_count: item.cnt_info.danmaku,
+        created_at: item.ctime,
+        published_at: item.pubtime,
+        favorited_at: item.fav_time,
     })
 }
 

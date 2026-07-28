@@ -2,7 +2,7 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`deferred` 已明确保留但按路线移出当前主线，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=13`、`deferred=5`、`partial=0`、`implemented=6`、`verified=10`；全量完整实现率为 `16/34 = 47.06%`，排除延期登录链后的当前主线完成度为 `16/29 = 55.17%`。
+状态沿用其他平台账本：`pending` 尚未实现，`deferred` 已明确保留但按路线移出当前主线，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=12`、`deferred=5`、`partial=0`、`implemented=6`、`verified=11`；全量完整实现率为 `17/34 = 50.00%`，排除延期登录链后的当前主线完成度为 `17/29 = 58.62%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
@@ -31,7 +31,7 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BP04 | 列表与 Uni | 公开合集详情 | `verified` | `GET /v1/playlists/bilibili:season:<season_id>` 以强类型显式拒绝无类型、零值、前导零和未知列表身份，固定调用现行 WBI `x/polymer/web-space/seasons_archives_list`；请求使用平台允许的 `mid=0` 解析真实所有者，因此直接引用不要求调用方重复提供 owner mid。响应交叉校验 `season_id`、所有者、meta/page 总数、AID 顺序、BVID、分页、状态、付费与播放位置，并将首屏档案与合集封面、简介、类别、发布时间和数量共同映射为稳定 Playlist；精确账户和调用方凭证继续可选且隔离。需求样例 `season:3629748` 已真实解析出 owner `327961371`、总数 617 和 30 项首屏 |
 | BP05 | 列表与 Uni | 公开合集视频分页 | `verified` | `GET /v1/playlists/bilibili:season:<season_id>/items` 复用现行 WBI 合集档案协议，以强类型 `VideoDetail` 保留视频身份；`/tracks` 提供面向纯音乐客户端的兼容视图并显式标记 `normalized_from_video`，不会影响 Uni 导入时的视频类型。任意 `offset/limit` 可跨上游固定 30 项页，遍历期间校验总数、合集、所有者和重复 AID/BVID，结果保留顺序、封面、时长、发布时间、互动/付费/状态、播放位置、播放及弹幕数；详情尚未解析的简介、UP 主昵称、分 P/CID 和清晰度不会伪造。需求样例 `season:3629748` 已真实验证从 offset 28 取 5 项跨两页，返回总数 617、下一偏移 33 和 5 个稳定 BV 视频引用 |
 | BP06 | 列表与 Uni | 收藏夹详情 | `verified` | `GET /v1/playlists/bilibili:favorite:<media_id>` 固定调用 `x/v3/fav/folder/info`，公开收藏夹默认匿名，私有内容只附带明确选择的服务器账户或调用方凭证。强类型响应交叉验证请求 `media_id`、原始 `fid`、owner mid 及平台完整 ID 关系，只接受视频收藏夹类型和已知二值状态；统一 Playlist 保留创建者昵称/头像/关注及 VIP 状态、封面、简介、创建/更新时间、属性位、默认/私有、收藏/点赞/置顶/失效状态、视频数和收藏/播放/点赞/分享统计。`-403` 与 `11010` 分别映射权限不足和资源不存在，不能伪装为空。需求样例 `favorite:2883236382` 已匿名真实验证出 `fid=28832363`、owner `47275982` 和 99 项 |
-| BP07 | 列表与 Uni | 收藏夹视频分页 | `pending` | `x/v3/fav/resource/list`；处理失效条目、多 P 视频、公开/私有权限及完整分页 |
+| BP07 | 列表与 Uni | 收藏夹视频分页 | `verified` | `GET /v1/playlists/bilibili:favorite:<media_id>/items` 固定调用 `x/v3/fav/resource/list`，固定当前收藏夹、全部分区、收藏时间顺序和 Web 类型；`/items` 返回强类型视频，`/tracks` 只提供带 `normalized_from_video` 的音乐客户端兼容视图。结果保留 AID/BVID、标题、封面、简介、UP 主、时长、分 P 数、失效状态、收藏/播放/弹幕计数及投稿/发布/收藏时间；失效视频仍保留可诊断身份但标记不可播放。统一 `offset/limit` 可跨上游 20 项页，并按上游原始坐标计算下一偏移：平台可能在仍有下一页时少返回一项，形成被过滤内容的分页空洞，不能误报失败或用 `offset+count` 造成重复。需求样例 `favorite:2883236382` 已真实验证 99 项、offset 18 跨页取 5 项，以及空洞 offset 39 后正确返回 `next_offset=45`；匿名公开与精确账户权限沿用 BP06 |
 | BP08 | 列表与 Uni | 合集与收藏夹导入 Uni Playlist | `pending` | `type=season/favorite_folder` 均完整遍历分页并原子导入；覆盖需求样例 `season:3629748` 与 `favorite:2883236382`，视频保存为可播放项目而非伪造歌曲 |
 | BV01 | 视频展示 | 视频详情与封面 | `pending` | 统一 `VideoDetail` 保留标题、简介、封面、UP 主、发布时间、AID/BVID、状态与可用清晰度 |
 | BV02 | 视频展示 | 分 P 目录 | `pending` | `GET /v1/videos/{ref}/parts` 返回稳定 CID、页码、标题、尺寸与时长；多 P 不默认丢弃非首 P |

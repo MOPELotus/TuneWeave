@@ -16,10 +16,10 @@ use crate::client::{
     BilibiliClient, BilibiliCollectedPlaylist, BilibiliCollectedPlaylistKind,
     BilibiliCollectedPlaylistPage, BilibiliConfig, BilibiliCreatedFavoriteFolder,
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
-    BilibiliFavoriteFolder, BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo,
-    BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
-    BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
-    BilibiliVideoSearchOrder,
+    BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome, BilibiliQrPoll,
+    BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist,
+    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration,
+    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -253,8 +253,15 @@ impl MusicProvider for BilibiliProvider {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Page { items, pagination })
             }
-            BilibiliPlaylistLocator::FavoriteFolder(_) => {
-                Err(unsupported_bilibili_playlist_kind("favorite"))
+            BilibiliPlaylistLocator::FavoriteFolder(media_id) => {
+                let (medias, pagination) = self
+                    .favorite_media_window(media_id, request, credential.as_ref())
+                    .await?;
+                let items = medias
+                    .into_iter()
+                    .map(|media| map_favorite_media_track(media, media_id))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Page { items, pagination })
             }
             BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
         }
@@ -281,8 +288,17 @@ impl MusicProvider for BilibiliProvider {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Page { items, pagination })
             }
-            BilibiliPlaylistLocator::FavoriteFolder(_) => {
-                Err(unsupported_bilibili_playlist_kind("favorite"))
+            BilibiliPlaylistLocator::FavoriteFolder(media_id) => {
+                let (medias, pagination) = self
+                    .favorite_media_window(media_id, request, credential.as_ref())
+                    .await?;
+                let items = medias
+                    .into_iter()
+                    .map(|media| {
+                        map_favorite_media_video(media, media_id).map(PlaylistPlayableItem::Video)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Page { items, pagination })
             }
             BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
         }
@@ -618,6 +634,98 @@ impl MusicProvider for BilibiliProvider {
 }
 
 impl BilibiliProvider {
+    async fn favorite_media_window(
+        &self,
+        media_id: u64,
+        request: &PageRequest,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<(Vec<BilibiliFavoriteMedia>, PageMeta)> {
+        const UPSTREAM_PAGE_SIZE: u32 = 20;
+        if !(1..=100).contains(&request.limit) {
+            return Err(bilibili_invalid_request(
+                "Bilibili playlist limit must be between 1 and 100",
+            ));
+        }
+        let first_page = request.offset / UPSTREAM_PAGE_SIZE + 1;
+        let first_skip = (request.offset % UPSTREAM_PAGE_SIZE) as usize;
+        let mut current_page = first_page;
+        let mut total = None;
+        let mut owner_id = None;
+        let mut fetched_pages = 0_u32;
+        let mut identities = BTreeSet::new();
+        let mut medias = Vec::with_capacity(request.limit as usize);
+        let mut next_cursor = request.offset;
+        while medias.len() < request.limit as usize {
+            let page = self
+                .client
+                .favorite_media_page(media_id, current_page, credential)
+                .await?;
+            if page.page != current_page
+                || page.page_size != UPSTREAM_PAGE_SIZE
+                || page.folder.media_id != media_id
+                || page.folder.media_count != page.total
+                || total.is_some_and(|expected| expected != page.total)
+                || owner_id.is_some_and(|expected| expected != page.folder.owner.id)
+            {
+                return Err(bilibili_data_error(
+                    "Bilibili favorite media pagination changed during traversal",
+                ));
+            }
+            total.get_or_insert(page.total);
+            owner_id.get_or_insert(page.folder.owner.id);
+            fetched_pages = fetched_pages.saturating_add(1);
+            let skip = if current_page == first_page {
+                first_skip
+            } else {
+                0
+            };
+            for (index, media) in page.medias.into_iter().enumerate().skip(skip) {
+                if medias.len() == request.limit as usize {
+                    break;
+                }
+                if !identities.insert(media.aid) {
+                    return Err(bilibili_data_error(
+                        "Bilibili favorite media traversal returned a duplicate identity",
+                    ));
+                }
+                medias.push(media);
+                let page_start = (current_page - 1).saturating_mul(UPSTREAM_PAGE_SIZE);
+                next_cursor = page_start
+                    .saturating_add(u32::try_from(index).unwrap_or(u32::MAX))
+                    .saturating_add(1);
+            }
+            if medias.len() == request.limit as usize || !page.has_more {
+                break;
+            }
+            next_cursor = current_page.saturating_mul(UPSTREAM_PAGE_SIZE);
+            current_page = current_page
+                .checked_add(1)
+                .ok_or_else(|| bilibili_data_error("Bilibili favorite media page overflowed"))?;
+        }
+        let total = total.unwrap_or_default();
+        let returned = u32::try_from(medias.len())
+            .map_err(|_| bilibili_data_error("Bilibili favorite media page overflowed"))?;
+        let has_more = returned > 0 && u64::from(next_cursor) < total;
+        Ok((
+            medias,
+            PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: Some(total),
+                next_offset: has_more.then_some(next_cursor),
+                has_more,
+                extensions: Extensions::from([
+                    ("collection_kind".to_owned(), json!("favorite_folder")),
+                    ("media_id".to_owned(), json!(media_id)),
+                    ("owner_mid".to_owned(), json!(owner_id)),
+                    ("media_type".to_owned(), json!("video")),
+                    ("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE)),
+                    ("upstream_pages_fetched".to_owned(), json!(fetched_pages)),
+                ]),
+            },
+        ))
+    }
+
     async fn season_archive_window(
         &self,
         season_id: u64,
@@ -1296,6 +1404,148 @@ fn map_season_archive_video(
             ("resolutions_resolved".to_owned(), json!(false)),
         ]),
     })
+}
+
+fn map_favorite_media_track(media: BilibiliFavoriteMedia, media_id: u64) -> Result<Track> {
+    let resource_ref = favorite_media_ref(&media)?;
+    let duration_ms = media
+        .duration_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| bilibili_data_error("Bilibili favorite media duration overflowed"))?;
+    let artists = media
+        .owner
+        .as_ref()
+        .map(favorite_media_artist)
+        .transpose()?
+        .into_iter()
+        .collect();
+    let mut extensions = favorite_media_extensions(&media, media_id, &resource_ref);
+    extensions.insert("normalized_from_video".to_owned(), json!(true));
+    Ok(Track {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id: media
+            .bvid
+            .clone()
+            .unwrap_or_else(|| format!("aid:{}", media.aid)),
+        name: media.title,
+        aliases: Vec::new(),
+        artists,
+        album: None,
+        duration_ms: Some(duration_ms),
+        isrc: None,
+        mv_ref: None,
+        playable: Some(!media.invalid),
+        available_qualities: Vec::new(),
+        extensions,
+    })
+}
+
+fn map_favorite_media_video(media: BilibiliFavoriteMedia, media_id: u64) -> Result<VideoDetail> {
+    let resource_ref = favorite_media_ref(&media)?;
+    let duration_ms = media
+        .duration_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| bilibili_data_error("Bilibili favorite media duration overflowed"))?;
+    let creators = media
+        .owner
+        .as_ref()
+        .map(favorite_media_creator)
+        .transpose()?
+        .into_iter()
+        .collect();
+    let extensions = favorite_media_extensions(&media, media_id, &resource_ref);
+    let video = Video {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id: media
+            .bvid
+            .clone()
+            .unwrap_or_else(|| format!("aid:{}", media.aid)),
+        title: media.title,
+        creators,
+        description: media.description,
+        cover_url: media.cover_url,
+        duration_ms: Some(duration_ms),
+        published_at: (media.published_at > 0)
+            .then(|| bilibili_unix_rfc3339(media.published_at))
+            .flatten(),
+        play_count: Some(media.play_count),
+        subscribed: None,
+        extensions,
+    };
+    Ok(VideoDetail {
+        kind: VideoResourceKind::Video,
+        video,
+        resolutions: Vec::new(),
+        extensions: Extensions::from([
+            ("detail_source".to_owned(), json!("favorite_media")),
+            ("summary_only".to_owned(), json!(true)),
+            ("resolutions_resolved".to_owned(), json!(false)),
+        ]),
+    })
+}
+
+fn favorite_media_ref(media: &BilibiliFavoriteMedia) -> Result<ResourceRef> {
+    match &media.bvid {
+        Some(bvid) => ResourceRef::new(Platform::Bilibili, bvid),
+        None => ResourceRef::new(Platform::Bilibili, format!("aid:{}", media.aid)),
+    }
+    .map_err(|_| bilibili_data_error("Bilibili favorite media identity was invalid"))
+}
+
+fn favorite_media_artist(
+    owner: &crate::client::BilibiliCollectedPlaylistOwner,
+) -> Result<ArtistSummary> {
+    let resource_ref = ResourceRef::new(Platform::Bilibili, format!("user:{}", owner.id))
+        .map_err(|_| bilibili_data_error("Bilibili favorite media owner was invalid"))?;
+    Ok(ArtistSummary {
+        resource_ref: Some(resource_ref),
+        name: owner.name.clone(),
+    })
+}
+
+fn favorite_media_creator(
+    owner: &crate::client::BilibiliCollectedPlaylistOwner,
+) -> Result<CreatorSummary> {
+    let artist = favorite_media_artist(owner)?;
+    Ok(CreatorSummary {
+        resource_ref: artist.resource_ref,
+        name: artist.name,
+        avatar_url: owner.avatar_url.clone(),
+    })
+}
+
+fn favorite_media_extensions(
+    media: &BilibiliFavoriteMedia,
+    media_id: u64,
+    video_ref: &ResourceRef,
+) -> Extensions {
+    let mut extensions = Extensions::from([
+        ("video_ref".to_owned(), json!(video_ref)),
+        (
+            "bilibili_playlist_kind".to_owned(),
+            json!("favorite_folder"),
+        ),
+        ("media_id".to_owned(), json!(media_id)),
+        ("aid".to_owned(), json!(media.aid)),
+        ("invalid".to_owned(), json!(media.invalid)),
+        ("part_count".to_owned(), json!(media.part_count)),
+        ("collect_count".to_owned(), json!(media.collect_count)),
+        ("play_count".to_owned(), json!(media.play_count)),
+        ("danmaku_count".to_owned(), json!(media.danmaku_count)),
+    ]);
+    insert_optional(&mut extensions, "bvid", media.bvid.clone());
+    if media.created_at > 0 {
+        extensions.insert("ctime".to_owned(), json!(media.created_at));
+    }
+    if media.published_at > 0 {
+        extensions.insert("pubtime".to_owned(), json!(media.published_at));
+    }
+    if media.favorited_at > 0 {
+        extensions.insert("fav_time".to_owned(), json!(media.favorited_at));
+    }
+    extensions
 }
 
 fn bilibili_archive_ref(bvid: &str) -> Result<ResourceRef> {
@@ -2356,17 +2606,17 @@ mod tests {
     async fn playlist_items_validate_kind_limit_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
         let unsupported = provider
-            .playlist_playable_items(
-                "favorite:2883236382",
-                &tuneweave_core::PageRequest::new(30, 0),
-            )
+            .playlist_playable_items("series:3908327", &tuneweave_core::PageRequest::new(30, 0))
             .await
-            .expect_err("favorite items are not implemented yet");
+            .expect_err("series items are not implemented yet");
         assert_eq!(unsupported.code, ErrorCode::CapabilityNotSupported);
-        assert_eq!(unsupported.details["playlist_kind"], "favorite");
+        assert_eq!(unsupported.details["playlist_kind"], "series");
 
         let invalid_limit = provider
-            .playlist_tracks("season:3629748", &tuneweave_core::PageRequest::new(0, 0))
+            .playlist_tracks(
+                "favorite:2883236382",
+                &tuneweave_core::PageRequest::new(0, 0),
+            )
             .await
             .expect_err("zero limit");
         assert_eq!(invalid_limit.code, ErrorCode::InvalidRequest);
@@ -2584,6 +2834,42 @@ mod tests {
         assert_eq!(playlist.track_count, Some(99));
         assert_eq!(playlist.extensions["owner_mid"], 47_275_982);
         assert_eq!(playlist.extensions["fid"], 28_832_363);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili favorite folder access"]
+    async fn live_favorite_video_page_crosses_upstream_boundary() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let page = provider
+            .playlist_playable_items(
+                "favorite:2883236382",
+                &tuneweave_core::PageRequest::new(5, 18),
+            )
+            .await
+            .expect("live public favorite videos");
+        assert_eq!(page.items.len(), 5);
+        assert_eq!(page.pagination.offset, 18);
+        assert_eq!(page.pagination.total, Some(99));
+        assert_eq!(page.pagination.next_offset, Some(23));
+        assert_eq!(page.pagination.extensions["upstream_pages_fetched"], 2);
+        assert!(page.items.iter().all(|item| {
+            matches!(
+            item,
+            PlaylistPlayableItem::Video(detail)
+                if detail.video.resource_ref.platform() == Platform::Bilibili
+                    && detail.video.extensions["media_id"] == 2_883_236_382_u64
+            )
+        }));
+
+        let gap_page = provider
+            .playlist_playable_items(
+                "favorite:2883236382",
+                &tuneweave_core::PageRequest::new(5, 39),
+            )
+            .await
+            .expect("page after an upstream pagination gap");
+        assert_eq!(gap_page.items.len(), 5);
+        assert_eq!(gap_page.pagination.next_offset, Some(45));
     }
 
     #[tokio::test]
