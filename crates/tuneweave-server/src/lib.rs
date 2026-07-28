@@ -13,7 +13,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{BytesRejection, JsonRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
@@ -576,7 +576,31 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos/{reference}/parts", get(video_parts))
         .route("/videos/{reference}/playback", get(video_playback_manifest))
         .route("/videos/{reference}/audio-stream", get(video_audio_stream))
+        .route(
+            "/videos/{reference}/audio-stream/redirect",
+            get(video_audio_stream_redirect),
+        )
+        .route(
+            "/videos/{reference}/audio-download",
+            get(video_audio_stream),
+        )
+        .route(
+            "/videos/{reference}/audio-download/redirect",
+            get(video_audio_stream_redirect),
+        )
         .route("/videos/{reference}/video-stream", get(video_track_stream))
+        .route(
+            "/videos/{reference}/video-stream/redirect",
+            get(video_track_stream_redirect),
+        )
+        .route(
+            "/videos/{reference}/video-download",
+            get(video_track_stream),
+        )
+        .route(
+            "/videos/{reference}/video-download/redirect",
+            get(video_track_stream_redirect),
+        )
         .route(
             "/videos/{reference}/subtitles/{subtitle}",
             get(video_subtitle),
@@ -5127,7 +5151,16 @@ async fn track_download_redirect(
 }
 
 fn download_redirect_response(url: &str) -> Response {
-    (StatusCode::FOUND, [(header::LOCATION, url.to_owned())]).into_response()
+    let mut response = (StatusCode::FOUND, [(header::LOCATION, url.to_owned())]).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9239,6 +9272,17 @@ async fn video_audio_stream(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<VideoAudioStream>>, ApiError> {
     let params = query_params(params)?;
+    let (platform, access, stream) =
+        resolve_video_audio_stream(&state, &headers, reference, params).await?;
+    Ok(Json(access.response(stream, platform)))
+}
+
+async fn resolve_video_audio_stream(
+    state: &AppState,
+    headers: &HeaderMap,
+    reference: String,
+    params: VideoAudioStreamParams,
+) -> Result<(Platform, ProviderAccess, VideoAudioStream), ApiError> {
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
@@ -9276,8 +9320,8 @@ async fn video_audio_stream(
         })
         .transpose()?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
-        &state,
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
         platform,
         account.as_deref(),
         AccountSelection::Optional,
@@ -9291,7 +9335,23 @@ async fn video_audio_stream(
         .provider
         .video_audio_stream(reference.id(), &request)
         .await?;
-    Ok(Json(access.response(stream, platform)))
+    Ok((platform, access, stream))
+}
+
+async fn video_audio_stream_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoAudioStreamParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let (platform, _, stream) =
+        resolve_video_audio_stream(&state, &headers, reference, params).await?;
+    video_media_redirect(
+        stream.url.as_deref(),
+        platform,
+        "video audio stream is unavailable",
+    )
 }
 
 async fn video_track_stream(
@@ -9301,6 +9361,17 @@ async fn video_track_stream(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<VideoTrackStream>>, ApiError> {
     let params = query_params(params)?;
+    let (platform, access, stream) =
+        resolve_video_track_stream(&state, &headers, reference, params).await?;
+    Ok(Json(access.response(stream, platform)))
+}
+
+async fn resolve_video_track_stream(
+    state: &AppState,
+    headers: &HeaderMap,
+    reference: String,
+    params: VideoTrackStreamParams,
+) -> Result<(Platform, ProviderAccess, VideoTrackStream), ApiError> {
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
@@ -9319,8 +9390,8 @@ async fn video_track_stream(
         .map(parse_video_codec_family)
         .transpose()?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
-        &state,
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
         platform,
         account.as_deref(),
         AccountSelection::Optional,
@@ -9333,7 +9404,35 @@ async fn video_track_stream(
         .provider
         .video_track_stream(reference.id(), &request)
         .await?;
-    Ok(Json(access.response(stream, platform)))
+    Ok((platform, access, stream))
+}
+
+async fn video_track_stream_redirect(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoTrackStreamParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let (platform, _, stream) =
+        resolve_video_track_stream(&state, &headers, reference, params).await?;
+    video_media_redirect(
+        stream.url.as_deref(),
+        platform,
+        "video track stream is unavailable",
+    )
+}
+
+fn video_media_redirect(
+    url: Option<&str>,
+    platform: Platform,
+    unavailable_message: &str,
+) -> Result<Response, ApiError> {
+    url.map(download_redirect_response).ok_or_else(|| {
+        TuneWeaveError::new(ErrorCode::ResourceNotFound, unavailable_message)
+            .with_platform(platform)
+            .into()
+    })
 }
 
 async fn video_details_get(
@@ -9680,7 +9779,12 @@ async fn video_stream_redirect(
     Err(
         TuneWeaveError::new(ErrorCode::ResourceNotFound, "video stream is unavailable")
             .with_platform(platform)
-            .with_details(json!({ "stream": stream }))
+            .with_details(json!({
+                "video_ref": stream.video_ref,
+                "requested_resolution": stream.requested_resolution,
+                "actual_resolution": stream.actual_resolution,
+                "message": stream.message
+            }))
             .into(),
     )
 }
@@ -26983,6 +27087,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_track_download_aliases_and_media_redirects_preserve_selection() {
+        let reference = "netease:D1C2B3A40987654321ABCDEF12345678";
+        for path in [
+            format!("/v1/videos/{reference}/audio-download?quality=high&codec=aac"),
+            format!("/v1/videos/{reference}/video-download?quality=1080p60&codec=av1"),
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"]["available"], true);
+            assert_eq!(response["data"]["part_ref"], "netease:segment:1", "{path}");
+            assert_eq!(
+                response["data"]["headers"]["Referer"],
+                "https://example.test/video"
+            );
+            assert!(response["data"]["headers"].get("Cookie").is_none());
+        }
+
+        for (path, expected_location) in [
+            (
+                format!("/v1/videos/{reference}/audio-stream/redirect?quality=high"),
+                "https://audio.example.test/video-audio.m4s",
+            ),
+            (
+                format!("/v1/videos/{reference}/audio-download/redirect?quality=high"),
+                "https://audio.example.test/video-audio.m4s",
+            ),
+            (
+                format!("/v1/videos/{reference}/video-stream/redirect?quality=1080p"),
+                "https://video.example.test/video-track.m4s",
+            ),
+            (
+                format!("/v1/videos/{reference}/video-download/redirect?quality=1080p"),
+                "https://video.example.test/video-track.m4s",
+            ),
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("build media redirect request"),
+                )
+                .await
+                .expect("media redirect succeeds");
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_location)
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("private, no-store")
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::REFERRER_POLICY)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-referrer")
+            );
+            assert!(response.headers().get("Cookie").is_none());
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
     async fn live_bilibili_video_parts_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -27161,6 +27336,40 @@ mod tests {
             response["data"]["frame_rate"]
                 .as_str()
                 .is_some_and(|frame_rate| !frame_rate.is_empty())
+        );
+        assert_eq!(
+            response["data"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert!(response["data"]["headers"].get("Cookie").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili playback access"]
+    async fn live_bilibili_unified_video_stream_selects_the_primary_part() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV1Jt411P77c/stream?resolution=1080",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["requested_resolution"], 1_080);
+        assert!(
+            response["data"]["actual_resolution"]
+                .as_u64()
+                .is_some_and(|resolution| resolution > 0 && resolution <= 1_080)
+        );
+        assert_eq!(
+            response["data"]["extensions"]["part_ref"],
+            "bilibili:cid:106101299"
         );
         assert_eq!(
             response["data"]["headers"]["Referer"],
@@ -27562,6 +27771,20 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("https://example.test/video/22695250.mp4")
         );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer")
+        );
 
         let (status, stream) = json_response_from(
             test_app_with_provider(),
@@ -27580,9 +27803,16 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(unavailable["error"]["code"], "resource_not_found");
         assert_eq!(
-            unavailable["error"]["details"]["stream"]["available"],
-            false
+            unavailable["error"]["details"]["video_ref"],
+            "netease:unavailable"
         );
+        assert_eq!(
+            unavailable["error"]["details"]["requested_resolution"],
+            1_080
+        );
+        assert!(unavailable["error"]["details"].get("stream").is_none());
+        assert!(unavailable["error"]["details"].get("url").is_none());
+        assert!(unavailable["error"]["details"].get("headers").is_none());
     }
 
     #[tokio::test]

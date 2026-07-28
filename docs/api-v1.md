@@ -360,6 +360,10 @@ B 站视频的仅音频轨道通过 `GET /v1/videos/{ref}/audio-stream` 选择�
 
 B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P、账户和默认第一 P 规则与仅音频端点相同。`quality`（也接受 `resolution/res`）支持 `auto`、144P/240P/360P/480P/720P/1080P、720P/1080P 高帧率、1080P 高码率、4K、8K、AI 修复、HDR、Dolby Vision 和 HDR Vivid；常用 `720p60`、`1080p+`、`1080p60`、`4k`、`8k` 等写法会规范为统一枚举。`codec` 只接受 AVC、HEVC、AV1 及其 H.264/H.265 别名，调用方不能提交任意编码字符串。选择器先按平台质量 ID 的明确回落链查找，再在同一质量内优先平台默认编码或调用方指定编码；`codecid=7/12/13` 必须分别与 AVC/HEVC/AV1 profile 一致，冲突视为上游数据错误。响应强类型保留请求/实际质量、动态范围、平台质量 ID、质量说明、编码族与原始 profile、带宽、尺寸、原始帧率、像素宽高比、SAP、SegmentBase、主/备用签名 URL和最早到期时间。无法取得请求档位时返回真实较低档位并设置 `downgraded=true`，不会用请求分辨率覆盖实际轨道；未指定编码时优先平台默认编码，HDR/Dolby/AV1 也不会被压缩成普通 1080P/AVC。服务端仍不代理媒体字节，公共请求头只包含必要 `Referer`。
 
+统一兼容端点 `GET /v1/videos/{ref}/stream` 在 B 站将数值 `resolution=1..4320` 映射到不高于该请求高度的最高平台质量档（请求低于平台最低 144P 时使用最低档），并复用上述视频轨选择器；省略分 P 时选择详情中经过归属校验的首 CID。返回的 `VideoStream` 直接给出实际高度、平台质量码、MIME、编码、签名 URL 和到期时间，并在扩展中保留分 P、请求/实际质量、动态范围、编码族、带宽、帧率、SegmentBase 和降级状态，不能用兼容模型遮蔽 B 站轨道事实。
+
+`audio-download` 与 `video-download` 分别是 `audio-stream` 与 `video-stream` 的下载语义别名，返回相同的原始 DASH 轨道元数据；TuneWeave 不代理、缓存、合并或转码媒体字节。四类轨道端点都提供 `/redirect`，统一兼容 `/stream/redirect` 也可用：成功时仅返回已由 provider 校验的 302 `Location`，并附带 `Cache-Control: private, no-store` 与 `Referrer-Policy: no-referrer`，不会复制 Cookie、调用方凭证或媒体请求头。HTTP 302 无法替调用方在后续 CDN 请求中设置 B 站要求的 `Referer`；遇到要求请求头的资源时必须先读取非跳转端点的脱敏 `headers`，再由客户端自行请求，不能把跳转端点当作带头代理。
+
 ### DigitalAlbum
 
 ```json
@@ -1422,7 +1426,13 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
 | GET | `/v1/videos/{ref}/playback` | 必填 `part`，`kind/type=video`、`audio_language/cur_language?`、`account?` | `VideoPlaybackManifest`；完整 DASH/DURL、多编码和音轨清单 |
 | GET | `/v1/videos/{ref}/audio-stream` | `part?`、`kind/type=video`、`quality?`、`codec?`、`audio_language/cur_language?`、`account?` | `VideoAudioStream`；选择单条音轨并显式返回实际等级、降级、主/备用 URL 和媒体请求头 |
+| GET | `/v1/videos/{ref}/audio-stream/redirect` | 同上 | 对选中的音轨返回无缓存 302；不代传媒体请求头 |
+| GET | `/v1/videos/{ref}/audio-download` | 同上 | `VideoAudioStream`；原始音轨下载语义别名，不代理媒体字节 |
+| GET | `/v1/videos/{ref}/audio-download/redirect` | 同上 | 对下载音轨返回无缓存 302；不代传媒体请求头 |
 | GET | `/v1/videos/{ref}/video-stream` | `part?`、`kind/type=video`、`quality/resolution/res?`、`codec=avc|hevc|av1?`、`account?` | `VideoTrackStream`；选择单条 DASH 视频轨并保留实际质量、动态范围、编码、帧率、SegmentBase 与降级状态 |
+| GET | `/v1/videos/{ref}/video-stream/redirect` | 同上 | 对选中的视频轨返回无缓存 302；不代传媒体请求头 |
+| GET | `/v1/videos/{ref}/video-download` | 同上 | `VideoTrackStream`；原始视频轨下载语义别名，不代理媒体字节 |
+| GET | `/v1/videos/{ref}/video-download/redirect` | 同上 | 对下载视频轨返回无缓存 302；不代传媒体请求头 |
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
 | GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 

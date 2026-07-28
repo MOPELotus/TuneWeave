@@ -17,9 +17,9 @@ use tuneweave_core::{
     VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
     VideoPlaybackProgressiveSegment, VideoPlaybackRequest, VideoPlaybackSegmentBase,
     VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoSubtitleStyle, VideoTrackQuality,
-    VideoTrackStream, VideoTrackStreamRequest,
+    VideoSearchFilters, VideoSearchOrder, VideoStream, VideoStreamRequest, VideoSubtitle,
+    VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest,
+    VideoSubtitleStyle, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -112,6 +112,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::VideoPlaybackManifest,
             Capability::VideoAudioStream,
             Capability::VideoTrackStream,
+            Capability::VideoStream,
         ])
     }
 
@@ -368,6 +369,22 @@ impl MusicProvider for BilibiliProvider {
             )
             .await?;
         select_bilibili_video_track(manifest, request)
+    }
+
+    async fn video_stream(&self, id: &str, request: &VideoStreamRequest) -> Result<VideoStream> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili unified video streaming accepts UGC video resources only",
+            ));
+        }
+        let quality = bilibili_video_quality_for_resolution(request.resolution)?;
+        let mut track_request = VideoTrackStreamRequest::new(request.kind, quality);
+        track_request.account.clone_from(&request.account);
+        let stream = self.video_track_stream(id, &track_request).await?;
+        Ok(map_bilibili_unified_video_stream(
+            stream,
+            request.resolution,
+        ))
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -2639,6 +2656,80 @@ fn bilibili_video_quality_target_height(quality: VideoTrackQuality) -> Option<u3
         | VideoTrackQuality::DolbyVision
         | VideoTrackQuality::HdrVivid => Some(2_160),
         VideoTrackQuality::P8k => Some(4_320),
+    }
+}
+
+fn bilibili_video_quality_for_resolution(resolution: u32) -> Result<VideoTrackQuality> {
+    if !(1..=4_320).contains(&resolution) {
+        return Err(bilibili_invalid_request(
+            "Bilibili video resolution must be between 1 and 4320",
+        ));
+    }
+    Ok(match resolution {
+        1..=144 => VideoTrackQuality::P144,
+        145..=239 => VideoTrackQuality::P144,
+        240..=359 => VideoTrackQuality::P240,
+        360..=479 => VideoTrackQuality::P360,
+        480..=719 => VideoTrackQuality::P480,
+        720..=1_079 => VideoTrackQuality::P720,
+        1_080..=2_159 => VideoTrackQuality::P1080,
+        2_160..=4_319 => VideoTrackQuality::P4k,
+        4_320 => VideoTrackQuality::P8k,
+        _ => unreachable!("resolution range is validated"),
+    })
+}
+
+fn map_bilibili_unified_video_stream(
+    stream: VideoTrackStream,
+    requested_resolution: u32,
+) -> VideoStream {
+    let mut extensions = stream.extensions;
+    extensions.insert("source".to_owned(), json!("video_track_stream"));
+    extensions.insert("part_ref".to_owned(), json!(stream.part_ref));
+    extensions.insert(
+        "requested_quality".to_owned(),
+        json!(stream.requested_quality),
+    );
+    extensions.insert("actual_quality".to_owned(), json!(stream.actual_quality));
+    extensions.insert("requested_codec".to_owned(), json!(stream.requested_codec));
+    extensions.insert("codec_family".to_owned(), json!(stream.codec_family));
+    extensions.insert("dynamic_range".to_owned(), json!(stream.dynamic_range));
+    extensions.insert("bandwidth".to_owned(), json!(stream.bandwidth));
+    extensions.insert("frame_rate".to_owned(), json!(stream.frame_rate));
+    extensions.insert(
+        "sample_aspect_ratio".to_owned(),
+        json!(stream.sample_aspect_ratio),
+    );
+    extensions.insert("start_with_sap".to_owned(), json!(stream.start_with_sap));
+    extensions.insert("segment_base".to_owned(), json!(stream.segment_base));
+    extensions.insert("quality_format".to_owned(), json!(stream.quality_format));
+    extensions.insert("downgraded".to_owned(), json!(stream.downgraded));
+    extensions.insert(
+        "expires_at_epoch_seconds".to_owned(),
+        json!(stream.expires_at_epoch_seconds),
+    );
+    VideoStream {
+        video_ref: stream.video_ref,
+        platform: stream.platform,
+        available: stream.available,
+        url: stream.url,
+        backup_urls: stream.backup_urls,
+        headers: stream.headers,
+        expires_at: stream
+            .expires_at_epoch_seconds
+            .and_then(bilibili_unix_rfc3339),
+        format: stream.mime_type,
+        codec: stream.codec,
+        width: stream.width,
+        height: stream.height,
+        size: None,
+        duration_ms: stream.duration_ms,
+        requested_resolution,
+        actual_resolution: stream.height,
+        platform_code: stream.platform_quality_id.map(i64::from),
+        fee: None,
+        message: stream.message,
+        extensions,
     }
 }
 
@@ -4988,6 +5079,64 @@ mod tests {
         )
         .expect_err("conflicting track kind");
         assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn unified_video_stream_maps_numeric_resolution_without_hiding_track_details() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::VideoStream));
+        assert_eq!(
+            bilibili_video_quality_for_resolution(720).expect("720P"),
+            VideoTrackQuality::P720
+        );
+        assert_eq!(
+            bilibili_video_quality_for_resolution(1_079).expect("below 1080P"),
+            VideoTrackQuality::P720
+        );
+        assert_eq!(
+            bilibili_video_quality_for_resolution(1_080).expect("1080P"),
+            VideoTrackQuality::P1080
+        );
+        assert_eq!(
+            bilibili_video_quality_for_resolution(2_160).expect("4K"),
+            VideoTrackQuality::P4k
+        );
+        assert_eq!(
+            bilibili_video_quality_for_resolution(4_320).expect("8K"),
+            VideoTrackQuality::P8k
+        );
+        for invalid in [0, 4_321] {
+            let error =
+                bilibili_video_quality_for_resolution(invalid).expect_err("invalid resolution");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+
+        let selected = select_bilibili_video_track(
+            playback_video_manifest(),
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::P1080),
+        )
+        .expect("1080P track");
+        let stream = map_bilibili_unified_video_stream(selected, 1_080);
+        assert_eq!(stream.video_ref.to_string(), "bilibili:bvid:BV1Jt411P77c");
+        assert!(stream.available);
+        assert_eq!(stream.requested_resolution, 1_080);
+        assert_eq!(stream.actual_resolution, Some(1_080));
+        assert_eq!(stream.platform_code, Some(80));
+        assert_eq!(stream.format.as_deref(), Some("video/mp4"));
+        assert_eq!(stream.codec.as_deref(), Some("avc1.640028"));
+        assert_eq!(stream.expires_at.as_deref(), Some("2033-05-18T03:33:19Z"));
+        assert_eq!(
+            stream.extensions["part_ref"],
+            json!("bilibili:cid:106101299")
+        );
+        assert_eq!(stream.extensions["requested_quality"], json!("p1080"));
+        assert_eq!(stream.extensions["codec_family"], json!("avc"));
+        assert_eq!(stream.extensions["downgraded"], json!(false));
+        assert_eq!(
+            stream.headers.get("Referer").map(String::as_str),
+            Some("https://www.bilibili.com/video/BV1Jt411P77c")
+        );
+        assert!(!stream.headers.contains_key("Cookie"));
     }
 
     #[tokio::test]
