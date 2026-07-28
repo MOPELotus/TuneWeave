@@ -83,6 +83,7 @@ pub enum Capability {
     TrackFavoriteCounts,
     TrackCredits,
     SheetMusicAvailability,
+    SheetMusic,
     ArtistOverview,
     ArtistStats,
     ArtistCatalog,
@@ -211,6 +212,10 @@ mod tests {
             serde_json::to_value(Capability::SheetMusicAvailability)
                 .expect("serialize sheet music availability capability"),
             serde_json::json!("sheet_music_availability")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::SheetMusic).expect("serialize sheet music capability"),
+            serde_json::json!("sheet_music")
         );
     }
 

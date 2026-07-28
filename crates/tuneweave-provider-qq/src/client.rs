@@ -356,6 +356,62 @@ impl QqClient {
             .ok_or_else(|| qq_data_error("QQ exact-comm service returned no response"))
     }
 
+    pub(crate) async fn request_with_exact_comm_allowing_business_errors(
+        &self,
+        request: QqApiRequest,
+        comm: &Value,
+    ) -> Result<QqBusinessResponse> {
+        self.request_exact_comm_allowing_business_errors(request, comm, false)
+            .await
+    }
+
+    pub(crate) async fn request_signed_with_exact_comm_allowing_business_errors(
+        &self,
+        request: QqApiRequest,
+        comm: &Value,
+    ) -> Result<QqBusinessResponse> {
+        self.request_exact_comm_allowing_business_errors(request, comm, true)
+            .await
+    }
+
+    async fn request_exact_comm_allowing_business_errors(
+        &self,
+        request: QqApiRequest,
+        comm: &Value,
+        signed: bool,
+    ) -> Result<QqBusinessResponse> {
+        if !comm.is_object() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "QQ exact comm must be an object",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let response = self
+            .post_api_with_user_agent_options(
+                comm,
+                std::slice::from_ref(&request),
+                None,
+                None,
+                true,
+                signed,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ exact-comm business service returned no response"))?;
+        let code = response
+            .raw
+            .get("code")
+            .and_then(platform_code)
+            .ok_or_else(|| qq_data_error("QQ exact-comm business response is missing a code"))?;
+        Ok(QqBusinessResponse {
+            code,
+            data: response.data,
+            raw: response.raw,
+        })
+    }
+
     pub(crate) async fn request_android_business(
         &self,
         request: QqApiRequest,

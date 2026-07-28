@@ -37,13 +37,14 @@ use tuneweave_core::{
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SheetMusicAvailability, SimilarArtistList, SimilarArtistRequest,
-    SimilarTrackList, SimilarTrackRequest, SimilarTrackSection, SimilarTrackSectionKind,
-    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
-    Track, TrackCredit, TrackCreditGroup, TrackCredits, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
-    TrackVersionList, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    SearchVariant, SheetMusic, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackCredit,
+    TrackCreditGroup, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -83,6 +84,9 @@ const TRACK_CREDIT_MODULE: &str = "music.sociality.KolWorksTag";
 const TRACK_CREDIT_METHOD: &str = "SongProducer";
 const SHEET_MUSIC_MODULE: &str = "music.mir.SheetMusicSvr";
 const SHEET_MUSIC_AVAILABILITY_METHOD: &str = "HasSheetMusic";
+const SHEET_MUSIC_LIST_METHOD: &str = "GetMoreSheetMusic";
+const SHEET_MUSIC_EXTERNAL_LIST_METHOD: &str = "GetChongChongSheetMusic";
+const SHEET_MUSIC_EMPTY_CODE: i64 = 10_007;
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1294,6 +1298,65 @@ struct QqSheetMusicAvailabilityResponse {
         deserialize_with = "deserialize_qq_binary_bool"
     )]
     has_external_catalog: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqSheetMusic {
+    #[serde(rename = "scoreMID")]
+    score_mid: String,
+    #[serde(rename = "scoreName")]
+    score_name: String,
+    #[serde(
+        rename = "picURLs",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    pic_urls: Vec<String>,
+    version: String,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    tonality: i64,
+    #[serde(rename = "scoreType", deserialize_with = "deserialize_qq_i64")]
+    score_type: i64,
+    #[serde(rename = "strScoreType")]
+    score_type_text: String,
+    uploader: String,
+    #[serde(rename = "viewFrequency", deserialize_with = "deserialize_qq_u64")]
+    view_frequency: u64,
+    #[serde(deserialize_with = "deserialize_qq_i64")]
+    tonality2: i64,
+    author: String,
+    composer: String,
+    lyricist: String,
+    singer: String,
+    performer: String,
+    #[serde(rename = "songMID")]
+    song_mid: String,
+    #[serde(rename = "subName")]
+    sub_name: String,
+    url: String,
+    #[serde(rename = "albumURL")]
+    album_url: String,
+    #[serde(rename = "insType", deserialize_with = "deserialize_qq_i64")]
+    instrument_type: i64,
+    #[serde(rename = "strInsType")]
+    instrument_text: String,
+    #[serde(rename = "coverURL")]
+    cover_url: String,
+    difficulty: String,
+    #[serde(rename = "sheetFile")]
+    sheet_file: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqSheetMusicListResponse {
+    #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
+    result: Vec<QqSheetMusic>,
+    #[serde(rename = "totalMap")]
+    total_map: BTreeMap<String, u64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3483,6 +3546,7 @@ impl MusicProvider for QqProvider {
             Capability::TrackFavoriteCounts,
             Capability::TrackCredits,
             Capability::SheetMusicAvailability,
+            Capability::SheetMusic,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -4069,6 +4133,26 @@ impl MusicProvider for QqProvider {
             )
             .await?;
         map_qq_sheet_music_availability(id.trim(), &identifier, &song_mid, response)
+    }
+
+    async fn sheet_music(
+        &self,
+        id: &str,
+        source: SheetMusicSource,
+        account: Option<&str>,
+    ) -> Result<SheetMusicList> {
+        let (identifier, song_mid) = self.resolve_sheet_music_mid(id, account).await?;
+        let (request, comm, signed) = qq_sheet_music_request(&song_mid, source);
+        let response = if signed {
+            self.client
+                .request_signed_with_exact_comm_allowing_business_errors(request, &comm)
+                .await?
+        } else {
+            self.client
+                .request_with_exact_comm_allowing_business_errors(request, &comm)
+                .await?
+        };
+        map_qq_sheet_music(id.trim(), &identifier, &song_mid, source, response)
     }
 
     async fn artist_tracks(
@@ -8161,6 +8245,35 @@ fn qq_sheet_music_availability_request(song_mid: &str) -> QqApiRequest {
     )
 }
 
+fn qq_sheet_music_request(song_mid: &str, source: SheetMusicSource) -> (QqApiRequest, Value, bool) {
+    let (method, score_type, platform_type, signed) = match source {
+        SheetMusicSource::User => (SHEET_MUSIC_LIST_METHOD, -1, 0, false),
+        SheetMusicSource::Ai => (SHEET_MUSIC_LIST_METHOD, -473, 1, false),
+        SheetMusicSource::External => (SHEET_MUSIC_EXTERNAL_LIST_METHOD, -1, 1, true),
+    };
+    let mut comm = qq_sheet_music_comm();
+    if source == SheetMusicSource::External {
+        comm.as_object_mut()
+            .expect("QQ sheet music comm is always an object")
+            .insert("platform".to_owned(), json!("h5"));
+    }
+    (
+        QqApiRequest::new(
+            SHEET_MUSIC_MODULE,
+            method,
+            json!({
+                "songMid": song_mid,
+                "begin": 0,
+                "end": 100,
+                "scoreType": score_type,
+                "ttype": platform_type
+            }),
+        ),
+        comm,
+        signed,
+    )
+}
+
 fn qq_sheet_music_comm() -> Value {
     json!({
         "g_tk": 5381,
@@ -8284,6 +8397,187 @@ fn map_qq_sheet_music_availability(
             ("response".to_owned(), response_raw),
         ]),
     })
+}
+
+fn map_qq_sheet_music(
+    requested_id: &str,
+    identifier: &QqTrackIdentifier,
+    song_mid: &str,
+    source: SheetMusicSource,
+    response: QqBusinessResponse,
+) -> Result<SheetMusicList> {
+    if !matches!(response.code, 0 | SHEET_MUSIC_EMPTY_CODE) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ sheet music request was rejected",
+        )
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "platform_code": response.code,
+            "source": source
+        })));
+    }
+    let parsed = serde_json::from_value::<QqSheetMusicListResponse>(response.data.clone())
+        .map_err(|error| qq_data_error(format!("QQ sheet music response is malformed: {error}")))?;
+    if parsed.result.len() > 100 {
+        return Err(qq_data_error(
+            "QQ sheet music response exceeded the fixed 100-item request window",
+        ));
+    }
+    for category in parsed.total_map.keys() {
+        if category.trim().is_empty()
+            || category.len() > 256
+            || category.chars().any(char::is_control)
+        {
+            return Err(qq_data_error(
+                "QQ sheet music response contains an invalid total category",
+            ));
+        }
+    }
+    let sheets = parsed
+        .result
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| map_qq_sheet_music_item(item, song_mid, source, index))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SheetMusicList {
+        track_ref: qq_ref(requested_id, "sheet music track")?,
+        source,
+        sheets,
+        totals: parsed.total_map,
+        extensions: Extensions::from([
+            ("song_mid".to_owned(), json!(song_mid)),
+            ("platform_code".to_owned(), json!(response.code)),
+            ("begin".to_owned(), json!(0)),
+            ("end".to_owned(), json!(100)),
+            (
+                "requested_identifier_kind".to_owned(),
+                json!(match identifier {
+                    QqTrackIdentifier::Numeric(_) => "numeric_id",
+                    QqTrackIdentifier::Mid(_) => "mid",
+                }),
+            ),
+            ("extra".to_owned(), json!(parsed.extra)),
+            ("response".to_owned(), response.raw),
+        ]),
+    })
+}
+
+fn map_qq_sheet_music_item(
+    item: QqSheetMusic,
+    requested_song_mid: &str,
+    source: SheetMusicSource,
+    index: usize,
+) -> Result<SheetMusic> {
+    let raw = serde_json::to_value(&item)
+        .map_err(|_| qq_data_error("failed to preserve QQ sheet music item"))?;
+    let score_mid = required_qq_sheet_text(&item.score_mid, "score MID", 256)?;
+    let name = required_qq_sheet_text(&item.score_name, "name", 8_192)?;
+    let song_mid = required_qq_sheet_text(&item.song_mid, "song MID", 256)?;
+    validate_qq_media_id(&song_mid, "sheet music response song MID")?;
+    if song_mid != requested_song_mid {
+        return Err(qq_data_error(
+            "QQ sheet music response does not belong to the requested track",
+        ));
+    }
+    if item.pic_urls.len() > 1_000 {
+        return Err(qq_data_error(
+            "QQ sheet music response exceeded its safe image bound",
+        ));
+    }
+    let image_urls = item
+        .pic_urls
+        .iter()
+        .map(|value| {
+            normalize_qq_sheet_url(value, "image")?
+                .ok_or_else(|| qq_data_error("QQ sheet music response contains an empty image URL"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SheetMusic {
+        sheet_ref: qq_ref(&format!("sheet:{score_mid}"), "sheet music")?,
+        track_ref: qq_ref(&song_mid, "sheet music track")?,
+        source,
+        name,
+        image_urls,
+        version: optional_qq_sheet_text(&item.version, "version", 8_192)?,
+        tonality: item.tonality,
+        alternate_tonality: item.tonality2,
+        score_type: item.score_type,
+        score_type_text: optional_qq_sheet_text(&item.score_type_text, "score type text", 8_192)?,
+        uploader: optional_qq_sheet_text(&item.uploader, "uploader", 8_192)?,
+        view_count: item.view_frequency,
+        author: optional_qq_sheet_text(&item.author, "author", 8_192)?,
+        composer: optional_qq_sheet_text(&item.composer, "composer", 8_192)?,
+        lyricist: optional_qq_sheet_text(&item.lyricist, "lyricist", 8_192)?,
+        singer: optional_qq_sheet_text(&item.singer, "singer", 8_192)?,
+        performer: optional_qq_sheet_text(&item.performer, "performer", 8_192)?,
+        subtitle: optional_qq_sheet_text(&item.sub_name, "subtitle", 8_192)?,
+        detail_url: normalize_qq_sheet_url(&item.url, "detail")?,
+        album_url: normalize_qq_sheet_url(&item.album_url, "album")?,
+        instrument_type: item.instrument_type,
+        instrument_text: optional_qq_sheet_text(&item.instrument_text, "instrument text", 8_192)?,
+        cover_url: normalize_qq_sheet_url(&item.cover_url, "cover")?,
+        difficulty: optional_qq_sheet_text(&item.difficulty, "difficulty", 8_192)?,
+        file_url: normalize_qq_sheet_url(&item.sheet_file, "file")?,
+        extensions: Extensions::from([
+            ("input_index".to_owned(), json!(index)),
+            ("extra".to_owned(), json!(item.extra)),
+            ("raw".to_owned(), raw),
+        ]),
+    })
+}
+
+fn required_qq_sheet_text(value: &str, context: &str, max_len: usize) -> Result<String> {
+    optional_qq_sheet_text(value, context, max_len)?.ok_or_else(|| {
+        qq_data_error(format!(
+            "QQ sheet music response contains an empty {context}"
+        ))
+    })
+}
+
+fn optional_qq_sheet_text(value: &str, context: &str, max_len: usize) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > max_len || value.chars().any(char::is_control) {
+        return Err(qq_data_error(format!(
+            "QQ sheet music response contains invalid {context} text"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn normalize_qq_sheet_url(value: &str, context: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 16_384 || value.chars().any(char::is_control) {
+        return Err(qq_data_error(format!(
+            "QQ sheet music response contains an invalid {context} URL"
+        )));
+    }
+    let normalized = if value.starts_with("//") {
+        format!("https:{value}")
+    } else {
+        value.to_owned()
+    };
+    let url = reqwest::Url::parse(&normalized).map_err(|_| {
+        qq_data_error(format!(
+            "QQ sheet music response contains a malformed {context} URL"
+        ))
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(qq_data_error(format!(
+            "QQ sheet music response contains an unsafe {context} URL"
+        )));
+    }
+    Ok(Some(normalized))
 }
 
 fn map_qq_track_credit(credit: QqTrackCredit) -> Result<TrackCredit> {
@@ -27577,6 +27871,219 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn sheet_music_requests_preserve_all_three_source_branches_and_exact_comm() {
+        let (user, user_comm, user_signed) =
+            qq_sheet_music_request("0039MnYb0qxYhV", SheetMusicSource::User);
+        assert_eq!(user.module, SHEET_MUSIC_MODULE);
+        assert_eq!(user.method, SHEET_MUSIC_LIST_METHOD);
+        assert_eq!(
+            user.param,
+            json!({
+                "songMid": "0039MnYb0qxYhV",
+                "begin": 0,
+                "end": 100,
+                "scoreType": -1,
+                "ttype": 0
+            })
+        );
+        assert_eq!(user_comm, qq_sheet_music_comm());
+        assert!(!user_signed);
+
+        let (ai, ai_comm, ai_signed) =
+            qq_sheet_music_request("0039MnYb0qxYhV", SheetMusicSource::Ai);
+        assert_eq!(ai.method, SHEET_MUSIC_LIST_METHOD);
+        assert_eq!(ai.param["scoreType"], -473);
+        assert_eq!(ai.param["ttype"], 1);
+        assert_eq!(ai_comm, qq_sheet_music_comm());
+        assert!(!ai_signed);
+
+        let (external, external_comm, external_signed) =
+            qq_sheet_music_request("0039MnYb0qxYhV", SheetMusicSource::External);
+        assert_eq!(external.method, SHEET_MUSIC_EXTERNAL_LIST_METHOD);
+        assert_eq!(external.param["scoreType"], -1);
+        assert_eq!(external.param["ttype"], 1);
+        assert_eq!(external_comm["platform"], "h5");
+        assert_eq!(external_comm.as_object().map(serde_json::Map::len), Some(8));
+        assert!(external_signed);
+    }
+
+    #[test]
+    fn sheet_music_mapping_keeps_files_metadata_totals_and_allowed_empty_code() {
+        let item = json!({
+            "scoreMID": "score000000001",
+            "scoreName": "晴天吉他谱",
+            "picURLs": ["//y.qq.com/sheet/page-1.jpg"],
+            "version": "原版",
+            "tonality": 1,
+            "scoreType": -1,
+            "strScoreType": "吉他谱",
+            "uploader": "制谱人",
+            "viewFrequency": 12345,
+            "tonality2": 2,
+            "author": "周杰伦",
+            "composer": "周杰伦",
+            "lyricist": "徐若瑄",
+            "singer": "周杰伦",
+            "performer": "",
+            "songMID": "0039MnYb0qxYhV",
+            "subName": "C 调",
+            "url": "https://y.qq.com/sheet/score000000001",
+            "albumURL": "",
+            "insType": 1,
+            "strInsType": "吉他",
+            "coverURL": "https://y.qq.com/sheet/cover.jpg",
+            "difficulty": "中等",
+            "sheetFile": "https://y.qq.com/sheet/score000000001.json",
+            "futureItemField": true
+        });
+        let data = json!({
+            "result": [item],
+            "totalMap": {"-1": 1},
+            "futureResponseField": true
+        });
+        let list = map_qq_sheet_music(
+            "97773",
+            &QqTrackIdentifier::Numeric(97_773),
+            "0039MnYb0qxYhV",
+            SheetMusicSource::User,
+            QqBusinessResponse {
+                code: 0,
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ sheet music");
+        assert_eq!(list.track_ref.to_string(), "qq:97773");
+        assert_eq!(list.source, SheetMusicSource::User);
+        assert_eq!(list.sheets.len(), 1);
+        assert_eq!(
+            list.sheets[0].sheet_ref.to_string(),
+            "qq:sheet:score000000001"
+        );
+        assert_eq!(list.sheets[0].track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(list.sheets[0].name, "晴天吉他谱");
+        assert_eq!(
+            list.sheets[0].image_urls[0],
+            "https://y.qq.com/sheet/page-1.jpg"
+        );
+        assert_eq!(list.sheets[0].performer, None);
+        assert_eq!(list.sheets[0].view_count, 12_345);
+        assert_eq!(list.sheets[0].extensions["input_index"], 0);
+        assert_eq!(list.sheets[0].extensions["extra"]["futureItemField"], true);
+        assert_eq!(list.totals["-1"], 1);
+        assert_eq!(list.extensions["platform_code"], 0);
+        assert_eq!(list.extensions["requested_identifier_kind"], "numeric_id");
+        assert_eq!(list.extensions["extra"]["futureResponseField"], true);
+
+        let empty = map_qq_sheet_music(
+            "0039MnYb0qxYhV",
+            &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+            "0039MnYb0qxYhV",
+            SheetMusicSource::Ai,
+            QqBusinessResponse {
+                code: SHEET_MUSIC_EMPTY_CODE,
+                data: json!({"result": null, "totalMap": {}}),
+                raw: json!({"code": SHEET_MUSIC_EMPTY_CODE, "data": {"result": null, "totalMap": {}}}),
+            },
+        )
+        .expect("map allowed empty QQ sheet music response");
+        assert!(empty.sheets.is_empty());
+        assert_eq!(empty.extensions["platform_code"], SHEET_MUSIC_EMPTY_CODE);
+    }
+
+    #[test]
+    fn sheet_music_mapping_rejects_business_identity_url_shape_and_bounds_errors() {
+        let valid = || {
+            json!({
+                "scoreMID": "score000000001",
+                "scoreName": "晴天吉他谱",
+                "picURLs": [],
+                "version": "",
+                "tonality": 1,
+                "scoreType": -1,
+                "strScoreType": "吉他谱",
+                "uploader": "",
+                "viewFrequency": 0,
+                "tonality2": 0,
+                "author": "",
+                "composer": "",
+                "lyricist": "",
+                "singer": "周杰伦",
+                "performer": "",
+                "songMID": "0039MnYb0qxYhV",
+                "subName": "",
+                "url": "",
+                "albumURL": "",
+                "insType": 0,
+                "strInsType": "",
+                "coverURL": "",
+                "difficulty": "",
+                "sheetFile": ""
+            })
+        };
+        let map = |data, code| {
+            map_qq_sheet_music(
+                "0039MnYb0qxYhV",
+                &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+                "0039MnYb0qxYhV",
+                SheetMusicSource::User,
+                QqBusinessResponse {
+                    code,
+                    data,
+                    raw: json!({"code": code}),
+                },
+            )
+        };
+        assert_eq!(
+            map(json!({"result": [], "totalMap": {}}), 999)
+                .expect_err("reject unknown QQ sheet music code")
+                .code,
+            ErrorCode::UpstreamError
+        );
+
+        let mut wrong_track = valid();
+        wrong_track["songMID"] = json!("003w2xz20QlUZt");
+        let mut unsafe_url = valid();
+        unsafe_url["sheetFile"] = json!("file:///secret");
+        for data in [
+            json!({"result": [wrong_track], "totalMap": {"-1": 1}}),
+            json!({"result": [unsafe_url], "totalMap": {"-1": 1}}),
+            json!({"result": [valid()], "totalMap": {"": 1}}),
+            json!({"result": vec![valid(); 101], "totalMap": {"-1": 101}}),
+            json!({"result": "bad", "totalMap": {}}),
+        ] {
+            assert_eq!(
+                map(data, 0)
+                    .expect_err("reject malformed QQ sheet music response")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sheet_music_validates_identity_before_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::SheetMusic));
+        for id in ["0", "invalid-mid!", "\n"] {
+            let error = provider
+                .sheet_music(id, SheetMusicSource::User, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ sheet music track identity");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let missing = provider
+            .sheet_music(
+                "0039MnYb0qxYhV",
+                SheetMusicSource::External,
+                Some("missing-account"),
+            )
+            .await
+            .expect_err("missing QQ sheet music account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -28926,6 +29433,42 @@ mod tests {
         assert_eq!(numeric.external_catalog, mid.external_catalog);
         assert_eq!(numeric.extensions["song_mid"], "0039MnYb0qxYhV");
         assert_eq!(mid.extensions["song_mid"], "0039MnYb0qxYhV");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_sheet_music_covers_user_ai_and_external_sources_for_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for source in [
+            SheetMusicSource::User,
+            SheetMusicSource::Ai,
+            SheetMusicSource::External,
+        ] {
+            let numeric = provider
+                .sheet_music("97773", source, None)
+                .await
+                .expect("live QQ numeric sheet music");
+            let mid = provider
+                .sheet_music("0039MnYb0qxYhV", source, None)
+                .await
+                .expect("live QQ MID sheet music");
+            assert_eq!(numeric.track_ref.to_string(), "qq:97773");
+            assert_eq!(mid.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+            assert_eq!(numeric.source, source);
+            assert_eq!(mid.source, source);
+            assert_eq!(numeric.totals, mid.totals);
+            assert_eq!(numeric.sheets.len(), mid.sheets.len());
+            assert!(!numeric.sheets.is_empty());
+            assert!(numeric.sheets.iter().all(|sheet| {
+                sheet.source == source
+                    && sheet.track_ref.to_string() == "qq:0039MnYb0qxYhV"
+                    && !sheet.name.is_empty()
+            }));
+        }
     }
 
     #[tokio::test]

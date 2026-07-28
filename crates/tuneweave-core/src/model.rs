@@ -2878,6 +2878,57 @@ pub struct TrackCredits {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SheetMusicSource {
+    #[default]
+    #[serde(alias = "user_uploaded", alias = "0")]
+    User,
+    #[serde(alias = "engine", alias = "generated", alias = "1")]
+    Ai,
+    #[serde(alias = "chongchong", alias = "third_party", alias = "2")]
+    External,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetMusic {
+    pub sheet_ref: ResourceRef,
+    pub track_ref: ResourceRef,
+    pub source: SheetMusicSource,
+    pub name: String,
+    pub image_urls: Vec<String>,
+    pub version: Option<String>,
+    pub tonality: i64,
+    pub alternate_tonality: i64,
+    pub score_type: i64,
+    pub score_type_text: Option<String>,
+    pub uploader: Option<String>,
+    pub view_count: u64,
+    pub author: Option<String>,
+    pub composer: Option<String>,
+    pub lyricist: Option<String>,
+    pub singer: Option<String>,
+    pub performer: Option<String>,
+    pub subtitle: Option<String>,
+    pub detail_url: Option<String>,
+    pub album_url: Option<String>,
+    pub instrument_type: i64,
+    pub instrument_text: Option<String>,
+    pub cover_url: Option<String>,
+    pub difficulty: Option<String>,
+    pub file_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetMusicList {
+    pub track_ref: ResourceRef,
+    pub source: SheetMusicSource,
+    pub sheets: Vec<SheetMusic>,
+    pub totals: BTreeMap<String, u64>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SheetMusicAvailability {
     pub track_ref: ResourceRef,
@@ -6159,6 +6210,55 @@ mod tests {
             "qq:0025NhlN2yWrP4"
         );
         assert_eq!(value["summary"], "完整制作班底");
+    }
+
+    #[test]
+    fn sheet_music_list_keeps_source_files_metadata_and_totals_typed() {
+        let sheet = SheetMusic {
+            sheet_ref: ResourceRef::new(Platform::Qq, "sheet:score-mid")
+                .expect("valid sheet reference"),
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid sheet track reference"),
+            source: SheetMusicSource::Ai,
+            name: "晴天吉他谱".to_owned(),
+            image_urls: vec!["https://y.qq.com/page.jpg".to_owned()],
+            version: Some("原版".to_owned()),
+            tonality: 1,
+            alternate_tonality: 2,
+            score_type: -473,
+            score_type_text: Some("AI 吉他谱".to_owned()),
+            uploader: None,
+            view_count: 12_345,
+            author: Some("周杰伦".to_owned()),
+            composer: Some("周杰伦".to_owned()),
+            lyricist: Some("徐若瑄".to_owned()),
+            singer: Some("周杰伦".to_owned()),
+            performer: None,
+            subtitle: None,
+            detail_url: Some("https://y.qq.com/sheet/score-mid".to_owned()),
+            album_url: None,
+            instrument_type: 1,
+            instrument_text: Some("吉他".to_owned()),
+            cover_url: None,
+            difficulty: Some("中等".to_owned()),
+            file_url: Some("https://y.qq.com/sheet/score-mid.json".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let list = SheetMusicList {
+            track_ref: ResourceRef::new(Platform::Qq, "97773")
+                .expect("valid requested track reference"),
+            source: SheetMusicSource::Ai,
+            sheets: vec![sheet],
+            totals: BTreeMap::from([("-473".to_owned(), 1)]),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize sheet music list");
+        assert_eq!(value["track_ref"], "qq:97773");
+        assert_eq!(value["source"], "ai");
+        assert_eq!(value["sheets"][0]["sheet_ref"], "qq:sheet:score-mid");
+        assert_eq!(value["sheets"][0]["score_type"], -473);
+        assert_eq!(value["sheets"][0]["view_count"], 12_345);
+        assert_eq!(value["totals"]["-473"], 1);
     }
 
     #[test]

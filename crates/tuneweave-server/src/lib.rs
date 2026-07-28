@@ -78,10 +78,10 @@ use tuneweave_core::{
     ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
     SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
     SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SimilarArtistList,
-    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
-    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
     TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
@@ -304,6 +304,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tracks/{reference}/sheet-music/availability",
             get(sheet_music_availability),
         )
+        .route("/tracks/{reference}/sheet-music", get(sheet_music))
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7615,6 +7616,14 @@ struct SheetMusicAvailabilityParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SheetMusicParams {
+    #[serde(default, alias = "type", alias = "ttype")]
+    source: SheetMusicSource,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelatedPlaylistParams {
     #[serde(
         alias = "last",
@@ -7804,6 +7813,26 @@ async fn sheet_music_availability(
         .sheet_music_availability(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(availability).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn sheet_music(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<SheetMusicParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SheetMusicList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let sheets = provider
+        .sheet_music(reference.id(), params.source, account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(sheets).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -13805,7 +13834,7 @@ mod tests {
         DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
         PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
         RadioPlaybackItem, RadioStyle, RadioStyleSource, RelatedPlaylistSection,
-        RelatedPlaylistSectionKind, Result, SearchQuery, SimilarTrackSection,
+        RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic, SimilarTrackSection,
         SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup, TrackLabel,
         VideoResolution,
     };
@@ -17380,6 +17409,7 @@ mod tests {
                 Capability::TrackFavoriteCounts,
                 Capability::TrackCredits,
                 Capability::SheetMusicAvailability,
+                Capability::SheetMusic,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -18037,6 +18067,51 @@ mod tests {
                 tablature: false,
                 standard_notation: true,
                 external_catalog: false,
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn sheet_music(
+            &self,
+            id: &str,
+            source: SheetMusicSource,
+            account: Option<&str>,
+        ) -> Result<SheetMusicList> {
+            Ok(SheetMusicList {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid sheet music track reference"),
+                source,
+                sheets: vec![SheetMusic {
+                    sheet_ref: ResourceRef::new(self.platform(), "sheet:score-mid")
+                        .expect("valid sheet reference"),
+                    track_ref: ResourceRef::new(self.platform(), "0039MnYb0qxYhV")
+                        .expect("valid canonical sheet track reference"),
+                    source,
+                    name: "晴天吉他谱".to_owned(),
+                    image_urls: vec!["https://y.qq.com/sheet/page-1.jpg".to_owned()],
+                    version: Some("原版".to_owned()),
+                    tonality: 1,
+                    alternate_tonality: 2,
+                    score_type: -1,
+                    score_type_text: Some("吉他谱".to_owned()),
+                    uploader: Some("制谱人".to_owned()),
+                    view_count: 12_345,
+                    author: Some("周杰伦".to_owned()),
+                    composer: Some("周杰伦".to_owned()),
+                    lyricist: Some("徐若瑄".to_owned()),
+                    singer: Some("周杰伦".to_owned()),
+                    performer: None,
+                    subtitle: Some("C 调".to_owned()),
+                    detail_url: Some("https://y.qq.com/sheet/score-mid".to_owned()),
+                    album_url: None,
+                    instrument_type: 1,
+                    instrument_text: Some("吉他".to_owned()),
+                    cover_url: Some("https://y.qq.com/sheet/cover.jpg".to_owned()),
+                    difficulty: Some("中等".to_owned()),
+                    file_url: Some("https://y.qq.com/sheet/score-mid.json".to_owned()),
+                    extensions: Extensions::new(),
+                }],
+                totals: BTreeMap::from([("guitar".to_owned(), 1)]),
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
@@ -22526,6 +22601,56 @@ mod tests {
         for path in [
             "/v1/tracks/qq:97773/sheet-music/availability?unknown=true",
             "/v1/tracks/not-a-reference/sheet-music/availability",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_sheet_music_preserves_source_metadata_account_aliases_and_strict_queries() {
+        let app = test_app_with_import_providers();
+        let (status, sheets) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music?source=external&account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sheets}");
+        assert_eq!(sheets["data"]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(sheets["data"]["source"], "external");
+        assert_eq!(
+            sheets["data"]["sheets"][0]["sheet_ref"],
+            "qq:sheet:score-mid"
+        );
+        assert_eq!(
+            sheets["data"]["sheets"][0]["track_ref"],
+            "qq:0039MnYb0qxYhV"
+        );
+        assert_eq!(sheets["data"]["sheets"][0]["name"], "晴天吉他谱");
+        assert_eq!(sheets["data"]["sheets"][0]["view_count"], 12_345);
+        assert_eq!(sheets["data"]["totals"]["guitar"], 1);
+        assert_eq!(sheets["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(sheets["meta"]["platform"], "qq");
+        assert_eq!(sheets["meta"]["account"], "green-vip");
+
+        let (status, legacy_alias) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music?ttype=2",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{legacy_alias}");
+        assert_eq!(legacy_alias["data"]["source"], "external");
+
+        let (status, default_source) =
+            json_response_from(app.clone(), "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music").await;
+        assert_eq!(status, StatusCode::OK, "{default_source}");
+        assert_eq!(default_source["data"]["source"], "user");
+
+        for path in [
+            "/v1/tracks/qq:97773/sheet-music?source=unknown",
+            "/v1/tracks/qq:97773/sheet-music?unknown=true",
+            "/v1/tracks/not-a-reference/sheet-music",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
