@@ -11927,68 +11927,52 @@ async fn comment_reaction_list(
 
 async fn comment_reaction_enable(
     State(state): State<AppState>,
-    Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
+    Path(route): Path<(String, String, String, String)>,
     params: Result<Query<CommentAccountQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
-    execute_comment_reaction_mutation(
-        &state,
-        kind,
-        reference,
-        comment_id,
-        reaction,
-        query_params(params)?,
-        true,
-    )
-    .await
+    execute_comment_reaction_mutation(&state, route, query_params(params)?, &headers, true).await
 }
 
 async fn comment_reaction_disable(
     State(state): State<AppState>,
-    Path((kind, reference, comment_id, reaction)): Path<(String, String, String, String)>,
+    Path(route): Path<(String, String, String, String)>,
     params: Result<Query<CommentAccountQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
-    execute_comment_reaction_mutation(
-        &state,
-        kind,
-        reference,
-        comment_id,
-        reaction,
-        query_params(params)?,
-        false,
-    )
-    .await
+    execute_comment_reaction_mutation(&state, route, query_params(params)?, &headers, false).await
 }
 
 async fn execute_comment_reaction_mutation(
     state: &AppState,
-    kind: String,
-    reference: String,
-    comment_id: String,
-    reaction: String,
+    route: (String, String, String, String),
     params: CommentAccountQuery,
+    headers: &HeaderMap,
     active: bool,
 ) -> Result<Json<ApiResponse<CommentReactionMutationResult>>, ApiError> {
+    let (kind, reference, comment_id, reaction) = route;
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
     let comment_id = validate_comment_id("comment_id", &comment_id)?;
     let kind = parse_comment_reaction_kind(&reaction)?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .set_comment_reaction(&CommentReactionMutationRequest {
             target,
             comment_id,
             kind,
             active,
             target_user_ref: None,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -12013,6 +11997,7 @@ async fn comment_report(
     State(state): State<AppState>,
     Path((kind, reference, comment_id)): Path<(String, String, String)>,
     params: Result<Query<CommentAccountQuery>, QueryRejection>,
+    headers: HeaderMap,
     payload: Result<Json<CommentReportBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CommentReportResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -12021,54 +12006,58 @@ async fn comment_report(
     let platform = target.resource_ref.platform();
     let comment_id = validate_comment_id("comment_id", &comment_id)?;
     let params = query_params(params)?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .report_comment(&CommentReportRequest {
             target,
             comment_id,
             reason: body.reason,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn comment_create(
     State(state): State<AppState>,
     Path((kind, reference)): Path<(String, String)>,
     Query(params): Query<CommentAccountQuery>,
+    headers: HeaderMap,
     payload: Result<Json<CommentContentBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
     let body = json_body(payload)?;
     validate_comment_content(&body.content)?;
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .post_comment(&CommentWriteRequest {
             target,
             content: body.content,
             reply_to: None,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn comment_reply(
     State(state): State<AppState>,
     Path((kind, reference, comment_id)): Path<(String, String, String)>,
     Query(params): Query<CommentAccountQuery>,
+    headers: HeaderMap,
     payload: Result<Json<CommentContentBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -12076,45 +12065,48 @@ async fn comment_reply(
     let comment_id = validate_comment_id("comment_id", &comment_id)?;
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .post_comment(&CommentWriteRequest {
             target,
             content: body.content,
             reply_to: Some(comment_id),
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn comment_delete(
     State(state): State<AppState>,
     Path((kind, reference, comment_id)): Path<(String, String, String)>,
     Query(params): Query<CommentAccountQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<CommentMutationResult>>, ApiError> {
     let comment_id = validate_comment_id("comment_id", &comment_id)?;
     let target = parse_comment_target(&kind, reference)?;
     let platform = target.resource_ref.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .delete_comment(&CommentDeleteRequest {
             target,
             comment_id,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 fn validate_comment_content(content: &str) -> Result<(), TuneWeaveError> {
@@ -22004,6 +21996,71 @@ mod tests {
         assert_eq!(deleted["data"]["comment_id"], "1535550516319");
         assert_eq!(deleted["data"]["target"]["ref"], "netease:185809");
         assert_eq!(deleted["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn comment_writes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-comment-writer",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (method, path, body) in [
+            (
+                Method::PUT,
+                "/v1/resources/track/netease:29178366/comments/12840183/reactions/like",
+                None,
+            ),
+            (
+                Method::DELETE,
+                "/v1/resources/track/netease:29178366/comments/12840183/reactions/like",
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/resources/track/netease:2058263032/comments/123456789/reports",
+                Some(json!({"reason": "人身攻击"})),
+            ),
+            (
+                Method::POST,
+                "/v1/resources/track/netease:185809/comments",
+                Some(json!({"content": "新评论"})),
+            ),
+            (
+                Method::POST,
+                "/v1/resources/track/netease:185809/comments/1438569889/replies",
+                Some(json!({"content": "回复内容"})),
+            ),
+            (
+                Method::DELETE,
+                "/v1/resources/track/netease:185809/comments/1535550516319",
+                None,
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, body, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"]["extensions"]["account"], "default");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::POST,
+            "/v1/resources/track/netease:185809/comments?account=writer",
+            Some(json!({"content": "新评论"})),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
