@@ -2392,6 +2392,15 @@ struct TrackBatchBody {
     song_type: Option<i64>,
 }
 
+struct TrackBatchInputs {
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    items: Option<Vec<TrackBatchItemBody>>,
+    platform: Option<String>,
+    account: Option<String>,
+    song_type: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrackBatchItemBody {
@@ -2430,52 +2439,56 @@ struct TrackFavoriteCountBatchBody {
 async fn tracks_get(
     State(state): State<AppState>,
     params: Result<Query<TrackBatchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let params = query_params(params)?;
     tracks_response(
         &state,
-        params.refs.map(|value| vec![value]),
-        params.ids.map(|value| vec![value]),
-        None,
-        params.platform.as_deref(),
-        params.account,
-        params.song_type,
+        &headers,
+        TrackBatchInputs {
+            refs: params.refs.map(|value| vec![value]),
+            ids: params.ids.map(|value| vec![value]),
+            items: None,
+            platform: params.platform,
+            account: params.account,
+            song_type: params.song_type,
+        },
     )
     .await
 }
 
 async fn tracks_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<TrackBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let body = json_body(body)?;
     tracks_response(
         &state,
-        body.refs.map(StreamReferenceInput::into_values),
-        body.ids.map(StreamReferenceInput::into_values),
-        body.items,
-        body.platform.as_deref(),
-        body.account,
-        body.song_type,
+        &headers,
+        TrackBatchInputs {
+            refs: body.refs.map(StreamReferenceInput::into_values),
+            ids: body.ids.map(StreamReferenceInput::into_values),
+            items: body.items,
+            platform: body.platform,
+            account: body.account,
+            song_type: body.song_type,
+        },
     )
     .await
 }
 
 async fn tracks_response(
     state: &AppState,
-    refs: Option<Vec<String>>,
-    ids: Option<Vec<String>>,
-    items: Option<Vec<TrackBatchItemBody>>,
-    platform: Option<&str>,
-    account: Option<String>,
-    song_type: Option<i64>,
+    headers: &HeaderMap,
+    inputs: TrackBatchInputs,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let items = parse_track_detail_request_items(
-        refs,
-        ids,
-        items,
-        platform,
-        song_type,
+        inputs.refs,
+        inputs.ids,
+        inputs.items,
+        inputs.platform.as_deref(),
+        inputs.song_type,
         state.default_platform,
     )?;
     let selected_platform = items[0].track_ref.platform();
@@ -2494,33 +2507,45 @@ async fn tracks_response(
                 .into(),
         );
     }
-    let account = optional_trimmed(account);
-    let provider = state.registry.require(selected_platform)?;
-    let tracks = provider
+    let account = optional_trimmed(inputs.account);
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        selected_platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let tracks = access
+        .provider
         .tracks_with_options(&TrackDetailBatchRequest {
             items,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(tracks).with_platform(selected_platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(tracks, selected_platform)))
 }
 
 async fn track_favorite_count(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<TrackFavoriteCountParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<TrackFavoriteCount>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let mut counts = provider
-        .track_favorite_counts(&[reference.id().to_owned()], account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut counts = access
+        .provider
+        .track_favorite_counts(
+            &[reference.id().to_owned()],
+            access.provider_account.as_deref(),
+        )
         .await?;
     if counts.len() != 1 || counts[0].track_ref != reference {
         return Err(TuneWeaveError::new(
@@ -2531,20 +2556,18 @@ async fn track_favorite_count(
         .into());
     }
     let count = counts.pop().expect("single favorite count was validated");
-    let mut response = ApiResponse::new(count).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(count, platform)))
 }
 
 async fn track_favorite_counts_get(
     State(state): State<AppState>,
     params: Result<Query<TrackFavoriteCountBatchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<TrackFavoriteCount>>>, ApiError> {
     let params = query_params(params)?;
     track_favorite_counts_response(
         &state,
+        &headers,
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
         params.platform.as_deref(),
@@ -2555,11 +2578,13 @@ async fn track_favorite_counts_get(
 
 async fn track_favorite_counts_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<TrackFavoriteCountBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<TrackFavoriteCount>>>, ApiError> {
     let body = json_body(body)?;
     track_favorite_counts_response(
         &state,
+        &headers,
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(|ids| {
             ids.into_values()
@@ -2575,6 +2600,7 @@ async fn track_favorite_counts_post(
 
 async fn track_favorite_counts_response(
     state: &AppState,
+    headers: &HeaderMap,
     refs: Option<Vec<String>>,
     ids: Option<Vec<String>>,
     platform: Option<&str>,
@@ -2604,13 +2630,19 @@ async fn track_favorite_counts_response(
         .into());
     }
     let account = optional_trimmed(account);
-    let provider = state.registry.require(selected_platform)?;
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        selected_platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let ids = references
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let counts = provider
-        .track_favorite_counts(&ids, account.as_deref())
+    let counts = access
+        .provider
+        .track_favorite_counts(&ids, access.provider_account.as_deref())
         .await?;
     if counts.len() != references.len()
         || counts
@@ -2625,11 +2657,7 @@ async fn track_favorite_counts_response(
         .with_platform(selected_platform)
         .into());
     }
-    let mut response = ApiResponse::new(counts).with_platform(selected_platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(counts, selected_platform)))
 }
 
 fn parse_track_detail_request_items(
@@ -2795,6 +2823,7 @@ async fn track(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Track>>, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
@@ -2803,14 +2832,17 @@ async fn track(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let track = provider.track(reference.id(), account).await?;
-    let mut response = ApiResponse::new(track).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account,
+        AccountSelection::Optional,
+    )?;
+    let track = access
+        .provider
+        .track(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(track, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2824,27 +2856,30 @@ async fn track_availability(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<TrackAvailabilityParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<TrackAvailability>>, ApiError> {
     let reference = parse_reference(reference)?;
     let bitrate = parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?
         .unwrap_or(TrackAvailabilityRequest::DEFAULT_BITRATE);
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let availability = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let availability = access
+        .provider
         .track_availability(
             reference.id(),
             &TrackAvailabilityRequest {
                 bitrate,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(availability).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(availability, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -23775,6 +23810,103 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["ref"], "netease:185809");
         assert_eq!(json["data"]["artists"][0]["name"], "周杰伦");
+    }
+
+    #[tokio::test]
+    async fn track_reads_accept_caller_credentials_without_server_aliases() {
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-track-reader",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_import_providers();
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/tracks/netease:185809",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["extensions"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        for (method, path, body) in [
+            (Method::GET, "/v1/tracks?ids=185809&platform=netease", None),
+            (
+                Method::POST,
+                "/v1/tracks",
+                Some(json!({"ids": ["185809"], "platform": "netease"})),
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, body, &netease).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"][0]["extensions"]["account"], "default");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, availability) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/tracks/netease:185809/availability",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(availability["data"]["extensions"]["account"], "default");
+        assert!(availability["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        for (method, path, body) in [
+            (
+                Method::GET,
+                "/v1/tracks/qq:0039MnYb0qxYhV/favorite-count",
+                None,
+            ),
+            (
+                Method::GET,
+                "/v1/tracks/favorite-counts?refs=qq:0039MnYb0qxYhV",
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/tracks/favorite-counts",
+                Some(json!({
+                    "refs": ["qq:0039MnYb0qxYhV"]
+                })),
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, body, &qq).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            let item = if response["data"].is_array() {
+                &response["data"][0]
+            } else {
+                &response["data"]
+            };
+            assert_eq!(item["extensions"]["account"], "default");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/tracks/netease:185809?account=reader",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
