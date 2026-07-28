@@ -2,7 +2,7 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=18`、`partial=0`、`implemented=6`、`verified=10`；完整实现率与已触达率均为 `16/34 = 47.06%`。
+状态沿用其他平台账本：`pending` 尚未实现，`deferred` 已明确保留但按路线移出当前主线，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=13`、`deferred=5`、`partial=0`、`implemented=6`、`verified=10`；全量完整实现率为 `16/34 = 47.06%`，排除延期登录链后的当前主线完成度为 `16/29 = 55.17%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
@@ -15,11 +15,11 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BF05 | 平台基础 | 强类型凭证、多账户与调用方托管 | `implemented` | `bilibili_cookie_v1` 强类型保存并校验 `DedeUserID/DedeUserID__ckMd5/SESSDATA/bili_jct/sid/refresh_token`，Debug 与错误不回显秘密；二维码确认从首个账户功能起支持 `(bilibili, account)` 及 `server/client/both`，调用方凭证平台、类型、到期语义和内部字段均在发网前验证。三种归属模式和账户隔离已离线验收，待真实扫码确认后联合升为 `verified` |
 | BA01 | 登录账户 | Web 二维码创建 | `verified` | 固定调用 `x/passport-login/web/qrcode/generate?source=main-fe-header`，同时兼容并严格校验当前 `account.bilibili.com/.../scan-web` 与旧版 Passport 扫码地址；二维码由进程内生成自包含 SVG，平台 key 只进入有期限的服务端事务。已真实创建并验证可轮询的二维码 |
 | BA02 | 登录账户 | Web 二维码轮询与状态机 | `implemented` | 按 BBDown 链路固定调用 `x/passport-login/web/qrcode/poll`，完整区分 `86101` 未扫码、`86090` 已扫码待确认、`86038` 过期、`0` 成功及其他失败码；确认时优先从重复 `Set-Cookie` 提取凭据，仅在必需字段缺失时从固定 `crossDomain` 地址回填，成功凭证只按事务固定归属模式交付一次。未扫码真实网络态及全部响应分支已通过，真实扫码成功态待账户联合验收 |
-| BA03 | 登录账户 | 登录 captcha 挑战 | `pending` | 获取 GeeTest challenge/gt/token；TuneWeave 不绕过验证码，由调用方提交人工验证结果继续密码或短信流程 |
-| BA04 | 登录账户 | Web 密码登录 | `pending` | 获取 RSA 公钥与 salt、加密密码并保留风控二次验证分支；密码与验证码不得持久化或进入日志 |
-| BA05 | 登录账户 | 国家/地区电话区号 | `pending` | 对接 Web country list 并映射统一国家区号模型 |
-| BA06 | 登录账户 | Web 短信验证码发送 | `pending` | 复用同一 captcha 事务和设备身份；手机号不持久化，发送与登录不得切换网络身份 |
-| BA07 | 登录账户 | Web 短信验证码登录 | `pending` | 复用发送阶段产生的 captcha key，完整处理绑定、风控和登录成功 Cookie |
+| BA03 | 登录账户 | 登录 captcha 挑战 | `deferred` | 排到酷狗/咪咕/酷我公开音源补充层之后；按 `test_nine → ttocr → gtmanual` 默认链和显式 `vision_ai` 实现，完整契约见 `docs/bilibili-captcha-providers.md` |
+| BA04 | 登录账户 | Web 密码登录 | `deferred` | 与 BA03 同阶段；获取 RSA 公钥与 salt、加密密码并保留风控二次验证分支，密码与验证码不得持久化或进入日志 |
+| BA05 | 登录账户 | 国家/地区电话区号 | `deferred` | 与密码/短信登录链一并实施，对接 Web country list 并映射统一国家区号模型 |
+| BA06 | 登录账户 | Web 短信验证码发送 | `deferred` | 与 BA03 共用受限验证码事务、设备和网络身份；手机号不持久化，发送与登录不得切换身份 |
+| BA07 | 登录账户 | Web 短信验证码登录 | `deferred` | 复用发送阶段 challenge/captcha key，完整处理绑定、风控和登录成功 Cookie；不得无限刷新 challenge 或重复消费 |
 | BA08 | 登录账户 | 会话状态与账户资料 | `implemented` | `GET /v1/auth/session` 与 `/v1/account/profile` 固定调用 `x/web-interface/nav`，强类型映射登录态、UID、昵称、头像、验证状态、等级、认证、挂件、大会员、钱包及 WBI 实时口令等已知结构；登录 UID 必须与选中凭证一致，头像只接受 B 站 HTTPS 图片域名。`-101` 和 `isLogin=false` 作为未认证正常结果，不存在的精确别名不发网且不回退 `default`；调用方凭证与服务器多账户共用同一链路。匿名真实网络态及离线完整/畸形分支已通过，登录账户成功态待扫码联合验收 |
 | BA09 | 登录账户 | Cookie 刷新与退出 | `implemented` | `POST /v1/auth/session/refresh` 完整执行 Cookie 刷新状态检查、固定公钥 RSA-OAEP `correspondPath`、实时 `refresh_csrf`、新 Cookie/refresh token 轮换、旧 refresh token 确认及新会话身份检查；无需刷新时验证旧会话并按归属模式返回同一代际，任一步失败均不覆盖服务器凭据。`DELETE /v1/auth/session` 固定调用 Web 退出接口，只在上游确认退出或明确返回失效登录页后删除精确账户；网络、CSRF 和未知错误保留旧凭据。`server/client/both` 的来源隔离、同 UID 检查、原子替换/删除、响应脱敏和全部状态解析已离线验收，待真实扫码账户完成刷新与退出联合验证 |
 | BS01 | 搜索 | 视频直接搜索 | `implemented` | `GET /v1/search?platform=bilibili&kind=video` 已接入视频专用搜索：先尝试现行 WBI 端点，若平台明确返回风险票据则在十分钟内使用仍可用的公开兼容端点，不申请、回显或自动处理 captcha。统一分页可跨上游页满足 `limit/offset`，结果强类型保留 AID/BVID、UP 主、封面、时长、分区、标签、命中列、计数、发布时间及付费/合作标志，未知 HTML 不会进入标题。统一 `order` 完整覆盖综合、播放、最新、弹幕、收藏和评论排序，`duration` 覆盖平台五档时长，`category_id/tids` 保留正整数分区 ID；三类筛选在 HTTP、核心模型、provider 和两套搜索端点间均有强类型映射，其他平台会明确拒绝而不静默忽略。默认排序真实返回过结果，筛选分支完成离线验收；当前出口后续重复验收触发 HTTP 412，因此待筛选真实成功态后升级为 `verified` |
@@ -45,8 +45,9 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 
 ## 实施顺序
 
-1. BF02–BF05 与 BA01–BA09：先形成可持久、可由调用方托管的真实登录与多账户底座。
+1. BF02–BF05、BA01–BA02 与 BA08–BA09：形成二维码登录、会话、调用方托管和多账户底座。
 2. BS01–BS03：接通直接视频搜索、建议与热搜。
 3. BP01–BP08：完成个人目录、公开合集、收藏夹和 Uni Playlist 双来源导入。
 4. BV01、BV02、BV04 与 BM01–BM05：完成封面、分 P、字幕、仅音频播放/下载及视频播放链。
 5. BV03：统计等非播放阻塞展示在上述链路稳定后补齐。
+6. 酷狗、咪咕、酷我公开音源补充层完成后，再实施 BA03–BA07；该延期不改变最终范围。
