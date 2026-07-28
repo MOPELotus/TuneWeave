@@ -2211,13 +2211,20 @@ async fn track_files(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<TrackFilesParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<AudioFileBatch>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let files = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let files = access
+        .provider
         .audio_files(&AudioFileRequest {
             items: vec![AudioFileRequestItem {
                 track_ref: reference,
@@ -2226,18 +2233,15 @@ async fn track_files(
                 media_id: optional_trimmed(params.media_id),
             }],
             default_spec: None,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(files).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(files, platform)))
 }
 
 async fn audio_files(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<AudioFilesBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AudioFileBatch>>, ApiError> {
     let body = json_body(body)?;
@@ -2320,19 +2324,21 @@ async fn audio_files(
         .map(|value| required_string_or_number("default_spec/file_type", value))
         .transpose()?;
     let account = optional_trimmed(body.account);
-    let provider = state.registry.require(platform)?;
-    let files = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let files = access
+        .provider
         .audio_files(&AudioFileRequest {
             items,
             default_spec,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(files).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(files, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -23666,6 +23672,70 @@ mod tests {
         assert_eq!(batch["data"]["files"][1]["spec"], "13");
         assert_eq!(batch["meta"]["platform"], "netease");
         assert_eq!(batch["meta"]["account"], "batch-vip");
+    }
+
+    #[tokio::test]
+    async fn audio_file_routes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-audio-files",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/tracks/netease:185809/files?file_type=ogg_640",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["extensions"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, batch) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/media/files",
+            Some(json!({
+                "platform": "netease",
+                "items": [{"ref": "netease:185809"}]
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(batch["data"]["extensions"]["account"], "default");
+        assert!(batch["meta"].get("account").is_none());
+
+        for (method, path, body) in [
+            (
+                Method::GET,
+                "/v1/tracks/netease:185809/files?account=vip",
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/media/files",
+                Some(json!({
+                    "platform": "netease",
+                    "account": "vip",
+                    "items": [{"ref": "netease:185809"}]
+                })),
+            ),
+        ] {
+            let (status, conflict) =
+                caller_json_request(app.clone(), method, path, body, &credential).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(conflict["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
