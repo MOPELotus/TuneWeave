@@ -124,6 +124,7 @@ TuneWeave 采用 `MIT OR Apache-2.0` 双许可。参考项目的许可证继续�
 
 - [网易云 431 个公开模块](coverage/netease.md)
 - [QQ 音乐 104 个公开方法](coverage/qq.md)
+- [B 站 Basic 34 个验收单元](coverage/bilibili-basic.md)
 
 登录也遵循完整覆盖原则。以网易云为例，二维码、邮箱账号密码、手机号密码、手机号验证码、登录状态、刷新和退出都属于账户能力，不以二维码登录代替其余流程。密码、验证码、Cookie 和 token 只能进入请求处理与服务端账户仓库，不写入日志或普通响应。
 
