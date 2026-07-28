@@ -43,6 +43,7 @@ const DEVICE_IDENTITY_ENDPOINT: &str = "https://api.bilibili.com/x/frontend/fing
 const WEB_HOME_ENDPOINT: &str = "https://www.bilibili.com/";
 const WEB_TICKET_ENDPOINT: &str =
     "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket";
+const SEARCH_SUGGESTION_ENDPOINT: &str = "https://s.search.bilibili.com/main/suggest";
 const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/type";
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
@@ -220,6 +221,37 @@ pub(crate) struct BilibiliSearchVideo {
     pub paid: Option<bool>,
     pub collaborative: Option<bool>,
     pub rank_score: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSearchSuggestionSet {
+    pub response_code: i64,
+    pub experiment: Option<String>,
+    pub search_token: Option<String>,
+    pub reported_total: Option<u64>,
+    pub user_feature: Option<String>,
+    pub suggestions: Vec<BilibiliSearchSuggestion>,
+    pub extensions: BTreeMap<String, Value>,
+    pub result_extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSearchSuggestion {
+    pub keyword: String,
+    pub term: Option<String>,
+    pub display_text: String,
+    pub highlight_ranges: Vec<BilibiliTextRange>,
+    pub reference: u64,
+    pub spid: u64,
+    pub suggestion_type: Option<String>,
+    pub item_feature: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct BilibiliTextRange {
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -989,6 +1021,48 @@ struct VideoSearchItem {
     is_union_video: Option<FlexibleU64>,
     #[serde(default)]
     rank_score: Option<FlexibleU64>,
+}
+
+#[derive(Deserialize)]
+struct SearchSuggestionResponse {
+    code: i64,
+    #[serde(default)]
+    exp_str: String,
+    #[serde(default)]
+    result: Option<SearchSuggestionResult>,
+    #[serde(default)]
+    stoken: String,
+    #[serde(default)]
+    total_count: Option<FlexibleU64>,
+    #[serde(default)]
+    user_feature: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SearchSuggestionResult {
+    #[serde(default)]
+    tag: Option<Vec<SearchSuggestionItem>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SearchSuggestionItem {
+    value: String,
+    #[serde(default)]
+    term: String,
+    #[serde(default)]
+    name: String,
+    r#ref: FlexibleU64,
+    spid: FlexibleU64,
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    item_feature: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -2051,6 +2125,63 @@ impl BilibiliClient {
         parse_logout_response(&bytes)
     }
 
+    pub(crate) async fn search_suggestions(
+        &self,
+        keyword: &str,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliSearchSuggestionSet> {
+        validate_search_keyword(keyword)?;
+        let device = self.web_device().await?;
+        let mut endpoint = Url::parse(SEARCH_SUGGESTION_ENDPOINT).map_err(|_| {
+            bilibili_internal_error("Bilibili search suggestion endpoint is invalid")
+        })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("term", keyword)
+            .append_pair("main_ver", "v1")
+            .append_pair("highlight", "")
+            .append_pair("func", "suggest")
+            .append_pair("suggest_type", "accurate")
+            .append_pair("sub_type", "tag")
+            .append_pair(
+                "userid",
+                credential.map_or("0", BilibiliCredential::user_id),
+            )
+            .append_pair("bangumi_acc_num", "1")
+            .append_pair("special_acc_num", "1")
+            .append_pair("topic_acc_num", "1")
+            .append_pair("upuser_acc_num", "1")
+            .append_pair("tag_num", "10")
+            .append_pair("special_num", "10")
+            .append_pair("bangumi_num", "10")
+            .append_pair("upuser_num", "3")
+            .append_pair("buvid", &device.buvid3)
+            .append_pair("spmid", "333.1007");
+        let device_cookie = device.cookie_header();
+        let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
+            format!("{}; {device_cookie}", credential.cookie_header())
+        });
+        let response = self
+            .http
+            .get(endpoint)
+            .header(COOKIE, cookie_header)
+            .header(REFERER, VIDEO_SEARCH_REFERER)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili search suggestion", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili search suggestion response exceeded the size limit",
+            ));
+        }
+        parse_search_suggestion_response(&bytes)
+    }
+
     pub(crate) async fn search_videos_page(
         &self,
         keyword: &str,
@@ -3039,6 +3170,209 @@ fn parse_web_ticket_response(bytes: &[u8]) -> Result<(CachedWebTicket, WbiKeys)>
         },
         keys,
     ))
+}
+
+fn parse_search_suggestion_response(bytes: &[u8]) -> Result<BilibiliSearchSuggestionSet> {
+    let response: SearchSuggestionResponse = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili search suggestion returned invalid JSON"))?;
+    if !matches!(response.code, 0 | 3) {
+        return Err(platform_business_error(
+            "Bilibili search suggestion",
+            response.code,
+            "",
+        ));
+    }
+    let (items, result_extensions) = response
+        .result
+        .map(|result| (result.tag.unwrap_or_default(), result.extra))
+        .unwrap_or_default();
+    if items.len() > 10 {
+        return Err(bilibili_upstream_error(
+            "Bilibili search suggestion exceeded the documented result limit",
+        ));
+    }
+    if response.code == 3 && !items.is_empty() {
+        return Err(bilibili_upstream_error(
+            "Bilibili empty search suggestion response contained results",
+        ));
+    }
+    let reported_total = response
+        .total_count
+        .map(|total| {
+            total.get().filter(|total| *total <= 10).ok_or_else(|| {
+                bilibili_upstream_error("Bilibili search suggestion returned an invalid total")
+            })
+        })
+        .transpose()?;
+    if reported_total.is_some_and(|total| total < items.len() as u64) {
+        return Err(bilibili_upstream_error(
+            "Bilibili search suggestion total was smaller than its results",
+        ));
+    }
+    let suggestions = items
+        .into_iter()
+        .map(map_search_suggestion_item)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BilibiliSearchSuggestionSet {
+        response_code: response.code,
+        experiment: optional_search_suggestion_text(
+            &response.exp_str,
+            "experiment identifier",
+            4096,
+        )?,
+        search_token: optional_search_suggestion_text(&response.stoken, "search token", 4096)?,
+        reported_total,
+        user_feature: optional_search_suggestion_text(
+            &response.user_feature,
+            "user feature",
+            4096,
+        )?,
+        suggestions,
+        extensions: response.extra,
+        result_extensions,
+    })
+}
+
+fn map_search_suggestion_item(item: SearchSuggestionItem) -> Result<BilibiliSearchSuggestion> {
+    let term = optional_search_suggestion_text(&item.term, "term", 1024)?;
+    let keyword_source = if item.value.trim().is_empty() {
+        term.as_deref().unwrap_or_default()
+    } else {
+        &item.value
+    };
+    let keyword = validated_search_suggestion_text(keyword_source, "keyword", 1024)?;
+    let (display_text, highlight_ranges) = if item.name.trim().is_empty() {
+        (keyword.clone(), Vec::new())
+    } else {
+        parse_search_suggestion_display(&item.name)?
+    };
+    let reference = item.r#ref.get().ok_or_else(|| {
+        bilibili_upstream_error("Bilibili search suggestion returned an invalid reference")
+    })?;
+    let spid = item.spid.get().ok_or_else(|| {
+        bilibili_upstream_error("Bilibili search suggestion returned an invalid SPID")
+    })?;
+    Ok(BilibiliSearchSuggestion {
+        keyword,
+        term,
+        display_text,
+        highlight_ranges,
+        reference,
+        spid,
+        suggestion_type: optional_search_suggestion_text(&item.r#type, "suggestion type", 256)?,
+        item_feature: optional_search_suggestion_text(&item.item_feature, "item feature", 4096)?,
+        extensions: item.extra,
+    })
+}
+
+fn parse_search_suggestion_display(value: &str) -> Result<(String, Vec<BilibiliTextRange>)> {
+    const HIGHLIGHT_OPEN: &str = "<em class=\"suggest_high_light\">";
+    const HIGHLIGHT_CLOSE: &str = "</em>";
+
+    let mut remaining = value.trim();
+    let mut display = String::with_capacity(remaining.len());
+    let mut ranges = Vec::new();
+    let mut highlight_start = None;
+    while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix(HIGHLIGHT_OPEN) {
+            if highlight_start.is_some() {
+                return Err(bilibili_upstream_error(
+                    "Bilibili search suggestion returned nested highlight markup",
+                ));
+            }
+            highlight_start = Some(display.chars().count());
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix(HIGHLIGHT_CLOSE) {
+            let start = highlight_start.take().ok_or_else(|| {
+                bilibili_upstream_error(
+                    "Bilibili search suggestion returned unmatched highlight markup",
+                )
+            })?;
+            let end = display.chars().count();
+            if start == end {
+                return Err(bilibili_upstream_error(
+                    "Bilibili search suggestion returned an empty highlight",
+                ));
+            }
+            ranges.push(BilibiliTextRange { start, end });
+            remaining = rest;
+            continue;
+        }
+        if let Some((decoded, consumed)) = decode_search_suggestion_entity(remaining) {
+            display.push(decoded);
+            remaining = &remaining[consumed..];
+            continue;
+        }
+        let character = remaining
+            .chars()
+            .next()
+            .expect("non-empty search suggestion display");
+        if character == '<' || character.is_control() {
+            return Err(bilibili_upstream_error(
+                "Bilibili search suggestion returned unsafe display markup",
+            ));
+        }
+        display.push(character);
+        remaining = &remaining[character.len_utf8()..];
+    }
+    if highlight_start.is_some() {
+        return Err(bilibili_upstream_error(
+            "Bilibili search suggestion returned unclosed highlight markup",
+        ));
+    }
+    let display = validated_search_suggestion_text(&display, "display text", 2048)?;
+    Ok((display, ranges))
+}
+
+fn decode_search_suggestion_entity(value: &str) -> Option<(char, usize)> {
+    for (entity, decoded) in [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+        ("&apos;", '\''),
+    ] {
+        if value.starts_with(entity) {
+            return Some((decoded, entity.len()));
+        }
+    }
+    let scan_end = value.len().min(16);
+    let end = value.get(..scan_end)?.find(';')?;
+    let entity = value.get(2..end)?;
+    let code_point = if value.starts_with("&#x") || value.starts_with("&#X") {
+        u32::from_str_radix(value.get(3..end)?, 16).ok()?
+    } else if value.starts_with("&#") {
+        entity.parse().ok()?
+    } else {
+        return None;
+    };
+    let character = char::from_u32(code_point)?;
+    (!character.is_control()).then_some((character, end + 1))
+}
+
+fn optional_search_suggestion_text(
+    value: &str,
+    context: &str,
+    limit: usize,
+) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validated_search_suggestion_text(value, context, limit).map(Some)
+}
+
+fn validated_search_suggestion_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili search suggestion returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_video_search_response(
@@ -6477,6 +6811,73 @@ mod tests {
                 .as_slice(),
         ] {
             assert!(parse_web_ticket_response(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn search_suggestions_separate_plain_display_text_and_highlight_ranges() {
+        let response = serde_json::to_vec(&json!({
+            "exp_str": "106301_106700",
+            "code": 0,
+            "result": {
+                "tag": [{
+                    "value": "洛天依歌曲",
+                    "term": "洛天依歌曲",
+                    "ref": 0,
+                    "name": "<em class=\"suggest_high_light\">洛天依</em>&amp;歌曲",
+                    "spid": 5,
+                    "type": "",
+                    "item_feature": "",
+                    "future_field": {"kept": true}
+                }],
+                "future_bucket": ["kept"]
+            },
+            "stoken": "4020133863501304726",
+            "total_count": "1",
+            "debug_response_info": {"debug_record": []},
+            "user_feature": ""
+        }))
+        .expect("suggestion fixture");
+        let result = parse_search_suggestion_response(&response).expect("suggestions");
+        assert_eq!(result.response_code, 0);
+        assert_eq!(result.reported_total, Some(1));
+        assert_eq!(result.suggestions[0].keyword, "洛天依歌曲");
+        assert_eq!(result.suggestions[0].display_text, "洛天依&歌曲");
+        assert_eq!(
+            result.suggestions[0].highlight_ranges,
+            [BilibiliTextRange { start: 0, end: 3 }]
+        );
+        assert_eq!(
+            result.suggestions[0].extensions["future_field"]["kept"],
+            true
+        );
+        assert_eq!(result.result_extensions["future_bucket"][0], "kept");
+        assert!(result.extensions.contains_key("debug_response_info"));
+    }
+
+    #[test]
+    fn search_suggestions_accept_the_platform_empty_code_and_reject_unsafe_markup() {
+        let empty = parse_search_suggestion_response(
+            br#"{"exp_str":"","code":3,"result":{"tag":[]},"stoken":"1","total_count":0}"#,
+        )
+        .expect("empty suggestion response");
+        assert!(empty.suggestions.is_empty());
+        assert_eq!(empty.response_code, 3);
+
+        for malformed in [
+            br#"{"code":0,"result":{"tag":[{"value":"safe","name":"<script>unsafe</script>","ref":0,"spid":5}]},"total_count":1}"#
+                .as_slice(),
+            br#"{"code":0,"result":{"tag":[{"value":"safe","name":"<em class=\"suggest_high_light\">safe","ref":0,"spid":5}]},"total_count":1}"#
+                .as_slice(),
+            br#"{"code":3,"result":{"tag":[{"value":"unexpected","name":"unexpected","ref":0,"spid":5}]},"total_count":1}"#
+                .as_slice(),
+        ] {
+            assert_eq!(
+                parse_search_suggestion_response(malformed)
+                    .expect_err("malformed suggestion")
+                    .code,
+                ErrorCode::UpstreamError
+            );
         }
     }
 

@@ -1216,17 +1216,15 @@ async fn search_suggestions(
         &state,
         platform,
         params.account.as_deref(),
-        AccountSelection::Default,
+        AccountSelection::Optional,
     )?;
     let provider = access.provider;
-    let account = access
-        .provider_account
-        .expect("default account selection always yields an account");
+    let account = access.provider_account;
     let list = provider
         .search_suggestions(&SearchSuggestionRequest {
             query: query.to_owned(),
             client,
-            account: Some(account.clone()),
+            account,
         })
         .await?;
     let mut response = ApiResponse::new(list).with_platform(platform);
@@ -22864,7 +22862,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(defaulted["data"]["client"], "web");
         assert_eq!(defaulted["meta"]["platform"], "netease");
-        assert_eq!(defaulted["meta"]["account"], "default");
+        assert!(defaulted["meta"]["account"].is_null());
     }
 
     #[tokio::test]
@@ -27441,6 +27439,40 @@ mod tests {
             );
             assert!(response.headers().get("Cookie").is_none());
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili search suggestion access"]
+    async fn live_bilibili_search_suggestions_flow_through_unified_http() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/search/suggestions?platform=bilibili&client=web&q=%E5%91%A8%E6%9D%B0%E4%BC%A6",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["client"], "web");
+        assert!(
+            response["data"]["suggestions"]
+                .as_array()
+                .is_some_and(|suggestions| !suggestions.is_empty() && suggestions.len() <= 10)
+        );
+        assert!(
+            response["data"]["suggestions"]
+                .as_array()
+                .expect("suggestions")
+                .iter()
+                .all(|suggestion| !suggestion["display_text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains('<'))
+        );
     }
 
     #[tokio::test]

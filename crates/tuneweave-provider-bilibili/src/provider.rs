@@ -11,7 +11,8 @@ use tuneweave_core::{
     CredentialMode, ErrorCode, Extensions, MusicProvider, Page, PageMeta, PageRequest, Platform,
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
-    SearchQuery, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
+    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
     VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoCodecFamily, VideoDetail,
     VideoDetailRequest, VideoDynamicRange, VideoPart, VideoPartListRequest, VideoPlaybackFormat,
     VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
@@ -29,8 +30,8 @@ use crate::client::{
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
     BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome,
     BilibiliPlaybackLanguageCatalog, BilibiliPlaybackManifest, BilibiliPlaybackTrack,
-    BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSeasonArchive,
-    BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
+    BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchSuggestionSet, BilibiliSearchVideo,
+    BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
     BilibiliSpacePlaylistPage, BilibiliSubtitle, BilibiliSubtitleBody, BilibiliSubtitleCatalog,
     BilibiliVideoPart, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
     BilibiliVideoSearchOrder, BilibiliVideoView,
@@ -105,6 +106,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::AccountProfile,
             Capability::SessionManagement,
             Capability::SearchVideos,
+            Capability::SearchSuggestions,
             Capability::PlaylistRead,
             Capability::VideoDetail,
             Capability::VideoParts,
@@ -226,6 +228,29 @@ impl MusicProvider for BilibiliProvider {
                 extensions,
             },
         })
+    }
+
+    async fn search_suggestions(
+        &self,
+        request: &SearchSuggestionRequest,
+    ) -> Result<SearchSuggestionList> {
+        if request.client != SearchSuggestionClient::Web {
+            return Err(bilibili_invalid_request(
+                "Bilibili search suggestions only support client=web",
+            ));
+        }
+        let query = request.query.trim();
+        if query.is_empty() || query.len() > 512 || query.chars().any(char::is_control) {
+            return Err(bilibili_invalid_request(
+                "Bilibili search suggestion keyword is invalid",
+            ));
+        }
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let response = self
+            .client
+            .search_suggestions(query, credential.as_ref())
+            .await?;
+        map_bilibili_search_suggestions(query, response)
     }
 
     async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
@@ -1649,6 +1674,56 @@ fn map_bilibili_search_video(item: BilibiliSearchVideo) -> Result<Video> {
         published_at: item.published_at.and_then(bilibili_unix_rfc3339),
         play_count: item.play_count,
         subscribed: None,
+        extensions,
+    })
+}
+
+fn map_bilibili_search_suggestions(
+    query: &str,
+    response: BilibiliSearchSuggestionSet,
+) -> Result<SearchSuggestionList> {
+    let suggestions = response
+        .suggestions
+        .into_iter()
+        .map(|suggestion| {
+            let mut extensions = suggestion.extensions;
+            extensions.insert("term".to_owned(), json!(suggestion.term));
+            extensions.insert("reference".to_owned(), json!(suggestion.reference));
+            extensions.insert("spid".to_owned(), json!(suggestion.spid));
+            extensions.insert(
+                "suggestion_type".to_owned(),
+                json!(suggestion.suggestion_type),
+            );
+            extensions.insert("item_feature".to_owned(), json!(suggestion.item_feature));
+            extensions.insert(
+                "highlight_ranges".to_owned(),
+                json!(suggestion.highlight_ranges),
+            );
+            SearchSuggestion {
+                keyword: suggestion.keyword,
+                kind: None,
+                display_text: Some(suggestion.display_text),
+                icon_url: None,
+                resource: None,
+                extensions,
+            }
+        })
+        .collect();
+    let mut extensions = response.extensions;
+    extensions.insert("response_code".to_owned(), json!(response.response_code));
+    extensions.insert("experiment".to_owned(), json!(response.experiment));
+    extensions.insert("search_token".to_owned(), json!(response.search_token));
+    extensions.insert("reported_total".to_owned(), json!(response.reported_total));
+    extensions.insert("user_feature".to_owned(), json!(response.user_feature));
+    extensions.insert(
+        "result_extensions".to_owned(),
+        json!(response.result_extensions),
+    );
+    Ok(SearchSuggestionList {
+        query: query.to_owned(),
+        client: SearchSuggestionClient::Web,
+        suggestions,
+        recommendations: Vec::new(),
         extensions,
     })
 }
@@ -3646,6 +3721,53 @@ mod tests {
     }
 
     #[test]
+    fn search_suggestion_mapping_keeps_plain_display_and_platform_metadata() {
+        let result = map_bilibili_search_suggestions(
+            "洛天依",
+            BilibiliSearchSuggestionSet {
+                response_code: 0,
+                experiment: Some("experiment".to_owned()),
+                search_token: Some("search-token".to_owned()),
+                reported_total: Some(1),
+                user_feature: None,
+                suggestions: vec![crate::client::BilibiliSearchSuggestion {
+                    keyword: "洛天依歌曲".to_owned(),
+                    term: Some("洛天依歌曲".to_owned()),
+                    display_text: "洛天依歌曲".to_owned(),
+                    highlight_ranges: vec![crate::client::BilibiliTextRange { start: 0, end: 3 }],
+                    reference: 0,
+                    spid: 5,
+                    suggestion_type: None,
+                    item_feature: None,
+                    extensions: BTreeMap::from([("future_field".to_owned(), json!(true))]),
+                }],
+                extensions: BTreeMap::from([("future_response".to_owned(), json!("kept"))]),
+                result_extensions: BTreeMap::from([("future_result".to_owned(), json!(["kept"]))]),
+            },
+        )
+        .expect("mapped suggestions");
+        assert_eq!(result.query, "洛天依");
+        assert_eq!(result.client, SearchSuggestionClient::Web);
+        assert_eq!(result.suggestions[0].keyword, "洛天依歌曲");
+        assert_eq!(
+            result.suggestions[0].display_text.as_deref(),
+            Some("洛天依歌曲")
+        );
+        assert!(result.suggestions[0].resource.is_none());
+        assert_eq!(
+            result.suggestions[0].extensions["highlight_ranges"][0],
+            json!({"start": 0, "end": 3})
+        );
+        assert_eq!(result.suggestions[0].extensions["future_field"], true);
+        assert_eq!(result.extensions["response_code"], 0);
+        assert_eq!(result.extensions["future_response"], "kept");
+        assert_eq!(
+            result.extensions["result_extensions"]["future_result"][0],
+            "kept"
+        );
+    }
+
+    #[test]
     fn video_search_mapping_uses_stable_video_and_creator_references() {
         let video = map_bilibili_search_video(BilibiliSearchVideo {
             aid: 78_977_417,
@@ -4191,6 +4313,36 @@ mod tests {
             ErrorCode::AuthenticationRequired
         );
         assert!(provider.capabilities().contains(&Capability::SearchVideos));
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_reject_non_web_clients_and_missing_accounts_before_network() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        for client in [SearchSuggestionClient::Mobile, SearchSuggestionClient::Pc] {
+            let error = provider
+                .search_suggestions(&SearchSuggestionRequest {
+                    query: "音乐".to_owned(),
+                    client,
+                    account: None,
+                })
+                .await
+                .expect_err("unsupported suggestion client");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let missing = provider
+            .search_suggestions(&SearchSuggestionRequest {
+                query: "音乐".to_owned(),
+                client: SearchSuggestionClient::Web,
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("missing selected account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SearchSuggestions)
+        );
     }
 
     #[tokio::test]
@@ -5150,6 +5302,35 @@ mod tests {
         assert_eq!(start.provider_transaction_id.len(), 32);
         assert!(start.url.starts_with("data:image/svg+xml;base64,"));
         assert_eq!(start.image_data_url.as_deref(), Some(start.url.as_str()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili search suggestion access"]
+    async fn live_provider_returns_plain_web_search_suggestions() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let result = provider
+            .search_suggestions(&SearchSuggestionRequest {
+                query: "周杰伦".to_owned(),
+                client: SearchSuggestionClient::Web,
+                account: None,
+            })
+            .await
+            .expect("live search suggestions");
+        assert!(!result.suggestions.is_empty());
+        assert!(result.suggestions.len() <= 10);
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .all(|suggestion| suggestion.resource.is_none())
+        );
+        assert!(result.suggestions.iter().all(|suggestion| {
+            !suggestion
+                .display_text
+                .as_deref()
+                .unwrap_or_default()
+                .contains('<')
+        }));
     }
 
     #[tokio::test]
