@@ -1453,20 +1453,22 @@ struct BannerParams {
 async fn banners(
     State(state): State<AppState>,
     params: Result<Query<BannerParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Banner>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = BannerListRequest::new(parse_banner_client(params.client.as_deref())?);
     request.catalog = parse_banner_catalog(params.catalog.as_deref())?;
-    request.account.clone_from(&account);
-    let banners = provider.banners(&request).await?;
-    let mut response = ApiResponse::new(banners).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    request.account.clone_from(&access.provider_account);
+    let banners = access.provider.banners(&request).await?;
+    Ok(Json(access.response(banners, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -22408,6 +22410,44 @@ mod tests {
         assert_eq!(json["data"][0]["extensions"]["catalog"], "podcast");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "spoken-word");
+    }
+
+    #[tokio::test]
+    async fn banners_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-banner-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, banners) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/banners?platform=netease&client=iphone",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(banners["data"][0]["extensions"]["account"], "default");
+        assert!(banners["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/banners?platform=netease&account=personal",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
