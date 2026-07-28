@@ -1,6 +1,6 @@
 # B 站 Basic 覆盖账本
 
-最后更新：2026-07-28。协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
+协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
 状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=29`、`partial=0`、`implemented=3`、`verified=2`，代码完成度 `5/34 = 14.71%`。
 
@@ -13,14 +13,14 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BF03 | 平台基础 | 固定域名 HTTP 客户端与业务错误 | `pending` | 只允许已审查的 B 站 API、Passport、搜索和媒体域名；统一映射登录失效、权限、风控、限流、资源不存在和上游错误 |
 | BF04 | 平台基础 | WBI、buvid 与设备身份 | `pending` | WBI 密钥、混淆表、时间戳和设备 Cookie 由 provider 管理；不得允许调用方覆盖签名、URL、代理或请求头 |
 | BF05 | 平台基础 | 强类型凭证、多账户与调用方托管 | `implemented` | `bilibili_cookie_v1` 强类型保存并校验 `DedeUserID/DedeUserID__ckMd5/SESSDATA/bili_jct/sid/refresh_token`，Debug 与错误不回显秘密；二维码确认从首个账户功能起支持 `(bilibili, account)` 及 `server/client/both`，调用方凭证平台、类型、到期语义和内部字段均在发网前验证。三种归属模式和账户隔离已离线验收，待真实扫码确认后联合升为 `verified` |
-| BA01 | 登录账户 | Web 二维码创建 | `verified` | 固定调用 `x/passport-login/web/qrcode/generate?source=main-fe-header`，同时兼容并严格校验当前 `account.bilibili.com/.../scan-web` 与旧版 Passport 扫码地址；二维码由进程内生成自包含 SVG，平台 key 只进入有期限的服务端事务。2026-07-28 已真实创建并验证可轮询的二维码 |
+| BA01 | 登录账户 | Web 二维码创建 | `verified` | 固定调用 `x/passport-login/web/qrcode/generate?source=main-fe-header`，同时兼容并严格校验当前 `account.bilibili.com/.../scan-web` 与旧版 Passport 扫码地址；二维码由进程内生成自包含 SVG，平台 key 只进入有期限的服务端事务。已真实创建并验证可轮询的二维码 |
 | BA02 | 登录账户 | Web 二维码轮询与状态机 | `implemented` | 按 BBDown 链路固定调用 `x/passport-login/web/qrcode/poll`，完整区分 `86101` 未扫码、`86090` 已扫码待确认、`86038` 过期、`0` 成功及其他失败码；确认时优先从重复 `Set-Cookie` 提取凭据，仅在必需字段缺失时从固定 `crossDomain` 地址回填，成功凭证只按事务固定归属模式交付一次。未扫码真实网络态及全部响应分支已通过，真实扫码成功态待账户联合验收 |
 | BA03 | 登录账户 | 登录 captcha 挑战 | `pending` | 获取 GeeTest challenge/gt/token；TuneWeave 不绕过验证码，由调用方提交人工验证结果继续密码或短信流程 |
 | BA04 | 登录账户 | Web 密码登录 | `pending` | 获取 RSA 公钥与 salt、加密密码并保留风控二次验证分支；密码与验证码不得持久化或进入日志 |
 | BA05 | 登录账户 | 国家/地区电话区号 | `pending` | 对接 Web country list 并映射统一国家区号模型 |
 | BA06 | 登录账户 | Web 短信验证码发送 | `pending` | 复用同一 captcha 事务和设备身份；手机号不持久化，发送与登录不得切换网络身份 |
 | BA07 | 登录账户 | Web 短信验证码登录 | `pending` | 复用发送阶段产生的 captcha key，完整处理绑定、风控和登录成功 Cookie |
-| BA08 | 登录账户 | 会话状态与账户资料 | `implemented` | `GET /v1/auth/session` 与 `/v1/account/profile` 固定调用 `x/web-interface/nav`，强类型映射登录态、UID、昵称、头像、验证状态、等级、认证、挂件、大会员、钱包及 WBI 实时口令等已知结构；登录 UID 必须与选中凭证一致，头像只接受 B 站 HTTPS 图片域名。`-101` 和 `isLogin=false` 作为未认证正常结果，不存在的精确别名不发网且不回退 `default`；调用方凭证与服务器多账户共用同一链路。2026-07-28 匿名真实网络态及离线完整/畸形分支已通过，登录账户成功态待扫码联合验收 |
+| BA08 | 登录账户 | 会话状态与账户资料 | `implemented` | `GET /v1/auth/session` 与 `/v1/account/profile` 固定调用 `x/web-interface/nav`，强类型映射登录态、UID、昵称、头像、验证状态、等级、认证、挂件、大会员、钱包及 WBI 实时口令等已知结构；登录 UID 必须与选中凭证一致，头像只接受 B 站 HTTPS 图片域名。`-101` 和 `isLogin=false` 作为未认证正常结果，不存在的精确别名不发网且不回退 `default`；调用方凭证与服务器多账户共用同一链路。匿名真实网络态及离线完整/畸形分支已通过，登录账户成功态待扫码联合验收 |
 | BA09 | 登录账户 | Cookie 刷新与退出 | `pending` | 完成 refresh_csrf/correspondPath 刷新链及退出；只有新凭证完整有效才原子替换，退出删除精确账户 |
 | BS01 | 搜索 | 视频直接搜索 | `pending` | Web 综合搜索中的 `video` 分支；完整保留页码、页大小、总数、排序、时长和分区筛选，不把专栏/直播混入视频结果 |
 | BS02 | 搜索 | 搜索建议 | `pending` | Web suggestion；关键词与展示高亮分离，空建议返回空列表而非错误 |
@@ -50,5 +50,3 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 3. BP01–BP08：完成个人目录、公开合集、收藏夹和 Uni Playlist 双来源导入。
 4. BV01、BV02、BV04 与 BM01–BM05：完成封面、分 P、字幕、仅音频播放/下载及视频播放链。
 5. BV03：统计等非播放阻塞展示在上述链路稳定后补齐。
-
-每完成 3 个 B 站公开能力后检查 BBDown 与 `bilibili-api-collect` 上游；未满 3 个时沿用全局 6–12 小时或用户主动要求的检查周期。状态变更必须同时重算总数，不为维持百分比跳过新增分支。
