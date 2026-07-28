@@ -6954,6 +6954,7 @@ async fn playlist_tracks_order(
 async fn podcast_episode_order(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     payload: Result<Json<PodcastEpisodeOrderBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PodcastEpisodeOrderResult>>, ApiError> {
     let podcast_ref = parse_reference(reference)?;
@@ -6999,10 +7000,15 @@ async fn podcast_episode_order(
     if !(1..=200).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 200").into());
     }
-    let account = account_alias(body.account.as_deref())?;
     let platform = podcast_ref.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .reorder_podcast_episode(
             podcast_ref.id(),
             &PodcastEpisodeOrderRequest {
@@ -7010,15 +7016,11 @@ async fn podcast_episode_order(
                 position,
                 limit,
                 offset,
-                account: Some(account.clone()),
+                account: Some(access.required_account().to_owned()),
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn podcast_episode_upload(
@@ -7030,6 +7032,13 @@ async fn podcast_episode_upload(
 ) -> Result<Json<ApiResponse<PodcastEpisodeUploadResult>>, ApiError> {
     let podcast_ref = parse_reference(reference)?;
     let params = query_params(params)?;
+    let platform = podcast_ref.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let data = payload.map_err(|_| {
         TuneWeaveError::invalid_request("audio body is invalid or exceeds 500 MiB")
             .with_details(json!({ "max_bytes": MAX_PODCAST_EPISODE_UPLOAD_BYTES }))
@@ -7058,10 +7067,8 @@ async fn podcast_episode_upload(
     if order_no == 0 {
         return Err(TuneWeaveError::invalid_request("order_no must be at least 1").into());
     }
-    let account = account_alias(params.account.as_deref())?;
-    let platform = podcast_ref.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let result = access
+        .provider
         .upload_podcast_episode(
             podcast_ref.id(),
             &PodcastEpisodeUploadRequest {
@@ -7089,15 +7096,11 @@ async fn podcast_episode_upload(
                     params.composed_songs.as_deref(),
                     platform,
                 )?,
-                account: Some(account.clone()),
+                account: Some(access.required_account().to_owned()),
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 fn validate_podcast_episode_upload_size(size: usize) -> Result<(), TuneWeaveError> {
@@ -7156,27 +7159,30 @@ async fn podcast_episode_delete(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistAccountParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<PodcastEpisodeDeleteResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let params = query_params(params)?;
-    let account = account_alias(params.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .delete_podcast_episodes(&PodcastEpisodeDeleteRequest {
             episode_refs: vec![reference],
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn podcast_episodes_delete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<PodcastEpisodeDeleteBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PodcastEpisodeDeleteResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -7188,19 +7194,20 @@ async fn podcast_episodes_delete(
         "podcast episode",
     )?;
     let platform = single_reference_platform("podcast episode deletion", &episode_refs)?;
-    let account = account_alias(body.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .delete_podcast_episodes(&PodcastEpisodeDeleteRequest {
             episode_refs,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn account_playlists_order(
@@ -23046,6 +23053,98 @@ mod tests {
         assert_eq!(defaults["data"]["extensions"]["order_no"], 1);
         assert_eq!(defaults["data"]["publish_time_ms"], 0);
         assert_eq!(defaults["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_writes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-podcast-studio",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, ordered) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/podcasts/netease:336355127/episodes/order",
+            Some(json!({"episode_ref": "netease:2058695201"})),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ordered["data"]["extensions"]["account"], "default");
+        assert!(ordered["meta"].get("account").is_none());
+
+        let (status, uploaded) = caller_binary_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/podcasts/netease:336355127/episodes?filename=episode.mp3&cover_image_id=109951168000000000&category_id=3&second_category_id=14&description=Intro",
+            "audio/mpeg",
+            b"audio".to_vec(),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(uploaded["data"]["extensions"]["account"], "default");
+        assert!(uploaded["meta"].get("account").is_none());
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::DELETE,
+            "/v1/account/podcast-episodes/netease:2058695201",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["extensions"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, batch) = caller_json_request(
+            app.clone(),
+            Method::DELETE,
+            "/v1/account/podcast-episodes",
+            Some(json!({
+                "refs": ["netease:2058695202", "netease:2058695201"]
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(batch["data"]["extensions"]["account"], "default");
+        assert!(batch["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/podcasts/netease:336355127/episodes/order",
+            Some(json!({
+                "episode_ref": "netease:2058695201",
+                "account": "studio"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
+
+        let (status, conflict) = caller_binary_request(
+            app,
+            Method::POST,
+            "/v1/account/podcasts/netease:336355127/episodes?account=studio&filename=episode.mp3&cover_image_id=109951168000000000&category_id=3&second_category_id=14&description=Intro",
+            "audio/mpeg",
+            b"audio".to_vec(),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
