@@ -8220,6 +8220,7 @@ async fn similar_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<SimilarTrackParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<SimilarTrackList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -8229,74 +8230,83 @@ async fn similar_tracks(
     }
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let list = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let list = access
+        .provider
         .similar_tracks(
             reference.id(),
             &SimilarTrackRequest {
                 limit_per_section,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(list).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(list, platform)))
 }
 
 async fn track_labels(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<TrackLabelParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<TrackLabelList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let labels = provider
-        .track_labels(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let labels = access
+        .provider
+        .track_labels(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(labels).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(labels, platform)))
 }
 
 async fn related_playlists(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<RelatedPlaylistParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RelatedPlaylistList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let previous_ids = parse_related_playlist_previous_ids(params.previous_ids.as_deref())?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let list = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let list = access
+        .provider
         .related_playlists(
             reference.id(),
             &RelatedPlaylistRequest {
                 previous_ids,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(list).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(list, platform)))
 }
 
 async fn related_videos(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<RelatedVideoParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RelatedVideoList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -8315,101 +8325,119 @@ async fn related_videos(
         .transpose()?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let list = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let list = access
+        .provider
         .related_videos(
             reference.id(),
             &RelatedVideoRequest {
                 previous_id,
-                account: account.clone(),
+                account: access.provider_account.clone(),
             },
         )
         .await?;
-    let mut response = ApiResponse::new(list).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(list, platform)))
 }
 
 async fn track_versions(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<TrackVersionParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<TrackVersionList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let versions = provider
-        .track_versions(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let versions = access
+        .provider
+        .track_versions(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(versions).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(versions, platform)))
 }
 
 async fn track_credits(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<TrackCreditParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<TrackCredits>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let credits = provider
-        .track_credits(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let credits = access
+        .provider
+        .track_credits(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(credits).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(credits, platform)))
 }
 
 async fn sheet_music_availability(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<SheetMusicAvailabilityParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<SheetMusicAvailability>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let availability = provider
-        .sheet_music_availability(reference.id(), account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let availability = access
+        .provider
+        .sheet_music_availability(reference.id(), access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(availability).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(availability, platform)))
 }
 
 async fn sheet_music(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<SheetMusicParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<SheetMusicList>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let sheets = provider
-        .sheet_music(reference.id(), params.source, account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let sheets = access
+        .provider
+        .sheet_music(
+            reference.id(),
+            params.source,
+            access.provider_account.as_deref(),
+        )
         .await?;
-    let mut response = ApiResponse::new(sheets).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(sheets, platform)))
 }
 
 fn parse_related_playlist_previous_ids(value: Option<&str>) -> Result<Vec<String>, TuneWeaveError> {
@@ -24921,6 +24949,43 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn track_related_reads_accept_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let qq = qq_caller_credential(None);
+
+        for path in [
+            "/v1/tracks/qq:97773/similar?limit=2",
+            "/v1/tracks/qq:97773/labels",
+            "/v1/tracks/qq:97773/related-playlists?last=101,102",
+            "/v1/tracks/qq:97773/related-videos?lastmvid=765058",
+            "/v1/tracks/qq:97773/versions",
+            "/v1/tracks/qq:0039MnYb0qxYhV/credits",
+            "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music/availability",
+            "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music?source=external",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &qq).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response["data"]["extensions"]["account"], "default",
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/tracks/qq:97773/similar?account=green-vip",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
