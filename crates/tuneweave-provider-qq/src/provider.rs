@@ -32,23 +32,23 @@ use tuneweave_core::{
     PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
     PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
-    ProviderQrPoll, ProviderQrStart, Quality, RecommendationFeed, RecommendationFeedAction,
-    RecommendationFeedCard, RecommendationFeedCardKind, RecommendationFeedCursor,
-    RecommendationFeedDirection, RecommendationFeedNiche, RecommendationFeedRequest,
-    RecommendationFeedShelf, RecommendationRequest, RecommendationSource, RelatedPlaylistList,
-    RelatedPlaylistRequest, RelatedPlaylistSection, RelatedPlaylistSectionKind, RelatedVideoList,
-    RelatedVideoRequest, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
-    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SheetMusic, SheetMusicAvailability, SheetMusicList,
-    SheetMusicSource, SimilarArtistList, SimilarArtistRequest, SimilarTrackList,
-    SimilarTrackRequest, SimilarTrackSection, SimilarTrackSectionKind,
-    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
-    Track, TrackCredit, TrackCreditGroup, TrackCredits, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
-    TrackVersionList, TrialWindow, TuneWeaveError, User, UserMusicGene, UserProfile,
-    UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
-    VideoStream, VideoStreamRequest,
+    ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality, RecommendationFeed,
+    RecommendationFeedAction, RecommendationFeedCard, RecommendationFeedCardKind,
+    RecommendationFeedCursor, RecommendationFeedDirection, RecommendationFeedNiche,
+    RecommendationFeedRequest, RecommendationFeedShelf, RecommendationRequest,
+    RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest, RelatedPlaylistSection,
+    RelatedPlaylistSectionKind, RelatedVideoList, RelatedVideoRequest, ResourceRef, Result,
+    SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant, SheetMusic,
+    SheetMusicAvailability, SheetMusicList, SheetMusicSource, SimilarArtistList,
+    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SimilarTrackSection,
+    SimilarTrackSectionKind, SingingAnnotationsAvailability, StoredAccountCredential,
+    StreamRequest, SubscriptionResult, Track, TrackCredit, TrackCreditGroup, TrackCredits,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind,
+    TrackLabel, TrackLabelList, TrackVersionList, TrialWindow, TuneWeaveError, User, UserMusicGene,
+    UserProfile, UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -3784,6 +3784,7 @@ struct QqMvCandidate<'a> {
 pub struct QqProvider {
     client: QqClient,
     credential_store: Option<Arc<dyn AccountCredentialStore>>,
+    caller_credential: Option<QqCredential>,
     qr_transactions: QqQrTransactions,
 }
 
@@ -4109,6 +4110,7 @@ impl QqProvider {
         Ok(Self {
             client: QqClient::new(config)?,
             credential_store,
+            caller_credential: None,
             qr_transactions: QqQrTransactions::default(),
         })
     }
@@ -4117,6 +4119,7 @@ impl QqProvider {
         Self {
             client,
             credential_store: None,
+            caller_credential: None,
             qr_transactions: QqQrTransactions::default(),
         }
     }
@@ -4130,6 +4133,13 @@ impl MusicProvider for QqProvider {
 
     fn name(&self) -> &'static str {
         "QQ Music"
+    }
+
+    fn with_caller_credential(
+        &self,
+        credential: &ProviderCredential,
+    ) -> Result<Arc<dyn MusicProvider>> {
+        Ok(Arc::new(self.caller_credential_scope(credential)?))
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
@@ -6246,6 +6256,16 @@ impl MusicProvider for QqProvider {
 }
 
 impl QqProvider {
+    fn caller_credential_scope(&self, credential: &ProviderCredential) -> Result<Self> {
+        let caller_credential = parse_qq_caller_credential(credential)?;
+        Ok(Self {
+            client: self.client.clone(),
+            credential_store: None,
+            caller_credential: Some(caller_credential),
+            qr_transactions: self.qr_transactions.clone(),
+        })
+    }
+
     fn persist_qq_credential(
         &self,
         account: &str,
@@ -6344,6 +6364,15 @@ impl QqProvider {
                 TuneWeaveError::invalid_request("QQ account alias cannot exceed 64 bytes")
                     .with_platform(Platform::Qq),
             );
+        }
+        if let Some(credential) = &self.caller_credential {
+            if account == "default" {
+                return Ok(Some(credential.clone()));
+            }
+            return Err(qq_authentication_required(
+                account,
+                "caller-managed QQ credentials do not expose server account aliases",
+            ));
         }
         let store = self.credential_store.as_ref().ok_or_else(|| {
             qq_authentication_required(account, "QQ account storage is not configured")
@@ -18593,6 +18622,38 @@ fn unauthenticated_qq_profile(account: &str) -> AccountProfile {
     profile
 }
 
+fn parse_qq_caller_credential(credential: &ProviderCredential) -> Result<QqCredential> {
+    if credential.platform != Platform::Qq {
+        return Err(TuneWeaveError::invalid_request(
+            "caller credential platform does not match QQ Music",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if credential.kind != QQ_CREDENTIAL_KIND {
+        return Err(TuneWeaveError::invalid_request(
+            "caller credential kind is not supported by QQ Music",
+        )
+        .with_platform(Platform::Qq));
+    }
+    let parsed = serde_json::from_str::<QqCredential>(credential.secret())
+        .map_err(|_| {
+            TuneWeaveError::invalid_request("caller QQ credential payload is malformed")
+                .with_platform(Platform::Qq)
+        })?
+        .normalize()
+        .map_err(|_| {
+            TuneWeaveError::invalid_request("caller QQ credential payload is invalid")
+                .with_platform(Platform::Qq)
+        })?;
+    if credential.expires_at != parsed.expires_at_epoch() {
+        return Err(TuneWeaveError::invalid_request(
+            "caller QQ credential expiry does not match its payload",
+        )
+        .with_platform(Platform::Qq));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18699,6 +18760,53 @@ mod tests {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         assert!(provider.capabilities().contains(&Capability::PlatformApi));
         assert!(provider.capabilities().contains(&Capability::PlatformBatch));
+    }
+
+    #[test]
+    fn caller_qq_credentials_create_an_isolated_nonpersistent_default_scope() {
+        let raw = serde_json::to_string(&json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "musickeyCreateTime": 100,
+            "keyExpiresIn": 50,
+            "loginType": 2
+        }))
+        .expect("credential JSON");
+        let material = ProviderCredential::new(Platform::Qq, QQ_CREDENTIAL_KIND, &raw, Some(150))
+            .expect("caller credential material");
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let scoped = provider
+            .caller_credential_scope(&material)
+            .expect("caller scope");
+        assert!(scoped.credential_store.is_none());
+        let credential = scoped
+            .qq_credential(Some("default"))
+            .expect("load caller credential")
+            .expect("credential present");
+        assert_eq!(credential.string_music_id(), "123456");
+        assert!(!format!("{credential:?}").contains("Q_H_L_private"));
+        let error = scoped
+            .qq_credential(Some("server-alias"))
+            .expect_err("server aliases are isolated from caller scope");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        for invalid in [
+            ProviderCredential::new(Platform::Netease, QQ_CREDENTIAL_KIND, &raw, Some(150))
+                .expect("wrong platform fixture"),
+            ProviderCredential::new(Platform::Qq, "cookie", &raw, Some(150))
+                .expect("wrong kind fixture"),
+            ProviderCredential::new(Platform::Qq, QQ_CREDENTIAL_KIND, &raw, Some(151))
+                .expect("wrong expiry fixture"),
+            ProviderCredential::new(Platform::Qq, QQ_CREDENTIAL_KIND, "{}", None)
+                .expect("malformed payload fixture"),
+        ] {
+            let Err(error) = provider.caller_credential_scope(&invalid) else {
+                panic!("invalid caller QQ credential was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert!(!error.message.contains("Q_H_L_private"));
+        }
     }
 
     #[test]

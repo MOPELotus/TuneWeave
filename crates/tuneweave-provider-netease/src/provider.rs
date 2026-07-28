@@ -61,22 +61,23 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
     PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
     PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem,
-    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationCursor,
-    RadioStationListRequest, RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationRequest, RecommendationSource, ResolutionStatus,
-    ResourceRef, Result, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem,
-    SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome,
-    StreamRequest, StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError,
-    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    PrincipalType, ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality,
+    RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 use url::Url;
 
@@ -162,6 +163,22 @@ impl NeteaseProvider {
             pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store: None,
         }
+    }
+
+    fn caller_credential_scope(&self, credential: &ProviderCredential) -> Result<Self> {
+        let cookie = parse_netease_caller_credential(credential)?;
+        let client = self.client.without_cookie();
+        let account_client = client.with_cookie(cookie);
+        Ok(Self {
+            client,
+            accounts: Arc::new(RwLock::new(BTreeMap::from([(
+                "default".to_owned(),
+                account_client,
+            )]))),
+            anonymous_identity: self.anonymous_identity.clone(),
+            pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
+            credential_store: None,
+        })
     }
 
     pub async fn create_qr_login(&self) -> Result<NeteaseQrLogin> {
@@ -568,6 +585,13 @@ impl MusicProvider for NeteaseProvider {
 
     fn name(&self) -> &'static str {
         "NetEase Cloud Music"
+    }
+
+    fn with_caller_credential(
+        &self,
+        credential: &ProviderCredential,
+    ) -> Result<Arc<dyn MusicProvider>> {
+        Ok(Arc::new(self.caller_credential_scope(credential)?))
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
@@ -10725,6 +10749,39 @@ fn validate_session_cookie(cookie: &str) -> Result<()> {
         "NetEase session cookie does not contain MUSIC_U",
     )
     .with_platform(Platform::Netease))
+}
+
+fn parse_netease_caller_credential(credential: &ProviderCredential) -> Result<String> {
+    if credential.platform != Platform::Netease {
+        return Err(TuneWeaveError::invalid_request(
+            "caller credential platform does not match NetEase",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if credential.kind != NETEASE_CREDENTIAL_KIND {
+        return Err(TuneWeaveError::invalid_request(
+            "caller credential kind is not supported by NetEase",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if credential.expires_at.is_some() {
+        return Err(TuneWeaveError::invalid_request(
+            "caller NetEase cookie credential cannot declare an expiry",
+        )
+        .with_platform(Platform::Netease));
+    }
+    let cookie = credential.secret();
+    if cookie.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "caller NetEase cookie credential contains invalid characters",
+        )
+        .with_platform(Platform::Netease));
+    }
+    validate_session_cookie(cookie).map_err(|_| {
+        TuneWeaveError::invalid_request("caller NetEase credential payload is invalid")
+            .with_platform(Platform::Netease)
+    })?;
+    Ok(cookie.to_owned())
 }
 
 async fn request_netease_streams(
@@ -26819,6 +26876,70 @@ mod tests {
                 .expect("remove account session")
         );
         assert!(provider.client_for(Some("green-diamond")).is_err());
+    }
+
+    #[test]
+    fn caller_netease_credentials_create_an_isolated_nonpersistent_default_scope() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        let material = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=caller-session",
+            None,
+        )
+        .expect("caller credential material");
+        let scoped = provider
+            .caller_credential_scope(&material)
+            .expect("caller scope");
+        assert!(scoped.credential_store.is_none());
+        assert!(
+            scoped
+                .client_for(Some("default"))
+                .expect("caller default account")
+                .is_authenticated()
+        );
+        let error = scoped
+            .client_for(Some("server-alias"))
+            .err()
+            .expect("server aliases are isolated from caller scope");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+
+        for invalid in [
+            ProviderCredential::new(
+                Platform::Qq,
+                NETEASE_CREDENTIAL_KIND,
+                "MUSIC_U=caller-session",
+                None,
+            )
+            .expect("wrong platform fixture"),
+            ProviderCredential::new(
+                Platform::Netease,
+                "anonymous_cookie_v1",
+                "MUSIC_U=caller-session",
+                None,
+            )
+            .expect("wrong kind fixture"),
+            ProviderCredential::new(
+                Platform::Netease,
+                NETEASE_CREDENTIAL_KIND,
+                "MUSIC_U=caller-session",
+                Some(1),
+            )
+            .expect("unexpected expiry fixture"),
+            ProviderCredential::new(
+                Platform::Netease,
+                NETEASE_CREDENTIAL_KIND,
+                "MUSIC_A=anonymous-only",
+                None,
+            )
+            .expect("unauthenticated cookie fixture"),
+        ] {
+            let Err(error) = provider.caller_credential_scope(&invalid) else {
+                panic!("invalid caller NetEase credential was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert!(!error.message.contains("caller-session"));
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -39,17 +39,18 @@ use crate::{
     PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
     PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderDescriptor,
-    ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
-    RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationFeed, RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList,
-    RelatedPlaylistRequest, RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, SheetMusicAvailability, SheetMusicList,
-    SheetMusicSource, SimilarArtistList, SimilarArtistRequest, SimilarTrackList,
-    SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderCredential,
+    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedRequest,
+    RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest, RelatedVideoList,
+    RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
+    SearchTrendingRequest, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackEntitlement,
     TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserMusicGene,
@@ -73,6 +74,21 @@ pub trait MusicProvider: Send + Sync {
             name: self.name().to_owned(),
             capabilities: self.capabilities().into_iter().collect(),
         }
+    }
+
+    /// Builds a request-scoped provider view backed only by a caller-supplied credential.
+    ///
+    /// Implementations must validate the platform, provider credential kind, payload shape and
+    /// expiry metadata before returning. The returned provider must not persist the credential or
+    /// fall back to a server-owned account for the same platform.
+    fn with_caller_credential(
+        &self,
+        _credential: &ProviderCredential,
+    ) -> Result<Arc<dyn MusicProvider>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CallerManagedCredentials,
+        ))
     }
 
     fn supports(&self, capability: Capability) -> bool {
