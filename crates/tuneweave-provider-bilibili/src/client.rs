@@ -50,11 +50,15 @@ const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const COLLECTED_PLAYLISTS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/collected/list";
+const SPACE_PLAYLISTS_ENDPOINT: &str =
+    "https://api.bilibili.com/x/polymer/web-space/seasons_series_list";
 const WEB_REFERER: &str = "https://www.bilibili.com/";
 const VIDEO_SEARCH_REFERER: &str = "https://search.bilibili.com/";
 const VIDEO_SEARCH_WEB_LOCATION: &str = "1430654";
 const FAVORITE_FOLDER_WEB_LOCATION: &str = "333.1387";
 const COLLECTED_PLAYLIST_PAGE_SIZE: u32 = 70;
+const SPACE_PLAYLIST_PAGE_SIZE: u32 = 20;
+const SPACE_PLAYLIST_WEB_LOCATION: &str = "333.999";
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -272,6 +276,42 @@ pub(crate) struct BilibiliCollectedPlaylistOwner {
     pub id: u64,
     pub name: String,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSpacePlaylistPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub has_more: bool,
+    pub playlists: Vec<BilibiliSpacePlaylist>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum BilibiliSpacePlaylistKind {
+    Season,
+    Series,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSpacePlaylist {
+    pub kind: BilibiliSpacePlaylistKind,
+    pub id: u64,
+    pub owner_id: u64,
+    pub name: String,
+    pub display_title: Option<String>,
+    pub description: String,
+    pub cover_url: Option<String>,
+    pub category: u64,
+    pub track_count: u64,
+    pub created_at: u64,
+    pub published_at: u64,
+    pub updated_at: u64,
+    pub state: Option<u64>,
+    pub creator_mode: Option<String>,
+    pub keywords: Vec<String>,
+    pub recent_aids: Vec<u64>,
+    pub preview_aids: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -727,6 +767,97 @@ struct CollectedPlaylistOwner {
     name: String,
     #[serde(default)]
     face: String,
+}
+
+#[derive(Deserialize)]
+struct SpacePlaylistsData {
+    items_lists: SpacePlaylistLists,
+}
+
+#[derive(Deserialize)]
+struct SpacePlaylistLists {
+    page: SpacePlaylistPageMeta,
+    #[serde(default)]
+    seasons_list: Vec<SpaceSeasonItem>,
+    #[serde(default)]
+    series_list: Vec<SpaceSeriesItem>,
+}
+
+#[derive(Deserialize)]
+struct SpacePlaylistPageMeta {
+    page_num: u32,
+    page_size: u32,
+    total: u64,
+}
+
+#[derive(Deserialize)]
+struct SpaceSeasonItem {
+    #[serde(default)]
+    archives: Vec<SpacePlaylistArchive>,
+    meta: SpaceSeasonMeta,
+    #[serde(default)]
+    recent_aids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct SpaceSeasonMeta {
+    #[serde(default)]
+    category: u64,
+    #[serde(default)]
+    cover: String,
+    #[serde(default)]
+    description: String,
+    mid: u64,
+    name: String,
+    #[serde(default)]
+    ptime: u64,
+    season_id: u64,
+    total: u64,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct SpaceSeriesItem {
+    #[serde(default)]
+    archives: Vec<SpacePlaylistArchive>,
+    meta: SpaceSeriesMeta,
+    #[serde(default)]
+    recent_aids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct SpaceSeriesMeta {
+    #[serde(default)]
+    category: u64,
+    #[serde(default)]
+    cover: String,
+    #[serde(default)]
+    creator: String,
+    #[serde(default)]
+    ctime: u64,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    last_update_ts: u64,
+    mid: u64,
+    #[serde(default)]
+    mtime: u64,
+    name: String,
+    #[serde(default)]
+    raw_keywords: String,
+    series_id: u64,
+    #[serde(default)]
+    state: u64,
+    total: u64,
+}
+
+#[derive(Deserialize)]
+struct SpacePlaylistArchive {
+    aid: u64,
+    bvid: String,
 }
 
 #[derive(Deserialize)]
@@ -1266,6 +1397,54 @@ impl BilibiliClient {
             ));
         }
         parse_collected_playlists_response(&bytes, page, COLLECTED_PLAYLIST_PAGE_SIZE)
+    }
+
+    pub(crate) async fn space_playlists_page(
+        &self,
+        user_id: u64,
+        page: u32,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliSpacePlaylistPage> {
+        if user_id == 0 || page == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili space playlist user ID and page must be positive",
+            ));
+        }
+        let context = self
+            .signed_web_context(
+                &[
+                    ("mid".to_owned(), user_id.to_string()),
+                    ("page_num".to_owned(), page.to_string()),
+                    ("page_size".to_owned(), SPACE_PLAYLIST_PAGE_SIZE.to_string()),
+                    (
+                        "web_location".to_owned(),
+                        SPACE_PLAYLIST_WEB_LOCATION.to_owned(),
+                    ),
+                ],
+                credential,
+            )
+            .await?;
+        let endpoint = format!("{SPACE_PLAYLISTS_ENDPOINT}?{}", context.query);
+        let referer = format!("https://space.bilibili.com/{user_id}/lists");
+        let response = self
+            .http
+            .get(endpoint)
+            .header(REFERER, referer)
+            .header(COOKIE, context.cookie_header)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili space playlists", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili space playlists response exceeded the size limit",
+            ));
+        }
+        parse_space_playlists_response(&bytes, user_id, page, SPACE_PLAYLIST_PAGE_SIZE)
     }
 
     async fn search_videos_compatibility_page(
@@ -2052,6 +2231,221 @@ fn map_collected_playlist_item(item: CollectedPlaylistItem) -> Result<BilibiliCo
         child_friendly: item.is_kid_playlist,
         child_friendly_description,
     })
+}
+
+fn parse_space_playlists_response(
+    bytes: &[u8],
+    requested_user_id: u64,
+    requested_page: u32,
+    requested_page_size: u32,
+) -> Result<BilibiliSpacePlaylistPage> {
+    let response: PassportResponse<SpacePlaylistsData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili space playlists returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili space playlists",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili space playlists response did not contain data")
+    })?;
+    let lists = data.items_lists;
+    if requested_page == 0
+        || requested_page_size != SPACE_PLAYLIST_PAGE_SIZE
+        || lists.page.page_num != requested_page
+        || lists.page.page_size != requested_page_size
+        || lists.page.total > 100_000
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili space playlists returned invalid pagination",
+        ));
+    }
+    let returned = lists
+        .seasons_list
+        .len()
+        .checked_add(lists.series_list.len())
+        .ok_or_else(|| bilibili_upstream_error("Bilibili space playlist page size overflowed"))?;
+    if returned > requested_page_size as usize {
+        return Err(bilibili_upstream_error(
+            "Bilibili space playlist page exceeded the requested size",
+        ));
+    }
+    let page_start = u64::from(requested_page - 1)
+        .checked_mul(u64::from(requested_page_size))
+        .ok_or_else(|| bilibili_upstream_error("Bilibili space playlist page offset overflowed"))?;
+    let page_end = page_start
+        .checked_add(returned as u64)
+        .ok_or_else(|| bilibili_upstream_error("Bilibili space playlist page result overflowed"))?;
+    if (page_start < lists.page.total && (page_end > lists.page.total || returned == 0))
+        || (page_start >= lists.page.total && returned > 0)
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili space playlist page was inconsistent with its total",
+        ));
+    }
+    let has_more = page_end < lists.page.total;
+    if has_more && returned != requested_page_size as usize {
+        return Err(bilibili_upstream_error(
+            "Bilibili space playlist continuation was inconsistent",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let mut playlists = Vec::with_capacity(returned);
+    for item in lists.seasons_list {
+        let playlist = map_space_season(item, requested_user_id)?;
+        if !identities.insert((playlist.kind, playlist.id)) {
+            return Err(bilibili_upstream_error(
+                "Bilibili space playlist page contained a duplicate identity",
+            ));
+        }
+        playlists.push(playlist);
+    }
+    for item in lists.series_list {
+        let playlist = map_space_series(item, requested_user_id)?;
+        if !identities.insert((playlist.kind, playlist.id)) {
+            return Err(bilibili_upstream_error(
+                "Bilibili space playlist page contained a duplicate identity",
+            ));
+        }
+        playlists.push(playlist);
+    }
+    Ok(BilibiliSpacePlaylistPage {
+        page: lists.page.page_num,
+        page_size: lists.page.page_size,
+        total: lists.page.total,
+        has_more,
+        playlists,
+    })
+}
+
+fn map_space_season(
+    item: SpaceSeasonItem,
+    requested_user_id: u64,
+) -> Result<BilibiliSpacePlaylist> {
+    let meta = item.meta;
+    if meta.season_id == 0 || meta.mid != requested_user_id || meta.category > u64::from(u32::MAX) {
+        return Err(bilibili_upstream_error(
+            "Bilibili space season returned an invalid identity",
+        ));
+    }
+    Ok(BilibiliSpacePlaylist {
+        kind: BilibiliSpacePlaylistKind::Season,
+        id: meta.season_id,
+        owner_id: meta.mid,
+        name: validated_bilibili_text(&meta.name, "space season name", 1024)?,
+        display_title: optional_bounded_text(&meta.title, "space season title", 1024)?,
+        description: validated_bilibili_multiline_text(
+            &meta.description,
+            "space season description",
+            64 * 1024,
+        )?,
+        cover_url: normalize_bilibili_image_url(&meta.cover, "space season cover")?,
+        category: meta.category,
+        track_count: meta.total,
+        created_at: 0,
+        published_at: meta.ptime,
+        updated_at: 0,
+        state: None,
+        creator_mode: None,
+        keywords: Vec::new(),
+        recent_aids: validated_aid_list(item.recent_aids, "space season recent AIDs")?,
+        preview_aids: validated_space_archives(item.archives, "space season previews")?,
+    })
+}
+
+fn map_space_series(
+    item: SpaceSeriesItem,
+    requested_user_id: u64,
+) -> Result<BilibiliSpacePlaylist> {
+    let meta = item.meta;
+    if meta.series_id == 0
+        || meta.mid != requested_user_id
+        || meta.category > u64::from(u32::MAX)
+        || meta.state > u64::from(u32::MAX)
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili space series returned an invalid identity",
+        ));
+    }
+    let mut keywords = meta
+        .keywords
+        .into_iter()
+        .chain(meta.raw_keywords.split(',').map(str::to_owned))
+        .map(|keyword| keyword.trim().to_owned())
+        .filter(|keyword| !keyword.is_empty())
+        .map(|keyword| validated_bilibili_text(&keyword, "space series keyword", 256))
+        .collect::<Result<Vec<_>>>()?;
+    let mut seen_keywords = std::collections::BTreeSet::new();
+    keywords.retain(|keyword| seen_keywords.insert(keyword.clone()));
+    Ok(BilibiliSpacePlaylist {
+        kind: BilibiliSpacePlaylistKind::Series,
+        id: meta.series_id,
+        owner_id: meta.mid,
+        name: validated_bilibili_text(&meta.name, "space series name", 1024)?,
+        display_title: None,
+        description: validated_bilibili_multiline_text(
+            &meta.description,
+            "space series description",
+            64 * 1024,
+        )?,
+        cover_url: normalize_bilibili_image_url(&meta.cover, "space series cover")?,
+        category: meta.category,
+        track_count: meta.total,
+        created_at: meta.ctime,
+        published_at: 0,
+        updated_at: meta.last_update_ts.max(meta.mtime),
+        state: Some(meta.state),
+        creator_mode: optional_bounded_text(&meta.creator, "space series creator mode", 256)?,
+        keywords,
+        recent_aids: validated_aid_list(item.recent_aids, "space series recent AIDs")?,
+        preview_aids: validated_space_archives(item.archives, "space series previews")?,
+    })
+}
+
+fn validated_space_archives(
+    archives: Vec<SpacePlaylistArchive>,
+    context: &str,
+) -> Result<Vec<u64>> {
+    if archives.len() > 100 {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned too many {context}"
+        )));
+    }
+    let mut aids = Vec::with_capacity(archives.len());
+    for archive in archives {
+        if archive.aid == 0 {
+            return Err(bilibili_upstream_error(format!(
+                "Bilibili returned an invalid {context}"
+            )));
+        }
+        match crate::BilibiliVideoIdentity::parse(&archive.bvid).map_err(|_| {
+            bilibili_upstream_error(format!("Bilibili returned an invalid BVID in {context}"))
+        })? {
+            crate::BilibiliVideoIdentity::Bvid(_) => {}
+            _ => unreachable!("BVID parser returned another identity type"),
+        }
+        aids.push(archive.aid);
+    }
+    validated_aid_list(aids, context)
+}
+
+fn validated_aid_list(values: Vec<u64>, context: &str) -> Result<Vec<u64>> {
+    if values.len() > 100
+        || values.contains(&0)
+        || values
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != values.len()
+    {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
+        )));
+    }
+    Ok(values)
 }
 
 fn is_video_search_risk_challenge(error: &TuneWeaveError) -> bool {
@@ -3834,6 +4228,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn space_playlists_preserve_seasons_series_previews_and_metadata() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "items_lists": {
+                    "page": { "page_num": 1, "page_size": 20, "total": 2 },
+                    "seasons_list": [{
+                        "archives": [{
+                            "aid": 343807541,
+                            "bvid": "BV1t94y1D79E"
+                        }],
+                        "meta": {
+                            "category": 0,
+                            "cover": "https://archive.biliimg.com/bfs/archive/season.jpg",
+                            "description": "第一行\n第二行",
+                            "mid": 37737161,
+                            "name": "合集·拾枝杂谈",
+                            "ptime": 1694682652,
+                            "season_id": 587216,
+                            "total": 10,
+                            "title": "拾枝杂谈"
+                        },
+                        "recent_aids": [343807541]
+                    }],
+                    "series_list": [{
+                        "archives": [{
+                            "aid": 284063097,
+                            "bvid": "BV1Fc411x7xF"
+                        }],
+                        "meta": {
+                            "category": 1,
+                            "cover": "http://i0.hdslb.com/bfs/archive/series.jpg",
+                            "creator": "auto",
+                            "ctime": 1705401630,
+                            "description": "Kotlin 学习路线",
+                            "keywords": ["", "Kotlin"],
+                            "last_update_ts": 1705925782,
+                            "mid": 37737161,
+                            "mtime": 1705925781,
+                            "name": "Kotlin开心路线",
+                            "raw_keywords": "Kotlin,构建",
+                            "series_id": 3908327,
+                            "state": 2,
+                            "total": 3
+                        },
+                        "recent_aids": [284063097]
+                    }]
+                }
+            }
+        }))
+        .expect("space playlists fixture");
+        let page =
+            parse_space_playlists_response(&response, 37_737_161, 1, 20).expect("space playlists");
+        assert_eq!(page.total, 2);
+        assert!(!page.has_more);
+        assert_eq!(page.playlists[0].kind, BilibiliSpacePlaylistKind::Season);
+        assert_eq!(page.playlists[0].id, 587_216);
+        assert_eq!(page.playlists[0].display_title.as_deref(), Some("拾枝杂谈"));
+        assert_eq!(page.playlists[0].recent_aids, [343_807_541]);
+        assert_eq!(page.playlists[1].kind, BilibiliSpacePlaylistKind::Series);
+        assert_eq!(
+            page.playlists[1].cover_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/archive/series.jpg")
+        );
+        assert_eq!(page.playlists[1].keywords, ["Kotlin", "构建"]);
+        assert_eq!(page.playlists[1].state, Some(2));
+    }
+
+    #[test]
+    fn space_playlists_reject_pagination_identity_and_preview_drift() {
+        for malformed in [
+            br#"{"code":0,"message":"OK","data":{"items_lists":{"page":{"page_num":2,"page_size":20,"total":0},"seasons_list":[],"series_list":[]}}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"items_lists":{"page":{"page_num":1,"page_size":20,"total":1},"seasons_list":[{"archives":[],"meta":{"mid":9,"name":"x","season_id":1,"total":0},"recent_aids":[]}],"series_list":[]}}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"items_lists":{"page":{"page_num":1,"page_size":20,"total":1},"seasons_list":[],"series_list":[{"archives":[{"aid":1,"bvid":"invalid"}],"meta":{"mid":37737161,"name":"x","series_id":1,"total":1},"recent_aids":[1]}]}}}"#
+                .as_slice(),
+        ] {
+            let error = parse_space_playlists_response(malformed, 37_737_161, 1, 20)
+                .expect_err("malformed space playlists");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_qr_creation_returns_a_trusted_scannable_url() {
@@ -3923,6 +4403,29 @@ mod tests {
             page.playlists
                 .iter()
                 .any(|playlist| playlist.kind == BilibiliCollectedPlaylistKind::FavoriteFolder)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili space playlist access"]
+    async fn live_space_playlists_use_wbi_and_preserve_seasons_and_series() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let page = client
+            .space_playlists_page(37_737_161, 1, None)
+            .await
+            .expect("live space playlists");
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, SPACE_PLAYLIST_PAGE_SIZE);
+        assert!(!page.playlists.is_empty());
+        assert!(
+            page.playlists
+                .iter()
+                .any(|playlist| playlist.kind == BilibiliSpacePlaylistKind::Season)
+        );
+        assert!(
+            page.playlists
+                .iter()
+                .any(|playlist| playlist.kind == BilibiliSpacePlaylistKind::Series)
         );
     }
 }

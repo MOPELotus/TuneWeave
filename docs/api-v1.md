@@ -340,7 +340,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 - `bilibili:season:3629748` 表示公开合集/Season；上游身份同时保留 `season_id` 与所有者 `mid`。
 - `bilibili:favorite:2883236382` 表示收藏夹；上游身份同时保留 `media_id/fid` 与所有者 `mid`。
 
-用户创建的 B 站收藏夹目录通过 `GET /v1/users/bilibili:{mid}/playlists/created` 读取，支持 `limit`、`offset` 和可选 `account`。公开目录默认匿名请求；指定服务器账户或调用方凭证后，只使用该精确登录态读取其可见内容。隐藏目录返回权限错误，真正公开但没有收藏夹的目录才返回空页。返回条目以 `bilibili:favorite:{media_id}` 为稳定引用，并在扩展中保留 `fid`、所有者、默认/私有属性及视频数量。
+用户创建的 B 站播放列表目录通过 `GET /v1/users/bilibili:{mid}/playlists/created` 读取，支持 `limit`、`offset` 和可选 `account`。结果按收藏夹、空间 Season/Series 的固定顺序合并：收藏夹以 `bilibili:favorite:{media_id}` 为稳定引用并保留 `fid`、默认/私有属性及视频数量，公开视频合集以 `bilibili:season:{season_id}` 返回，公开视频系列以 `bilibili:series:{series_id}` 返回。公开目录默认匿名请求；指定服务器账户或调用方凭证后，只使用该精确登录态读取其可见内容。用户隐藏收藏夹时仍返回公开 Season/Series，并在分页扩展标记该来源隐藏，不会把公开视频合集一并伪装为空。
 
 用户收藏的播放列表目录通过 `GET /v1/users/bilibili:{mid}/playlists/favorite` 读取，分页与账户选择语义相同。B 站 Web 目录同时包含普通收藏夹和收藏的视频合集：前者返回 `bilibili:favorite:{media_id}`，后者返回 `bilibili:season:{season_id}`；失效条目保留 `invalid=true` 供调用方替换来源，不会被静默丢弃。两种目录始终与用户创建目录分开，适合作为后续 Uni Playlist 导入来源。
 
