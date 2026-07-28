@@ -8839,6 +8839,15 @@ struct VideoStreamBatchBody {
     resolution: Option<StreamUnsignedInput>,
 }
 
+struct VideoStreamBatchInputs {
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<String>,
+    account: Option<String>,
+    kind: Option<String>,
+    resolution: Option<String>,
+}
+
 async fn video_detail(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -9028,64 +9037,81 @@ async fn video_stream(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<VideoStreamParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<VideoStream>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let (account, request) = video_stream_request(&params, reference.platform(), reference.id())?;
-    let provider = state.registry.require(reference.platform())?;
-    let stream = provider.video_stream(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(stream).with_platform(reference.platform());
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let (account, mut request) =
+        video_stream_request(&params, reference.platform(), reference.id())?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account.clone_from(&access.provider_account);
+    let stream = access
+        .provider
+        .video_stream(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(stream, platform)))
 }
 
 async fn video_streams_get(
     State(state): State<AppState>,
     params: Result<Query<VideoStreamBatchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
     let params = query_params(params)?;
     video_streams_response(
         &state,
-        params.refs.map(|value| vec![value]),
-        params.ids.map(|value| vec![value]),
-        params.platform.as_deref(),
-        params.account,
-        params.kind.as_deref(),
-        params.resolution.as_deref(),
+        &headers,
+        VideoStreamBatchInputs {
+            refs: params.refs.map(|value| vec![value]),
+            ids: params.ids.map(|value| vec![value]),
+            platform: params.platform,
+            account: params.account,
+            kind: params.kind,
+            resolution: params.resolution,
+        },
     )
     .await
 }
 
 async fn video_streams_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<VideoStreamBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
     let body = json_body(body)?;
     let resolution = body.resolution.map(StreamUnsignedInput::into_parameter);
     video_streams_response(
         &state,
-        body.refs.map(StreamReferenceInput::into_values),
-        body.ids.map(StreamReferenceInput::into_values),
-        body.platform.as_deref(),
-        body.account,
-        body.kind.as_deref(),
-        resolution.as_deref(),
+        &headers,
+        VideoStreamBatchInputs {
+            refs: body.refs.map(StreamReferenceInput::into_values),
+            ids: body.ids.map(StreamReferenceInput::into_values),
+            platform: body.platform,
+            account: body.account,
+            kind: body.kind,
+            resolution,
+        },
     )
     .await
 }
 
 async fn video_streams_response(
     state: &AppState,
-    refs: Option<Vec<String>>,
-    ids: Option<Vec<String>>,
-    platform: Option<&str>,
-    account: Option<String>,
-    kind: Option<&str>,
-    resolution: Option<&str>,
+    headers: &HeaderMap,
+    inputs: VideoStreamBatchInputs,
 ) -> Result<Json<ApiResponse<Vec<VideoStream>>>, ApiError> {
-    let references = parse_stream_batch_references(refs, ids, platform, state.default_platform)?;
+    let references = parse_stream_batch_references(
+        inputs.refs,
+        inputs.ids,
+        inputs.platform.as_deref(),
+        state.default_platform,
+    )?;
     if references.len() > 100 {
         return Err(TuneWeaveError::invalid_request(
             "video stream batch cannot contain more than 100 references",
@@ -9108,14 +9134,14 @@ async fn video_streams_response(
         }))
         .into());
     }
-    let kind = if selected_platform == Platform::Qq && kind.is_none() {
+    let kind = if selected_platform == Platform::Qq && inputs.kind.is_none() {
         VideoResourceKind::Mv
     } else {
-        parse_video_resource_kind(kind, references[0].id())?
+        parse_video_resource_kind(inputs.kind.as_deref(), references[0].id())?
     };
     let resolution = parse_u32_parameter(
         "resolution",
-        resolution,
+        inputs.resolution.as_deref(),
         VideoStreamRequest::DEFAULT_RESOLUTION,
     )?;
     if !(1..=4_320).contains(&resolution) {
@@ -9123,15 +9149,20 @@ async fn video_streams_response(
             TuneWeaveError::invalid_request("resolution must be between 1 and 4320").into(),
         );
     }
-    let account = optional_trimmed(account);
+    let account = optional_trimmed(inputs.account);
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        selected_platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = VideoStreamRequest::new(kind, resolution);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     let ids = references
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let provider = state.registry.require(selected_platform)?;
-    let streams = provider.video_streams(&ids, &request).await?;
+    let streams = access.provider.video_streams(&ids, &request).await?;
     if streams.len() != references.len() {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -9157,29 +9188,37 @@ async fn video_streams_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    let mut response = ApiResponse::new(streams).with_platform(selected_platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(streams, selected_platform)))
 }
 
 async fn video_stream_redirect(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<VideoStreamParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let (_, request) = video_stream_request(&params, reference.platform(), reference.id())?;
-    let provider = state.registry.require(reference.platform())?;
-    let stream = provider.video_stream(reference.id(), &request).await?;
+    let (account, mut request) =
+        video_stream_request(&params, reference.platform(), reference.id())?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account.clone_from(&access.provider_account);
+    let stream = access
+        .provider
+        .video_stream(reference.id(), &request)
+        .await?;
     if let Some(url) = stream.url.as_deref() {
         return Ok(download_redirect_response(url));
     }
     Err(
         TuneWeaveError::new(ErrorCode::ResourceNotFound, "video stream is unavailable")
-            .with_platform(reference.platform())
+            .with_platform(platform)
             .with_details(json!({ "stream": stream }))
             .into(),
     )
@@ -25527,6 +25566,83 @@ mod tests {
         assert_eq!(streams["data"][0]["video_ref"], "qq:013xscuH0xlbie");
         assert_eq!(streams["data"][1]["video_ref"], "qq:002abcXYZ");
         assert_eq!(streams["data"][0]["requested_resolution"], 720);
+    }
+
+    #[tokio::test]
+    async fn video_streams_accept_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let qq = qq_caller_credential(None);
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/videos/qq:013xscuH0xlbie/stream?resolution=720",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["extensions"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, streams) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/videos/streams?ids=013xscuH0xlbie,013xscuH0xlbie&platform=qq&res=1080",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(streams["data"].as_array().expect("stream batch").len(), 2);
+        assert_eq!(streams["data"][0]["extensions"]["account"], "default");
+        assert!(streams["meta"].get("account").is_none());
+
+        let (status, streams) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/videos/streams",
+            Some(json!({
+                "refs": ["qq:013xscuH0xlbie"],
+                "resolution": 720
+            })),
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(streams["data"][0]["extensions"]["account"], "default");
+        assert!(streams["meta"].get("account").is_none());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/videos/qq:013xscuH0xlbie/stream/redirect?resolution=720")
+                    .header(CALLER_CREDENTIAL_HEADER, qq.value.clone())
+                    .body(Body::empty())
+                    .expect("build caller video redirect request"),
+            )
+            .await
+            .expect("caller video redirect request succeeds");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://example.test/qq/013xscuH0xlbie.mp4")
+        );
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/videos/qq:013xscuH0xlbie/stream?account=green-vip",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
