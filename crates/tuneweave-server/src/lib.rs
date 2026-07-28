@@ -10540,17 +10540,25 @@ struct AuthSessionParams {
 
 async fn auth_session_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AuthSessionParams>,
 ) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
     let platform = parse_platform_parameter(&params.platform)?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let profile = provider.session_profile(&account).await?;
-    Ok(Json(
-        ApiResponse::new(profile)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
+    let profile = access.provider.session_profile(&account).await?;
+    let mut response = ApiResponse::new(profile).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 #[derive(Deserialize)]
@@ -11832,12 +11840,20 @@ fn validate_comment_list_options(
 
 async fn account_profile(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let profile = provider.session_profile(&account).await?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
+    let profile = access.provider.session_profile(&account).await?;
     if !profile.authenticated {
         return Err(TuneWeaveError::new(
             tuneweave_core::ErrorCode::AuthenticationRequired,
@@ -11847,11 +11863,11 @@ async fn account_profile(
         .with_details(json!({ "account": account }))
         .into());
     }
-    Ok(Json(
-        ApiResponse::new(profile)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let mut response = ApiResponse::new(profile).with_platform(platform);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn account_playlists(
@@ -27723,6 +27739,51 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn session_and_account_profile_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        for path in [
+            "/v1/auth/session?platform=netease",
+            "/v1/account?platform=netease",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+            assert_eq!(json["data"]["authenticated"], true, "{path}");
+            assert_eq!(json["data"]["account"], "default", "{path}");
+            assert!(json["meta"].get("account").is_none(), "{path}");
+            assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+        }
+
+        let conflict = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/session?platform=netease&account=default")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(conflict.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
