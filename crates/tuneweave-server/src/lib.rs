@@ -12861,27 +12861,32 @@ struct AccountFollowingArtistParams {
 async fn account_following_artists(
     State(state): State<AppState>,
     params: Result<Query<AccountFollowingArtistParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_following_artists(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -12898,68 +12903,84 @@ struct ArtistUpdatesParams {
 
 async fn account_artist_new_videos(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ArtistUpdatesParams>,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_artist_new_videos(&ArtistUpdatesRequest {
             limit,
             before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_artist_new_tracks(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ArtistUpdatesParams>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_artist_new_tracks(&ArtistUpdatesRequest {
             limit,
             before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_artist_new_works(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<ArtistUpdatesParams>,
 ) -> Result<Json<ApiResponse<Vec<ArtistWorkUpdate>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_artist_new_works(&ArtistWorksRequest {
             limit,
             before_ms: parse_optional_u64_parameter("before", params.before.as_deref())?,
@@ -12969,87 +12990,101 @@ async fn account_artist_new_works(
                 params.first_request.as_deref(),
                 true,
             )?,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_artist_new_tracks_play_all(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
-        .account_artist_new_tracks_play_all(Some(&account))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let page = access
+        .provider
+        .account_artist_new_tracks_play_all(Some(access.required_account()))
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_favorite_tracks(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .favorite_tracks(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
 
 async fn account_history(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<PlaybackHistoryEntry>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let period = parse_history_period(params.period.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_history(&PlaybackHistoryRequest {
             period,
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -13057,10 +13092,16 @@ async fn account_history(
 async fn account_recent_podcast_episode_history(
     State(state): State<AppState>,
     params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisodePlaybackHistoryEntry>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request(
@@ -13075,18 +13116,17 @@ async fn account_recent_podcast_episode_history(
         )
         .into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .recent_podcast_episode_history(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -30616,6 +30656,94 @@ mod tests {
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn personal_library_reads_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-personal-library",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, reference) in [
+            (
+                "/v1/account/following/artists?platform=netease",
+                "netease:6452",
+            ),
+            (
+                "/v1/account/following/artists/new-videos?platform=netease",
+                "netease:1099001",
+            ),
+            (
+                "/v1/account/following/artists/new-tracks?platform=netease",
+                "netease:2099001",
+            ),
+            (
+                "/v1/account/following/artists/new-tracks/play-all?platform=netease",
+                "netease:2099001",
+            ),
+            (
+                "/v1/account/favorites/tracks?platform=netease",
+                "netease:185809",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(response["data"][0]["ref"], reference, "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        for (path, account_pointer) in [
+            (
+                "/v1/account/following/artists/new-works?platform=netease",
+                "/data/0/extensions/account",
+            ),
+            (
+                "/v1/account/history/podcast-episodes?platform=netease",
+                "/data/0/extensions/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, history) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/history?platform=netease&period=week",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history["data"][0]["track"]["ref"], "netease:185809");
+        assert!(history["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/account/favorites/tracks?platform=netease&account=personal",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
