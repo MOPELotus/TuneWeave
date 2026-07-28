@@ -48,10 +48,13 @@ const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
+const COLLECTED_PLAYLISTS_ENDPOINT: &str =
+    "https://api.bilibili.com/x/v3/fav/folder/collected/list";
 const WEB_REFERER: &str = "https://www.bilibili.com/";
 const VIDEO_SEARCH_REFERER: &str = "https://search.bilibili.com/";
 const VIDEO_SEARCH_WEB_LOCATION: &str = "1430654";
 const FAVORITE_FOLDER_WEB_LOCATION: &str = "333.1387";
+const COLLECTED_PLAYLIST_PAGE_SIZE: u32 = 70;
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -222,6 +225,53 @@ pub(crate) struct BilibiliCreatedFavoriteFolder {
     pub media_count: u64,
     pub child_friendly: bool,
     pub child_friendly_description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliCollectedPlaylistPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub has_more: bool,
+    pub playlists: Vec<BilibiliCollectedPlaylist>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum BilibiliCollectedPlaylistKind {
+    FavoriteFolder,
+    Season,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliCollectedPlaylist {
+    pub kind: BilibiliCollectedPlaylistKind,
+    pub id: u64,
+    pub folder_id: Option<u64>,
+    pub owner: Option<BilibiliCollectedPlaylistOwner>,
+    pub attributes: u64,
+    pub attribute_description: String,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub description: String,
+    pub cover_type: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub invalid: bool,
+    pub favorite_state: bool,
+    pub media_count: u64,
+    pub view_count: Option<u64>,
+    pub pinned: Option<bool>,
+    pub deep_link: Option<String>,
+    pub bvid: Option<String>,
+    pub child_friendly: bool,
+    pub child_friendly_description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliCollectedPlaylistOwner {
+    pub id: u64,
+    pub name: String,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -615,6 +665,68 @@ struct CreatedFavoriteFolderItem {
     is_kid_playlist: bool,
     #[serde(default)]
     kid_playlist_desc: String,
+}
+
+#[derive(Deserialize)]
+struct CollectedPlaylistsData {
+    count: u64,
+    #[serde(default)]
+    list: Option<Vec<CollectedPlaylistItem>>,
+    #[serde(default)]
+    has_more: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CollectedPlaylistItem {
+    id: u64,
+    #[serde(default)]
+    fid: u64,
+    #[serde(default)]
+    mid: u64,
+    #[serde(default)]
+    attr: u64,
+    #[serde(default)]
+    attr_desc: String,
+    title: String,
+    #[serde(default)]
+    cover: String,
+    #[serde(default)]
+    upper: Option<CollectedPlaylistOwner>,
+    #[serde(default)]
+    cover_type: u64,
+    #[serde(default)]
+    intro: String,
+    #[serde(default)]
+    ctime: u64,
+    #[serde(default)]
+    mtime: u64,
+    state: u64,
+    fav_state: u64,
+    media_count: u64,
+    #[serde(default)]
+    view_count: Option<u64>,
+    #[serde(default)]
+    is_top: Option<bool>,
+    #[serde(default, rename = "type")]
+    kind: Option<u64>,
+    #[serde(default)]
+    link: String,
+    #[serde(default)]
+    bvid: String,
+    #[serde(default)]
+    is_kid_playlist: bool,
+    #[serde(default)]
+    kid_playlist_desc: String,
+}
+
+#[derive(Deserialize)]
+struct CollectedPlaylistOwner {
+    #[serde(default)]
+    mid: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    face: String,
 }
 
 #[derive(Deserialize)]
@@ -1115,6 +1227,45 @@ impl BilibiliClient {
             ));
         }
         parse_created_favorite_folders_response(&bytes, owner_id)
+    }
+
+    pub(crate) async fn collected_playlists_page(
+        &self,
+        user_id: u64,
+        page: u32,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliCollectedPlaylistPage> {
+        if user_id == 0 || page == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili collected playlist user ID and page must be positive",
+            ));
+        }
+        let mut endpoint = Url::parse(COLLECTED_PLAYLISTS_ENDPOINT).map_err(|_| {
+            bilibili_internal_error("Bilibili collected playlists endpoint is invalid")
+        })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("up_mid", &user_id.to_string())
+            .append_pair("ps", &COLLECTED_PLAYLIST_PAGE_SIZE.to_string())
+            .append_pair("pn", &page.to_string())
+            .append_pair("platform", "web");
+        let referer = format!("https://space.bilibili.com/{user_id}/favlist");
+        let mut request = self.http.get(endpoint).header(REFERER, referer);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili collected playlists", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlists response exceeded the size limit",
+            ));
+        }
+        parse_collected_playlists_response(&bytes, page, COLLECTED_PLAYLIST_PAGE_SIZE)
     }
 
     async fn search_videos_compatibility_page(
@@ -1712,6 +1863,197 @@ fn parse_created_favorite_folders_response(
     })
 }
 
+fn parse_collected_playlists_response(
+    bytes: &[u8],
+    requested_page: u32,
+    requested_page_size: u32,
+) -> Result<BilibiliCollectedPlaylistPage> {
+    let response: PassportResponse<CollectedPlaylistsData> = serde_json::from_slice(bytes)
+        .map_err(|_| {
+            bilibili_upstream_error("Bilibili collected playlists returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili collected playlists",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "Bilibili user collected playlists are not publicly visible",
+        )
+        .with_platform(Platform::Bilibili)
+        .with_details(json!({ "platform_code": 0, "hidden": true }))
+    })?;
+    if requested_page == 0 || !(1..=70).contains(&requested_page_size) || data.count > 1_000_000 {
+        return Err(bilibili_upstream_error(
+            "Bilibili collected playlists returned invalid pagination",
+        ));
+    }
+    let items = data.list.unwrap_or_default();
+    if items.len() > requested_page_size as usize {
+        return Err(bilibili_upstream_error(
+            "Bilibili collected playlist page exceeded the requested size",
+        ));
+    }
+    let page_start = u64::from(requested_page - 1)
+        .checked_mul(u64::from(requested_page_size))
+        .ok_or_else(|| {
+            bilibili_upstream_error("Bilibili collected playlist page offset overflowed")
+        })?;
+    let page_end = page_start.checked_add(items.len() as u64).ok_or_else(|| {
+        bilibili_upstream_error("Bilibili collected playlist page size overflowed")
+    })?;
+    if (page_start < data.count && (page_end > data.count || items.is_empty()))
+        || (page_start >= data.count && !items.is_empty())
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili collected playlist page was inconsistent with its total",
+        ));
+    }
+    let has_more = page_end < data.count;
+    if data.has_more.is_some_and(|reported| reported != has_more)
+        || (has_more && items.len() != requested_page_size as usize)
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili collected playlist continuation was inconsistent",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let mut playlists = Vec::with_capacity(items.len());
+    for item in items {
+        let playlist = map_collected_playlist_item(item)?;
+        if !identities.insert((playlist.kind, playlist.id)) {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlist page contained duplicate identities",
+            ));
+        }
+        playlists.push(playlist);
+    }
+    Ok(BilibiliCollectedPlaylistPage {
+        page: requested_page,
+        page_size: requested_page_size,
+        total: data.count,
+        has_more,
+        playlists,
+    })
+}
+
+fn map_collected_playlist_item(item: CollectedPlaylistItem) -> Result<BilibiliCollectedPlaylist> {
+    if item.id == 0 || item.attr > u64::from(u32::MAX) || item.cover_type > u64::from(u32::MAX) {
+        return Err(bilibili_upstream_error(
+            "Bilibili collected playlist returned an invalid identity or attribute",
+        ));
+    }
+    let invalid = match item.state {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlist returned an invalid state",
+            ));
+        }
+    };
+    let favorite_state = match item.fav_state {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlist returned an invalid favorite state",
+            ));
+        }
+    };
+    let kind = match (item.kind, item.fid) {
+        (Some(11), folder_id) if folder_id > 0 => BilibiliCollectedPlaylistKind::FavoriteFolder,
+        (Some(21), 0) => BilibiliCollectedPlaylistKind::Season,
+        (None, folder_id) if folder_id > 0 => BilibiliCollectedPlaylistKind::FavoriteFolder,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlist returned an unsupported collection type",
+            ));
+        }
+    };
+    let folder_id = (kind == BilibiliCollectedPlaylistKind::FavoriteFolder).then_some(item.fid);
+    let title = validated_bilibili_text(&item.title, "collected playlist title", 1024)?;
+    let cover_url = normalize_bilibili_image_url(&item.cover, "collected playlist cover")?;
+    let description = validated_bilibili_multiline_text(
+        &item.intro,
+        "collected playlist description",
+        64 * 1024,
+    )?;
+    let attribute_description = validated_bilibili_multiline_text(
+        &item.attr_desc,
+        "collected playlist attribute description",
+        4096,
+    )?;
+    let child_friendly_description = validated_bilibili_multiline_text(
+        &item.kid_playlist_desc,
+        "child-friendly collected playlist description",
+        4096,
+    )?;
+    let deep_link = optional_bounded_text(&item.link, "collected playlist link", 4096)?;
+    let bvid = if item.bvid.trim().is_empty() {
+        None
+    } else {
+        Some(
+            match crate::BilibiliVideoIdentity::parse(&item.bvid).map_err(|_| {
+                bilibili_upstream_error("Bilibili collected playlist returned an invalid BVID")
+            })? {
+                crate::BilibiliVideoIdentity::Bvid(value) => value,
+                _ => unreachable!("BVID parser returned another identity type"),
+            },
+        )
+    };
+    let owner = match item.upper {
+        Some(owner) if owner.mid > 0 || !owner.name.trim().is_empty() => {
+            if owner.mid == 0 || owner.mid != item.mid {
+                return Err(bilibili_upstream_error(
+                    "Bilibili collected playlist returned an inconsistent owner",
+                ));
+            }
+            Some(BilibiliCollectedPlaylistOwner {
+                id: owner.mid,
+                name: validated_bilibili_text(&owner.name, "collected playlist owner name", 512)?,
+                avatar_url: normalize_bilibili_image_url(
+                    &owner.face,
+                    "collected playlist owner avatar",
+                )?,
+            })
+        }
+        Some(_) | None if invalid && item.mid == 0 => None,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili collected playlist did not return a valid owner",
+            ));
+        }
+    };
+    Ok(BilibiliCollectedPlaylist {
+        kind,
+        id: item.id,
+        folder_id,
+        owner,
+        attributes: item.attr,
+        attribute_description,
+        title,
+        cover_url,
+        description,
+        cover_type: item.cover_type,
+        created_at: item.ctime,
+        updated_at: item.mtime,
+        invalid,
+        favorite_state,
+        media_count: item.media_count,
+        view_count: item.view_count,
+        pinned: item.is_top,
+        deep_link,
+        bvid,
+        child_friendly: item.is_kid_playlist,
+        child_friendly_description,
+    })
+}
+
 fn is_video_search_risk_challenge(error: &TuneWeaveError) -> bool {
     error.code == ErrorCode::RateLimited
         && error.details.get("risk_challenge").and_then(Value::as_bool) == Some(true)
@@ -1857,12 +2199,50 @@ fn validated_bilibili_text(value: &str, context: &str, limit: usize) -> Result<S
     Ok(value.to_owned())
 }
 
-fn normalize_search_image_url(value: &str) -> Result<String> {
+fn validated_bilibili_multiline_text(value: &str, context: &str, limit: usize) -> Result<String> {
     let value = value.trim();
-    let value = value
-        .strip_prefix("//")
-        .map_or_else(|| value.to_owned(), |value| format!("https://{value}"));
-    validated_image_url(Some(&value), "search cover")?
+    if value.len() > limit
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+    {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn optional_bounded_text(value: &str, context: &str, limit: usize) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > limit || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn normalize_bilibili_image_url(value: &str, context: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = if let Some(value) = value.strip_prefix("//") {
+        format!("https://{value}")
+    } else if let Some(value) = value.strip_prefix("http://") {
+        format!("https://{value}")
+    } else {
+        value.to_owned()
+    };
+    validated_image_url(Some(&value), context)
+}
+
+fn normalize_search_image_url(value: &str) -> Result<String> {
+    normalize_bilibili_image_url(value, "search cover")?
         .ok_or_else(|| bilibili_upstream_error("Bilibili video search did not return a cover"))
 }
 
@@ -2377,13 +2757,14 @@ fn validated_image_url(value: Option<&str>, context: &str) -> Result<Option<Stri
         return Ok(None);
     };
     let url = Url::parse(value).map_err(|_| {
-        bilibili_upstream_error(format!(
-            "Bilibili session returned an invalid {context} URL"
-        ))
+        bilibili_upstream_error(format!("Bilibili returned an invalid {context} URL"))
     })?;
-    let trusted_host = url
-        .host_str()
-        .is_some_and(|host| host == "hdslb.com" || host.ends_with(".hdslb.com"));
+    let trusted_host = url.host_str().is_some_and(|host| {
+        host == "hdslb.com"
+            || host.ends_with(".hdslb.com")
+            || host == "biliimg.com"
+            || host.ends_with(".biliimg.com")
+    });
     if url.scheme() != "https"
         || url.port().is_some()
         || !url.username().is_empty()
@@ -2391,7 +2772,7 @@ fn validated_image_url(value: Option<&str>, context: &str) -> Result<Option<Stri
         || !trusted_host
     {
         return Err(bilibili_upstream_error(format!(
-            "Bilibili session returned an unsafe {context} URL"
+            "Bilibili returned an unsafe {context} URL"
         )));
     }
     Ok(Some(value.to_owned()))
@@ -3319,6 +3700,140 @@ mod tests {
         }
     }
 
+    #[test]
+    fn collected_playlists_keep_folders_seasons_and_invalid_entries_distinct() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "count": 3,
+                "list": [{
+                    "id": 1513762000_u64,
+                    "fid": 15137620,
+                    "mid": 3493115920454890_u64,
+                    "attr": 22,
+                    "attr_desc": "",
+                    "title": "色差即坏苹果001宇宙",
+                    "cover": "http://i0.hdslb.com/bfs/archive/folder.jpg",
+                    "upper": {
+                        "mid": 3493115920454890_u64,
+                        "name": "收藏夹作者",
+                        "face": "//i0.hdslb.com/bfs/face/avatar.jpg"
+                    },
+                    "cover_type": 2,
+                    "intro": "第一行\n第二行",
+                    "ctime": 1563394571,
+                    "mtime": 1563394572,
+                    "state": 0,
+                    "fav_state": 1,
+                    "media_count": 55,
+                    "view_count": 10,
+                    "is_top": true,
+                    "type": 11,
+                    "link": "",
+                    "bvid": "",
+                    "is_kid_playlist": false,
+                    "kid_playlist_desc": ""
+                }, {
+                    "id": 4641954,
+                    "fid": 0,
+                    "mid": 1868902080,
+                    "attr": 0,
+                    "title": "2025哔哩哔哩拜年纪",
+                    "cover": "https://archive.biliimg.com/bfs/archive/season.jpg",
+                    "upper": {
+                        "mid": 1868902080,
+                        "name": "哔哩哔哩拜年纪",
+                        "face": ""
+                    },
+                    "cover_type": 0,
+                    "intro": "",
+                    "ctime": 0,
+                    "mtime": 1738078200,
+                    "state": 0,
+                    "fav_state": 1,
+                    "media_count": 46,
+                    "type": 21,
+                    "link": "bilibili://video/113884295860962?is_from_ugc_season=1",
+                    "bvid": "",
+                    "is_kid_playlist": false,
+                    "kid_playlist_desc": ""
+                }, {
+                    "id": 1291813,
+                    "fid": 0,
+                    "mid": 0,
+                    "attr": 1,
+                    "title": "该合集已失效",
+                    "cover": "",
+                    "upper": { "mid": 0, "name": "", "face": "" },
+                    "cover_type": 0,
+                    "intro": "",
+                    "ctime": 0,
+                    "mtime": 0,
+                    "state": 1,
+                    "fav_state": 0,
+                    "media_count": 0,
+                    "type": 21
+                }],
+                "has_more": false
+            }
+        }))
+        .expect("collected playlists fixture");
+        let page =
+            parse_collected_playlists_response(&response, 1, 70).expect("collected playlists");
+        assert_eq!(page.total, 3);
+        assert!(!page.has_more);
+        assert_eq!(
+            page.playlists[0].kind,
+            BilibiliCollectedPlaylistKind::FavoriteFolder
+        );
+        assert_eq!(page.playlists[0].folder_id, Some(15_137_620));
+        assert_eq!(
+            page.playlists[0].cover_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/archive/folder.jpg")
+        );
+        assert_eq!(page.playlists[0].description, "第一行\n第二行");
+        assert_eq!(
+            page.playlists[1].kind,
+            BilibiliCollectedPlaylistKind::Season
+        );
+        assert_eq!(page.playlists[1].folder_id, None);
+        assert_eq!(
+            page.playlists[1].cover_url.as_deref(),
+            Some("https://archive.biliimg.com/bfs/archive/season.jpg")
+        );
+        assert!(page.playlists[2].invalid);
+        assert!(page.playlists[2].owner.is_none());
+    }
+
+    #[test]
+    fn collected_playlists_enforce_privacy_pagination_and_known_types() {
+        let hidden =
+            parse_collected_playlists_response(br#"{"code":0,"message":"OK","data":null}"#, 1, 70)
+                .expect_err("hidden collected playlists");
+        assert_eq!(hidden.code, ErrorCode::PermissionDenied);
+
+        let beyond_end = parse_collected_playlists_response(
+            br#"{"code":0,"message":"OK","data":{"count":1,"list":null,"has_more":false}}"#,
+            2,
+            70,
+        )
+        .expect("page beyond end");
+        assert!(beyond_end.playlists.is_empty());
+
+        for malformed in [
+            br#"{"code":0,"message":"OK","data":{"count":71,"list":[],"has_more":true}}"#.as_slice(),
+            br#"{"code":0,"message":"OK","data":{"count":1,"list":[{"id":1,"fid":0,"mid":1,"title":"x","upper":{"mid":1,"name":"u","face":""},"state":0,"fav_state":1,"media_count":1,"type":99}],"has_more":false}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"count":1,"list":[{"id":1,"fid":1,"mid":1,"title":"x","upper":{"mid":2,"name":"u","face":""},"state":0,"fav_state":1,"media_count":1,"type":11}],"has_more":false}}"#
+                .as_slice(),
+        ] {
+            let error = parse_collected_playlists_response(malformed, 1, 70)
+                .expect_err("malformed collected playlists");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_qr_creation_returns_a_trusted_scannable_url() {
@@ -3385,6 +3900,29 @@ mod tests {
                 .folders
                 .iter()
                 .all(|folder| folder.owner_id == 7_792_521)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili collected playlist access"]
+    async fn live_public_collected_playlists_include_typed_seasons_and_folders() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let page = client
+            .collected_playlists_page(293_793_435, 1, None)
+            .await
+            .expect("live public collected playlists");
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, COLLECTED_PLAYLIST_PAGE_SIZE);
+        assert!(!page.playlists.is_empty());
+        assert!(
+            page.playlists
+                .iter()
+                .any(|playlist| playlist.kind == BilibiliCollectedPlaylistKind::Season)
+        );
+        assert!(
+            page.playlists
+                .iter()
+                .any(|playlist| playlist.kind == BilibiliCollectedPlaylistKind::FavoriteFolder)
         );
     }
 }

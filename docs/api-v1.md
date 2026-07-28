@@ -342,6 +342,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 用户创建的 B 站收藏夹目录通过 `GET /v1/users/bilibili:{mid}/playlists/created` 读取，支持 `limit`、`offset` 和可选 `account`。公开目录默认匿名请求；指定服务器账户或调用方凭证后，只使用该精确登录态读取其可见内容。隐藏目录返回权限错误，真正公开但没有收藏夹的目录才返回空页。返回条目以 `bilibili:favorite:{media_id}` 为稳定引用，并在扩展中保留 `fid`、所有者、默认/私有属性及视频数量。
 
+用户收藏的播放列表目录通过 `GET /v1/users/bilibili:{mid}/playlists/favorite` 读取，分页与账户选择语义相同。B 站 Web 目录同时包含普通收藏夹和收藏的视频合集：前者返回 `bilibili:favorite:{media_id}`，后者返回 `bilibili:season:{season_id}`；失效条目保留 `invalid=true` 供调用方替换来源，不会被静默丢弃。两种目录始终与用户创建目录分开，适合作为后续 Uni Playlist 导入来源。
+
 两类资源都通过 `GET /v1/playlists/{ref}` 和 `GET /v1/playlists/{ref}/tracks` 访问。公开内容通常不需要账户；私有收藏夹由 `account` 选择 B 站登录态。由于 TuneWeave 的主要用途是音乐播放，列表中的 B 站视频会规范化为可播放的 `Track`，并在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid`、`extensions.bvid`、`extensions.cid` 中保留完整视频身份；原始视频详情仍通过 `/v1/videos/{ref}` 读取。
 
 ### DigitalAlbum

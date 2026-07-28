@@ -2,7 +2,7 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=23`、`partial=0`、`implemented=6`、`verified=5`；完整实现率与已触达率均为 `11/34 = 32.35%`。
+状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=22`、`partial=0`、`implemented=6`、`verified=6`；完整实现率与已触达率均为 `12/34 = 35.29%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
@@ -26,7 +26,7 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BS02 | 搜索 | 搜索建议 | `pending` | Web suggestion；关键词与展示高亮分离，空建议返回空列表而非错误 |
 | BS03 | 搜索 | 热门搜索 | `pending` | 热搜词、展示文本、排行与跳转元数据强类型映射；不跟随任意外部 URL |
 | BP01 | 列表与 Uni | 用户创建的收藏夹目录 | `verified` | `GET /v1/users/{bilibili:mid}/playlists/created` 固定调用 `x/v3/fav/folder/created/list-all` 并限定视频收藏类型；公开目录可匿名读取，`account` 或调用方凭证只在明确选择时附带，不存在的账户别名在发网前失败。目录强类型校验所有者、数量、唯一完整 `media_id`、原始 `fid`、属性位、收藏状态和儿童模式字段，统一 Playlist 保留默认/自建、公开/私有、视频数量和稳定 `bilibili:favorite:<media_id>` 身份；`data=null` 作为隐藏权限错误，不伪装成空目录。公开用户 `7792521` 的客户端与 provider 分页链已真实联网验收 |
-| BP02 | 列表与 Uni | 当前账户收藏的收藏夹目录 | `pending` | 与创建目录分离并保留分页，不把“收藏他人列表”误作本地创建 |
+| BP02 | 列表与 Uni | 用户收藏的播放列表目录 | `verified` | `GET /v1/users/{bilibili:mid}/playlists/favorite` 固定调用 `x/v3/fav/folder/collected/list`，以 `platform=web` 完整保留普通收藏夹 `type=11` 与用户收藏的视频合集 `type=21`，分别输出 `bilibili:favorite:<media_id>` 和 `bilibili:season:<season_id>`，不会混作本地创建目录。统一偏移分页可跨上游 70 项页，校验总数、续页、重复身份和类型漂移；条目保留所有者、封面、简介、时间、属性、收藏/失效/置顶状态、浏览与视频数量，HTTP 图片只升级到受信 B 站 HTTPS 图床。公开用户 `293793435` 的匿名混合类型目录和 provider 偏移分页均已真实联网验收；隐藏目录与精确账户选择分别保持权限错误和账户隔离 |
 | BP03 | 列表与 Uni | 用户公开合集/系列目录 | `pending` | `x/polymer/web-space/seasons_series_list`；Season 与 Series 分型，Basic 首先支持公开视频合集 |
 | BP04 | 列表与 Uni | 公开合集详情 | `pending` | `bilibili:season:<season_id>`，同时保留所有者 `mid`、封面、简介、数量与公开状态 |
 | BP05 | 列表与 Uni | 公开合集视频分页 | `pending` | `x/polymer/web-space/seasons_archives_list`；保留上游顺序、分页、AID/BVID 和各视频可播放身份 |

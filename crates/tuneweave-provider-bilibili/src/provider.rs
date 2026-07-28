@@ -3,19 +3,21 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    AccountCredentialStore, AccountProfile, AuthState, Capability, CreatorSummary, CredentialMode,
-    ErrorCode, Extensions, MusicProvider, Page, PageMeta, Platform, Playlist, ProviderAuthResult,
-    ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, ResourceRef, Result,
-    SearchItem, SearchKind, SearchQuery, SearchVariant, StoredAccountCredential, TuneWeaveError,
-    Video, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder,
+    AccountCredentialStore, AccountProfile, ArtistSummary, AuthState, Capability, CreatorSummary,
+    CredentialMode, ErrorCode, Extensions, MusicProvider, Page, PageMeta, Platform, Playlist,
+    ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
+    ResourceRef, Result, SearchItem, SearchKind, SearchQuery, SearchVariant,
+    StoredAccountCredential, TuneWeaveError, Video, VideoSearchDuration, VideoSearchFilters,
+    VideoSearchOrder,
 };
 
 use crate::BilibiliVideoIdentity;
 use crate::client::{
-    BilibiliClient, BilibiliConfig, BilibiliCreatedFavoriteFolder, BilibiliCreatedFavoriteFolders,
-    BilibiliCredential, BilibiliCredentialRefresh, BilibiliLogoutOutcome, BilibiliQrPoll,
-    BilibiliSearchVideo, BilibiliSessionStatus, BilibiliVideoSearchDuration,
-    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
+    BilibiliClient, BilibiliCollectedPlaylist, BilibiliCollectedPlaylistKind,
+    BilibiliCollectedPlaylistPage, BilibiliConfig, BilibiliCreatedFavoriteFolder,
+    BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
+    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSessionStatus,
+    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -215,6 +217,80 @@ impl MusicProvider for BilibiliProvider {
             .created_favorite_folders(owner_id, credential.as_ref())
             .await?;
         map_created_favorite_folder_page(folders, request.offset, request.limit.clamp(1, 100))
+    }
+
+    async fn user_favorite_playlists(
+        &self,
+        user_id: &str,
+        request: &tuneweave_core::PageRequest,
+    ) -> Result<Page<Playlist>> {
+        const UPSTREAM_PAGE_SIZE: u32 = 70;
+        let user_id = validate_bilibili_user_id(user_id)?;
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let limit = request.limit.clamp(1, 100);
+        let first_page = request.offset / UPSTREAM_PAGE_SIZE + 1;
+        let first_skip = (request.offset % UPSTREAM_PAGE_SIZE) as usize;
+        let mut current_page = first_page;
+        let mut total = None;
+        let mut fetched_pages = 0_u32;
+        let mut identities = BTreeSet::new();
+        let mut items = Vec::with_capacity(limit as usize);
+        while items.len() < limit as usize {
+            let page = self
+                .client
+                .collected_playlists_page(user_id, current_page, credential.as_ref())
+                .await?;
+            validate_collected_playlist_page(&page, current_page, total)?;
+            total.get_or_insert(page.total);
+            fetched_pages = fetched_pages.saturating_add(1);
+            let skip = if current_page == first_page {
+                first_skip
+            } else {
+                0
+            };
+            for playlist in page.playlists.into_iter().skip(skip) {
+                if items.len() == limit as usize {
+                    break;
+                }
+                if !identities.insert((playlist.kind, playlist.id)) {
+                    return Err(bilibili_data_error(
+                        "Bilibili collected playlist traversal returned a duplicate identity",
+                    ));
+                }
+                items.push(map_collected_playlist(playlist)?);
+            }
+            if !page.has_more {
+                break;
+            }
+            current_page = current_page.checked_add(1).ok_or_else(|| {
+                bilibili_data_error("Bilibili collected playlist page overflowed")
+            })?;
+        }
+        let total = total.unwrap_or_default();
+        let returned = u32::try_from(items.len())
+            .map_err(|_| bilibili_data_error("Bilibili collected playlist page overflowed"))?;
+        let next_offset = request
+            .offset
+            .checked_add(returned)
+            .ok_or_else(|| bilibili_data_error("Bilibili collected playlist offset overflowed"))?;
+        let has_more = returned > 0 && u64::from(next_offset) < total;
+        Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit,
+                offset: request.offset,
+                total: Some(total),
+                next_offset: has_more.then_some(next_offset),
+                has_more,
+                extensions: Extensions::from([
+                    ("library_scope".to_owned(), json!("user_favorite")),
+                    ("user_mid".to_owned(), json!(user_id)),
+                    ("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE)),
+                    ("upstream_pages_fetched".to_owned(), json!(fetched_pages)),
+                    ("includes_collected_seasons".to_owned(), json!(true)),
+                ]),
+            },
+        })
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -862,6 +938,103 @@ fn map_created_favorite_folder(folder: BilibiliCreatedFavoriteFolder) -> Result<
     })
 }
 
+fn validate_collected_playlist_page(
+    page: &BilibiliCollectedPlaylistPage,
+    requested_page: u32,
+    expected_total: Option<u64>,
+) -> Result<()> {
+    if page.page != requested_page
+        || page.page_size != 70
+        || page.playlists.len() > page.page_size as usize
+        || expected_total.is_some_and(|total| total != page.total)
+    {
+        return Err(bilibili_data_error(
+            "Bilibili collected playlist pagination changed during traversal",
+        ));
+    }
+    Ok(())
+}
+
+fn map_collected_playlist(playlist: BilibiliCollectedPlaylist) -> Result<Playlist> {
+    let (kind, id, resource_ref) = match playlist.kind {
+        BilibiliCollectedPlaylistKind::FavoriteFolder => {
+            let id = format!("favorite:{}", playlist.id);
+            let resource_ref = ResourceRef::new(Platform::Bilibili, &id).map_err(|_| {
+                bilibili_data_error("Bilibili collected favorite folder identity was invalid")
+            })?;
+            ("favorite_folder", id, resource_ref)
+        }
+        BilibiliCollectedPlaylistKind::Season => {
+            let id = format!("season:{}", playlist.id);
+            let resource_ref = ResourceRef::new(Platform::Bilibili, &id).map_err(|_| {
+                bilibili_data_error("Bilibili collected season identity was invalid")
+            })?;
+            ("season", id, resource_ref)
+        }
+    };
+    let mut extensions = Extensions::from([
+        ("source".to_owned(), json!("favorite")),
+        ("collection_kind".to_owned(), json!(kind)),
+        ("upstream_id".to_owned(), json!(playlist.id)),
+        ("attr".to_owned(), json!(playlist.attributes)),
+        (
+            "attr_description".to_owned(),
+            json!(playlist.attribute_description),
+        ),
+        ("private".to_owned(), json!(playlist.attributes & 1 != 0)),
+        ("default".to_owned(), json!(playlist.attributes & 2 == 0)),
+        ("cover_type".to_owned(), json!(playlist.cover_type)),
+        ("invalid".to_owned(), json!(playlist.invalid)),
+        ("fav_state".to_owned(), json!(playlist.favorite_state)),
+        ("media_type".to_owned(), json!("video")),
+        ("child_friendly".to_owned(), json!(playlist.child_friendly)),
+        (
+            "child_friendly_description".to_owned(),
+            json!(playlist.child_friendly_description),
+        ),
+    ]);
+    insert_optional(&mut extensions, "fid", playlist.folder_id);
+    insert_optional(&mut extensions, "view_count", playlist.view_count);
+    insert_optional(&mut extensions, "pinned", playlist.pinned);
+    insert_optional(&mut extensions, "deep_link", playlist.deep_link);
+    insert_optional(&mut extensions, "bvid", playlist.bvid);
+    let creator = playlist
+        .owner
+        .map(|owner| {
+            let resource_ref = ResourceRef::new(Platform::Bilibili, format!("user:{}", owner.id))
+                .map_err(|_| {
+                bilibili_data_error("Bilibili collected playlist owner was invalid")
+            })?;
+            extensions.insert("owner_mid".to_owned(), json!(owner.id));
+            extensions.insert("owner_ref".to_owned(), json!(resource_ref));
+            insert_optional(&mut extensions, "owner_avatar_url", owner.avatar_url);
+            Ok::<_, TuneWeaveError>(ArtistSummary {
+                resource_ref: Some(resource_ref),
+                name: owner.name,
+            })
+        })
+        .transpose()?;
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id,
+        name: playlist.title,
+        description: playlist.description,
+        cover_url: playlist.cover_url,
+        creator,
+        track_count: Some(playlist.media_count),
+        tags: Vec::new(),
+        subscribed: Some(playlist.favorite_state),
+        created_at: (playlist.created_at > 0)
+            .then(|| bilibili_unix_rfc3339(playlist.created_at))
+            .flatten(),
+        updated_at: (playlist.updated_at > 0)
+            .then(|| bilibili_unix_rfc3339(playlist.updated_at))
+            .flatten(),
+        extensions,
+    })
+}
+
 fn insert_optional<T: serde::Serialize>(extensions: &mut Extensions, key: &str, value: Option<T>) {
     if let Some(value) = value
         && let Ok(value) = serde_json::to_value(value)
@@ -1281,6 +1454,89 @@ mod tests {
         assert_eq!(page.pagination.extensions["library_scope"], "user_created");
     }
 
+    #[test]
+    fn collected_playlist_mapping_preserves_kind_owner_state_and_metadata() {
+        let playlist = map_collected_playlist(BilibiliCollectedPlaylist {
+            kind: BilibiliCollectedPlaylistKind::Season,
+            id: 4_641_954,
+            folder_id: None,
+            owner: Some(crate::client::BilibiliCollectedPlaylistOwner {
+                id: 1_868_902_080,
+                name: "哔哩哔哩拜年纪".to_owned(),
+                avatar_url: Some("https://i0.hdslb.com/bfs/face/avatar.jpg".to_owned()),
+            }),
+            attributes: 0,
+            attribute_description: String::new(),
+            title: "2025哔哩哔哩拜年纪".to_owned(),
+            cover_url: Some("https://archive.biliimg.com/bfs/archive/season.jpg".to_owned()),
+            description: "视频合集".to_owned(),
+            cover_type: 0,
+            created_at: 0,
+            updated_at: 1_738_078_200,
+            invalid: false,
+            favorite_state: true,
+            media_count: 46,
+            view_count: Some(74_688_312),
+            pinned: Some(false),
+            deep_link: Some("bilibili://video/113884295860962?is_from_ugc_season=1".to_owned()),
+            bvid: None,
+            child_friendly: false,
+            child_friendly_description: String::new(),
+        })
+        .expect("mapped collected season");
+        assert_eq!(playlist.resource_ref.to_string(), "bilibili:season:4641954");
+        assert_eq!(playlist.id, "season:4641954");
+        assert_eq!(playlist.subscribed, Some(true));
+        assert_eq!(playlist.track_count, Some(46));
+        assert_eq!(
+            playlist
+                .creator
+                .as_ref()
+                .and_then(|creator| creator.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("bilibili:user:1868902080")
+        );
+        assert_eq!(playlist.updated_at.as_deref(), Some("2025-01-28T15:30:00Z"));
+        assert_eq!(playlist.extensions["collection_kind"], "season");
+        assert_eq!(playlist.extensions["view_count"], 74_688_312);
+        assert_eq!(
+            playlist.extensions["owner_avatar_url"],
+            "https://i0.hdslb.com/bfs/face/avatar.jpg"
+        );
+
+        let favorite = map_collected_playlist(BilibiliCollectedPlaylist {
+            kind: BilibiliCollectedPlaylistKind::FavoriteFolder,
+            id: 49_630_708,
+            folder_id: Some(496_307),
+            owner: None,
+            attributes: 22,
+            attribute_description: String::new(),
+            title: "失效收藏夹".to_owned(),
+            cover_url: None,
+            description: String::new(),
+            cover_type: 2,
+            created_at: 0,
+            updated_at: 0,
+            invalid: true,
+            favorite_state: false,
+            media_count: 0,
+            view_count: None,
+            pinned: None,
+            deep_link: None,
+            bvid: None,
+            child_friendly: false,
+            child_friendly_description: String::new(),
+        })
+        .expect("mapped collected favorite folder");
+        assert_eq!(
+            favorite.resource_ref.to_string(),
+            "bilibili:favorite:49630708"
+        );
+        assert_eq!(favorite.extensions["fid"], 496_307);
+        assert_eq!(favorite.extensions["invalid"], true);
+    }
+
     #[tokio::test]
     async fn created_favorite_folders_validate_identity_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
@@ -1304,6 +1560,28 @@ mod tests {
             .expect_err("missing selected account");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert!(provider.capabilities().contains(&Capability::PlaylistRead));
+    }
+
+    #[tokio::test]
+    async fn collected_playlists_validate_identity_and_account_before_network_access() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let invalid = provider
+            .user_favorite_playlists("user:293793435", &tuneweave_core::PageRequest::new(30, 0))
+            .await
+            .expect_err("typed user prefix is invalid in a typed user route");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+        let missing = provider
+            .user_favorite_playlists(
+                "293793435",
+                &tuneweave_core::PageRequest {
+                    limit: 30,
+                    offset: 0,
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing selected account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -1379,6 +1657,25 @@ mod tests {
             page.items
                 .iter()
                 .all(|playlist| playlist.id.starts_with("favorite:"))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili collected playlist access"]
+    async fn live_provider_paginates_public_collected_playlists() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let page = provider
+            .user_favorite_playlists("293793435", &tuneweave_core::PageRequest::new(10, 5))
+            .await
+            .expect("public collected playlists");
+        assert_eq!(page.items.len(), 10);
+        assert_eq!(page.pagination.offset, 5);
+        assert!(page.pagination.has_more);
+        assert_eq!(page.pagination.extensions["user_mid"], 293_793_435);
+        assert!(
+            page.items
+                .iter()
+                .all(|playlist| playlist.subscribed.is_some())
         );
     }
 }
