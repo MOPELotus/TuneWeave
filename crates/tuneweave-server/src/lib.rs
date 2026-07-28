@@ -7186,18 +7186,15 @@ fn single_reference_platform(
 
 async fn playlist(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
+    let credentials = CallerCredentialSet::from_headers(&headers)?;
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
     let platform = reference.platform();
     if platform == Platform::Uni {
-        if account.is_some() {
+        if params.account.is_some() {
             return Err(TuneWeaveError::invalid_request(
                 "local Uni Playlists do not use platform accounts",
             )
@@ -7211,10 +7208,18 @@ async fn playlist(
             ApiResponse::new(playlist_from_uni(playlist)).with_platform(Platform::Uni),
         ));
     }
-    let provider = state.registry.require(platform)?;
-    let playlist = provider.playlist(reference.id(), account).await?;
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let playlist = access
+        .provider
+        .playlist(reference.id(), access.provider_account.as_deref())
+        .await?;
     let mut response = ApiResponse::new(playlist).with_platform(platform);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
 
@@ -7230,24 +7235,20 @@ struct PageParams {
 
 async fn playlist_tracks(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let credentials = CallerCredentialSet::from_headers(&headers)?;
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty())
-        .map(str::to_owned);
     let platform = reference.platform();
     if platform == Platform::Uni {
-        if account.is_some() {
+        if params.account.is_some() {
             return Err(TuneWeaveError::invalid_request(
                 "local Uni Playlists do not use platform accounts",
             )
@@ -7283,21 +7284,27 @@ async fn playlist_tracks(
                 }),
         ));
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .playlist_tracks(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account,
             },
         )
         .await?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
 
@@ -7306,19 +7313,20 @@ async fn playlist_tracks(
 
 async fn playlist_playable_items(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<PlaylistPlayableEntry>>>, ApiError> {
+    let credentials = CallerCredentialSet::from_headers(&headers)?;
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let account = optional_trimmed(params.account);
     let platform = reference.platform();
     if platform == Platform::Uni {
-        if account.is_some() {
+        if params.account.is_some() {
             return Err(TuneWeaveError::invalid_request(
                 "local Uni Playlists do not use platform accounts",
             )
@@ -7336,15 +7344,21 @@ async fn playlist_playable_items(
                 .with_pagination(page.pagination),
         ));
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .playlist_source_items(
             reference.id(),
             "playlist",
             &PageRequest {
                 limit,
                 offset,
-                account: account.clone(),
+                account: access.provider_account,
             },
         )
         .await?;
@@ -7362,7 +7376,7 @@ async fn playlist_playable_items(
     let mut response = ApiResponse::new(items)
         .with_platform(platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -11654,29 +11668,39 @@ async fn account_profile(
 
 async fn account_playlists(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access
+        .provider_account
+        .expect("default account selection always yields an account");
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .account_playlists(&PageRequest {
             limit,
             offset,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
-            .with_pagination(page.pagination),
-    ))
+    let mut response = ApiResponse::new(page.items)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn account_albums(
@@ -16194,8 +16218,14 @@ mod tests {
             })
         }
 
-        async fn playlist(&self, id: &str, _account: Option<&str>) -> Result<Playlist> {
-            Ok(sample_playlist(id))
+        async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+            let mut playlist = sample_playlist(id);
+            if let Some(account) = account {
+                playlist
+                    .extensions
+                    .insert("account".to_owned(), json!(account));
+            }
+            Ok(playlist)
         }
 
         async fn playlist_tracks(&self, _id: &str, request: &PageRequest) -> Result<Page<Track>> {
@@ -16207,7 +16237,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
-                    extensions: Default::default(),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
                 },
             })
         }
@@ -16337,7 +16367,7 @@ mod tests {
                     total: Some(1),
                     next_offset: None,
                     has_more: false,
-                    extensions: Default::default(),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
                 },
             })
         }
@@ -25733,6 +25763,72 @@ mod tests {
         assert_eq!(items["data"][0]["extensions"]["stable_item_id"], false);
         assert_eq!(items["meta"]["account"], "public");
         assert_eq!(items["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn playlist_reads_use_caller_credentials_without_server_account_fallback() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        for (path, account_pointer) in [
+            ("/v1/playlists/netease:3778678", "/data/extensions/account"),
+            (
+                "/v1/playlists/netease:3778678/tracks",
+                "/meta/pagination/extensions/account",
+            ),
+            (
+                "/v1/playlists/netease:3778678/items",
+                "/meta/pagination/extensions/account",
+            ),
+            (
+                "/v1/account/playlists?platform=netease",
+                "/meta/pagination/extensions/account",
+            ),
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body");
+            let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+            assert_eq!(
+                json.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}"
+            );
+            assert!(json["meta"].get("account").is_none(), "{path}");
+            assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+        }
+
+        for path in [
+            "/v1/playlists/netease:3778678?account=default",
+            "/v1/playlists/netease:3778678/tracks?account=default",
+            "/v1/playlists/netease:3778678/items?account=default",
+            "/v1/account/playlists?platform=netease&account=default",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     #[tokio::test]
