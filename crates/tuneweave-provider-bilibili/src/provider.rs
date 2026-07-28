@@ -12,13 +12,14 @@ use tuneweave_core::{
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
     SearchQuery, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
-    VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoDetail, VideoDetailRequest,
-    VideoPart, VideoPartListRequest, VideoPlaybackFormat, VideoPlaybackLanguage,
-    VideoPlaybackLanguageCatalog, VideoPlaybackManifest, VideoPlaybackProgressiveSegment,
-    VideoPlaybackRequest, VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind,
-    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoSubtitle,
-    VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest,
-    VideoSubtitleStyle,
+    VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoCodecFamily, VideoDetail,
+    VideoDetailRequest, VideoDynamicRange, VideoPart, VideoPartListRequest, VideoPlaybackFormat,
+    VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
+    VideoPlaybackProgressiveSegment, VideoPlaybackRequest, VideoPlaybackSegmentBase,
+    VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument,
+    VideoSubtitleList, VideoSubtitleRequest, VideoSubtitleStyle, VideoTrackQuality,
+    VideoTrackStream, VideoTrackStreamRequest,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -110,6 +111,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::VideoSubtitles,
             Capability::VideoPlaybackManifest,
             Capability::VideoAudioStream,
+            Capability::VideoTrackStream,
         ])
     }
 
@@ -349,6 +351,23 @@ impl MusicProvider for BilibiliProvider {
             )
             .await?;
         select_bilibili_audio_stream(manifest, request)
+    }
+
+    async fn video_track_stream(
+        &self,
+        id: &str,
+        request: &VideoTrackStreamRequest,
+    ) -> Result<VideoTrackStream> {
+        let manifest = self
+            .playback_manifest(
+                id,
+                request.kind,
+                request.part_id.as_deref(),
+                None,
+                request.account.as_deref(),
+            )
+            .await?;
+        select_bilibili_video_track(manifest, request)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -2345,6 +2364,323 @@ fn bilibili_audio_codec_matches(codec: &str, preference: &str) -> bool {
     }
 }
 
+fn select_bilibili_video_track(
+    manifest: VideoPlaybackManifest,
+    request: &VideoTrackStreamRequest,
+) -> Result<VideoTrackStream> {
+    let mut available = Vec::with_capacity(manifest.video_tracks.len());
+    for track in &manifest.video_tracks {
+        if track.kind != VideoPlaybackTrackKind::Video {
+            return Err(bilibili_data_error(
+                "Bilibili playback video track returned a conflicting track kind",
+            ));
+        }
+        available.push((track, bilibili_video_codec_family(track)?));
+    }
+    let candidates = available
+        .iter()
+        .copied()
+        .filter(|(_, family)| {
+            request
+                .codec
+                .is_none_or(|requested| *family == Some(requested))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Bilibili playback manifest did not contain a matching video track",
+        )
+        .with_platform(Platform::Bilibili)
+        .with_details(json!({
+            "requested_quality": request.quality,
+            "requested_codec": request.codec,
+            "available_quality_ids": manifest
+                .video_tracks
+                .iter()
+                .map(|track| track.id)
+                .collect::<BTreeSet<_>>(),
+            "available_codec_ids": manifest
+                .video_tracks
+                .iter()
+                .filter_map(|track| track.codec_id)
+                .collect::<BTreeSet<_>>(),
+        })));
+    }
+    let selection_codec = request.codec.or_else(|| {
+        manifest
+            .video_codec_id
+            .and_then(bilibili_video_codec_family_from_id)
+    });
+    let mut selected = None;
+    for (fallback_index, quality_id) in bilibili_video_quality_fallback(request.quality)
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        if let Some(candidate) =
+            select_bilibili_video_quality_candidate(&candidates, quality_id, selection_codec)
+        {
+            selected = Some((candidate, Some(fallback_index)));
+            break;
+        }
+    }
+    let ((selected, codec_family), fallback_index) = selected.unwrap_or_else(|| {
+        (
+            select_bilibili_video_height_candidate(&candidates, request.quality, selection_codec),
+            None,
+        )
+    });
+    let selected = selected.clone();
+    let actual_quality = bilibili_video_quality_from_id(selected.id);
+    let downgraded = match request.quality {
+        VideoTrackQuality::Auto => false,
+        _ if fallback_index.is_some_and(|index| index > 0) => true,
+        _ if actual_quality == Some(request.quality) => false,
+        _ => bilibili_video_quality_target_height(request.quality)
+            .is_some_and(|height| selected.height.is_some_and(|actual| actual < height)),
+    };
+    let quality_format = manifest
+        .formats
+        .iter()
+        .find(|format| format.quality == selected.id)
+        .cloned();
+    Ok(VideoTrackStream {
+        video_ref: manifest.video_ref.clone(),
+        part_ref: manifest.part_ref.clone(),
+        platform: Platform::Bilibili,
+        available: true,
+        url: Some(selected.url.clone()),
+        backup_urls: selected.backup_urls.clone(),
+        headers: manifest.headers.clone(),
+        expires_at_epoch_seconds: manifest.expires_at_epoch_seconds,
+        mime_type: Some(selected.mime_type.clone()),
+        codec: Some(selected.codecs.clone()),
+        codec_family,
+        bandwidth: Some(selected.bandwidth),
+        duration_ms: Some(manifest.duration_ms),
+        requested_quality: request.quality,
+        actual_quality,
+        requested_codec: request.codec,
+        dynamic_range: actual_quality.map(bilibili_video_dynamic_range),
+        platform_quality_id: Some(selected.id),
+        quality_format,
+        width: selected.width,
+        height: selected.height,
+        frame_rate: selected.frame_rate.clone(),
+        sample_aspect_ratio: selected.sample_aspect_ratio.clone(),
+        start_with_sap: selected.start_with_sap,
+        segment_base: selected.segment_base.clone(),
+        downgraded,
+        message: downgraded.then(|| {
+            "requested Bilibili video quality was unavailable; selected a lower quality".to_owned()
+        }),
+        extensions: Extensions::from([
+            ("source".to_owned(), json!("video_playback_manifest")),
+            (
+                "current_video_quality".to_owned(),
+                json!(manifest.current_quality),
+            ),
+            (
+                "default_video_codec_id".to_owned(),
+                json!(manifest.video_codec_id),
+            ),
+            ("selected_track_id".to_owned(), json!(selected.id)),
+            ("selected_codec_id".to_owned(), json!(selected.codec_id)),
+            ("fallback_index".to_owned(), json!(fallback_index)),
+        ]),
+    })
+}
+
+fn select_bilibili_video_quality_candidate<'a>(
+    candidates: &[(&'a VideoPlaybackTrack, Option<VideoCodecFamily>)],
+    quality_id: u32,
+    preferred_codec: Option<VideoCodecFamily>,
+) -> Option<(&'a VideoPlaybackTrack, Option<VideoCodecFamily>)> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|(track, _)| track.id == quality_id)
+        .max_by_key(|(track, family)| {
+            (
+                bilibili_video_codec_rank(*family, preferred_codec),
+                track.bandwidth,
+            )
+        })
+}
+
+fn select_bilibili_video_height_candidate<'a>(
+    candidates: &[(&'a VideoPlaybackTrack, Option<VideoCodecFamily>)],
+    quality: VideoTrackQuality,
+    preferred_codec: Option<VideoCodecFamily>,
+) -> (&'a VideoPlaybackTrack, Option<VideoCodecFamily>) {
+    let target_height = bilibili_video_quality_target_height(quality);
+    let selected_height = target_height
+        .and_then(|target| {
+            candidates
+                .iter()
+                .filter_map(|(track, _)| track.height.filter(|height| *height <= target))
+                .max()
+        })
+        .or_else(|| {
+            if quality == VideoTrackQuality::Auto {
+                candidates
+                    .iter()
+                    .filter_map(|(track, _)| track.height)
+                    .max()
+            } else {
+                candidates
+                    .iter()
+                    .filter_map(|(track, _)| track.height)
+                    .min()
+            }
+        });
+    candidates
+        .iter()
+        .copied()
+        .filter(|(track, _)| track.height == selected_height)
+        .max_by_key(|(track, family)| {
+            (
+                bilibili_video_codec_rank(*family, preferred_codec),
+                track.bandwidth,
+            )
+        })
+        .expect("video candidates are non-empty and have validated heights")
+}
+
+fn bilibili_video_codec_rank(
+    family: Option<VideoCodecFamily>,
+    preferred: Option<VideoCodecFamily>,
+) -> u8 {
+    if family == preferred && family.is_some() {
+        return 4;
+    }
+    match family {
+        Some(VideoCodecFamily::Avc) => 3,
+        Some(VideoCodecFamily::Hevc) => 2,
+        Some(VideoCodecFamily::Av1) => 1,
+        None => 0,
+    }
+}
+
+fn bilibili_video_codec_family(track: &VideoPlaybackTrack) -> Result<Option<VideoCodecFamily>> {
+    let id_family = track.codec_id.and_then(bilibili_video_codec_family_from_id);
+    let profile = track.codecs.to_ascii_lowercase();
+    let profile_family = if profile.starts_with("avc1.") || profile.starts_with("avc3.") {
+        Some(VideoCodecFamily::Avc)
+    } else if profile.starts_with("hev1.") || profile.starts_with("hvc1.") {
+        Some(VideoCodecFamily::Hevc)
+    } else if profile.starts_with("av01.") {
+        Some(VideoCodecFamily::Av1)
+    } else {
+        None
+    };
+    if id_family.is_some() && profile_family != id_family {
+        return Err(bilibili_data_error(
+            "Bilibili playback video track returned conflicting codec identifiers",
+        ));
+    }
+    Ok(id_family.or(profile_family))
+}
+
+fn bilibili_video_codec_family_from_id(id: i64) -> Option<VideoCodecFamily> {
+    match id {
+        7 => Some(VideoCodecFamily::Avc),
+        12 => Some(VideoCodecFamily::Hevc),
+        13 => Some(VideoCodecFamily::Av1),
+        _ => None,
+    }
+}
+
+fn bilibili_video_quality_from_id(id: u32) -> Option<VideoTrackQuality> {
+    match id {
+        5 => Some(VideoTrackQuality::P144),
+        6 => Some(VideoTrackQuality::P240),
+        16 => Some(VideoTrackQuality::P360),
+        32 => Some(VideoTrackQuality::P480),
+        48 | 64 => Some(VideoTrackQuality::P720),
+        74 => Some(VideoTrackQuality::P720HighFrameRate),
+        80 => Some(VideoTrackQuality::P1080),
+        100 => Some(VideoTrackQuality::AiEnhanced),
+        112 => Some(VideoTrackQuality::P1080HighBitrate),
+        116 => Some(VideoTrackQuality::P1080HighFrameRate),
+        120 => Some(VideoTrackQuality::P4k),
+        125 => Some(VideoTrackQuality::Hdr),
+        126 => Some(VideoTrackQuality::DolbyVision),
+        127 => Some(VideoTrackQuality::P8k),
+        129 => Some(VideoTrackQuality::HdrVivid),
+        _ => None,
+    }
+}
+
+fn bilibili_video_dynamic_range(quality: VideoTrackQuality) -> VideoDynamicRange {
+    match quality {
+        VideoTrackQuality::Hdr => VideoDynamicRange::Hdr,
+        VideoTrackQuality::DolbyVision => VideoDynamicRange::DolbyVision,
+        VideoTrackQuality::HdrVivid => VideoDynamicRange::HdrVivid,
+        _ => VideoDynamicRange::Sdr,
+    }
+}
+
+fn bilibili_video_quality_target_height(quality: VideoTrackQuality) -> Option<u32> {
+    match quality {
+        VideoTrackQuality::Auto => None,
+        VideoTrackQuality::P144 => Some(144),
+        VideoTrackQuality::P240 => Some(240),
+        VideoTrackQuality::P360 => Some(360),
+        VideoTrackQuality::P480 => Some(480),
+        VideoTrackQuality::P720 | VideoTrackQuality::P720HighFrameRate => Some(720),
+        VideoTrackQuality::P1080
+        | VideoTrackQuality::P1080HighBitrate
+        | VideoTrackQuality::P1080HighFrameRate
+        | VideoTrackQuality::AiEnhanced => Some(1_080),
+        VideoTrackQuality::P4k
+        | VideoTrackQuality::Hdr
+        | VideoTrackQuality::DolbyVision
+        | VideoTrackQuality::HdrVivid => Some(2_160),
+        VideoTrackQuality::P8k => Some(4_320),
+    }
+}
+
+fn bilibili_video_quality_fallback(quality: VideoTrackQuality) -> &'static [u32] {
+    const AUTO: &[u32] = &[
+        127, 126, 129, 125, 120, 116, 112, 100, 80, 74, 64, 48, 32, 16, 6, 5,
+    ];
+    const P144: &[u32] = &[5];
+    const P240: &[u32] = &[6, 5];
+    const P360: &[u32] = &[16, 6, 5];
+    const P480: &[u32] = &[32, 16, 6, 5];
+    const P720: &[u32] = &[64, 48, 32, 16, 6, 5];
+    const P720_HIGH_FRAME_RATE: &[u32] = &[74, 64, 48, 32, 16, 6, 5];
+    const P1080: &[u32] = &[80, 74, 64, 48, 32, 16, 6, 5];
+    const P1080_HIGH_BITRATE: &[u32] = &[112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const P1080_HIGH_FRAME_RATE: &[u32] = &[116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const P4K: &[u32] = &[120, 116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const P8K: &[u32] = &[127, 120, 116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const AI_ENHANCED: &[u32] = &[100, 80, 74, 64, 48, 32, 16, 6, 5];
+    const HDR: &[u32] = &[125, 120, 116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const DOLBY_VISION: &[u32] = &[126, 125, 120, 116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    const HDR_VIVID: &[u32] = &[129, 125, 120, 116, 112, 80, 74, 64, 48, 32, 16, 6, 5];
+    match quality {
+        VideoTrackQuality::Auto => AUTO,
+        VideoTrackQuality::P144 => P144,
+        VideoTrackQuality::P240 => P240,
+        VideoTrackQuality::P360 => P360,
+        VideoTrackQuality::P480 => P480,
+        VideoTrackQuality::P720 => P720,
+        VideoTrackQuality::P720HighFrameRate => P720_HIGH_FRAME_RATE,
+        VideoTrackQuality::P1080 => P1080,
+        VideoTrackQuality::P1080HighBitrate => P1080_HIGH_BITRATE,
+        VideoTrackQuality::P1080HighFrameRate => P1080_HIGH_FRAME_RATE,
+        VideoTrackQuality::P4k => P4K,
+        VideoTrackQuality::P8k => P8K,
+        VideoTrackQuality::AiEnhanced => AI_ENHANCED,
+        VideoTrackQuality::Hdr => HDR,
+        VideoTrackQuality::DolbyVision => DOLBY_VISION,
+        VideoTrackQuality::HdrVivid => HDR_VIVID,
+    }
+}
+
 fn map_season_archive_track(
     archive: BilibiliSeasonArchive,
     season_id: u64,
@@ -3980,6 +4316,38 @@ mod tests {
                 .capabilities()
                 .contains(&Capability::VideoAudioStream)
         );
+        let wrong_track_kind = provider
+            .video_track_stream(
+                "bvid:BV117411r7R1",
+                &VideoTrackStreamRequest::new(VideoResourceKind::Mv, VideoTrackQuality::Auto),
+            )
+            .await
+            .expect_err("video track MV kind");
+        assert_eq!(wrong_track_kind.code, ErrorCode::InvalidRequest);
+        let mut invalid_track_part =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto);
+        invalid_track_part.part_id = Some("page:1".to_owned());
+        let invalid_track_part = provider
+            .video_track_stream("bvid:BV117411r7R1", &invalid_track_part)
+            .await
+            .expect_err("invalid video track part");
+        assert_eq!(invalid_track_part.code, ErrorCode::InvalidRequest);
+        let mut missing_track_account =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto);
+        missing_track_account.account = Some("missing".to_owned());
+        let missing_track_account = provider
+            .video_track_stream("bvid:BV117411r7R1", &missing_track_account)
+            .await
+            .expect_err("missing video track account");
+        assert_eq!(
+            missing_track_account.code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::VideoTrackStream)
+        );
     }
 
     #[test]
@@ -4428,6 +4796,198 @@ mod tests {
         let serialized = format!("{error:?}");
         assert!(!serialized.contains("media.example"));
         assert!(!serialized.contains("deadline"));
+    }
+
+    fn playback_video_track(
+        id: u32,
+        width: u32,
+        height: u32,
+        frame_rate: &str,
+        codec: &str,
+        codec_id: i64,
+        bandwidth: u64,
+    ) -> VideoPlaybackTrack {
+        VideoPlaybackTrack {
+            kind: VideoPlaybackTrackKind::Video,
+            id,
+            url: format!("https://media.example/video-{id}-{codec_id}.m4s?deadline=2000000000"),
+            backup_urls: vec![format!(
+                "https://backup.example/video-{id}-{codec_id}.m4s?deadline=1999999999"
+            )],
+            bandwidth,
+            mime_type: "video/mp4".to_owned(),
+            codecs: codec.to_owned(),
+            width: Some(width),
+            height: Some(height),
+            frame_rate: Some(frame_rate.to_owned()),
+            sample_aspect_ratio: Some("1:1".to_owned()),
+            start_with_sap: Some(1),
+            segment_base: Some(VideoPlaybackSegmentBase {
+                initialization: "0-994".to_owned(),
+                index_range: "995-2370".to_owned(),
+            }),
+            codec_id: Some(codec_id),
+            extensions: Extensions::new(),
+        }
+    }
+
+    fn playback_video_manifest() -> VideoPlaybackManifest {
+        let mut manifest = playback_audio_manifest(true, true);
+        manifest.video_codec_id = Some(7);
+        manifest.accepted_qualities = vec![127, 126, 125, 80, 64];
+        manifest.formats = vec![
+            VideoPlaybackFormat {
+                quality: 127,
+                format: "dash".to_owned(),
+                description: "8K 超高清".to_owned(),
+                display_description: "8K".to_owned(),
+                superscript: None,
+                codecs: vec!["hev1.1.6.L183.90".to_owned(), "av01.0.17M.10".to_owned()],
+                extensions: Extensions::new(),
+            },
+            VideoPlaybackFormat {
+                quality: 126,
+                format: "dash".to_owned(),
+                description: "杜比视界".to_owned(),
+                display_description: "Dolby Vision".to_owned(),
+                superscript: None,
+                codecs: vec!["hev1.2.4.L153.B0".to_owned()],
+                extensions: Extensions::new(),
+            },
+            VideoPlaybackFormat {
+                quality: 125,
+                format: "dash".to_owned(),
+                description: "HDR 真彩色".to_owned(),
+                display_description: "HDR".to_owned(),
+                superscript: None,
+                codecs: vec!["hev1.2.4.L153.B0".to_owned()],
+                extensions: Extensions::new(),
+            },
+            VideoPlaybackFormat {
+                quality: 80,
+                format: "dash".to_owned(),
+                description: "1080P 高清".to_owned(),
+                display_description: "1080P".to_owned(),
+                superscript: None,
+                codecs: vec!["avc1.640028".to_owned()],
+                extensions: Extensions::new(),
+            },
+            VideoPlaybackFormat {
+                quality: 64,
+                format: "dash".to_owned(),
+                description: "720P 高清".to_owned(),
+                display_description: "720P".to_owned(),
+                superscript: None,
+                codecs: vec![
+                    "avc1.64001F".to_owned(),
+                    "hev1.1.6.L120.90".to_owned(),
+                    "av01.0.08M.08".to_owned(),
+                ],
+                extensions: Extensions::new(),
+            },
+        ];
+        manifest.video_tracks = vec![
+            playback_video_track(64, 1280, 720, "30", "avc1.64001F", 7, 1_000_000),
+            playback_video_track(64, 1280, 720, "30", "hev1.1.6.L120.90", 12, 800_000),
+            playback_video_track(64, 1280, 720, "30", "av01.0.08M.08", 13, 700_000),
+            playback_video_track(80, 1920, 1080, "30", "avc1.640028", 7, 2_000_000),
+            playback_video_track(125, 3840, 2160, "60", "hev1.2.4.L153.B0", 12, 5_000_000),
+            playback_video_track(126, 3840, 2160, "60", "hev1.2.4.L153.B0", 12, 5_500_000),
+            playback_video_track(127, 7680, 4320, "60", "hev1.1.6.L183.90", 12, 8_000_000),
+            playback_video_track(127, 7680, 4320, "60", "av01.0.17M.10", 13, 6_000_000),
+        ];
+        manifest
+    }
+
+    #[test]
+    fn video_selection_preserves_quality_codec_dynamic_range_and_real_downgrades() {
+        let p720 = select_bilibili_video_track(
+            playback_video_manifest(),
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::P720),
+        )
+        .expect("720P video");
+        assert_eq!(p720.platform_quality_id, Some(64));
+        assert_eq!(p720.actual_quality, Some(VideoTrackQuality::P720));
+        assert_eq!(p720.codec_family, Some(VideoCodecFamily::Avc));
+        assert_eq!(
+            p720.quality_format
+                .as_ref()
+                .map(|format| format.display_description.as_str()),
+            Some("720P")
+        );
+        assert!(!p720.downgraded);
+
+        let mut av1_1080 =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::P1080);
+        av1_1080.codec = Some(VideoCodecFamily::Av1);
+        let av1_1080 = select_bilibili_video_track(playback_video_manifest(), &av1_1080)
+            .expect("AV1 fallback");
+        assert_eq!(av1_1080.platform_quality_id, Some(64));
+        assert_eq!(av1_1080.actual_quality, Some(VideoTrackQuality::P720));
+        assert_eq!(av1_1080.codec_family, Some(VideoCodecFamily::Av1));
+        assert!(av1_1080.downgraded);
+
+        let mut hdr_avc =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Hdr);
+        hdr_avc.codec = Some(VideoCodecFamily::Avc);
+        let hdr_avc = select_bilibili_video_track(playback_video_manifest(), &hdr_avc)
+            .expect("HDR AVC fallback");
+        assert_eq!(hdr_avc.platform_quality_id, Some(80));
+        assert_eq!(hdr_avc.actual_quality, Some(VideoTrackQuality::P1080));
+        assert_eq!(hdr_avc.dynamic_range, Some(VideoDynamicRange::Sdr));
+        assert!(hdr_avc.downgraded);
+
+        let dolby = select_bilibili_video_track(
+            playback_video_manifest(),
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::DolbyVision),
+        )
+        .expect("Dolby Vision");
+        assert_eq!(dolby.platform_quality_id, Some(126));
+        assert_eq!(dolby.actual_quality, Some(VideoTrackQuality::DolbyVision));
+        assert_eq!(dolby.dynamic_range, Some(VideoDynamicRange::DolbyVision));
+        assert_eq!(dolby.codec_family, Some(VideoCodecFamily::Hevc));
+        assert!(!dolby.downgraded);
+
+        let auto = select_bilibili_video_track(
+            playback_video_manifest(),
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto),
+        )
+        .expect("automatic video");
+        assert_eq!(auto.platform_quality_id, Some(127));
+        assert_eq!(auto.codec_family, Some(VideoCodecFamily::Hevc));
+        assert!(!auto.downgraded);
+
+        let mut avc_only = playback_video_manifest();
+        avc_only
+            .video_tracks
+            .retain(|track| track.codec_id == Some(7));
+        let mut unavailable =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto);
+        unavailable.codec = Some(VideoCodecFamily::Av1);
+        let error =
+            select_bilibili_video_track(avc_only, &unavailable).expect_err("missing AV1 video");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+        let serialized = format!("{error:?}");
+        assert!(!serialized.contains("media.example"));
+        assert!(!serialized.contains("deadline"));
+
+        let mut conflicting = playback_video_manifest();
+        conflicting.video_tracks[0].codecs = "av01.0.08M.08".to_owned();
+        let error = select_bilibili_video_track(
+            conflicting,
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto),
+        )
+        .expect_err("conflicting codec");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+
+        let mut conflicting = playback_video_manifest();
+        conflicting.video_tracks[0].kind = VideoPlaybackTrackKind::Audio;
+        let error = select_bilibili_video_track(
+            conflicting,
+            &VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Auto),
+        )
+        .expect_err("conflicting track kind");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[tokio::test]

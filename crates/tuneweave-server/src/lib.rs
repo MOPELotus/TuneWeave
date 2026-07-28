@@ -92,12 +92,13 @@ use tuneweave_core::{
     UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
     UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
-    Video, VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest,
-    VideoPlaybackRequest, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    Video, VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest,
+    VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -575,6 +576,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos/{reference}/parts", get(video_parts))
         .route("/videos/{reference}/playback", get(video_playback_manifest))
         .route("/videos/{reference}/audio-stream", get(video_audio_stream))
+        .route("/videos/{reference}/video-stream", get(video_track_stream))
         .route(
             "/videos/{reference}/subtitles/{subtitle}",
             get(video_subtitle),
@@ -8962,6 +8964,18 @@ struct VideoAudioStreamParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoTrackStreamParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    part: Option<String>,
+    #[serde(alias = "resolution", alias = "res")]
+    quality: Option<String>,
+    codec: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoDetailBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -9276,6 +9290,48 @@ async fn video_audio_stream(
     let stream = access
         .provider
         .video_audio_stream(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(stream, platform)))
+}
+
+async fn video_track_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoTrackStreamParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoTrackStream>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let part_id = params
+        .part
+        .map(|part| normalize_video_part_reference(part, reference.platform()))
+        .transpose()?;
+    let quality = parse_video_track_quality(params.quality.as_deref())?;
+    let codec = params
+        .codec
+        .as_deref()
+        .map(parse_video_codec_family)
+        .transpose()?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoTrackStreamRequest::new(kind, quality);
+    request.part_id = part_id;
+    request.codec = codec;
+    request.account.clone_from(&access.provider_account);
+    let stream = access
+        .provider
+        .video_track_stream(reference.id(), &request)
         .await?;
     Ok(Json(access.response(stream, platform)))
 }
@@ -14830,6 +14886,58 @@ fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
     }
 }
 
+fn parse_video_track_quality(value: Option<&str>) -> Result<VideoTrackQuality, TuneWeaveError> {
+    match value
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "auto" => Ok(VideoTrackQuality::Auto),
+        "p144" | "144" | "144p" => Ok(VideoTrackQuality::P144),
+        "p240" | "240" | "240p" => Ok(VideoTrackQuality::P240),
+        "p360" | "360" | "360p" => Ok(VideoTrackQuality::P360),
+        "p480" | "480" | "480p" => Ok(VideoTrackQuality::P480),
+        "p720" | "720" | "720p" => Ok(VideoTrackQuality::P720),
+        "p720_high_frame_rate" | "720p60" | "720_60" => Ok(VideoTrackQuality::P720HighFrameRate),
+        "p1080" | "1080" | "1080p" => Ok(VideoTrackQuality::P1080),
+        "p1080_high_bitrate" | "1080p+" | "1080p_plus" => Ok(VideoTrackQuality::P1080HighBitrate),
+        "p1080_high_frame_rate" | "1080p60" | "1080_60" => {
+            Ok(VideoTrackQuality::P1080HighFrameRate)
+        }
+        "p4k" | "4k" | "2160" | "2160p" => Ok(VideoTrackQuality::P4k),
+        "p8k" | "8k" | "4320" | "4320p" => Ok(VideoTrackQuality::P8k),
+        "ai_enhanced" | "ai" | "smart_repair" => Ok(VideoTrackQuality::AiEnhanced),
+        "hdr" => Ok(VideoTrackQuality::Hdr),
+        "dolby_vision" | "dolbyvision" | "dv" => Ok(VideoTrackQuality::DolbyVision),
+        "hdr_vivid" | "hdrvivid" => Ok(VideoTrackQuality::HdrVivid),
+        value => Err(TuneWeaveError::invalid_request(format!(
+            "unsupported video quality: {value}"
+        ))
+        .with_details(json!({
+            "allowed": [
+                "auto", "p144", "p240", "p360", "p480", "p720",
+                "p720_high_frame_rate", "p1080", "p1080_high_bitrate",
+                "p1080_high_frame_rate", "p4k", "p8k", "ai_enhanced",
+                "hdr", "dolby_vision", "hdr_vivid"
+            ]
+        }))),
+    }
+}
+
+fn parse_video_codec_family(value: &str) -> Result<VideoCodecFamily, TuneWeaveError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "avc" | "h264" | "h.264" => Ok(VideoCodecFamily::Avc),
+        "hevc" | "h265" | "h.265" => Ok(VideoCodecFamily::Hevc),
+        "av1" | "av01" => Ok(VideoCodecFamily::Av1),
+        value => Err(
+            TuneWeaveError::invalid_request(format!("unsupported video codec: {value}"))
+                .with_details(json!({ "allowed": ["avc", "hevc", "av1"] })),
+        ),
+    }
+}
+
 fn parse_stream_variant(value: Option<&str>) -> Result<StreamVariant, TuneWeaveError> {
     match value
         .unwrap_or("default")
@@ -15766,8 +15874,8 @@ mod tests {
         ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
         RelatedPlaylistSection, RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic,
         SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
-        TrackLabel, VideoPlaybackFormat, VideoPlaybackProgressiveSegment, VideoPlaybackSegmentBase,
-        VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResolution,
+        TrackLabel, VideoDynamicRange, VideoPlaybackFormat, VideoPlaybackProgressiveSegment,
+        VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResolution,
     };
     use tuneweave_provider_qq::{QqConfig, QqProvider};
 
@@ -15908,6 +16016,7 @@ mod tests {
                 Capability::VideoSubtitles,
                 Capability::VideoPlaybackManifest,
                 Capability::VideoAudioStream,
+                Capability::VideoTrackStream,
                 Capability::VideoStats,
                 Capability::VideoStream,
                 Capability::VideoSubscriptionWrite,
@@ -17964,6 +18073,78 @@ mod tests {
                     ("account".to_owned(), json!(request.account)),
                     ("codec".to_owned(), json!(request.codec)),
                     ("audio_language".to_owned(), json!(request.audio_language)),
+                ]),
+            })
+        }
+
+        async fn video_track_stream(
+            &self,
+            id: &str,
+            request: &VideoTrackStreamRequest,
+        ) -> Result<VideoTrackStream> {
+            let video_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid test video reference");
+            let part_id = request.part_id.as_deref().unwrap_or("segment:1");
+            let part_ref = ResourceRef::new(Platform::Netease, part_id)
+                .expect("valid test video part reference");
+            let codec_family = request.codec.unwrap_or(VideoCodecFamily::Avc);
+            let (codec, codec_id) = match codec_family {
+                VideoCodecFamily::Avc => ("avc1.64001F", 7),
+                VideoCodecFamily::Hevc => ("hev1.1.6.L120.90", 12),
+                VideoCodecFamily::Av1 => ("av01.0.08M.08", 13),
+            };
+            let dynamic_range = match request.quality {
+                VideoTrackQuality::Hdr => VideoDynamicRange::Hdr,
+                VideoTrackQuality::DolbyVision => VideoDynamicRange::DolbyVision,
+                VideoTrackQuality::HdrVivid => VideoDynamicRange::HdrVivid,
+                _ => VideoDynamicRange::Sdr,
+            };
+            Ok(VideoTrackStream {
+                video_ref,
+                part_ref,
+                platform: Platform::Netease,
+                available: true,
+                url: Some("https://video.example.test/video-track.m4s".to_owned()),
+                backup_urls: vec!["https://backup.example.test/video-track.m4s".to_owned()],
+                headers: BTreeMap::from([(
+                    "Referer".to_owned(),
+                    "https://example.test/video".to_owned(),
+                )]),
+                expires_at_epoch_seconds: Some(2_000_000_000),
+                mime_type: Some("video/mp4".to_owned()),
+                codec: Some(codec.to_owned()),
+                codec_family: Some(codec_family),
+                bandwidth: Some(2_000_000),
+                duration_ms: Some(212_000),
+                requested_quality: request.quality,
+                actual_quality: Some(request.quality),
+                requested_codec: request.codec,
+                dynamic_range: Some(dynamic_range),
+                platform_quality_id: Some(64),
+                quality_format: Some(VideoPlaybackFormat {
+                    quality: 64,
+                    format: "dash".to_owned(),
+                    description: "720P 高清".to_owned(),
+                    display_description: "720P".to_owned(),
+                    superscript: None,
+                    codecs: vec![codec.to_owned()],
+                    extensions: Extensions::new(),
+                }),
+                width: Some(1280),
+                height: Some(720),
+                frame_rate: Some("30".to_owned()),
+                sample_aspect_ratio: Some("1:1".to_owned()),
+                start_with_sap: Some(1),
+                segment_base: Some(VideoPlaybackSegmentBase {
+                    initialization: "0-994".to_owned(),
+                    index_range: "995-2370".to_owned(),
+                }),
+                downgraded: false,
+                message: None,
+                extensions: Extensions::from([
+                    ("kind".to_owned(), json!(request.kind)),
+                    ("account".to_owned(), json!(request.account)),
+                    ("codec_id".to_owned(), json!(codec_id)),
                 ]),
             })
         }
@@ -26755,6 +26936,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_track_stream_forwards_quality_codec_and_defaults_to_primary_part() {
+        for part in ["&part=netease:segment:1", ""] {
+            let path = format!(
+                "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678/video-stream?type=video&resolution=1080p60&codec=av1&account=collector{part}"
+            );
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"]["video_ref"],
+                "netease:D1C2B3A40987654321ABCDEF12345678"
+            );
+            assert_eq!(response["data"]["part_ref"], "netease:segment:1");
+            assert_eq!(
+                response["data"]["requested_quality"],
+                "p1080_high_frame_rate"
+            );
+            assert_eq!(response["data"]["actual_quality"], "p1080_high_frame_rate");
+            assert_eq!(response["data"]["requested_codec"], "av1");
+            assert_eq!(response["data"]["codec_family"], "av1");
+            assert_eq!(response["data"]["dynamic_range"], "sdr");
+            assert_eq!(response["data"]["extensions"]["kind"], "video");
+            assert_eq!(response["data"]["extensions"]["account"], "collector");
+            assert_eq!(response["data"]["extensions"]["codec_id"], 13);
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_track_stream_rejects_foreign_empty_and_unknown_inputs() {
+        for path in [
+            "/v1/videos/netease:opaque/video-stream?quality=unknown",
+            "/v1/videos/netease:opaque/video-stream?quality=",
+            "/v1/videos/netease:opaque/video-stream?codec=vp9",
+            "/v1/videos/netease:opaque/video-stream?codec=",
+            "/v1/videos/netease:opaque/video-stream?part=qq:segment:1",
+            "/v1/videos/netease:opaque/video-stream?part=",
+            "/v1/videos/netease:opaque/video-stream?kind=unknown",
+            "/v1/videos/netease:opaque/video-stream?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
     async fn live_bilibili_video_parts_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -26879,6 +27107,60 @@ mod tests {
                 .as_str()
                 .expect("selected codec")
                 .starts_with("mp4a.")
+        );
+        assert_eq!(
+            response["data"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert!(response["data"]["headers"].get("Cookie").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili playback access"]
+    async fn live_bilibili_video_track_stream_preserves_av1_and_real_downgrade() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV1Jt411P77c/video-stream?part=bilibili:cid:106101299&quality=p1080&codec=av1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["part_ref"], "bilibili:cid:106101299");
+        assert_eq!(response["data"]["requested_quality"], "p1080");
+        assert_eq!(response["data"]["actual_quality"], "p480");
+        assert_eq!(response["data"]["platform_quality_id"], 32);
+        assert_eq!(response["data"]["requested_codec"], "av1");
+        assert_eq!(response["data"]["codec_family"], "av1");
+        assert_eq!(response["data"]["dynamic_range"], "sdr");
+        assert_eq!(response["data"]["downgraded"], true);
+        assert!(
+            response["data"]["url"]
+                .as_str()
+                .expect("selected video URL")
+                .starts_with("https://")
+        );
+        assert!(
+            response["data"]["codec"]
+                .as_str()
+                .expect("selected codec")
+                .starts_with("av01.")
+        );
+        assert!(
+            response["data"]["height"]
+                .as_u64()
+                .is_some_and(|height| height > 0)
+        );
+        assert!(
+            response["data"]["frame_rate"]
+                .as_str()
+                .is_some_and(|frame_rate| !frame_rate.is_empty())
         );
         assert_eq!(
             response["data"]["headers"]["Referer"],
@@ -30375,6 +30657,45 @@ mod tests {
         ] {
             assert_eq!(
                 parse_quality(Some(value)).expect(value),
+                expected,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_track_parsers_cover_every_quality_and_codec_family() {
+        for (value, expected) in [
+            ("auto", VideoTrackQuality::Auto),
+            ("144p", VideoTrackQuality::P144),
+            ("240", VideoTrackQuality::P240),
+            ("360p", VideoTrackQuality::P360),
+            ("480", VideoTrackQuality::P480),
+            ("720p", VideoTrackQuality::P720),
+            ("720p60", VideoTrackQuality::P720HighFrameRate),
+            ("1080p", VideoTrackQuality::P1080),
+            ("1080p+", VideoTrackQuality::P1080HighBitrate),
+            ("1080p60", VideoTrackQuality::P1080HighFrameRate),
+            ("4k", VideoTrackQuality::P4k),
+            ("8k", VideoTrackQuality::P8k),
+            ("smart-repair", VideoTrackQuality::AiEnhanced),
+            ("hdr", VideoTrackQuality::Hdr),
+            ("dolby-vision", VideoTrackQuality::DolbyVision),
+            ("hdr-vivid", VideoTrackQuality::HdrVivid),
+        ] {
+            assert_eq!(
+                parse_video_track_quality(Some(value)).expect(value),
+                expected,
+                "{value}"
+            );
+        }
+        for (value, expected) in [
+            ("h.264", VideoCodecFamily::Avc),
+            ("h265", VideoCodecFamily::Hevc),
+            ("av01", VideoCodecFamily::Av1),
+        ] {
+            assert_eq!(
+                parse_video_codec_family(value).expect(value),
                 expected,
                 "{value}"
             );

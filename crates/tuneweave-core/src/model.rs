@@ -3628,6 +3628,99 @@ pub struct VideoAudioStream {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoTrackQuality {
+    #[default]
+    Auto,
+    P144,
+    P240,
+    P360,
+    P480,
+    P720,
+    P720HighFrameRate,
+    P1080,
+    P1080HighBitrate,
+    P1080HighFrameRate,
+    P4k,
+    P8k,
+    AiEnhanced,
+    Hdr,
+    DolbyVision,
+    HdrVivid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoCodecFamily {
+    Avc,
+    Hevc,
+    Av1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoDynamicRange {
+    Sdr,
+    Hdr,
+    DolbyVision,
+    HdrVivid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoTrackStreamRequest {
+    pub kind: VideoResourceKind,
+    pub part_id: Option<String>,
+    pub quality: VideoTrackQuality,
+    pub codec: Option<VideoCodecFamily>,
+    pub account: Option<String>,
+}
+
+impl VideoTrackStreamRequest {
+    #[must_use]
+    pub fn new(kind: VideoResourceKind, quality: VideoTrackQuality) -> Self {
+        Self {
+            kind,
+            part_id: None,
+            quality,
+            codec: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoTrackStream {
+    pub video_ref: ResourceRef,
+    pub part_ref: ResourceRef,
+    pub platform: Platform,
+    pub available: bool,
+    pub url: Option<String>,
+    pub backup_urls: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub expires_at_epoch_seconds: Option<u64>,
+    pub mime_type: Option<String>,
+    pub codec: Option<String>,
+    pub codec_family: Option<VideoCodecFamily>,
+    pub bandwidth: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub requested_quality: VideoTrackQuality,
+    pub actual_quality: Option<VideoTrackQuality>,
+    pub requested_codec: Option<VideoCodecFamily>,
+    pub dynamic_range: Option<VideoDynamicRange>,
+    pub platform_quality_id: Option<u32>,
+    pub quality_format: Option<VideoPlaybackFormat>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub frame_rate: Option<String>,
+    pub sample_aspect_ratio: Option<String>,
+    pub start_with_sap: Option<u32>,
+    pub segment_base: Option<VideoPlaybackSegmentBase>,
+    pub downgraded: bool,
+    pub message: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
@@ -6995,6 +7088,93 @@ mod tests {
         assert_eq!(value["tier"], "lossless");
         assert_eq!(value["downgraded"], true);
         assert_eq!(value["platform_quality_id"], 30_251);
+
+        let mut track_request =
+            VideoTrackStreamRequest::new(VideoResourceKind::Video, VideoTrackQuality::Hdr);
+        track_request.part_id = Some("cid:146044693".to_owned());
+        track_request.codec = Some(VideoCodecFamily::Hevc);
+        track_request.account = Some("viewer".to_owned());
+        assert_eq!(track_request.quality, VideoTrackQuality::Hdr);
+        assert_eq!(track_request.codec, Some(VideoCodecFamily::Hevc));
+        for (quality, expected) in [
+            (VideoTrackQuality::Auto, "auto"),
+            (VideoTrackQuality::P144, "p144"),
+            (VideoTrackQuality::P240, "p240"),
+            (VideoTrackQuality::P360, "p360"),
+            (VideoTrackQuality::P480, "p480"),
+            (VideoTrackQuality::P720, "p720"),
+            (VideoTrackQuality::P720HighFrameRate, "p720_high_frame_rate"),
+            (VideoTrackQuality::P1080, "p1080"),
+            (VideoTrackQuality::P1080HighBitrate, "p1080_high_bitrate"),
+            (
+                VideoTrackQuality::P1080HighFrameRate,
+                "p1080_high_frame_rate",
+            ),
+            (VideoTrackQuality::P4k, "p4k"),
+            (VideoTrackQuality::P8k, "p8k"),
+            (VideoTrackQuality::AiEnhanced, "ai_enhanced"),
+            (VideoTrackQuality::Hdr, "hdr"),
+            (VideoTrackQuality::DolbyVision, "dolby_vision"),
+            (VideoTrackQuality::HdrVivid, "hdr_vivid"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(quality).expect("serialize video track quality"),
+                serde_json::json!(expected)
+            );
+        }
+
+        let track_stream = VideoTrackStream {
+            video_ref: part.video_ref.clone(),
+            part_ref: part.resource_ref.clone(),
+            platform: Platform::Bilibili,
+            available: true,
+            url: Some("https://example.test/video-hdr.m4s".to_owned()),
+            backup_urls: vec!["https://backup.example.test/video-hdr.m4s".to_owned()],
+            headers: BTreeMap::from([(
+                "Referer".to_owned(),
+                "https://www.bilibili.com/video/BV117411r7R1".to_owned(),
+            )]),
+            expires_at_epoch_seconds: Some(2_000_000_000),
+            mime_type: Some("video/mp4".to_owned()),
+            codec: Some("hev1.2.4.L153.B0".to_owned()),
+            codec_family: Some(VideoCodecFamily::Hevc),
+            bandwidth: Some(4_000_000),
+            duration_ms: Some(212_000),
+            requested_quality: VideoTrackQuality::DolbyVision,
+            actual_quality: Some(VideoTrackQuality::Hdr),
+            requested_codec: Some(VideoCodecFamily::Hevc),
+            dynamic_range: Some(VideoDynamicRange::Hdr),
+            platform_quality_id: Some(125),
+            quality_format: Some(VideoPlaybackFormat {
+                quality: 125,
+                format: "dash".to_owned(),
+                description: "HDR 真彩色".to_owned(),
+                display_description: "HDR".to_owned(),
+                superscript: None,
+                codecs: vec!["hev1.2.4.L153.B0".to_owned()],
+                extensions: Extensions::new(),
+            }),
+            width: Some(3840),
+            height: Some(2160),
+            frame_rate: Some("59.940".to_owned()),
+            sample_aspect_ratio: Some("1:1".to_owned()),
+            start_with_sap: Some(1),
+            segment_base: Some(VideoPlaybackSegmentBase {
+                initialization: "0-994".to_owned(),
+                index_range: "995-2370".to_owned(),
+            }),
+            downgraded: true,
+            message: Some("requested quality was unavailable".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(track_stream).expect("serialize video track stream");
+        assert_eq!(value["requested_quality"], "dolby_vision");
+        assert_eq!(value["actual_quality"], "hdr");
+        assert_eq!(value["codec_family"], "hevc");
+        assert_eq!(value["dynamic_range"], "hdr");
+        assert_eq!(value["platform_quality_id"], 125);
+        assert_eq!(value["quality_format"]["display_description"], "HDR");
+        assert_eq!(value["segment_base"]["index_range"], "995-2370");
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,

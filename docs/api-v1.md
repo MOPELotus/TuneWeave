@@ -358,6 +358,8 @@ B 站完整播放清单通过 `GET /v1/videos/{ref}/playback?part={part_ref}` �
 
 B 站视频的仅音频轨道通过 `GET /v1/videos/{ref}/audio-stream` 选择。`part` 可使用同平台 `bilibili:cid:{cid}` 或省略平台前缀；省略时选择详情目录中的第一 P。`quality` 使用统一音质枚举，`codec` 可指定 `aac/mp4a`、`dolby/eac3`、`flac/lossless` 或平台返回的精确编码，`audio_language/cur_language` 和 `account` 沿用播放清单语义。自动选择按 Hi-Res、杜比、普通音轨顺序查找；普通轨优先以平台稳定 ID `30216/30232/30280` 区分低、标准和较高音质，同时保留实际 `bandwidth`，避免把内容相关的可变平均带宽误当成平台等级。响应分别给出 `requested_quality`、`actual_quality`、`tier`、平台音频 ID 和 `downgraded`：例如请求 `high` 但最高仅有 `30280` 时返回实际 `higher` 并明确标记降级，请求 `master` 回落到 B 站 Hi-Res 时也不会伪装为母带。主/备用签名 URL、最早到期时间、MIME、编码、带宽、时长及必要 `Referer` 原样保留；服务端不下载、混流或代理媒体字节，未匹配错误也不回显签名 URL。
 
+B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P、账户和默认第一 P 规则与仅音频端点相同。`quality`（也接受 `resolution/res`）支持 `auto`、144P/240P/360P/480P/720P/1080P、720P/1080P 高帧率、1080P 高码率、4K、8K、AI 修复、HDR、Dolby Vision 和 HDR Vivid；常用 `720p60`、`1080p+`、`1080p60`、`4k`、`8k` 等写法会规范为统一枚举。`codec` 只接受 AVC、HEVC、AV1 及其 H.264/H.265 别名，调用方不能提交任意编码字符串。选择器先按平台质量 ID 的明确回落链查找，再在同一质量内优先平台默认编码或调用方指定编码；`codecid=7/12/13` 必须分别与 AVC/HEVC/AV1 profile 一致，冲突视为上游数据错误。响应强类型保留请求/实际质量、动态范围、平台质量 ID、质量说明、编码族与原始 profile、带宽、尺寸、原始帧率、像素宽高比、SAP、SegmentBase、主/备用签名 URL和最早到期时间。无法取得请求档位时返回真实较低档位并设置 `downgraded=true`，不会用请求分辨率覆盖实际轨道；未指定编码时优先平台默认编码，HDR/Dolby/AV1 也不会被压缩成普通 1080P/AVC。服务端仍不代理媒体字节，公共请求头只包含必要 `Referer`。
+
 ### DigitalAlbum
 
 ```json
@@ -1420,6 +1422,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
 | GET | `/v1/videos/{ref}/playback` | 必填 `part`，`kind/type=video`、`audio_language/cur_language?`、`account?` | `VideoPlaybackManifest`；完整 DASH/DURL、多编码和音轨清单 |
 | GET | `/v1/videos/{ref}/audio-stream` | `part?`、`kind/type=video`、`quality?`、`codec?`、`audio_language/cur_language?`、`account?` | `VideoAudioStream`；选择单条音轨并显式返回实际等级、降级、主/备用 URL 和媒体请求头 |
+| GET | `/v1/videos/{ref}/video-stream` | `part?`、`kind/type=video`、`quality/resolution/res?`、`codec=avc|hevc|av1?`、`account?` | `VideoTrackStream`；选择单条 DASH 视频轨并保留实际质量、动态范围、编码、帧率、SegmentBase 与降级状态 |
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
 | GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 
