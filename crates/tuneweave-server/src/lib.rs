@@ -3794,6 +3794,12 @@ struct StreamControls {
 }
 
 #[derive(Clone, Debug)]
+struct ScopedStreamControls {
+    controls: StreamControls,
+    caller_accounts: BTreeMap<Platform, String>,
+}
+
+#[derive(Clone, Debug)]
 enum StreamRouting {
     Standard {
         preferred_platform: Option<Platform>,
@@ -3907,6 +3913,49 @@ impl StreamControls {
                 .then(|| self.account.clone())
                 .flatten(),
         }
+    }
+}
+
+impl ScopedStreamControls {
+    fn new(
+        controls: StreamControls,
+        credentials: &CallerCredentialSet,
+        origin_platforms: impl IntoIterator<Item = Platform>,
+    ) -> Result<Self, TuneWeaveError> {
+        for origin_platform in origin_platforms {
+            let mut request = controls.resolve_request(origin_platform);
+            credentials.apply_stream_accounts(&mut request.accounts)?;
+        }
+        Ok(Self {
+            controls,
+            caller_accounts: credentials
+                .credentials
+                .keys()
+                .map(|platform| (*platform, "default".to_owned()))
+                .collect(),
+        })
+    }
+
+    fn resolve_request(&self, origin_platform: Platform) -> ResolveRequest {
+        let mut request = self.controls.resolve_request(origin_platform);
+        request.accounts.extend(self.caller_accounts.clone());
+        request
+    }
+
+    fn provider_request(&self, platform: Platform) -> StreamRequest {
+        let mut request = self.controls.provider_request(platform);
+        if let Some(account) = self.caller_accounts.get(&platform) {
+            request.account = Some(account.clone());
+        }
+        request
+    }
+
+    fn starts_with_origin(&self, origin_platform: Platform) -> bool {
+        self.controls.starts_with_origin(origin_platform)
+    }
+
+    fn fallback_enabled(&self) -> bool {
+        self.controls.fallback_enabled()
     }
 }
 
@@ -4914,9 +4963,11 @@ struct StreamBatchBody {
 
 async fn track_streams_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<StreamBatchParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<StreamBatch>>, ApiError> {
     let params = query_params(params)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let references = parse_stream_batch_references(
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
@@ -4935,6 +4986,12 @@ async fn track_streams_get(
         source: params.source.as_deref(),
         account: params.account.as_deref(),
     })?;
+    let controls = ScopedStreamControls::new(
+        controls,
+        &credentials,
+        references.iter().map(ResourceRef::platform),
+    )?;
+    let state = credentials.scoped_state(&state)?;
     Ok(Json(
         stream_batch_response(&state, references, controls).await,
     ))
@@ -4942,9 +4999,11 @@ async fn track_streams_get(
 
 async fn track_streams_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<StreamBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<StreamBatch>>, ApiError> {
     let body = json_body(body)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let references = parse_stream_batch_references(
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(StreamReferenceInput::into_values),
@@ -4966,6 +5025,12 @@ async fn track_streams_post(
         source: body.source.as_deref(),
         account: body.account.as_deref(),
     })?;
+    let controls = ScopedStreamControls::new(
+        controls,
+        &credentials,
+        references.iter().map(ResourceRef::platform),
+    )?;
+    let state = credentials.scoped_state(&state)?;
     Ok(Json(
         stream_batch_response(&state, references, controls).await,
     ))
@@ -5062,7 +5127,7 @@ fn split_stream_batch_values(
 async fn stream_batch_response(
     state: &AppState,
     references: Vec<ResourceRef>,
-    controls: StreamControls,
+    controls: ScopedStreamControls,
 ) -> ApiResponse<StreamBatch> {
     let platform = references
         .first()
@@ -5072,7 +5137,7 @@ async fn stream_batch_response(
                 .iter()
                 .all(|reference| reference.platform() == *platform)
         });
-    let account = controls.account.clone();
+    let account = controls.controls.account.clone();
     let batch = resolve_stream_batch(state, &references, &controls).await;
     let mut response = ApiResponse::new(batch);
     if let Some(platform) = platform {
@@ -5087,7 +5152,7 @@ async fn stream_batch_response(
 async fn resolve_stream_batch(
     state: &AppState,
     references: &[ResourceRef],
-    controls: &StreamControls,
+    controls: &ScopedStreamControls,
 ) -> StreamBatch {
     let mut outcomes = vec![None; references.len()];
     let mut direct_groups = BTreeMap::<Platform, Vec<(usize, Track)>>::new();
@@ -5179,10 +5244,13 @@ async fn resolve_stream_batch(
         extensions: Extensions::from([
             ("requested_refs".to_owned(), json!(references)),
             ("provider_batches".to_owned(), json!(provider_batches)),
-            ("quality".to_owned(), json!(controls.quality)),
-            ("variant".to_owned(), json!(controls.variant)),
-            ("bitrate".to_owned(), json!(controls.bitrate)),
-            ("immersive_type".to_owned(), json!(controls.immersive_type)),
+            ("quality".to_owned(), json!(controls.controls.quality)),
+            ("variant".to_owned(), json!(controls.controls.variant)),
+            ("bitrate".to_owned(), json!(controls.controls.bitrate)),
+            (
+                "immersive_type".to_owned(),
+                json!(controls.controls.immersive_type),
+            ),
             ("fallback".to_owned(), json!(controls.fallback_enabled())),
         ]),
     }
@@ -5249,7 +5317,7 @@ fn normalize_direct_stream_outcome(
 async fn resolve_failed_stream_outcome(
     state: &AppState,
     initial: StreamOutcome,
-    controls: &StreamControls,
+    controls: &ScopedStreamControls,
 ) -> StreamOutcome {
     if initial.status == ResolutionStatus::Success || !controls.fallback_enabled() {
         return initial;
@@ -5266,7 +5334,7 @@ async fn resolve_failed_stream_outcome(
 async fn resolve_stream_reference(
     state: &AppState,
     reference: &ResourceRef,
-    controls: &StreamControls,
+    controls: &ScopedStreamControls,
 ) -> StreamOutcome {
     let provider = match state.registry.require(reference.platform()) {
         Ok(provider) => provider,
@@ -26867,6 +26935,95 @@ mod tests {
         for outcome in json["data"]["outcomes"].as_array().expect("POST outcomes") {
             assert_eq!(outcome["stream"]["headers"]["x-test-immersive-type"], "aac");
         }
+    }
+
+    #[tokio::test]
+    async fn track_stream_batches_scope_caller_credentials_per_platform() {
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=private-netease-session",
+                None,
+            )
+            .expect("NetEase provider credential"),
+        )
+        .expect("NetEase caller credential");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/streams?ids=1,2&platform=netease&fallback=false")
+                    .header(CALLER_CREDENTIAL_HEADER, netease.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        for outcome in json["data"]["outcomes"].as_array().expect("outcomes") {
+            assert_eq!(outcome["stream"]["attempts"][0]["account"], "default");
+        }
+        assert!(json["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        let payload = serde_json::to_vec(&json!({
+            "refs": ["netease:1", "qq:2"],
+            "fallback": false
+        }))
+        .expect("serialize request JSON");
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/tracks/streams")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload))
+            .expect("build request");
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            netease.value.parse().expect("NetEase header value"),
+        );
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ header value"),
+        );
+        let response = test_app_with_import_providers()
+            .oneshot(request)
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            json["data"]["outcomes"][0]["stream"]["attempts"][0]["account"],
+            "default"
+        );
+        assert_eq!(
+            json["data"]["outcomes"][1]["stream"]["headers"]["x-test-stream-account"],
+            "default"
+        );
+        assert_eq!(
+            json["data"]["outcomes"][1]["stream"]["attempts"][0]["account"],
+            "default"
+        );
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-netease-session"));
+
+        let conflict = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/streams?ids=1&platform=netease&account=default")
+                    .header(CALLER_CREDENTIAL_HEADER, netease.value)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(conflict.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
