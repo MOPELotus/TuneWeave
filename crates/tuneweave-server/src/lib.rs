@@ -4695,19 +4695,27 @@ fn download_request(params: &DownloadParams) -> Result<StreamRequest, TuneWeaveE
 
 async fn track_download(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<DownloadParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MediaDownload>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let request = download_request(&params)?;
-    let provider = state.registry.require(reference.platform())?;
+    let mut request = download_request(&params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        reference.platform(),
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account.clone_from(&access.provider_account);
+    let provider = access.provider;
     let track = provider
         .track(reference.id(), request.account.as_deref())
         .await?;
     let download = provider.download(&track, &request).await?;
     let mut response = ApiResponse::new(download).with_platform(reference.platform());
-    if let Some(account) = request.account {
+    if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
     Ok(Json(response))
@@ -4715,13 +4723,21 @@ async fn track_download(
 
 async fn track_download_redirect(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<DownloadParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let request = download_request(&params)?;
-    let provider = state.registry.require(reference.platform())?;
+    let mut request = download_request(&params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        reference.platform(),
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account = access.provider_account;
+    let provider = access.provider;
     let track = provider
         .track(reference.id(), request.account.as_deref())
         .await?;
@@ -26600,6 +26616,63 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(download["data"]["extensions"]["origin_account"], "locker");
         assert_eq!(download["meta"]["account"], "locker");
+    }
+
+    #[tokio::test]
+    async fn track_downloads_use_caller_credentials_without_server_account_fallback() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/netease:9001/download")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["extensions"]["account"], "default");
+        assert_eq!(json["data"]["extensions"]["origin_account"], "default");
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+
+        let redirect = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tracks/netease:9001/download/redirect")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(redirect.status(), StatusCode::FOUND);
+
+        for path in [
+            "/v1/tracks/netease:9001/download?account=default",
+            "/v1/tracks/netease:9001/download/redirect?account=default",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     #[tokio::test]
