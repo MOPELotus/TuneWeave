@@ -2994,6 +2994,133 @@ pub struct UserProfile {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneAttribute {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub english_name: Option<String>,
+    pub keyword: Option<String>,
+    pub image_url: Option<String>,
+    pub slogan: Option<String>,
+    pub display_type: i64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneAge {
+    pub attribute: MusicGeneAttribute,
+    pub change: i64,
+    pub change_label: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneTempo {
+    pub attribute: MusicGeneAttribute,
+    pub minimum_score: i64,
+    pub maximum_score: i64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneGroove {
+    pub attribute: MusicGeneAttribute,
+    pub level: i64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGenePersonality {
+    pub attribute: MusicGeneAttribute,
+    pub actual_type: MusicGeneAttribute,
+    pub guide_text: Option<String>,
+    pub guide_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneListeningPeriod {
+    pub month: i64,
+    pub count: u64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneListeningReport {
+    pub current_month: i64,
+    pub display_type: i64,
+    pub periods: Vec<MusicGeneListeningPeriod>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneStatusEntry {
+    pub title: String,
+    pub english_name: Option<String>,
+    pub image_url: Option<String>,
+    pub display_type: i64,
+    pub count: u64,
+    pub change: i64,
+    pub period_label: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneStatus {
+    pub display_type: i64,
+    pub entries: Vec<MusicGeneStatusEntry>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneMainDescription {
+    pub description: Option<String>,
+    pub title: Option<String>,
+    pub jump_title: Option<String>,
+    pub logo_name: Option<String>,
+    pub action_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGenePreferences {
+    pub action_url: Option<String>,
+    pub detail_action_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MusicGeneAiInterpretation {
+    pub blocked: bool,
+    pub block_page: i64,
+    pub report_field: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserMusicGene {
+    pub user: User,
+    pub is_visit_account: bool,
+    pub preferences: MusicGenePreferences,
+    pub listening_report: MusicGeneListeningReport,
+    pub ages: Vec<MusicGeneAge>,
+    pub tempo: Option<MusicGeneTempo>,
+    pub character_color: Option<MusicGeneAttribute>,
+    pub genres: Vec<MusicGeneAttribute>,
+    pub groove: Option<MusicGeneGroove>,
+    pub music_tastes: Vec<MusicGeneAttribute>,
+    pub personality: Option<MusicGenePersonality>,
+    pub favorite_singers: Vec<MusicGeneAttribute>,
+    pub slowness: Option<MusicGeneAttribute>,
+    pub time_preference: Option<MusicGeneAttribute>,
+    pub status: Option<MusicGeneStatus>,
+    pub main_description: Option<MusicGeneMainDescription>,
+    pub ai_interpretation: Option<MusicGeneAiInterpretation>,
+    pub sort_order: Vec<i64>,
+    pub card_order: Vec<i64>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserProfileBackend {
@@ -7137,6 +7264,72 @@ mod tests {
         assert_eq!(value["playlist_subscriber_count"], 10);
         assert_eq!(value["public_listening_history"], false);
         assert_eq!(value["extensions"]["backend"], "modern");
+    }
+
+    #[test]
+    fn user_music_gene_keeps_identity_report_dimensions_and_order_typed() {
+        let gene = UserMusicGene {
+            user: User {
+                resource_ref: ResourceRef::new(Platform::Qq, "7eEFNeSlNKns")
+                    .expect("valid music gene user reference"),
+                platform: Platform::Qq,
+                id: "7eEFNeSlNKns".to_owned(),
+                name: "音乐用户".to_owned(),
+                avatar_url: None,
+                signature: None,
+                followed: None,
+                mutual: None,
+                extensions: Extensions::new(),
+            },
+            is_visit_account: true,
+            preferences: MusicGenePreferences {
+                action_url: Some("qqmusic://musicgene/preferences".to_owned()),
+                detail_action_url: None,
+                extensions: Extensions::new(),
+            },
+            listening_report: MusicGeneListeningReport {
+                current_month: 7,
+                display_type: 1,
+                periods: vec![MusicGeneListeningPeriod {
+                    month: 6,
+                    count: 321,
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::new(),
+            },
+            ages: Vec::new(),
+            tempo: None,
+            character_color: None,
+            genres: vec![MusicGeneAttribute {
+                id: Some("genre".to_owned()),
+                title: Some("流行".to_owned()),
+                english_name: Some("Pop".to_owned()),
+                keyword: None,
+                image_url: None,
+                slogan: None,
+                display_type: 1,
+                extensions: Extensions::new(),
+            }],
+            groove: None,
+            music_tastes: Vec::new(),
+            personality: None,
+            favorite_singers: Vec::new(),
+            slowness: None,
+            time_preference: None,
+            status: None,
+            main_description: None,
+            ai_interpretation: None,
+            sort_order: vec![1, 2, 3],
+            card_order: vec![3, 2, 1],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(gene).expect("serialize user music gene");
+        assert_eq!(value["user"]["ref"], "qq:7eEFNeSlNKns");
+        assert_eq!(value["is_visit_account"], true);
+        assert_eq!(value["listening_report"]["periods"][0]["count"], 321);
+        assert_eq!(value["genres"][0]["title"], "流行");
+        assert_eq!(value["sort_order"], serde_json::json!([1, 2, 3]));
+        assert_eq!(value["card_order"], serde_json::json!([3, 2, 1]));
     }
 
     #[test]

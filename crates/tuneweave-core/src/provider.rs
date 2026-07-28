@@ -52,8 +52,8 @@ use crate::{
     SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest,
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackEntitlement,
-    TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserMusicGene,
+    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
     VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
     VideoTaxonomyRequest,
 };
@@ -168,6 +168,13 @@ pub trait MusicProvider: Send + Sync {
             UserProfileBackend::Modern => Capability::UserProfileModern,
         };
         Err(TuneWeaveError::unsupported(self.platform(), capability))
+    }
+
+    async fn user_music_gene(&self, _id: &str, _account: Option<&str>) -> Result<UserMusicGene> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::UserMusicGene,
+        ))
     }
 
     async fn user_membership(

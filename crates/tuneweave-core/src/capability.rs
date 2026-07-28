@@ -24,6 +24,7 @@ pub enum Capability {
     SearchLocalTrackMatch,
     UserProfileLegacy,
     UserProfileModern,
+    UserMusicGene,
     UserMembership,
     UserMembershipClientInfo,
     AnonymousSession,
@@ -235,6 +236,15 @@ mod tests {
             serde_json::to_value(Capability::PlaylistSubscriptionWrite)
                 .expect("serialize playlist subscription write capability"),
             serde_json::json!("playlist_subscription_write")
+        );
+    }
+
+    #[test]
+    fn user_music_gene_uses_a_stable_discovery_name() {
+        assert_eq!(
+            serde_json::to_value(Capability::UserMusicGene)
+                .expect("serialize user music gene capability"),
+            serde_json::json!("user_music_gene")
         );
     }
 

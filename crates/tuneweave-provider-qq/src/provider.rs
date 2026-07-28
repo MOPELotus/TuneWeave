@@ -23,28 +23,31 @@ use tuneweave_core::{
     CreatorSummary, ErrorCode, Extensions, GeneralSearchRelated, GeneralSearchRelatedTerm,
     GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection, ImmersiveAudioType, Lyrics,
     LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
-    MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMutationAction, PlaylistMutationResult, PlaylistPlayableItem,
-    PlaylistVisibility, Podcast, PodcastEpisode, ProviderQrPoll, ProviderQrStart, Quality,
-    RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
-    RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
-    RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
-    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
-    RelatedPlaylistSection, RelatedPlaylistSectionKind, RelatedVideoList, RelatedVideoRequest,
-    ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SheetMusic, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
-    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
-    SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackCredit,
-    TrackCreditGroup, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    MultiStyleLyricTranslations, MusicGeneAge, MusicGeneAiInterpretation, MusicGeneAttribute,
+    MusicGeneGroove, MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGeneMainDescription,
+    MusicGenePersonality, MusicGenePreferences, MusicGeneStatus, MusicGeneStatusEntry,
+    MusicGeneTempo, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
+    MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, Playlist, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
+    PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
+    ProviderQrPoll, ProviderQrStart, Quality, RecommendationFeed, RecommendationFeedAction,
+    RecommendationFeedCard, RecommendationFeedCardKind, RecommendationFeedCursor,
+    RecommendationFeedDirection, RecommendationFeedNiche, RecommendationFeedRequest,
+    RecommendationFeedShelf, RecommendationRequest, RecommendationSource, RelatedPlaylistList,
+    RelatedPlaylistRequest, RelatedPlaylistSection, RelatedPlaylistSectionKind, RelatedVideoList,
+    RelatedVideoRequest, ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem,
+    SearchQuery, SearchSelector, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, SheetMusic, SheetMusicAvailability, SheetMusicList,
+    SheetMusicSource, SimilarArtistList, SimilarArtistRequest, SimilarTrackList,
+    SimilarTrackRequest, SimilarTrackSection, SimilarTrackSectionKind,
+    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
+    Track, TrackCredit, TrackCreditGroup, TrackCredits, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
+    TrackVersionList, TrialWindow, TuneWeaveError, User, UserMusicGene, UserProfile,
+    UserProfileBackend, Video, VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind,
+    VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -87,6 +90,8 @@ const SHEET_MUSIC_AVAILABILITY_METHOD: &str = "HasSheetMusic";
 const SHEET_MUSIC_LIST_METHOD: &str = "GetMoreSheetMusic";
 const SHEET_MUSIC_EXTERNAL_LIST_METHOD: &str = "GetChongChongSheetMusic";
 const SHEET_MUSIC_EMPTY_CODE: i64 = 10_007;
+const MUSIC_GENE_MODULE: &str = "music.recommend.UserProfileSettingSvr";
+const MUSIC_GENE_METHOD: &str = "GetProfileReport";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1584,6 +1589,263 @@ struct QqFavoriteAlbumsResponse {
     albums: Vec<QqFavoriteAlbumItem>,
     #[serde(rename = "v_failAlbumId")]
     failed_album_ids: Vec<u64>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneAttribute {
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "TypeTitle")]
+    title: String,
+    #[serde(rename = "EnglishName")]
+    english_name: String,
+    #[serde(rename = "KeyWord")]
+    keyword: String,
+    #[serde(rename = "Pic")]
+    image_url: String,
+    #[serde(rename = "Slogan")]
+    slogan: String,
+    #[serde(rename = "ShowType", deserialize_with = "deserialize_qq_i64")]
+    display_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneAttributeCard {
+    #[serde(rename = "Base")]
+    attribute: QqMusicGeneAttribute,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneAge {
+    #[serde(rename = "Base")]
+    attribute: QqMusicGeneAttribute,
+    #[serde(rename = "ChangeAge", deserialize_with = "deserialize_qq_i64")]
+    change: i64,
+    #[serde(rename = "ChangeAgeTag")]
+    change_label: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneTempo {
+    #[serde(rename = "Base")]
+    attribute: QqMusicGeneAttribute,
+    #[serde(rename = "MinScore", deserialize_with = "deserialize_qq_i64")]
+    minimum_score: i64,
+    #[serde(rename = "MaxScore", deserialize_with = "deserialize_qq_i64")]
+    maximum_score: i64,
+    #[serde(default, rename = "CardBPMActExt")]
+    action_extensions: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneGroove {
+    #[serde(rename = "Base")]
+    attribute: QqMusicGeneAttribute,
+    #[serde(rename = "Level", deserialize_with = "deserialize_qq_i64")]
+    level: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGenePersonality {
+    #[serde(rename = "Base")]
+    attribute: QqMusicGeneAttribute,
+    #[serde(rename = "RealMBTI")]
+    actual_type: QqMusicGeneAttribute,
+    #[serde(rename = "GuideTxt")]
+    guide_text: String,
+    #[serde(rename = "GuideScheme")]
+    guide_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneListeningPeriod {
+    #[serde(rename = "Month", deserialize_with = "deserialize_qq_i64")]
+    month: i64,
+    #[serde(rename = "Num", deserialize_with = "deserialize_qq_u64")]
+    count: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneListeningReport {
+    #[serde(rename = "CurrentMonth", deserialize_with = "deserialize_qq_i64")]
+    current_month: i64,
+    #[serde(rename = "ShowType", deserialize_with = "deserialize_qq_i64")]
+    display_type: i64,
+    #[serde(rename = "Report")]
+    periods: Vec<QqMusicGeneListeningPeriod>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneStatusEntry {
+    #[serde(rename = "TypeTitle")]
+    title: String,
+    #[serde(rename = "EnglishName")]
+    english_name: String,
+    #[serde(rename = "Pic")]
+    image_url: String,
+    #[serde(rename = "ShowType", deserialize_with = "deserialize_qq_i64")]
+    display_type: i64,
+    #[serde(rename = "Num", deserialize_with = "deserialize_qq_u64")]
+    count: u64,
+    #[serde(rename = "ChangeNum", deserialize_with = "deserialize_qq_i64")]
+    change: i64,
+    #[serde(rename = "StatusTimes")]
+    period_label: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneStatus {
+    #[serde(rename = "Base")]
+    entries: Vec<QqMusicGeneStatusEntry>,
+    #[serde(rename = "ShowType", deserialize_with = "deserialize_qq_i64")]
+    display_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneBootstrapping {
+    #[serde(rename = "Title")]
+    title: String,
+    #[serde(rename = "JumpTitle")]
+    jump_title: String,
+    #[serde(rename = "LogoName")]
+    logo_name: String,
+    #[serde(rename = "Scheme")]
+    action_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneMainDescription {
+    #[serde(rename = "Description")]
+    description: String,
+    #[serde(rename = "Bootstrapping")]
+    bootstrapping: QqMusicGeneBootstrapping,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGenePreferences {
+    #[serde(rename = "JumpUrl")]
+    action_url: String,
+    #[serde(rename = "PreferencesJumpUrl")]
+    detail_action_url: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneUserCard {
+    #[serde(rename = "HeadUrl")]
+    avatar_url: String,
+    #[serde(rename = "NickName")]
+    name: String,
+    #[serde(rename = "Signature")]
+    signature: String,
+    #[serde(rename = "EncryptionAccount")]
+    encrypted_uin: String,
+    #[serde(rename = "Preferences")]
+    preferences: QqMusicGenePreferences,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqMusicGeneAiInterpretation {
+    #[serde(rename = "IfBlock", deserialize_with = "deserialize_qq_binary_bool")]
+    blocked: bool,
+    #[serde(rename = "BlockPage", deserialize_with = "deserialize_qq_i64")]
+    block_page: i64,
+    #[serde(rename = "ReportFiled")]
+    report_field: String,
+    #[serde(default, rename = "Cards")]
+    cards: Value,
+    #[serde(default, rename = "Tags")]
+    tags: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqMusicGeneResponse {
+    #[serde(rename = "UserInfoCard")]
+    user: QqMusicGeneUserCard,
+    #[serde(rename = "ListeningReport")]
+    listening_report: QqMusicGeneListeningReport,
+    #[serde(rename = "SortArray")]
+    sort_order: Vec<i64>,
+    #[serde(
+        rename = "IsVisitAccount",
+        deserialize_with = "deserialize_qq_binary_bool"
+    )]
+    is_visit_account: bool,
+    #[serde(
+        default,
+        rename = "Ages",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    ages: Vec<QqMusicGeneAge>,
+    #[serde(default, rename = "BPM")]
+    tempo: Option<QqMusicGeneTempo>,
+    #[serde(default, rename = "CharacterColor")]
+    character_color: Option<QqMusicGeneAttributeCard>,
+    #[serde(
+        default,
+        rename = "Genres",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    genres: Vec<QqMusicGeneAttributeCard>,
+    #[serde(default, rename = "Grooving")]
+    groove: Option<QqMusicGeneGroove>,
+    #[serde(
+        default,
+        rename = "MusicTastes",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    music_tastes: Vec<QqMusicGeneAttributeCard>,
+    #[serde(default, rename = "Personality")]
+    personality: Option<QqMusicGenePersonality>,
+    #[serde(
+        default,
+        rename = "Singers",
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    favorite_singers: Vec<QqMusicGeneAttributeCard>,
+    #[serde(default, rename = "SlowDegrees")]
+    slowness: Option<QqMusicGeneAttributeCard>,
+    #[serde(default, rename = "TimePreference")]
+    time_preference: Option<QqMusicGeneAttributeCard>,
+    #[serde(default, rename = "StatusIndex")]
+    status: Option<QqMusicGeneStatus>,
+    #[serde(default, rename = "MainDescription")]
+    main_description: Option<QqMusicGeneMainDescription>,
+    #[serde(default, rename = "DeepseekInterpretation")]
+    ai_interpretation: Option<QqMusicGeneAiInterpretation>,
+    #[serde(default, rename = "sortCard")]
+    card_order: Vec<i64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3527,6 +3789,7 @@ impl MusicProvider for QqProvider {
             Capability::RecommendationFeed,
             Capability::Recommendations,
             Capability::UserProfileModern,
+            Capability::UserMusicGene,
             Capability::ChartCatalog,
             Capability::ChartTracks,
             Capability::UserMembership,
@@ -4655,6 +4918,22 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ user homepage request returned no response"))?;
         map_qq_user_homepage(encrypted_uin, response)
+    }
+
+    async fn user_music_gene(&self, id: &str, account: Option<&str>) -> Result<UserMusicGene> {
+        let encrypted_uin = validate_qq_encrypted_uin(id, "music gene user identity")?.to_owned();
+        let credential = self.qq_credential(account)?;
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_music_gene_request(&encrypted_uin)?],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ music gene request returned no response"))?;
+        map_qq_music_gene(&encrypted_uin, response)
     }
 
     async fn user_membership(
@@ -9603,6 +9882,368 @@ fn qq_user_homepage_request(encrypted_uin: &str) -> Result<QqApiRequest> {
             "IsQueryTabDetail": 1
         }),
     ))
+}
+
+fn qq_music_gene_request(encrypted_uin: &str) -> Result<QqApiRequest> {
+    let encrypted_uin = validate_qq_encrypted_uin(encrypted_uin, "music gene user identity")?;
+    Ok(QqApiRequest::new(
+        MUSIC_GENE_MODULE,
+        MUSIC_GENE_METHOD,
+        json!({"VisitAccount": encrypted_uin}),
+    ))
+}
+
+fn map_qq_music_gene(
+    requested_encrypted_uin: &str,
+    response: QqApiResponse,
+) -> Result<UserMusicGene> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqMusicGeneResponse>(response_data)
+        .map_err(|error| qq_data_error(format!("QQ music gene response is malformed: {error}")))?;
+    validate_qq_music_gene_bounds(&parsed)?;
+    let returned_encrypted_uin = validate_qq_encrypted_uin(
+        parsed.user.encrypted_uin.trim(),
+        "music gene response user identity",
+    )
+    .map_err(|_| qq_data_error("QQ music gene response contains an invalid user identity"))?;
+    if returned_encrypted_uin != requested_encrypted_uin {
+        return Err(qq_data_error(
+            "QQ music gene response does not belong to the requested user",
+        ));
+    }
+
+    let user_name = required_qq_sheet_text(&parsed.user.name, "music gene user name", 8_192)?;
+    let avatar_url = normalize_qq_sheet_url(&parsed.user.avatar_url, "music gene avatar")?;
+    let signature = normalized_qq_credit_summary(&parsed.user.signature)?;
+    let preferences = MusicGenePreferences {
+        action_url: validate_qq_track_credit_action(&parsed.user.preferences.action_url)?,
+        detail_action_url: validate_qq_track_credit_action(
+            &parsed.user.preferences.detail_action_url,
+        )?,
+        extensions: Extensions::from([("extra".to_owned(), json!(parsed.user.preferences.extra))]),
+    };
+    let user = User {
+        resource_ref: qq_ref(requested_encrypted_uin, "music gene user")?,
+        platform: Platform::Qq,
+        id: requested_encrypted_uin.to_owned(),
+        name: user_name,
+        avatar_url,
+        signature,
+        followed: None,
+        mutual: None,
+        extensions: Extensions::from([("extra".to_owned(), json!(parsed.user.extra))]),
+    };
+    let listening_report = MusicGeneListeningReport {
+        current_month: parsed.listening_report.current_month,
+        display_type: parsed.listening_report.display_type,
+        periods: parsed
+            .listening_report
+            .periods
+            .into_iter()
+            .map(|period| MusicGeneListeningPeriod {
+                month: period.month,
+                count: period.count,
+                extensions: Extensions::from([("extra".to_owned(), json!(period.extra))]),
+            })
+            .collect(),
+        extensions: Extensions::from([("extra".to_owned(), json!(parsed.listening_report.extra))]),
+    };
+    let ages = parsed
+        .ages
+        .into_iter()
+        .map(|age| {
+            Ok(MusicGeneAge {
+                attribute: map_qq_music_gene_attribute(age.attribute, None)?,
+                change: age.change,
+                change_label: optional_qq_sheet_text(
+                    &age.change_label,
+                    "music gene age change label",
+                    8_192,
+                )?,
+                extensions: Extensions::from([("extra".to_owned(), json!(age.extra))]),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let tempo = parsed
+        .tempo
+        .map(|tempo| {
+            validate_qq_music_gene_dynamic_array(
+                &tempo.action_extensions,
+                "tempo action extensions",
+            )?;
+            Ok(MusicGeneTempo {
+                attribute: map_qq_music_gene_attribute(tempo.attribute, None)?,
+                minimum_score: tempo.minimum_score,
+                maximum_score: tempo.maximum_score,
+                extensions: Extensions::from([
+                    ("action_extensions".to_owned(), tempo.action_extensions),
+                    ("extra".to_owned(), json!(tempo.extra)),
+                ]),
+            })
+        })
+        .transpose()?;
+    let character_color = parsed
+        .character_color
+        .map(map_qq_music_gene_attribute_card)
+        .transpose()?;
+    let genres = parsed
+        .genres
+        .into_iter()
+        .map(map_qq_music_gene_attribute_card)
+        .collect::<Result<Vec<_>>>()?;
+    let groove = parsed
+        .groove
+        .map(|groove| {
+            Ok(MusicGeneGroove {
+                attribute: map_qq_music_gene_attribute(groove.attribute, None)?,
+                level: groove.level,
+                extensions: Extensions::from([("extra".to_owned(), json!(groove.extra))]),
+            })
+        })
+        .transpose()?;
+    let music_tastes = parsed
+        .music_tastes
+        .into_iter()
+        .map(map_qq_music_gene_attribute_card)
+        .collect::<Result<Vec<_>>>()?;
+    let personality = parsed
+        .personality
+        .map(|personality| {
+            Ok(MusicGenePersonality {
+                attribute: map_qq_music_gene_attribute(personality.attribute, None)?,
+                actual_type: map_qq_music_gene_attribute(personality.actual_type, None)?,
+                guide_text: optional_qq_sheet_text(
+                    &personality.guide_text,
+                    "music gene personality guide",
+                    16_384,
+                )?,
+                guide_url: validate_qq_track_credit_action(&personality.guide_url)?,
+                extensions: Extensions::from([("extra".to_owned(), json!(personality.extra))]),
+            })
+        })
+        .transpose()?;
+    let favorite_singers = parsed
+        .favorite_singers
+        .into_iter()
+        .map(map_qq_music_gene_attribute_card)
+        .collect::<Result<Vec<_>>>()?;
+    let slowness = parsed
+        .slowness
+        .map(map_qq_music_gene_attribute_card)
+        .transpose()?;
+    let time_preference = parsed
+        .time_preference
+        .map(map_qq_music_gene_attribute_card)
+        .transpose()?;
+    let status = parsed.status.map(map_qq_music_gene_status).transpose()?;
+    let main_description = parsed
+        .main_description
+        .map(map_qq_music_gene_main_description)
+        .transpose()?;
+    let ai_interpretation = parsed
+        .ai_interpretation
+        .map(|interpretation| {
+            validate_qq_music_gene_dynamic_array(&interpretation.cards, "AI cards")?;
+            validate_qq_music_gene_dynamic_array(&interpretation.tags, "AI tags")?;
+            Ok(MusicGeneAiInterpretation {
+                blocked: interpretation.blocked,
+                block_page: interpretation.block_page,
+                report_field: optional_qq_sheet_text(
+                    &interpretation.report_field,
+                    "music gene AI report field",
+                    8_192,
+                )?,
+                extensions: Extensions::from([
+                    ("cards".to_owned(), interpretation.cards),
+                    ("tags".to_owned(), interpretation.tags),
+                    ("extra".to_owned(), json!(interpretation.extra)),
+                ]),
+            })
+        })
+        .transpose()?;
+
+    Ok(UserMusicGene {
+        user,
+        is_visit_account: parsed.is_visit_account,
+        preferences,
+        listening_report,
+        ages,
+        tempo,
+        character_color,
+        genres,
+        groove,
+        music_tastes,
+        personality,
+        favorite_singers,
+        slowness,
+        time_preference,
+        status,
+        main_description,
+        ai_interpretation,
+        sort_order: parsed.sort_order,
+        card_order: parsed.card_order,
+        extensions: Extensions::from([
+            ("extra".to_owned(), json!(parsed.extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn validate_qq_music_gene_bounds(parsed: &QqMusicGeneResponse) -> Result<()> {
+    for (length, context, maximum) in [
+        (parsed.ages.len(), "age list", 100),
+        (parsed.genres.len(), "genre list", 100),
+        (parsed.music_tastes.len(), "music taste list", 100),
+        (parsed.favorite_singers.len(), "singer list", 100),
+        (
+            parsed.listening_report.periods.len(),
+            "listening report",
+            1_000,
+        ),
+        (parsed.sort_order.len(), "sort order", 1_000),
+        (parsed.card_order.len(), "card order", 1_000),
+        (
+            parsed
+                .status
+                .as_ref()
+                .map_or(0, |status| status.entries.len()),
+            "status list",
+            1_000,
+        ),
+    ] {
+        if length > maximum {
+            return Err(qq_data_error(format!(
+                "QQ music gene response exceeded its safe {context} bound"
+            )));
+        }
+    }
+    if parsed
+        .tempo
+        .as_ref()
+        .is_some_and(|tempo| tempo.minimum_score > tempo.maximum_score)
+    {
+        return Err(qq_data_error(
+            "QQ music gene response contains an inverted tempo score range",
+        ));
+    }
+    Ok(())
+}
+
+fn map_qq_music_gene_attribute_card(card: QqMusicGeneAttributeCard) -> Result<MusicGeneAttribute> {
+    map_qq_music_gene_attribute(card.attribute, Some(card.extra))
+}
+
+fn map_qq_music_gene_attribute(
+    attribute: QqMusicGeneAttribute,
+    card_extra: Option<BTreeMap<String, Value>>,
+) -> Result<MusicGeneAttribute> {
+    let id = optional_qq_sheet_text(&attribute.id, "music gene attribute ID", 1_024)?;
+    let title = optional_qq_sheet_text(&attribute.title, "music gene attribute title", 8_192)?;
+    let mut extensions = Extensions::from([("extra".to_owned(), json!(attribute.extra))]);
+    if let Some(card_extra) = card_extra {
+        extensions.insert("card_extra".to_owned(), json!(card_extra));
+    }
+    Ok(MusicGeneAttribute {
+        id,
+        title,
+        english_name: optional_qq_sheet_text(
+            &attribute.english_name,
+            "music gene English name",
+            8_192,
+        )?,
+        keyword: optional_qq_sheet_text(&attribute.keyword, "music gene keyword", 8_192)?,
+        image_url: normalize_qq_sheet_url(&attribute.image_url, "music gene image")?,
+        slogan: optional_qq_sheet_text(&attribute.slogan, "music gene slogan", 16_384)?,
+        display_type: attribute.display_type,
+        extensions,
+    })
+}
+
+fn map_qq_music_gene_status(status: QqMusicGeneStatus) -> Result<MusicGeneStatus> {
+    Ok(MusicGeneStatus {
+        display_type: status.display_type,
+        entries: status
+            .entries
+            .into_iter()
+            .map(|entry| {
+                Ok(MusicGeneStatusEntry {
+                    title: required_qq_sheet_text(&entry.title, "music gene status title", 8_192)?,
+                    english_name: optional_qq_sheet_text(
+                        &entry.english_name,
+                        "music gene status English name",
+                        8_192,
+                    )?,
+                    image_url: normalize_qq_sheet_url(&entry.image_url, "music gene status image")?,
+                    display_type: entry.display_type,
+                    count: entry.count,
+                    change: entry.change,
+                    period_label: optional_qq_sheet_text(
+                        &entry.period_label,
+                        "music gene status period",
+                        8_192,
+                    )?,
+                    extensions: Extensions::from([("extra".to_owned(), json!(entry.extra))]),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        extensions: Extensions::from([("extra".to_owned(), json!(status.extra))]),
+    })
+}
+
+fn map_qq_music_gene_main_description(
+    description: QqMusicGeneMainDescription,
+) -> Result<MusicGeneMainDescription> {
+    Ok(MusicGeneMainDescription {
+        description: normalized_qq_credit_summary(&description.description)?,
+        title: optional_qq_sheet_text(
+            &description.bootstrapping.title,
+            "music gene bootstrap title",
+            8_192,
+        )?,
+        jump_title: optional_qq_sheet_text(
+            &description.bootstrapping.jump_title,
+            "music gene bootstrap jump title",
+            8_192,
+        )?,
+        logo_name: optional_qq_sheet_text(
+            &description.bootstrapping.logo_name,
+            "music gene bootstrap logo",
+            8_192,
+        )?,
+        action_url: validate_qq_track_credit_action(&description.bootstrapping.action_url)?,
+        extensions: Extensions::from([
+            ("extra".to_owned(), json!(description.extra)),
+            (
+                "bootstrap_extra".to_owned(),
+                json!(description.bootstrapping.extra),
+            ),
+        ]),
+    })
+}
+
+fn validate_qq_music_gene_dynamic_array(value: &Value, context: &str) -> Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let items = value.as_array().ok_or_else(|| {
+        qq_data_error(format!(
+            "QQ music gene response contains malformed {context}"
+        ))
+    })?;
+    if items.len() > 1_000
+        || serde_json::to_vec(value)
+            .map_err(|_| qq_data_error("failed to measure QQ music gene dynamic data"))?
+            .len()
+            > 1_048_576
+    {
+        return Err(qq_data_error(format!(
+            "QQ music gene response exceeded its safe {context} bound"
+        )));
+    }
+    Ok(())
 }
 
 fn qq_user_homepage_target<'a>(
@@ -17765,6 +18406,110 @@ mod tests {
         })
     }
 
+    fn sample_music_gene_base(id: &str, title: &str) -> Value {
+        json!({
+            "Id": id,
+            "TypeTitle": title,
+            "EnglishName": "Sunny",
+            "KeyWord": "明亮",
+            "Pic": "https://y.qq.com/music-gene/card.jpg",
+            "Slogan": "音乐让生活发光",
+            "ShowType": 1,
+            "futureBaseField": true
+        })
+    }
+
+    fn sample_music_gene_data(encrypted_uin: &str) -> Value {
+        json!({
+            "UserInfoCard": {
+                "HeadUrl": "https://y.qq.com/avatar.jpg",
+                "NickName": "音乐用户",
+                "Signature": "听见好音乐",
+                "EncryptionAccount": encrypted_uin,
+                "Preferences": {
+                    "JumpUrl": "qqmusic://musicgene/preferences",
+                    "PreferencesJumpUrl": "https://y.qq.com/music-gene/preferences",
+                    "futurePreferenceField": true
+                },
+                "futureUserField": true
+            },
+            "ListeningReport": {
+                "CurrentMonth": 7,
+                "ShowType": 1,
+                "Report": [{"Month": 6, "Num": 321, "futurePeriodField": true}],
+                "futureListeningField": true
+            },
+            "SortArray": [1, 2, 3],
+            "sortCard": [3, 2, 1],
+            "IsVisitAccount": 1,
+            "Ages": [{
+                "Base": sample_music_gene_base("age", "音乐年龄"),
+                "ChangeAge": 2,
+                "ChangeAgeTag": "更年轻",
+                "futureAgeField": true
+            }],
+            "BPM": {
+                "Base": sample_music_gene_base("bpm", "节奏偏好"),
+                "MinScore": 80,
+                "MaxScore": 120,
+                "CardBPMActExt": [],
+                "futureTempoField": true
+            },
+            "CharacterColor": {"Base": sample_music_gene_base("color", "性格色彩")},
+            "Genres": [{"Base": sample_music_gene_base("genre", "流行")}],
+            "Grooving": {
+                "Base": sample_music_gene_base("groove", "律动"),
+                "Level": 4,
+                "futureGrooveField": true
+            },
+            "MusicTastes": [{"Base": sample_music_gene_base("taste", "耐听")}],
+            "Personality": {
+                "Base": sample_music_gene_base("personality", "音乐人格"),
+                "RealMBTI": sample_music_gene_base("infp", "INFP"),
+                "GuideTxt": "查看人格解读",
+                "GuideScheme": "qqmusic://musicgene/personality",
+                "futurePersonalityField": true
+            },
+            "Singers": [{"Base": sample_music_gene_base("singer", "周杰伦")}],
+            "SlowDegrees": {"Base": sample_music_gene_base("slow", "舒缓度")},
+            "TimePreference": {"Base": sample_music_gene_base("night", "夜间")},
+            "StatusIndex": {
+                "Base": [{
+                    "TypeTitle": "听歌量",
+                    "EnglishName": "Listening",
+                    "Pic": "https://y.qq.com/music-gene/status.jpg",
+                    "ShowType": 1,
+                    "Num": 1234,
+                    "ChangeNum": 56,
+                    "StatusTimes": "本月",
+                    "futureStatusField": true
+                }],
+                "ShowType": 2,
+                "futureStatusGroupField": true
+            },
+            "MainDescription": {
+                "Description": "你的音乐世界丰富而明亮",
+                "Bootstrapping": {
+                    "Title": "继续探索",
+                    "JumpTitle": "立即查看",
+                    "LogoName": "QQ 音乐",
+                    "Scheme": "https://y.qq.com/music-gene/explore",
+                    "futureBootstrapField": true
+                },
+                "futureDescriptionField": true
+            },
+            "DeepseekInterpretation": {
+                "IfBlock": 0,
+                "BlockPage": 0,
+                "ReportFiled": "summary",
+                "Cards": null,
+                "Tags": [],
+                "futureAiField": true
+            },
+            "futureResponseField": true
+        })
+    }
+
     fn sample_singer_homepage_tab(tab_id: &str, has_more: i64) -> Value {
         json!({
             "TabID": tab_id,
@@ -19868,6 +20613,132 @@ mod tests {
                 .expect_err("invalid QQ user homepage response");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn music_gene_request_and_mapping_preserve_complete_typed_profile() {
+        let request = qq_music_gene_request(" 7eEFNeSlNKns ").expect("music gene request");
+        assert_eq!(request.module, MUSIC_GENE_MODULE);
+        assert_eq!(request.method, MUSIC_GENE_METHOD);
+        assert_eq!(request.param, json!({"VisitAccount": "7eEFNeSlNKns"}));
+
+        let data = sample_music_gene_data("7eEFNeSlNKns");
+        let gene = map_qq_music_gene(
+            "7eEFNeSlNKns",
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ music gene");
+        assert_eq!(gene.user.resource_ref.to_string(), "qq:7eEFNeSlNKns");
+        assert_eq!(gene.user.name, "音乐用户");
+        assert!(gene.is_visit_account);
+        assert_eq!(gene.listening_report.periods[0].count, 321);
+        assert_eq!(gene.ages[0].change, 2);
+        assert_eq!(gene.tempo.as_ref().expect("tempo").minimum_score, 80);
+        assert_eq!(gene.tempo.as_ref().expect("tempo").maximum_score, 120);
+        assert_eq!(
+            gene.character_color
+                .as_ref()
+                .expect("character color")
+                .title
+                .as_deref(),
+            Some("性格色彩")
+        );
+        assert_eq!(gene.genres.len(), 1);
+        assert_eq!(gene.groove.as_ref().expect("groove").level, 4);
+        assert_eq!(gene.music_tastes.len(), 1);
+        assert_eq!(
+            gene.personality
+                .as_ref()
+                .expect("personality")
+                .actual_type
+                .title
+                .as_deref(),
+            Some("INFP")
+        );
+        assert_eq!(gene.favorite_singers.len(), 1);
+        assert_eq!(gene.status.as_ref().expect("status").entries[0].count, 1234);
+        assert_eq!(gene.sort_order, [1, 2, 3]);
+        assert_eq!(gene.card_order, [3, 2, 1]);
+        assert_eq!(gene.extensions["extra"]["futureResponseField"], true);
+        assert_eq!(gene.user.extensions["extra"]["futureUserField"], true);
+        assert_eq!(
+            gene.preferences.extensions["extra"]["futurePreferenceField"],
+            true
+        );
+        assert_eq!(
+            gene.ai_interpretation
+                .as_ref()
+                .expect("AI interpretation")
+                .extensions["tags"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn music_gene_mapping_rejects_identity_flags_ranges_urls_shapes_and_bounds() {
+        let mut fixtures = Vec::new();
+        for (pointer, value) in [
+            ("/UserInfoCard/EncryptionAccount", json!("different-user")),
+            ("/UserInfoCard/NickName", json!("")),
+            ("/UserInfoCard/HeadUrl", json!("javascript:alert(1)")),
+            ("/IsVisitAccount", json!(2)),
+            ("/BPM/MinScore", json!(121)),
+            ("/BPM/CardBPMActExt", json!({"bad": true})),
+            ("/DeepseekInterpretation/Cards", json!({"bad": true})),
+            (
+                "/MainDescription/Bootstrapping/Scheme",
+                json!("file:///secret"),
+            ),
+        ] {
+            let mut fixture = sample_music_gene_data("7eEFNeSlNKns");
+            *fixture
+                .pointer_mut(pointer)
+                .unwrap_or_else(|| panic!("music gene fixture pointer {pointer}")) = value;
+            fixtures.push(fixture);
+        }
+        let mut missing_report = sample_music_gene_data("7eEFNeSlNKns");
+        missing_report
+            .as_object_mut()
+            .expect("music gene response")
+            .remove("ListeningReport");
+        fixtures.push(missing_report);
+        let mut too_many = sample_music_gene_data("7eEFNeSlNKns");
+        too_many["Genres"] = json!(vec![
+            json!({"Base": sample_music_gene_base("genre", "流行")});
+            101
+        ]);
+        fixtures.push(too_many);
+
+        for fixture in fixtures {
+            let error = map_qq_music_gene("7eEFNeSlNKns", response(fixture))
+                .expect_err("invalid QQ music gene response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+        for invalid in ["", "bad\nuser"] {
+            let Err(error) = qq_music_gene_request(invalid) else {
+                panic!("invalid music gene user identity was accepted");
+            };
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[tokio::test]
+    async fn music_gene_validates_target_and_exact_optional_account_before_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::UserMusicGene));
+        let invalid = provider
+            .user_music_gene("bad\nuser", Some("missing-account"))
+            .await
+            .expect_err("invalid music gene target");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+        let missing = provider
+            .user_music_gene("7eEFNeSlNKns", Some("missing-account"))
+            .await
+            .expect_err("missing optional viewer account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
     #[tokio::test]
@@ -29469,6 +30340,38 @@ mod tests {
                     && !sheet.name.is_empty()
             }));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_music_gene_maps_complete_public_profile_without_credentials() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let gene = provider
+            .user_music_gene("7eEFNeSlNKns", None)
+            .await
+            .expect("live public QQ music gene");
+        assert_eq!(gene.user.resource_ref.to_string(), "qq:7eEFNeSlNKns");
+        assert!(!gene.user.name.is_empty());
+        assert!(gene.is_visit_account);
+        assert!(!gene.listening_report.periods.is_empty());
+        assert!(!gene.ages.is_empty());
+        assert!(gene.tempo.is_some());
+        assert!(gene.character_color.is_some());
+        assert!(!gene.genres.is_empty());
+        assert!(gene.groove.is_some());
+        assert!(gene.personality.is_some());
+        assert!(!gene.favorite_singers.is_empty());
+        assert!(gene.slowness.is_some());
+        assert!(gene.time_preference.is_some());
+        assert!(gene.status.is_some());
+        assert!(gene.main_description.is_some());
+        assert!(gene.ai_interpretation.is_some());
+        assert!(!gene.sort_order.is_empty());
+        assert!(!gene.card_order.is_empty());
     }
 
     #[tokio::test]

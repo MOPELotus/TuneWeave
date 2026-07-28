@@ -1226,6 +1226,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | DELETE | `/v1/resources/{type}/{ref}/comments/{comment_id}/reactions/{reaction}` | `account?` | `CommentReactionMutationResult`；停用评论反应 |
 | POST | `/v1/resources/{type}/{ref}/comments/{comment_id}/reports` | 查询参数 `account?`；JSON `{reason}` | `CommentReportResult`；举报评论 |
 | GET | `/v1/users/{ref}` | `account?`、`backend?=modern|legacy`（也接受 `variant/source`） | 指定用户的完整 `UserProfile`；引用决定平台；QQ 仅支持 modern 且要求查看者账户 |
+| GET | `/v1/users/{ref}/music-gene` | `account?` | `UserMusicGene`；QQ 音乐基因、听歌报告、个性维度与平台展示顺序，公开用户可匿名读取 |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/playlists/created` | 分页、`account?` | 指定用户创建的 `Playlist[]`；平台用户引用的 ID 语义由对应 provider 校验 |
 | GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
@@ -1274,6 +1275,8 @@ QQ 的 `client=mobile` 精确对应 Android `music.smartboxCgi.SmartBoxCgi/GetSm
 用户完整资料的 `backend` 缺省为 `modern`，也接受 `new/eapi/v2`；网易云精确对应参考 `user_detail_new`，以 EAPI 调用 `/api/w/v1/user/detail/{uid}` 并提交字符串 `all=true/userId`。`backend=legacy`（也接受 `old/weapi/v1`）精确对应 `user_detail`，以空载荷 WeAPI 调用 `/api/v1/user/detail/{uid}`。两条路径共用 `UserProfile`，但通过独立能力和 `extensions.backend/response` 保留实际后端及完整响应。空包装、空文本、零时间戳不会遮蔽后续有效兼容字段，返回用户 ID 与请求不一致时按上游错误拒绝。`/v1/account/profile` 先从指定 `platform/account` 的持久登录态取得用户 ID，再以同一账户请求资料，不会借用默认账户或把登录凭据写入响应。2026-07-22 已真实验证公开 legacy/modern 及持久账户 modern 三条统一 HTTP 路径。
 
 QQ 用户资料只支持 modern 后端，固定调用 Android `music.UnifiedHomepage.UnifiedHomepageSrv/GetHomepageHeader` 并提交 `uin/IsQueryTabDetail=1`。`GET /v1/users/qq:<encrypted-uin>?account=...` 把路径中的加密 UIN 作为目标用户，显式 `account` 只选择登录查看者；`GET /v1/account/profile?platform=qq&account=...` 则把所选会话的数值 music ID 精确换成同一凭据保存的 `encryptUin`，不会混用两种身份。稳定资料包含规范用户引用、名称、安全头像/背景、关注态和粉丝/关注数；朋友/访客数、用户类型、歌手关联、标签页、提示、未知字段与完整响应保存在扩展。响应身份不一致、非法布尔标志、危险 URL、畸形必需字段和非零状态都会拒绝。参考实现的匿名分支会注入固定假 music ID/musickey；TuneWeave 不制造或发送占位凭据，2026-07-26 真实匿名请求已确认返回业务码 1000，因此两条 QQ 路径均要求真实 `(qq, account)` 登录态，成功态留待账户联合验收。
+
+QQ 音乐基因使用独立的 `GET /v1/users/qq:<encrypted-uin>/music-gene?account?=...`，固定调用 Android `music.recommend.UserProfileSettingSvr/GetProfileReport` 并只提交路径目标为 `VisitAccount`。它与需要查看者登录的 QQ 主页头部分离：公开音乐基因可匿名读取，显式 `account` 只选择精确 `(qq, account)` 查看者凭据，不存在时不会回退 `default`。统一 `UserMusicGene` 强类型保存目标用户、平台原样的访问标志、偏好动作、月度听歌报告、年龄变化、速度范围、性格色彩、曲风、律动、音乐偏好、人格、偏好歌手、慢歌程度、时段偏好、状态指标、主描述、AI 解读，以及 `SortArray/sortCard` 的原始展示顺序。真实响应中的 `IsVisitAccount=1` 也会出现在匿名访问公开用户时，因此字段中性命名为 `is_visit_account`，不会误解为“当前登录用户”。已知字段全部先经强类型、身份、大小、区间和安全 URL 校验；当前上游没有公开元素结构且真实响应仍为空的 Deepseek/CardBPM 动态列表只允许有界 JSON 数组并放在扩展，不用裸 JSON 代替其余已知模型。2026-07-28 公开目标的 Rust Provider 与统一 HTTP 匿名真实通过，听歌报告、个性维度及 8 项展示/卡片顺序完整返回。
 
 QQ 不喜欢目录固定调用签名端点 `https://u.y.qq.com/cgi-bin/musics.fcg` 的 `music.feedback.FeedbackBlack/GetDislikeList`。`track/artist/style` 分别映射 `Cmd=3/2/4`、`SongLastid/SingersLastid/StyleLastid` 和条目 `IdType=1/2/3`；`page` 从 1 开始，零游标按参考首屏语义省略。`zzc` 签名基于实际发送的同一份 JSON 字节计算，调用方不能注入目标 URL、签名、Cookie、代理或请求头。响应只接受所选类别容器，条目返回字符串 ID、名称、安全图片和 RFC 3339 添加时间；平台 `Token` 是目录分页元数据，不是账户凭据。QQ 没有返回可靠总数或 `has_more`，因此非空页从所选类别末项推导 `next_page/next_cursor`，空页终止，完整遍历可能需要一次终止空页；不会沿用参考分页器同时索引三个类别列表而在其余列表为空时失败。该端点要求精确 `(qq, account)`，缺失别名在签名联网前返回 401。
 

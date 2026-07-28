@@ -89,8 +89,8 @@ use tuneweave_core::{
     UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
     UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
-    UniPlaylistItemStream, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
+    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
     VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
     VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
@@ -511,6 +511,7 @@ pub fn build_router(state: AppState) -> Router {
             "/users/{reference}/following/artists",
             get(user_following_artists),
         )
+        .route("/users/{reference}/music-gene", get(user_music_gene))
         .route("/users/{reference}", get(user_profile))
         .route("/users/{reference}/membership", get(user_membership))
         .route("/users/{reference}/history", get(user_history))
@@ -8871,6 +8872,12 @@ struct UserProfileParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UserMusicGeneParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AccountUserProfileParams {
     platform: Option<String>,
     account: Option<String>,
@@ -8910,6 +8917,26 @@ async fn user_profile(
         .user_profile(reference.id(), backend, account.as_deref())
         .await?;
     let mut response = ApiResponse::new(profile).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn user_music_gene(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<UserMusicGeneParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UserMusicGene>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let account = optional_trimmed(params.account);
+    let provider = state.registry.require(platform)?;
+    let gene = provider
+        .user_music_gene(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(gene).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -13831,12 +13858,13 @@ mod tests {
         ArtistHomepageTabMetadata, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
         AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup, ChartTrackPreview,
         CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
-        DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicProvider, Page, PageMeta,
-        PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
-        RadioPlaybackItem, RadioStyle, RadioStyleSource, RelatedPlaylistSection,
-        RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic, SimilarTrackSection,
-        SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup, TrackLabel,
-        VideoResolution,
+        DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicGeneAttribute,
+        MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGenePreferences, MusicProvider,
+        Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart,
+        RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
+        RelatedPlaylistSection, RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic,
+        SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
+        TrackLabel, VideoResolution,
     };
 
     use super::*;
@@ -13878,6 +13906,7 @@ mod tests {
                 Capability::SearchLocalTrackMatch,
                 Capability::UserProfileLegacy,
                 Capability::UserProfileModern,
+                Capability::UserMusicGene,
                 Capability::UserMembership,
                 Capability::AudioRecognition,
                 Capability::Banners,
@@ -14231,6 +14260,53 @@ mod tests {
                 .extensions
                 .insert("account".to_owned(), json!(account));
             Ok(profile)
+        }
+
+        async fn user_music_gene(&self, id: &str, account: Option<&str>) -> Result<UserMusicGene> {
+            Ok(UserMusicGene {
+                user: sample_user(id),
+                is_visit_account: true,
+                preferences: MusicGenePreferences {
+                    action_url: Some("qqmusic://musicgene/preferences".to_owned()),
+                    detail_action_url: None,
+                    extensions: Extensions::new(),
+                },
+                listening_report: MusicGeneListeningReport {
+                    current_month: 7,
+                    display_type: 1,
+                    periods: vec![MusicGeneListeningPeriod {
+                        month: 6,
+                        count: 321,
+                        extensions: Extensions::new(),
+                    }],
+                    extensions: Extensions::new(),
+                },
+                ages: Vec::new(),
+                tempo: None,
+                character_color: None,
+                genres: vec![MusicGeneAttribute {
+                    id: Some("genre".to_owned()),
+                    title: Some("流行".to_owned()),
+                    english_name: Some("Pop".to_owned()),
+                    keyword: None,
+                    image_url: None,
+                    slogan: None,
+                    display_type: 1,
+                    extensions: Extensions::new(),
+                }],
+                groove: None,
+                music_tastes: Vec::new(),
+                personality: None,
+                favorite_singers: Vec::new(),
+                slowness: None,
+                time_preference: None,
+                status: None,
+                main_description: None,
+                ai_interpretation: None,
+                sort_order: vec![1, 2, 3],
+                card_order: vec![3, 2, 1],
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
         }
 
         async fn user_membership(
@@ -17410,11 +17486,70 @@ mod tests {
                 Capability::TrackCredits,
                 Capability::SheetMusicAvailability,
                 Capability::SheetMusic,
+                Capability::UserMusicGene,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
                 Capability::VideoCatalog,
             ])
+        }
+
+        async fn user_music_gene(&self, id: &str, account: Option<&str>) -> Result<UserMusicGene> {
+            Ok(UserMusicGene {
+                user: User {
+                    resource_ref: ResourceRef::new(Platform::Qq, id)
+                        .expect("valid QQ user reference"),
+                    platform: Platform::Qq,
+                    id: id.to_owned(),
+                    name: "QQ 音乐用户".to_owned(),
+                    avatar_url: Some("https://example.test/qq-avatar.jpg".to_owned()),
+                    signature: None,
+                    followed: None,
+                    mutual: None,
+                    extensions: Extensions::new(),
+                },
+                is_visit_account: true,
+                preferences: MusicGenePreferences {
+                    action_url: Some("qqmusic://musicgene/preferences".to_owned()),
+                    detail_action_url: None,
+                    extensions: Extensions::new(),
+                },
+                listening_report: MusicGeneListeningReport {
+                    current_month: 7,
+                    display_type: 1,
+                    periods: vec![MusicGeneListeningPeriod {
+                        month: 6,
+                        count: 321,
+                        extensions: Extensions::new(),
+                    }],
+                    extensions: Extensions::new(),
+                },
+                ages: Vec::new(),
+                tempo: None,
+                character_color: None,
+                genres: vec![MusicGeneAttribute {
+                    id: Some("genre".to_owned()),
+                    title: Some("流行".to_owned()),
+                    english_name: Some("Pop".to_owned()),
+                    keyword: None,
+                    image_url: None,
+                    slogan: None,
+                    display_type: 1,
+                    extensions: Extensions::new(),
+                }],
+                groove: None,
+                music_tastes: Vec::new(),
+                personality: None,
+                favorite_singers: Vec::new(),
+                slowness: None,
+                time_preference: None,
+                status: None,
+                main_description: None,
+                ai_interpretation: None,
+                sort_order: vec![1, 2, 3],
+                card_order: vec![3, 2, 1],
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
         }
 
         async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -26476,6 +26611,50 @@ mod tests {
             "/v1/account/profile?unknown=true",
         ] {
             let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_music_gene_preserves_typed_dimensions_order_and_optional_account() {
+        let (status, public) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/users/qq:7eEFNeSlNKns/music-gene",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(public["data"]["user"]["ref"], "qq:7eEFNeSlNKns");
+        assert_eq!(public["data"]["is_visit_account"], true);
+        assert_eq!(
+            public["data"]["listening_report"]["periods"][0]["count"],
+            321
+        );
+        assert_eq!(public["data"]["genres"][0]["title"], "流行");
+        assert_eq!(public["data"]["sort_order"], json!([1, 2, 3]));
+        assert_eq!(public["data"]["card_order"], json!([3, 2, 1]));
+        assert_eq!(public["meta"]["platform"], "qq");
+
+        let (status, authenticated) = json_response_from(
+            test_app_with_import_providers(),
+            "/v1/users/qq:7eEFNeSlNKns/music-gene?account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(authenticated["data"]["extensions"]["account"], "viewer");
+        assert_eq!(authenticated["meta"]["account"], "viewer");
+    }
+
+    #[tokio::test]
+    async fn music_gene_rejects_invalid_references_and_unknown_query_fields() {
+        for path in [
+            "/v1/users/invalid/music-gene",
+            "/v1/users/qq:/music-gene",
+            "/v1/users/qq:7eEFNeSlNKns/music-gene?platform=qq",
+            "/v1/users/qq:7eEFNeSlNKns/music-gene?unknown=true",
+        ] {
+            let (status, response) =
+                json_response_from(test_app_with_import_providers(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
