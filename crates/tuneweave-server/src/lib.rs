@@ -11049,34 +11049,40 @@ fn parse_cloud_track_reference_fields(
 
 async fn cloud_tracks(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<CloudTracksQuery>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .cloud_tracks(&PageRequest {
             limit,
             offset,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
-            .with_pagination(page.pagination),
-    ))
+    let response = access
+        .response(page.items, platform)
+        .with_pagination(page.pagination);
+    Ok(Json(response))
 }
 
 async fn cloud_track_details_response(
     state: &AppState,
+    credentials: &CallerCredentialSet,
     platform: Option<&str>,
     account: Option<&str>,
     refs: Option<PlaylistReferenceInput>,
@@ -11084,28 +11090,28 @@ async fn cloud_track_details_response(
 ) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
     let (platform, track_refs) =
         parse_cloud_track_reference_fields(refs, ids, platform, state.default_platform)?;
-    let account = account_alias(account)?;
-    let provider = state.registry.require(platform)?;
-    let tracks = provider
+    let access =
+        credentials.select_provider(state, platform, account, AccountSelection::Default)?;
+    let account = access.required_account().to_owned();
+    let tracks = access
+        .provider
         .cloud_track_details(&CloudTrackDetailRequest {
             track_refs,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(tracks)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(tracks, platform)))
 }
 
 async fn cloud_track_details_get(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<CloudTrackDetailsQuery>, QueryRejection>,
 ) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
     let params = query_params(params)?;
     cloud_track_details_response(
         &state,
+        &CallerCredentialSet::from_headers(&headers, &state)?,
         params.platform.as_deref(),
         params.account.as_deref(),
         params
@@ -11122,6 +11128,7 @@ async fn cloud_track_details_get(
 
 async fn cloud_track_details_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<CloudAccountQuery>, QueryRejection>,
     payload: Result<Json<CloudTrackReferenceBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<CloudTrack>>>, ApiError> {
@@ -11129,6 +11136,7 @@ async fn cloud_track_details_post(
     let body = json_body(payload)?;
     cloud_track_details_response(
         &state,
+        &CallerCredentialSet::from_headers(&headers, &state)?,
         params.platform.as_deref(),
         params.account.as_deref(),
         body.refs,
@@ -11139,6 +11147,7 @@ async fn cloud_track_details_post(
 
 async fn cloud_tracks_delete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<CloudTrackDeleteBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CloudTrackDeleteResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -11148,50 +11157,62 @@ async fn cloud_tracks_delete(
         body.platform.as_deref(),
         state.default_platform,
     )?;
-    let account = account_alias(body.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .delete_cloud_tracks(&CloudTrackDeleteRequest {
             track_refs,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn cloud_track_download(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<CloudTrackDownloadQuery>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MediaDownload>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let download = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let download = access
+        .provider
         .download_cloud_track(reference.id(), Some(&account))
         .await?;
-    Ok(Json(
-        ApiResponse::new(download)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(download, platform)))
 }
 
 async fn cloud_track_download_redirect(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<CloudTrackDownloadQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(reference.platform())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        reference.platform(),
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let provider = access.provider;
     let download = provider
         .download_cloud_track(reference.id(), Some(&account))
         .await?;
@@ -11288,9 +11309,15 @@ async fn cloud_upload(
         .transpose()?
         .unwrap_or_default();
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .upload_cloud_track(&CloudUploadRequest {
             filename,
             content_type,
@@ -11302,11 +11329,7 @@ async fn cloud_upload(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11323,6 +11346,7 @@ struct CloudUploadTicketBody {
 
 async fn cloud_upload_ticket(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CloudAccountQuery>,
     payload: Result<Json<CloudUploadTicketBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CloudUploadTicket>>, ApiError> {
@@ -11335,9 +11359,15 @@ async fn cloud_upload_ticket(
         return Err(TuneWeaveError::invalid_request("file_size must be greater than zero").into());
     }
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let ticket = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let ticket = access
+        .provider
         .cloud_upload_ticket(&CloudUploadTicketRequest {
             md5: body.md5,
             file_size: body.file_size,
@@ -11347,11 +11377,7 @@ async fn cloud_upload_ticket(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(ticket)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(ticket, platform)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11372,6 +11398,7 @@ struct CloudUploadCompleteBody {
 
 async fn cloud_upload_complete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CloudAccountQuery>,
     payload: Result<Json<CloudUploadCompleteBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CloudUploadResult>>, ApiError> {
@@ -11381,9 +11408,15 @@ async fn cloud_upload_complete(
         return Err(TuneWeaveError::invalid_request("bitrate must be greater than zero").into());
     }
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .complete_cloud_upload(&CloudUploadCompleteRequest {
             provisional_track_id: body.provisional_track_id,
             resource_id: body.resource_id,
@@ -11396,11 +11429,7 @@ async fn cloud_upload_complete(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11422,6 +11451,7 @@ struct CloudImportBody {
 
 async fn cloud_import(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CloudAccountQuery>,
     payload: Result<Json<CloudImportBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CloudImportResult>>, ApiError> {
@@ -11440,9 +11470,15 @@ async fn cloud_import(
         return Err(TuneWeaveError::invalid_request("file_size must be greater than zero").into());
     }
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .import_cloud_track(&CloudImportRequest {
             md5: body.md5,
             source_track_id,
@@ -11455,11 +11491,7 @@ async fn cloud_import(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -11475,25 +11507,28 @@ struct CloudLyricsQuery {
 
 async fn cloud_lyrics(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CloudLyricsQuery>,
 ) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
     let user_id = required_trimmed("user_id", params.user_id)?;
     let track_id = required_trimmed("track_id", params.track_id)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let lyrics = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let lyrics = access
+        .provider
         .cloud_lyrics(&CloudLyricsRequest {
             user_id,
             track_id,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(lyrics)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(lyrics, platform)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11509,6 +11544,7 @@ struct CloudMatchBody {
 
 async fn cloud_match(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CloudAccountQuery>,
     payload: Result<Json<CloudMatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CloudMatchResult>>, ApiError> {
@@ -11521,9 +11557,15 @@ async fn cloud_match(
         .map(|value| required_string_or_number("target_track_id", value))
         .transpose()?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .match_cloud_track(&CloudMatchRequest {
             user_id,
             cloud_track_id,
@@ -11531,11 +11573,7 @@ async fn cloud_match(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -29040,6 +29078,193 @@ mod tests {
             json["error"]["details"]["max_bytes"],
             MAX_AVATAR_UPLOAD_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_routes_share_one_caller_credential_scope_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-cloud-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, tracks) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/cloud/tracks?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tracks["data"][0]["extensions"]["account"], "default");
+        assert!(tracks["meta"].get("account").is_none());
+
+        let (status, details) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/cloud/tracks/details?refs=netease:9001",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(details["data"][0]["extensions"]["account"], "default");
+        assert!(details["meta"].get("account").is_none());
+
+        let (status, deleted) = caller_json_request(
+            app.clone(),
+            Method::DELETE,
+            "/v1/account/cloud/tracks",
+            Some(json!({ "refs": ["netease:9001"] })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deleted["data"]["extensions"]["account"], "default");
+        assert!(deleted["meta"].get("account").is_none());
+
+        let (status, download) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/cloud/tracks/netease:9001/download",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(download["data"]["extensions"]["account"], "default");
+        assert!(download["meta"].get("account").is_none());
+
+        let redirect = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/account/cloud/tracks/netease:9001/download/redirect")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build caller cloud redirect request"),
+            )
+            .await
+            .expect("caller cloud redirect succeeds");
+        assert_eq!(redirect.status(), StatusCode::FOUND);
+        assert_eq!(
+            redirect.headers().get(header::LOCATION),
+            Some(
+                &"https://example.test/cloud/9001.flac"
+                    .parse()
+                    .expect("location header")
+            )
+        );
+
+        let (status, uploaded) = caller_binary_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/cloud/uploads?platform=netease&filename=caller.flac",
+            "audio/flac",
+            b"fLaC-caller-audio".to_vec(),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(uploaded["data"]["extensions"]["account"], "default");
+        assert!(uploaded["meta"].get("account").is_none());
+
+        let (status, ticket) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/cloud/uploads/ticket?platform=netease",
+            Some(json!({
+                "md5": "0123456789abcdef0123456789abcdef",
+                "file_size": 42,
+                "filename": "caller.flac"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ticket["data"]["extensions"]["account"], "default");
+        assert!(ticket["meta"].get("account").is_none());
+
+        let (status, completed) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/cloud/uploads/complete?platform=netease",
+            Some(json!({
+                "provisional_track_id": "123",
+                "resource_id": "resource-456",
+                "md5": "0123456789abcdef0123456789abcdef",
+                "filename": "caller.flac"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["data"]["extensions"]["account"], "default");
+        assert!(completed["meta"].get("account").is_none());
+
+        let (status, imported) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/cloud/imports?platform=netease",
+            Some(json!({
+                "md5": "d02b8ab79d91c01167ba31e349fe5275",
+                "bitrate": 999000,
+                "file_size": 42,
+                "file_type": "flac",
+                "song_name": "调用方歌曲"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["data"]["extensions"]["account"], "default");
+        assert!(imported["meta"].get("account").is_none());
+
+        let (status, lyrics) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/account/cloud/lyrics?platform=netease&uid=32953014&sid=cloud-song",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lyrics["data"]["extensions"]["account"], "default");
+        assert!(lyrics["meta"].get("account").is_none());
+
+        let (status, matched) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/account/cloud/matches?platform=netease",
+            Some(json!({
+                "user_id": "32953014",
+                "cloud_track_id": "cloud-song",
+                "target_track_id": "185809"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(matched["data"]["extensions"]["account"], "default");
+        assert!(matched["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/account/cloud/tracks?platform=netease&account=default",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
