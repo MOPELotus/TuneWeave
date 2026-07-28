@@ -13754,12 +13754,19 @@ struct QqExtensionBatchBody {
 
 async fn qq_extension_api(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<QqExtensionApiBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let body = json_body(payload)?;
     let account = optional_trimmed(body.account);
-    let provider = state.registry.require(Platform::Qq)?;
-    let data = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        Platform::Qq,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let data = access
+        .provider
         .platform_api(&PlatformApiRequest {
             uri: format!("{}/{}", body.module, body.method),
             data: json!({
@@ -13768,18 +13775,15 @@ async fn qq_extension_api(
                 "allow_error_codes": body.allow_error_codes,
             }),
             protocol: Some(qq_extension_protocol(body.client, body.signed).to_owned()),
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(data).with_platform(Platform::Qq);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(data, Platform::Qq)))
 }
 
 async fn qq_extension_batch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<QqExtensionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Value>>, ApiError> {
     let body = json_body(payload)?;
@@ -13800,20 +13804,22 @@ async fn qq_extension_batch(
             )
         })
         .collect();
-    let provider = state.registry.require(Platform::Qq)?;
-    let data = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        Platform::Qq,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let data = access
+        .provider
         .platform_batch(&PlatformBatchRequest {
             requests,
             protocol: Some(qq_extension_protocol(body.client, body.signed).to_owned()),
             encrypted_response: false,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(data).with_platform(Platform::Qq);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(data, Platform::Qq)))
 }
 
 const fn qq_extension_protocol(client: QqExtensionClient, signed: bool) -> &'static str {
@@ -33651,6 +33657,64 @@ mod tests {
         );
         assert_eq!(json["data"]["encrypted_response"], false);
         assert!(json["meta"].get("account").is_none());
+    }
+
+    #[tokio::test]
+    async fn qq_extensions_accept_caller_credentials_without_server_aliases() {
+        let credential = qq_caller_credential(None);
+        let app = test_app_with_import_providers();
+
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/extensions/qq/api",
+            Some(json!({
+                "module": "music.musicToplist.Toplist",
+                "method": "GetAll",
+                "param": { "flag": false },
+                "signed": true
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        let (status, batch) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/extensions/qq/batch",
+            Some(json!({
+                "requests": {
+                    "catalog": {
+                        "module": "music.musicToplist.Toplist",
+                        "method": "GetAll"
+                    }
+                },
+                "client": "web"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(batch["data"]["account"], "default");
+        assert!(batch["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::POST,
+            "/v1/extensions/qq/api",
+            Some(json!({
+                "module": "music.musicToplist.Toplist",
+                "method": "GetAll",
+                "account": "qq-vip"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
