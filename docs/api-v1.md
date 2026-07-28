@@ -16,7 +16,7 @@
 | --- | --- |
 | `platform` | 目录或账户所属平台。省略时使用服务配置的默认平台；搜索允许使用 `all` 做多平台聚合。 |
 | `account` | 同一平台内由服务器托管的账户别名，默认 `default`。与同平台调用方凭证不能同时显式提供。 |
-| `X-TuneWeave-Credential` | 可重复敏感请求头；每项携带一个平台的调用方托管凭证，不进入 URL、普通 JSON、日志或扩展字段。当前已覆盖核心播放、账户读写、推荐、评论和权益链路；未列明的公开目录可选登录态与底层扩展 API 仍在收口。 |
+| `X-TuneWeave-Credential` | 可重复敏感请求头；每项携带一个平台的调用方托管凭证，不进入 URL、普通 JSON、日志或扩展字段。QQ 与网易云当前已实现的公开业务端点、跨平台回退和安全原始扩展均已覆盖。 |
 | `playback_platform` | 首选播放来源。它只影响媒体解析，不改变原歌曲引用。 |
 | `fallback` | 播放失败时是否继续尝试其他平台，默认 `true`。 |
 | `fallback_platforms` | 本次请求的有序回退列表，逗号分隔；省略时使用服务器策略。 |
@@ -1468,7 +1468,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 
 ### 登录与账户
 
-调用方托管凭证扩展已进入分阶段实现。QQ 与网易云当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。两平台的登录导出、调用方模式刷新/退出、账户资料、个人及公开用户曲库、收藏和歌单写入、云盘、媒体库、播客管理、不喜欢内容、个性推荐、评论及听歌权益均已接通；未列明的公开目录可选登录态与底层扩展 API 仍在接入，不能从能力声明推断为业务 API 全量完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
+QQ 与网易云当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。两平台当前已实现的公开业务端点、跨平台回退及安全原始扩展已经接通；这只表示凭证所有权桥覆盖已实现端点，不代表对应平台的全量 API 已经完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
@@ -1703,7 +1703,7 @@ QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用
 | GET | `/v1/extensions/netease/partner/tasks` | 查询音乐合伙人当日任务与待评作品 |
 | POST | `/v1/extensions/netease/partner/run` | 按服务端策略执行合伙人任务并返回逐账户报告 |
 
-网易云日历接受统一参数 `start_time`、`end_time`，并兼容参考项目的 `startTime`、`endTime`；值必须是无符号 Unix 毫秒时间戳。为完整保留参考实现的运行时行为，任一时间参数省略时都会使用本次请求的当前毫秒时间，两个参数也允许同时省略。`account` 选择服务端保存的网易云登录态。端点固定使用 WeAPI 调用 `/api/mcalendar/detail`，成功时完整上游日历 JSON 位于统一包络的 `data` 中。
+网易云日历接受统一参数 `start_time`、`end_time`，并兼容参考项目的 `startTime`、`endTime`；值必须是无符号 Unix 毫秒时间戳。为完整保留参考实现的运行时行为，任一时间参数省略时都会使用本次请求的当前毫秒时间，两个参数也允许同时省略。`account` 选择服务端保存的网易云登录态，也可省略账户并通过 `X-TuneWeave-Credential` 使用调用方托管凭证；两者不能同时用于网易云。端点固定使用 WeAPI 调用 `/api/mcalendar/detail`，成功时完整上游日历 JSON 位于统一包络的 `data` 中。
 
 网易云匿名身份由服务端生成、保存和复用，不属于登录账户，也不会覆盖任一 `account` 别名。首次 GET 或 `refresh=true` 会生成参考格式的 52 位十六进制设备 ID，按客户端 DLL 的 XOR + MD5 + Base64 规则构造用户名，并通过 XEAPI `/api/register/anonimous` 注册；POST 始终强制刷新。成功结果包含 `device_id/cookie/registered/refreshed/extensions`，其中 `cookie` 为兼容参考响应而返回，但不会进入 Debug 或普通日志，也不能由调用方反向注入统一请求。设备 ID 与 `MUSIC_A` 作为一份身份原子写入私有数据目录，重启后继续用于默认公开请求；显式登录账户始终优先且保持隔离。2026-07-18 实测 TuneWeave 与当前参考实现均收到上游业务码 400 且无 Cookie，因此代码完成但不伪造注册成功，待上游恢复后补成功态验收。
 
@@ -1727,7 +1727,7 @@ QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用
 
 `crypto` 可取 `eapi`、`weapi`、`api`、`linuxapi`、`xeapi`，省略时使用 `eapi`；`protocol` 是 `crypto` 的输入别名。成功时上游 JSON 位于统一包络的 `data` 中。该端点用于覆盖参考项目自身的通用 `/api` 能力以及尚无合理统一语义的调试场景，不替代其余模块的逐项统一映射与验收。
 
-为避免把通用入口变成凭据注入或 SSRF 接口，请求 `uri` 只能是非空 `/api/...` 路径，目标域名由服务端配置且不能由调用者覆盖；请求体拒绝 `cookie`、`domain`、`headers`、`proxy`、`ua` 等传输覆盖字段，`data.cookie` 也会被拒绝。当前登录态只通过 `account` 选择服务端保存的账户别名；调用方托管能力接入后也只接受专用请求头中的 TuneWeave 版本化凭证封装，不接受平台原始 Cookie、密钥或 token 字段。XEAPI 的公钥注册、X25519 会话密钥、anti-cheat token 请求头与加密响应解包均由适配器内部完成。
+为避免把通用入口变成凭据注入或 SSRF 接口，请求 `uri` 只能是非空 `/api/...` 路径，目标域名由服务端配置且不能由调用者覆盖；请求体拒绝 `cookie`、`domain`、`headers`、`proxy`、`ua` 等传输覆盖字段，`data.cookie` 也会被拒绝。登录态可通过 `account` 选择服务端保存的账户别名，或省略账户并通过 `X-TuneWeave-Credential` 提交 TuneWeave 版本化网易云凭证封装；两种来源同时出现会在访问上游前拒绝，平台原始 Cookie、密钥或 token 字段始终不接受。XEAPI 的公钥注册、X25519 会话密钥、anti-cheat token 请求头与加密响应解包均由适配器内部完成。
 
 网易云传输身份只能由服务端启动配置选择：`TUNEWEAVE_NETEASE_PROXY` 接受 HTTP(S) 正向代理，`TUNEWEAVE_NETEASE_REAL_IP` 接受固定 IPv4 地址，`TUNEWEAVE_NETEASE_RANDOM_CN_IP=true` 则在 provider 启动时生成一个地址，并按照参考实现 `generateConfig()` 产生 `global.cnIp` 的实际作用域，由该实例后续的 EAPI、WeAPI、明文 API、LinuxAPI、XEAPI 及密钥注册请求共同复用，而不是逐请求重新随机。短信验证码发送前还会加载或注册持久匿名设备会话，发送成功后把该设备会话按国家码和手机号在内存中绑定 10 分钟；校验与登录复用它，登录成功即删除临时绑定。手机号和验证码不会持久化。固定和随机身份互斥；启用后同一个地址同时写入 `X-Real-IP` 与 `X-Forwarded-For`。为了保持小体积，随机生成器采用参考实现内置的 `116.25.0.0` 至 `116.94.255.255` 中国地址兜底范围，不把四千余条 CIDR 数据嵌进二进制。代理地址与 IP 不接受 HTTP 参数或 JSON 覆盖，代理认证信息不会进入错误和日志，媒体资源下载及对象存储上传也不会附加伪造来源头。
 
@@ -1755,7 +1755,7 @@ POST 也兼容参考项目把 `"/api/..."` 直接放在顶层的写法；GET 则
 
 上游真实批量协议要求每个子请求参数最终是 JSON 文本。调用者传入对象、数组、数字、布尔或 `null` 时适配器会自动序列化，已传入的字符串保持原样，因此参考项目的 GET 字符串形式和 POST 对象形式均可用。响应不重排或折叠子请求结果，上游顶层 `code` 及各 `/api/...` 键原样位于统一包络的 `data` 中。
 
-每个批量键都会独立校验为固定网易云域名下的非空 `/api/...` 路径；空批次、重复键以及原始 Cookie、域名、代理、请求头、UA、伪造 IP、客户端超时或检查令牌覆盖都会被拒绝。当前账户凭据只通过 `account` 别名选择；调用方托管能力接入后可改用专用请求头中的对应平台封装，但仍不能在批量体内注入原始凭据。`e_r=true` 的响应解密由适配器内部完成。
+每个批量键都会独立校验为固定网易云域名下的非空 `/api/...` 路径；空批次、重复键以及原始 Cookie、域名、代理、请求头、UA、伪造 IP、客户端超时或检查令牌覆盖都会被拒绝。账户凭据可通过 `account` 别名选择，或改用 `X-TuneWeave-Credential` 中的网易云封装；两种来源不能并用，批量体内也不能注入原始凭据。`e_r=true` 的响应解密由适配器内部完成。
 
 QQ 通用扩展以结构化字段选择 CGI 服务，不接受 URL：
 
@@ -1772,7 +1772,7 @@ QQ 通用扩展以结构化字段选择 CGI 服务，不接受 URL：
 }
 ```
 
-`client` 只接受 `android` 或 `web`；`signed=true` 仍由服务端固定选择 `musics.fcg`、生成时间戳和 `zzc` 签名，调用方不能覆盖目标域名或签名输入。Android 请求可以省略账户保持匿名，或用 `account` 精确选择已保存的 `(qq, account)` 凭据；Web 档案当前只允许匿名，避免把未经真实确认的 Web 登录参数伪装成可用能力。`param` 省略时为空对象，兼容输入名 `params/data`；默认按 QQ 移动协议递归把布尔值转换为 `0/1`，只有已知需要原生 JSON 布尔的调用才设置 `preserve_booleans=true`。
+`client` 只接受 `android` 或 `web`；`signed=true` 仍由服务端固定选择 `musics.fcg`、生成时间戳和 `zzc` 签名，调用方不能覆盖目标域名或签名输入。Android 请求可以省略账户保持匿名、用 `account` 精确选择已保存的 `(qq, account)` 凭据，或通过 `X-TuneWeave-Credential` 使用调用方托管的 QQ 凭证；同平台两种来源不能并用。Web 档案当前只允许匿名，避免把未经真实确认的 Web 登录参数伪装成可用能力。`param` 省略时为空对象，兼容输入名 `params/data`；默认按 QQ 移动协议递归把布尔值转换为 `0/1`，只有已知需要原生 JSON 布尔的调用才设置 `preserve_booleans=true`。
 
 批量请求把相同字段放在 `requests` 的有键对象中，并在批次顶层统一选择 `client/signed/account`。批次不能为空且最多 20 项，每个标签、模块和方法均采用有界安全字符集；每个参数对象限制为 1 MiB、32 层和 20000 个 JSON 节点。顶层与任意嵌套层的 Cookie、token、QQ 音乐密钥、OAuth 标识、`comm`、QIMEI、目标 URL/域名、代理、请求头及 UA 字段都会在读取账户或访问网络前拒绝。响应按调用方标签返回；其中的凭据、Cookie、会话密钥和设备身份字段会递归替换为 `[redacted]`，正常媒体/图片 URL 与分页等组合字段（例如 `pageToken`）不会被误删。
 
