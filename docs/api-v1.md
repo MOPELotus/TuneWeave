@@ -16,7 +16,7 @@
 | --- | --- |
 | `platform` | 目录或账户所属平台。省略时使用服务配置的默认平台；搜索允许使用 `all` 做多平台聚合。 |
 | `account` | 同一平台内由服务器托管的账户别名，默认 `default`。与同平台调用方凭证不能同时显式提供。 |
-| `X-TuneWeave-Credential` | 可重复敏感请求头；每项携带一个平台的调用方托管凭证，不进入 URL、普通 JSON、日志或扩展字段。当前已覆盖搜索、歌词、歌单读取/导入、播放、下载和会话查询。 |
+| `X-TuneWeave-Credential` | 可重复敏感请求头；每项携带一个平台的调用方托管凭证，不进入 URL、普通 JSON、日志或扩展字段。当前已覆盖核心播放、账户读写、推荐、评论和权益链路；未列明的公开目录可选登录态与底层扩展 API 仍在收口。 |
 | `playback_platform` | 首选播放来源。它只影响媒体解析，不改变原歌曲引用。 |
 | `fallback` | 播放失败时是否继续尝试其他平台，默认 `true`。 |
 | `fallback_platforms` | 本次请求的有序回退列表，逗号分隔；省略时使用服务器策略。 |
@@ -1468,7 +1468,7 @@ QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共
 
 ### 登录与账户
 
-调用方托管凭证扩展已进入分阶段实现。QQ 与网易云当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。两平台的登录导出、调用方模式刷新/退出均已接通；未列明账户写端点仍在接入，不能从能力声明推断为账户 API 全量完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
+调用方托管凭证扩展已进入分阶段实现。QQ 与网易云当前均声明 `caller_managed_credentials`：所有会创建登录态的首个请求接受 `credential_mode=server|client|both`，多步二维码/验证码事务固定首请求选择，确认阶段不能改写。`client/both` 的成功登录或刷新响应新增一次性 `caller_credential`，并强制 `Cache-Control: no-store` 与 `Pragma: no-cache`；普通状态、账户和业务响应仍不回显凭证。业务请求以可重复 `X-TuneWeave-Credential` 请求头按平台携带，和同平台显式 `account/accounts` 冲突时返回 400。两平台的登录导出、调用方模式刷新/退出、账户资料、个人及公开用户曲库、收藏和歌单写入、云盘、媒体库、播客管理、不喜欢内容、个性推荐、评论及听歌权益均已接通；未列明的公开目录可选登录态与底层扩展 API 仍在接入，不能从能力声明推断为业务 API 全量完成。封装格式、大小限制、跨平台组合、刷新/退出与脱敏要求以 [`docs/credential-ownership.md`](credential-ownership.md) 为准。
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
