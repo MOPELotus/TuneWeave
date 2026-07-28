@@ -61,18 +61,18 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
     PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
     PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderQrPoll, ProviderQrStart,
-    Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
     UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
     VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
@@ -3225,7 +3225,43 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn logout(&self, account: &str) -> Result<bool> {
-        NeteaseProvider::logout_account(self, account).await
+        Ok(self
+            .logout_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .removed)
+    }
+
+    async fn logout_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderLogoutResult> {
+        if source_credential.is_none() && mode == CredentialMode::Server {
+            return Ok(ProviderLogoutResult {
+                removed: self.logout_account(account).await?,
+                caller_credential_discard_required: false,
+            });
+        }
+        let account = validate_netease_login_account(account, mode)?.to_owned();
+        let client = netease_logout_source(self, &account, source_credential, mode)?;
+        client.logout().await?;
+        let removed = if mode.persists_on_server() {
+            self.remove_session(&account).map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "NetEase account was closed upstream but local credential removal failed",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({ "upstream_state": "logged_out" }))
+            })?
+        } else {
+            false
+        };
+        Ok(ProviderLogoutResult {
+            removed,
+            caller_credential_discard_required: true,
+        })
     }
 
     async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
@@ -10904,6 +10940,41 @@ fn netease_refresh_source(
         None => provider.client_for(Some(account)),
         Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
             "a caller credential cannot refresh a server-only session",
+        )
+        .with_platform(Platform::Netease)),
+        Some(source) => {
+            let caller_cookie = parse_netease_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider.client_for(Some(account))?;
+                let stored_cookie = stored.configured_cookie().ok_or_else(|| {
+                    netease_authentication_required(account, "NetEase account was not found")
+                })?;
+                if !netease_cookies_share_identity(&caller_cookie, stored_cookie) {
+                    return Err(TuneWeaveError::invalid_request(
+                        "caller credential and server account refer to different NetEase identities",
+                    )
+                    .with_platform(Platform::Netease));
+                }
+            }
+            Ok(provider.client.without_cookie().with_cookie(caller_cookie))
+        }
+    }
+}
+
+fn netease_logout_source(
+    provider: &NeteaseProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<NeteaseClient> {
+    validate_netease_login_account(account, mode)?;
+    match source_credential {
+        None => Err(TuneWeaveError::invalid_request(
+            "caller-managed logout requires a caller credential",
+        )
+        .with_platform(Platform::Netease)),
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot close a server-only session",
         )
         .with_platform(Platform::Netease)),
         Some(source) => {
@@ -27318,6 +27389,137 @@ mod tests {
                 .client_for(Some("default"))
                 .expect("default client")
                 .is_authenticated()
+        );
+    }
+
+    #[test]
+    fn netease_logout_sources_reject_ambiguous_ownership_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        provider
+            .install_session("personal", "MUSIC_U=server-session".to_owned())
+            .expect("install account session");
+        let matching = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=server-session; __csrf=caller-csrf",
+            None,
+        )
+        .expect("matching caller credential");
+        assert!(
+            netease_logout_source(&provider, "personal", Some(&matching), CredentialMode::Both,)
+                .is_ok()
+        );
+
+        let mismatched = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=other-session",
+            None,
+        )
+        .expect("mismatched caller credential");
+        let Err(error) = netease_logout_source(
+            &provider,
+            "personal",
+            Some(&mismatched),
+            CredentialMode::Both,
+        ) else {
+            panic!("different identity must fail");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let Err(error) = netease_logout_source(&provider, "default", None, CredentialMode::Client)
+        else {
+            panic!("caller logout requires a credential");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let Err(error) = netease_logout_source(
+            &provider,
+            "personal",
+            Some(&matching),
+            CredentialMode::Server,
+        ) else {
+            panic!("server logout rejects caller credentials");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn caller_and_both_owned_netease_logout_keep_storage_boundaries() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            for expected_cookie in ["music_u=client-session", "music_u=both-session"] {
+                let (mut stream, _) = listener.accept().expect("accept logout request");
+                let mut request = [0_u8; 16 * 1024];
+                let length = stream.read(&mut request).expect("read logout request");
+                let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+                assert!(request.contains(expected_cookie));
+                let body = r#"{"code":200}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write logout response");
+            }
+        });
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            web_base_url: format!("http://{address}"),
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        provider
+            .install_session("personal", "MUSIC_U=both-session".to_owned())
+            .expect("install both-owned account");
+        let client_source = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=client-session",
+            None,
+        )
+        .expect("client caller credential");
+        let client = MusicProvider::logout_with_ownership(
+            &provider,
+            "default",
+            Some(&client_source),
+            CredentialMode::Client,
+        )
+        .await
+        .expect("logout caller credential");
+        assert!(!client.removed);
+        assert!(client.caller_credential_discard_required);
+        assert!(provider.client_for(Some("personal")).is_ok());
+
+        let both_source = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=both-session; __csrf=caller-csrf",
+            None,
+        )
+        .expect("both caller credential");
+        let both = MusicProvider::logout_with_ownership(
+            &provider,
+            "personal",
+            Some(&both_source),
+            CredentialMode::Both,
+        )
+        .await
+        .expect("logout both-owned credential");
+        server.join().expect("join logout server");
+
+        assert!(both.removed);
+        assert!(both.caller_credential_discard_required);
+        assert!(provider.client_for(Some("personal")).is_err());
+        assert!(
+            store
+                .load_platform(Platform::Netease)
+                .expect("stored credentials")
+                .is_empty()
         );
     }
 
