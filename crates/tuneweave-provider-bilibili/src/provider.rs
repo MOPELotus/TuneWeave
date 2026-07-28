@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -8,7 +12,10 @@ use tuneweave_core::{
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
     SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
-    VideoDetailRequest, VideoPart, VideoPartListRequest, VideoResourceKind, VideoSearchDuration,
+    VideoDetailRequest, VideoPart, VideoPartListRequest, VideoPlaybackFormat,
+    VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
+    VideoPlaybackProgressiveSegment, VideoPlaybackRequest, VideoPlaybackSegmentBase,
+    VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResourceKind, VideoSearchDuration,
     VideoSearchFilters, VideoSearchOrder, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument,
     VideoSubtitleList, VideoSubtitleRequest, VideoSubtitleStyle,
 };
@@ -18,11 +25,13 @@ use crate::client::{
     BilibiliClient, BilibiliCollectedPlaylist, BilibiliCollectedPlaylistKind,
     BilibiliCollectedPlaylistPage, BilibiliConfig, BilibiliCreatedFavoriteFolder,
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
-    BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome, BilibiliQrPoll,
-    BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist,
-    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliSubtitle, BilibiliSubtitleBody,
-    BilibiliSubtitleCatalog, BilibiliVideoPart, BilibiliVideoSearchDuration,
-    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder, BilibiliVideoView,
+    BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome,
+    BilibiliPlaybackLanguageCatalog, BilibiliPlaybackManifest, BilibiliPlaybackTrack,
+    BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSeasonArchive,
+    BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
+    BilibiliSpacePlaylistPage, BilibiliSubtitle, BilibiliSubtitleBody, BilibiliSubtitleCatalog,
+    BilibiliVideoPart, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
+    BilibiliVideoSearchOrder, BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -98,6 +107,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::VideoDetail,
             Capability::VideoParts,
             Capability::VideoSubtitles,
+            Capability::VideoPlaybackManifest,
         ])
     }
 
@@ -302,6 +312,49 @@ impl MusicProvider for BilibiliProvider {
             .subtitle_body(&subtitle.resource_url, &catalog.bvid)
             .await?;
         map_bilibili_subtitle_document(&catalog, subtitle, body)
+    }
+
+    async fn video_playback_manifest(
+        &self,
+        id: &str,
+        request: &VideoPlaybackRequest,
+    ) -> Result<VideoPlaybackManifest> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive playback requires kind=video",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive playback requires an AID or BVID",
+            ));
+        }
+        let cid = parse_bilibili_part_id(&request.part_id)?;
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let view = self
+            .client
+            .video_view(&identity, credential.as_ref())
+            .await?;
+        if !view.parts.iter().any(|part| part.cid == cid) {
+            return Err(bilibili_invalid_request(
+                "Bilibili playback part does not belong to the requested video",
+            ));
+        }
+        let manifest = self
+            .client
+            .playback_manifest(
+                view.aid,
+                &view.bvid,
+                cid,
+                request.audio_language.as_deref(),
+                credential.as_ref(),
+            )
+            .await?;
+        map_bilibili_playback_manifest(manifest, &view.parts)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1845,6 +1898,174 @@ fn subtitle_seconds_to_milliseconds(value: f64) -> Result<u64> {
         ));
     }
     Ok(milliseconds as u64)
+}
+
+fn map_bilibili_playback_manifest(
+    manifest: BilibiliPlaybackManifest,
+    parts: &[BilibiliVideoPart],
+) -> Result<VideoPlaybackManifest> {
+    let video_ref = BilibiliVideoIdentity::Bvid(manifest.bvid.clone()).resource_ref()?;
+    let part_ref = ResourceRef::new(Platform::Bilibili, format!("cid:{}", manifest.cid))
+        .map_err(|_| bilibili_data_error("Bilibili playback part identity was invalid"))?;
+    let last_play_part_ref = manifest
+        .last_play_cid
+        .map(|cid| {
+            if !parts.iter().any(|part| part.cid == cid) {
+                return Err(bilibili_data_error(
+                    "Bilibili playback progress referenced an unknown video part",
+                ));
+            }
+            ResourceRef::new(Platform::Bilibili, format!("cid:{cid}"))
+                .map_err(|_| bilibili_data_error("Bilibili playback progress CID was invalid"))
+        })
+        .transpose()?;
+    let video_tracks = manifest
+        .video_tracks
+        .into_iter()
+        .map(|track| map_bilibili_playback_track(track, VideoPlaybackTrackKind::Video))
+        .collect();
+    let audio_tracks = manifest
+        .audio_tracks
+        .into_iter()
+        .map(|track| map_bilibili_playback_track(track, VideoPlaybackTrackKind::Audio))
+        .collect();
+    let dolby_audio_tracks = manifest
+        .dolby_audio_tracks
+        .into_iter()
+        .map(|track| map_bilibili_playback_track(track, VideoPlaybackTrackKind::DolbyAudio))
+        .collect();
+    let lossless_audio_tracks = manifest
+        .lossless_audio_tracks
+        .into_iter()
+        .map(|track| map_bilibili_playback_track(track, VideoPlaybackTrackKind::LosslessAudio))
+        .collect();
+    let progressive_segments = manifest
+        .progressive_segments
+        .into_iter()
+        .map(map_bilibili_progressive_segment)
+        .collect();
+    let formats = manifest
+        .formats
+        .into_iter()
+        .map(|format| VideoPlaybackFormat {
+            quality: format.quality,
+            format: format.format,
+            description: format.description,
+            display_description: format.display_description,
+            superscript: format.superscript,
+            codecs: format.codecs,
+            extensions: Extensions::new(),
+        })
+        .collect();
+    let languages = manifest.languages.map(map_bilibili_playback_languages);
+    Ok(VideoPlaybackManifest {
+        video_ref: video_ref.clone(),
+        part_ref: part_ref.clone(),
+        platform: Platform::Bilibili,
+        duration_ms: manifest.duration_ms,
+        current_quality: manifest.current_quality,
+        format: manifest.format,
+        accepted_formats: manifest.accepted_formats,
+        accepted_qualities: manifest.accepted_qualities,
+        formats,
+        video_codec_id: manifest.video_codec_id,
+        seek_parameter: manifest.seek_parameter,
+        seek_type: manifest.seek_type,
+        minimum_buffer_time: manifest.minimum_buffer_time,
+        video_tracks,
+        audio_tracks,
+        dolby_audio_tracks,
+        lossless_audio_tracks,
+        dolby_type: manifest.dolby_type,
+        lossless_display: manifest.lossless_display,
+        progressive_segments,
+        selected_audio_language: manifest.selected_audio_language,
+        selected_production_type: manifest.selected_production_type,
+        languages,
+        last_play_time_ms: manifest.last_play_time_ms,
+        last_play_part_ref,
+        expires_at_epoch_seconds: manifest.expires_at_epoch_seconds,
+        headers: BTreeMap::from([(
+            "Referer".to_owned(),
+            format!("https://www.bilibili.com/video/{}", manifest.bvid),
+        )]),
+        extensions: Extensions::from([
+            ("aid".to_owned(), json!(manifest.aid)),
+            ("bvid".to_owned(), json!(manifest.bvid)),
+            ("cid".to_owned(), json!(manifest.cid)),
+            ("video_ref".to_owned(), json!(video_ref)),
+            ("part_ref".to_owned(), json!(part_ref)),
+            ("source".to_owned(), json!("x_player_wbi_playurl")),
+            ("fnval".to_owned(), json!(4048)),
+            ("fnver".to_owned(), json!(0)),
+            ("fourk".to_owned(), json!(true)),
+        ]),
+    })
+}
+
+fn map_bilibili_playback_track(
+    track: BilibiliPlaybackTrack,
+    kind: VideoPlaybackTrackKind,
+) -> VideoPlaybackTrack {
+    let segment_base = track.segment_base.map(|segment| VideoPlaybackSegmentBase {
+        initialization: segment.initialization,
+        index_range: segment.index_range,
+    });
+    VideoPlaybackTrack {
+        kind,
+        id: track.id,
+        url: track.url,
+        backup_urls: track.backup_urls,
+        bandwidth: track.bandwidth,
+        mime_type: track.mime_type,
+        codecs: track.codecs,
+        width: track.width,
+        height: track.height,
+        frame_rate: track.frame_rate,
+        sample_aspect_ratio: track.sample_aspect_ratio,
+        start_with_sap: track.start_with_sap,
+        segment_base,
+        codec_id: track.codec_id,
+        extensions: Extensions::new(),
+    }
+}
+
+fn map_bilibili_progressive_segment(
+    segment: BilibiliProgressiveSegment,
+) -> VideoPlaybackProgressiveSegment {
+    VideoPlaybackProgressiveSegment {
+        order: segment.order,
+        duration_ms: segment.duration_ms,
+        size: segment.size,
+        url: segment.url,
+        backup_urls: segment.backup_urls,
+        extensions: Extensions::new(),
+    }
+}
+
+fn map_bilibili_playback_languages(
+    catalog: BilibiliPlaybackLanguageCatalog,
+) -> VideoPlaybackLanguageCatalog {
+    VideoPlaybackLanguageCatalog {
+        supported: catalog.supported,
+        items: catalog
+            .items
+            .into_iter()
+            .map(|item| VideoPlaybackLanguage {
+                language: item.language,
+                title: item.title,
+                subtitle_language: item.subtitle_language,
+                video_detected: item.video_detected,
+                mouth_shape_changed: item.mouth_shape_changed,
+                production_type: item.production_type,
+                extensions: Extensions::new(),
+            })
+            .collect(),
+        open_message: catalog.open_message,
+        close_message: catalog.close_message,
+        default_title: catalog.default_title,
+        extensions: Extensions::new(),
+    }
 }
 
 fn map_season_archive_track(
@@ -3397,6 +3618,43 @@ mod tests {
             missing_subtitle_body_account.code,
             ErrorCode::AuthenticationRequired
         );
+        let wrong_playback_kind = provider
+            .video_playback_manifest(
+                "bvid:BV117411r7R1",
+                &VideoPlaybackRequest::new(VideoResourceKind::Mv, "cid:146044693"),
+            )
+            .await
+            .expect_err("playback MV kind");
+        assert_eq!(wrong_playback_kind.code, ErrorCode::InvalidRequest);
+        let invalid_playback_part = provider
+            .video_playback_manifest(
+                "bvid:BV117411r7R1",
+                &VideoPlaybackRequest::new(VideoResourceKind::Video, "page:1"),
+            )
+            .await
+            .expect_err("invalid playback part");
+        assert_eq!(invalid_playback_part.code, ErrorCode::InvalidRequest);
+        let missing_playback_account = provider
+            .video_playback_manifest(
+                "bvid:BV117411r7R1",
+                &VideoPlaybackRequest {
+                    kind: VideoResourceKind::Video,
+                    part_id: "cid:146044693".to_owned(),
+                    audio_language: None,
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing playback account");
+        assert_eq!(
+            missing_playback_account.code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::VideoPlaybackManifest)
+        );
     }
 
     #[test]
@@ -3574,6 +3832,100 @@ mod tests {
         let serialized = serde_json::to_string(&document).expect("serialize subtitle document");
         assert!(!serialized.contains("auth_key"));
         assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn playback_manifest_maps_parent_refs_tracks_headers_and_progress() {
+        let manifest = map_bilibili_playback_manifest(
+            BilibiliPlaybackManifest {
+                aid: 60_977_932,
+                bvid: "BV1Jt411P77c".to_owned(),
+                cid: 106_101_299,
+                duration_ms: 212_000,
+                current_quality: 64,
+                format: "flv720".to_owned(),
+                accepted_formats: vec!["flv720".to_owned()],
+                accepted_qualities: vec![64],
+                formats: vec![crate::client::BilibiliPlaybackFormat {
+                    quality: 64,
+                    format: "flv720".to_owned(),
+                    description: "720P 高清".to_owned(),
+                    display_description: "720P".to_owned(),
+                    superscript: None,
+                    codecs: vec!["avc1.64001F".to_owned()],
+                }],
+                video_codec_id: Some(7),
+                seek_parameter: Some("start".to_owned()),
+                seek_type: Some("offset".to_owned()),
+                minimum_buffer_time: Some(1.5),
+                video_tracks: vec![BilibiliPlaybackTrack {
+                    id: 64,
+                    url: "https://upos.example/video.m4s?deadline=2000000000".to_owned(),
+                    backup_urls: Vec::new(),
+                    bandwidth: 537_253,
+                    mime_type: "video/mp4".to_owned(),
+                    codecs: "avc1.64001F".to_owned(),
+                    width: Some(960),
+                    height: Some(540),
+                    frame_rate: Some("29.412".to_owned()),
+                    sample_aspect_ratio: Some("1:1".to_owned()),
+                    start_with_sap: Some(1),
+                    segment_base: Some(crate::client::BilibiliSegmentBase {
+                        initialization: "0-994".to_owned(),
+                        index_range: "995-2370".to_owned(),
+                    }),
+                    codec_id: Some(7),
+                }],
+                audio_tracks: Vec::new(),
+                dolby_audio_tracks: Vec::new(),
+                lossless_audio_tracks: Vec::new(),
+                dolby_type: None,
+                lossless_display: None,
+                progressive_segments: vec![BilibiliProgressiveSegment {
+                    order: 1,
+                    duration_ms: 212_000,
+                    size: 10_000_000,
+                    url: "https://upos.example/video.mp4?deadline=2000000000".to_owned(),
+                    backup_urls: Vec::new(),
+                }],
+                selected_audio_language: Some("en".to_owned()),
+                selected_production_type: Some(1),
+                languages: None,
+                last_play_time_ms: Some(12_345),
+                last_play_cid: Some(106_101_299),
+                expires_at_epoch_seconds: Some(2_000_000_000),
+            },
+            &[BilibiliVideoPart {
+                cid: 106_101_299,
+                page: 1,
+                source: "vupload".to_owned(),
+                title: "正片".to_owned(),
+                duration_seconds: 212,
+                width: 960,
+                height: 540,
+                rotated: false,
+            }],
+        )
+        .expect("mapped playback manifest");
+
+        assert_eq!(manifest.video_ref.to_string(), "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(manifest.part_ref.to_string(), "bilibili:cid:106101299");
+        assert_eq!(
+            manifest
+                .last_play_part_ref
+                .as_ref()
+                .expect("last played part")
+                .to_string(),
+            "bilibili:cid:106101299"
+        );
+        assert_eq!(manifest.video_tracks[0].kind, VideoPlaybackTrackKind::Video);
+        assert_eq!(manifest.video_tracks[0].codec_id, Some(7));
+        assert_eq!(
+            manifest.headers["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert_eq!(manifest.extensions["fnval"], 4048);
+        assert_eq!(manifest.extensions["cid"], 106_101_299);
     }
 
     #[tokio::test]

@@ -354,6 +354,8 @@ B 站字幕目录通过 `GET /v1/videos/{ref}/subtitles?part={part_ref}` 读取�
 
 字幕正文通过 `GET /v1/videos/{ref}/subtitles/{subtitle_ref}?part={part_ref}` 读取，`subtitle_ref` 可使用目录返回的完整同平台引用或省略平台前缀的 `subtitle:{id}`。provider 会重新获取同一父视频和 CID 的目录并按稳定 ID 选择资源，不接受调用方提交 URL；资源仅允许固定 B 站 HTTPS 字幕 CDN 的旧版 JSON 路径或现行 AI 字幕路径，不跟随重定向、不发送账户 Cookie，并限制响应为 4 MiB。`VideoSubtitleDocument` 将来源语言、类型、版本、样式和每段字幕的毫秒起止时间、原始文本、位置及音乐置信度分开建模。目录中的临时签名 URL及其查询参数不会出现在响应、扩展或错误中。
 
+B 站完整播放清单通过 `GET /v1/videos/{ref}/playback?part={part_ref}` 读取，父视频和分 P 身份规则与字幕相同；可选 `audio_language`（兼容上游名 `cur_language`）请求平台列出的 AI 音轨。响应 `VideoPlaybackManifest` 同时保留可用清晰度说明、DASH 的 AVC/HEVC/AV1 视频轨、普通/杜比/Hi-Res 音轨和兼容 DURL 分段，不会在这一层擅自替调用方选择或混流。每条轨道分开提供 MIME、编码、带宽、尺寸、帧率、SegmentBase、主/备用 URL，清单还保留播放进度、音轨语言目录和所有媒体 URL 中最早的 `deadline`。媒体 URL 仅允许 B 站视频 CDN 的 HTTPS 地址，服务端不代理媒体字节；`headers` 只包含媒体请求必需的 `Referer`，绝不回传账户 Cookie。后续 `/stream`、仅音频和下载端点从这份强类型清单执行选择与回退。
+
 ### DigitalAlbum
 
 ```json
@@ -1414,6 +1416,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | POST | `/v1/videos/streams` | JSON `{refs?|ids/vids?, platform?, kind/type?, resolution/res?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoStream[]`；使用 provider 原生批量能力或统一逐项默认实现 |
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
 | GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
+| GET | `/v1/videos/{ref}/playback` | 必填 `part`，`kind/type=video`、`audio_language/cur_language?`、`account?` | `VideoPlaybackManifest`；完整 DASH/DURL、多编码和音轨清单 |
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
 | GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 

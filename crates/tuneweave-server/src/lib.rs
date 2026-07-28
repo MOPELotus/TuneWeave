@@ -93,10 +93,11 @@ use tuneweave_core::{
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
     UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
     Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
-    VideoPartListRequest, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -572,6 +573,7 @@ pub fn build_router(state: AppState) -> Router {
             get(video_streams_get).post(video_streams_post),
         )
         .route("/videos/{reference}/parts", get(video_parts))
+        .route("/videos/{reference}/playback", get(video_playback_manifest))
         .route(
             "/videos/{reference}/subtitles/{subtitle}",
             get(video_subtitle),
@@ -8935,6 +8937,17 @@ struct VideoSubtitleParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoPlaybackParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    part: Option<String>,
+    #[serde(alias = "cur_language")]
+    audio_language: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoDetailBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -9140,6 +9153,55 @@ async fn video_subtitle(
         .video_subtitle(reference.id(), &subtitle_id, &request)
         .await?;
     Ok(Json(access.response(document, platform)))
+}
+
+async fn video_playback_manifest(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoPlaybackParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoPlaybackManifest>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let part_id = normalize_video_part_reference(
+        params
+            .part
+            .ok_or_else(|| TuneWeaveError::invalid_request("part is required"))?,
+        reference.platform(),
+    )?;
+    let audio_language = params
+        .audio_language
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 32 || value.chars().any(char::is_control) {
+                return Err(TuneWeaveError::invalid_request(
+                    "audio_language must contain a valid language tag",
+                ));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoPlaybackRequest::new(kind, part_id);
+    request.audio_language = audio_language;
+    request.account.clone_from(&access.provider_account);
+    let manifest = access
+        .provider
+        .video_playback_manifest(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(manifest, platform)))
 }
 
 async fn video_details_get(
@@ -15628,7 +15690,8 @@ mod tests {
         ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
         RelatedPlaylistSection, RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic,
         SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
-        TrackLabel, VideoResolution,
+        TrackLabel, VideoPlaybackFormat, VideoPlaybackProgressiveSegment, VideoPlaybackSegmentBase,
+        VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResolution,
     };
     use tuneweave_provider_qq::{QqConfig, QqProvider};
 
@@ -15767,6 +15830,7 @@ mod tests {
                 Capability::VideoDetail,
                 Capability::VideoParts,
                 Capability::VideoSubtitles,
+                Capability::VideoPlaybackManifest,
                 Capability::VideoStats,
                 Capability::VideoStream,
                 Capability::VideoSubscriptionWrite,
@@ -17690,6 +17754,99 @@ mod tests {
                     extensions: Extensions::new(),
                 }],
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn video_playback_manifest(
+            &self,
+            id: &str,
+            request: &VideoPlaybackRequest,
+        ) -> Result<VideoPlaybackManifest> {
+            let video_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid test video reference");
+            let part_ref = ResourceRef::new(Platform::Netease, &request.part_id)
+                .expect("valid test video part reference");
+            Ok(VideoPlaybackManifest {
+                video_ref,
+                part_ref,
+                platform: Platform::Netease,
+                duration_ms: 212_000,
+                current_quality: 64,
+                format: "dash".to_owned(),
+                accepted_formats: vec!["dash".to_owned()],
+                accepted_qualities: vec![64, 32, 16],
+                formats: vec![VideoPlaybackFormat {
+                    quality: 64,
+                    format: "dash".to_owned(),
+                    description: "720P 高清".to_owned(),
+                    display_description: "720P".to_owned(),
+                    superscript: None,
+                    codecs: vec!["avc1.64001F".to_owned()],
+                    extensions: Extensions::new(),
+                }],
+                video_codec_id: Some(7),
+                seek_parameter: Some("start".to_owned()),
+                seek_type: Some("offset".to_owned()),
+                minimum_buffer_time: Some(1.5),
+                video_tracks: vec![VideoPlaybackTrack {
+                    kind: VideoPlaybackTrackKind::Video,
+                    id: 64,
+                    url: "https://video.example.test/video.m4s?deadline=2000000000".to_owned(),
+                    backup_urls: Vec::new(),
+                    bandwidth: 537_253,
+                    mime_type: "video/mp4".to_owned(),
+                    codecs: "avc1.64001F".to_owned(),
+                    width: Some(960),
+                    height: Some(540),
+                    frame_rate: Some("30".to_owned()),
+                    sample_aspect_ratio: Some("1:1".to_owned()),
+                    start_with_sap: Some(1),
+                    segment_base: Some(VideoPlaybackSegmentBase {
+                        initialization: "0-994".to_owned(),
+                        index_range: "995-2370".to_owned(),
+                    }),
+                    codec_id: Some(7),
+                    extensions: Extensions::new(),
+                }],
+                audio_tracks: vec![VideoPlaybackTrack {
+                    kind: VideoPlaybackTrackKind::Audio,
+                    id: 30_232,
+                    url: "https://audio.example.test/audio.m4s?deadline=2000000000".to_owned(),
+                    backup_urls: Vec::new(),
+                    bandwidth: 112_268,
+                    mime_type: "audio/mp4".to_owned(),
+                    codecs: "mp4a.40.2".to_owned(),
+                    width: None,
+                    height: None,
+                    frame_rate: None,
+                    sample_aspect_ratio: None,
+                    start_with_sap: Some(0),
+                    segment_base: Some(VideoPlaybackSegmentBase {
+                        initialization: "0-907".to_owned(),
+                        index_range: "908-2295".to_owned(),
+                    }),
+                    codec_id: Some(0),
+                    extensions: Extensions::new(),
+                }],
+                dolby_audio_tracks: Vec::new(),
+                lossless_audio_tracks: Vec::new(),
+                dolby_type: None,
+                lossless_display: None,
+                progressive_segments: Vec::<VideoPlaybackProgressiveSegment>::new(),
+                selected_audio_language: request.audio_language.clone(),
+                selected_production_type: None,
+                languages: None,
+                last_play_time_ms: None,
+                last_play_part_ref: None,
+                expires_at_epoch_seconds: Some(2_000_000_000),
+                headers: BTreeMap::from([(
+                    "Referer".to_owned(),
+                    "https://example.test/video".to_owned(),
+                )]),
+                extensions: Extensions::from([
+                    ("kind".to_owned(), json!(request.kind)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -26395,6 +26552,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_playback_manifest_forwards_part_language_and_account() {
+        for part in ["netease:segment:1", "segment:1"] {
+            let path = format!(
+                "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678/playback?part={part}&type=video&audio_language=en&account=collector"
+            );
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"]["video_ref"],
+                "netease:D1C2B3A40987654321ABCDEF12345678"
+            );
+            assert_eq!(response["data"]["part_ref"], "netease:segment:1");
+            assert_eq!(response["data"]["current_quality"], 64);
+            assert_eq!(response["data"]["accepted_qualities"], json!([64, 32, 16]));
+            assert_eq!(response["data"]["video_tracks"][0]["kind"], "video");
+            assert_eq!(response["data"]["video_tracks"][0]["codecs"], "avc1.64001F");
+            assert_eq!(response["data"]["audio_tracks"][0]["kind"], "audio");
+            assert_eq!(response["data"]["selected_audio_language"], "en");
+            assert_eq!(response["data"]["extensions"]["account"], "collector");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_playback_manifest_rejects_missing_foreign_and_unknown_inputs() {
+        for path in [
+            "/v1/videos/netease:opaque/playback",
+            "/v1/videos/netease:opaque/playback?part=",
+            "/v1/videos/netease:opaque/playback?part=qq:segment:1",
+            "/v1/videos/netease:opaque/playback?part=segment:1&kind=unknown",
+            "/v1/videos/netease:opaque/playback?part=segment:1&audio_language=",
+            "/v1/videos/netease:opaque/playback?part=segment:1&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
     async fn live_bilibili_video_parts_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -26447,6 +26645,42 @@ mod tests {
         assert_eq!(response["data"]["part_ref"], "bilibili:cid:106101299");
         assert_eq!(response["data"]["requires_login"], true);
         assert_eq!(response["data"]["items"], json!([]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili playback access"]
+    async fn live_bilibili_playback_manifest_preserves_dash_tracks() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV1Jt411P77c/playback?part=bilibili:cid:106101299",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["part_ref"], "bilibili:cid:106101299");
+        assert!(
+            !response["data"]["video_tracks"]
+                .as_array()
+                .expect("video tracks")
+                .is_empty()
+        );
+        assert!(
+            !response["data"]["audio_tracks"]
+                .as_array()
+                .expect("audio tracks")
+                .is_empty()
+        );
+        assert_eq!(
+            response["data"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
     }
 
     #[tokio::test]

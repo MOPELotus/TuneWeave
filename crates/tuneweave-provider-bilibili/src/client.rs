@@ -48,6 +48,7 @@ const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
 const VIDEO_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/view";
 const VIDEO_PLAYER_ENDPOINT: &str = "https://api.bilibili.com/x/player/wbi/v2";
+const VIDEO_PLAYBACK_ENDPOINT: &str = "https://api.bilibili.com/x/player/wbi/playurl";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const FAVORITE_FOLDER_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/folder/info";
@@ -418,6 +419,97 @@ pub(crate) struct BilibiliSubtitleCue {
     pub text: String,
     pub position: Option<u32>,
     pub music_confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BilibiliPlaybackManifest {
+    pub aid: u64,
+    pub bvid: String,
+    pub cid: u64,
+    pub duration_ms: u64,
+    pub current_quality: u32,
+    pub format: String,
+    pub accepted_formats: Vec<String>,
+    pub accepted_qualities: Vec<u32>,
+    pub formats: Vec<BilibiliPlaybackFormat>,
+    pub video_codec_id: Option<i64>,
+    pub seek_parameter: Option<String>,
+    pub seek_type: Option<String>,
+    pub minimum_buffer_time: Option<f64>,
+    pub video_tracks: Vec<BilibiliPlaybackTrack>,
+    pub audio_tracks: Vec<BilibiliPlaybackTrack>,
+    pub dolby_audio_tracks: Vec<BilibiliPlaybackTrack>,
+    pub lossless_audio_tracks: Vec<BilibiliPlaybackTrack>,
+    pub dolby_type: Option<u32>,
+    pub lossless_display: Option<bool>,
+    pub progressive_segments: Vec<BilibiliProgressiveSegment>,
+    pub selected_audio_language: Option<String>,
+    pub selected_production_type: Option<u32>,
+    pub languages: Option<BilibiliPlaybackLanguageCatalog>,
+    pub last_play_time_ms: Option<u64>,
+    pub last_play_cid: Option<u64>,
+    pub expires_at_epoch_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliPlaybackTrack {
+    pub id: u32,
+    pub url: String,
+    pub backup_urls: Vec<String>,
+    pub bandwidth: u64,
+    pub mime_type: String,
+    pub codecs: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub frame_rate: Option<String>,
+    pub sample_aspect_ratio: Option<String>,
+    pub start_with_sap: Option<u32>,
+    pub segment_base: Option<BilibiliSegmentBase>,
+    pub codec_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSegmentBase {
+    pub initialization: String,
+    pub index_range: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliProgressiveSegment {
+    pub order: u32,
+    pub duration_ms: u64,
+    pub size: u64,
+    pub url: String,
+    pub backup_urls: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliPlaybackFormat {
+    pub quality: u32,
+    pub format: String,
+    pub description: String,
+    pub display_description: String,
+    pub superscript: Option<String>,
+    pub codecs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliPlaybackLanguageCatalog {
+    pub supported: bool,
+    pub items: Vec<BilibiliPlaybackLanguage>,
+    pub open_message: Option<String>,
+    pub close_message: Option<String>,
+    pub default_title: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliPlaybackLanguage {
+    pub language: String,
+    pub title: String,
+    pub subtitle_language: Option<String>,
+    pub video_detected: Option<bool>,
+    pub mouth_shape_changed: Option<bool>,
+    pub production_type: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1073,6 +1165,176 @@ struct SubtitleCueData {
     content: String,
     #[serde(default)]
     music: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackData {
+    quality: u32,
+    format: String,
+    timelength: u64,
+    #[serde(default)]
+    accept_format: String,
+    #[serde(default)]
+    accept_description: Vec<String>,
+    #[serde(default)]
+    accept_quality: Vec<u32>,
+    #[serde(default)]
+    video_codecid: Option<i64>,
+    #[serde(default)]
+    seek_param: String,
+    #[serde(default)]
+    seek_type: String,
+    #[serde(default)]
+    dash: Option<PlaybackDashData>,
+    #[serde(default)]
+    durl: Option<Vec<ProgressiveSegmentData>>,
+    #[serde(default)]
+    support_formats: Vec<PlaybackFormatData>,
+    #[serde(default)]
+    cur_language: String,
+    #[serde(default)]
+    cur_production_type: Option<u32>,
+    #[serde(default)]
+    language: Option<PlaybackLanguageCatalogData>,
+    #[serde(default)]
+    last_play_time: Option<i64>,
+    #[serde(default)]
+    last_play_cid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackDashData {
+    duration: f64,
+    #[serde(default, rename = "minBufferTime")]
+    minimum_buffer_time_camel: Option<f64>,
+    #[serde(default)]
+    min_buffer_time: Option<f64>,
+    #[serde(default)]
+    video: Vec<PlaybackTrackData>,
+    #[serde(default)]
+    audio: Option<Vec<PlaybackTrackData>>,
+    #[serde(default)]
+    dolby: Option<PlaybackDolbyData>,
+    #[serde(default)]
+    flac: Option<PlaybackFlacData>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackDolbyData {
+    #[serde(default, rename = "type")]
+    dolby_type: Option<u32>,
+    #[serde(default)]
+    audio: Option<Vec<PlaybackTrackData>>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackFlacData {
+    #[serde(default)]
+    display: Option<bool>,
+    #[serde(default)]
+    audio: Option<PlaybackTrackData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+struct PlaybackTrackData {
+    id: u32,
+    #[serde(default, rename = "baseUrl")]
+    base_url_camel: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default, rename = "backupUrl")]
+    backup_urls_camel: Option<Vec<String>>,
+    #[serde(default)]
+    backup_url: Option<Vec<String>>,
+    bandwidth: u64,
+    #[serde(default, rename = "mimeType")]
+    mime_type_camel: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    codecs: String,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default, rename = "frameRate")]
+    frame_rate_camel: Option<String>,
+    #[serde(default)]
+    frame_rate: Option<String>,
+    #[serde(default)]
+    sar: Option<String>,
+    #[serde(default, rename = "startWithSap")]
+    start_with_sap_camel: Option<u32>,
+    #[serde(default)]
+    start_with_sap: Option<u32>,
+    #[serde(default, rename = "SegmentBase")]
+    segment_base_camel: Option<SegmentBaseData>,
+    #[serde(default)]
+    segment_base: Option<SegmentBaseData>,
+    #[serde(default)]
+    codecid: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+struct SegmentBaseData {
+    #[serde(default, rename = "Initialization")]
+    initialization_camel: Option<String>,
+    #[serde(default)]
+    initialization: Option<String>,
+    #[serde(default, rename = "indexRange")]
+    index_range_camel: Option<String>,
+    #[serde(default)]
+    index_range: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProgressiveSegmentData {
+    order: u32,
+    length: u64,
+    size: u64,
+    url: String,
+    #[serde(default)]
+    backup_url: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackFormatData {
+    quality: u32,
+    format: String,
+    #[serde(default)]
+    new_description: String,
+    #[serde(default)]
+    display_desc: String,
+    #[serde(default)]
+    superscript: String,
+    #[serde(default)]
+    codecs: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct PlaybackLanguageCatalogData {
+    support: bool,
+    #[serde(default)]
+    items: Vec<PlaybackLanguageData>,
+    #[serde(default)]
+    open_toast: String,
+    #[serde(default)]
+    close_toast: String,
+    #[serde(default)]
+    default_title: String,
+}
+
+#[derive(Deserialize)]
+struct PlaybackLanguageData {
+    lang: String,
+    title: String,
+    #[serde(default)]
+    subtitle_lang: String,
+    #[serde(default)]
+    video_detext: Option<bool>,
+    #[serde(default)]
+    video_mouth_shape_change: Option<bool>,
+    #[serde(default)]
+    production_type: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1943,6 +2205,87 @@ impl BilibiliClient {
             ));
         }
         parse_video_subtitle_catalog(&bytes, aid, bvid, cid)
+    }
+
+    pub(crate) async fn playback_manifest(
+        &self,
+        aid: u64,
+        bvid: &str,
+        cid: u64,
+        audio_language: Option<&str>,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliPlaybackManifest> {
+        if aid == 0 || cid == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili playback AID and CID must be positive",
+            ));
+        }
+        if !matches!(
+            crate::BilibiliVideoIdentity::parse(bvid),
+            Ok(crate::BilibiliVideoIdentity::Bvid(ref value)) if value == bvid
+        ) {
+            return Err(invalid_bilibili_request(
+                "Bilibili playback request contains an invalid BVID",
+            ));
+        }
+        let audio_language = audio_language
+            .map(validate_playback_language_parameter)
+            .transpose()?;
+        let mut parameters = vec![
+            ("avid".to_owned(), aid.to_string()),
+            ("cid".to_owned(), cid.to_string()),
+            ("fnval".to_owned(), "4048".to_owned()),
+            ("fnver".to_owned(), "0".to_owned()),
+            ("fourk".to_owned(), "1".to_owned()),
+            ("from_client".to_owned(), "BROWSER".to_owned()),
+            ("otype".to_owned(), "json".to_owned()),
+            ("qn".to_owned(), "127".to_owned()),
+            ("support_multi_audio".to_owned(), "true".to_owned()),
+        ];
+        if credential.is_none() {
+            parameters.push(("try_look".to_owned(), "1".to_owned()));
+        }
+        if let Some(audio_language) = audio_language.as_deref() {
+            parameters.push(("cur_language".to_owned(), audio_language.to_owned()));
+        }
+        let context = self.signed_web_context(&parameters, credential).await?;
+        let endpoint = format!("{VIDEO_PLAYBACK_ENDPOINT}?{}", context.query);
+        let mut response = self
+            .http
+            .get(endpoint)
+            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+            .header(COOKIE, context.cookie_header)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili playback manifest", status));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest response exceeded the size limit",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or_default()
+                .min(MAX_SUBTITLE_RESPONSE_BYTES),
+        );
+        while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback manifest response exceeded the size limit",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        parse_playback_manifest(&bytes, aid, bvid, cid)
     }
 
     pub(crate) async fn subtitle_body(
@@ -3032,6 +3375,622 @@ fn parse_subtitle_body(bytes: &[u8]) -> Result<BilibiliSubtitleBody> {
         stroke,
         cues,
     })
+}
+
+fn parse_playback_manifest(
+    bytes: &[u8],
+    requested_aid: u64,
+    requested_bvid: &str,
+    requested_cid: u64,
+) -> Result<BilibiliPlaybackManifest> {
+    let response: PassportResponse<PlaybackData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili playback manifest returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili playback manifest",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili playback manifest response did not contain data")
+    })?;
+    if requested_aid == 0
+        || requested_cid == 0
+        || data.timelength == 0
+        || data.timelength > 30 * 24 * 60 * 60 * 1_000
+        || data.quality == 0
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest returned invalid media metadata",
+        ));
+    }
+    let bvid = match crate::BilibiliVideoIdentity::parse(requested_bvid)
+        .map_err(|_| bilibili_upstream_error("Bilibili playback manifest used an invalid BVID"))?
+    {
+        crate::BilibiliVideoIdentity::Bvid(value) if value == requested_bvid => value,
+        _ => {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest used a non-canonical BVID",
+            ));
+        }
+    };
+    let format = validated_bilibili_text(&data.format, "playback format", 128)?;
+    let accepted_formats = validated_playback_formats(&data.accept_format)?;
+    let accepted_qualities = validated_playback_qualities(data.accept_quality)?;
+    let descriptions = playback_quality_descriptions(&accepted_qualities, data.accept_description)?;
+    let formats = map_playback_formats(data.support_formats, &descriptions)?;
+    let seek_parameter = optional_bounded_text(&data.seek_param, "playback seek parameter", 64)?;
+    let seek_type = optional_bounded_text(&data.seek_type, "playback seek type", 64)?;
+    let selected_audio_language =
+        optional_bounded_text(&data.cur_language, "selected playback language", 32)?
+            .map(|language| validate_playback_language_parameter(&language))
+            .transpose()?;
+    let languages = data
+        .language
+        .map(map_playback_language_catalog)
+        .transpose()?;
+    let last_play_time_ms = match data.last_play_time {
+        Some(value) if value >= 0 => Some(u64::try_from(value).map_err(|_| {
+            bilibili_upstream_error("Bilibili playback progress exceeded its supported range")
+        })?),
+        Some(-1) | None => None,
+        Some(_) => {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest returned invalid playback progress",
+            ));
+        }
+    };
+    let last_play_cid = data.last_play_cid.filter(|cid| *cid > 0);
+
+    let mut minimum_buffer_time = None;
+    let mut video_tracks = Vec::new();
+    let mut audio_tracks = Vec::new();
+    let mut dolby_audio_tracks = Vec::new();
+    let mut lossless_audio_tracks = Vec::new();
+    let mut dolby_type = None;
+    let mut lossless_display = None;
+    if let Some(dash) = data.dash {
+        validate_subtitle_seconds(dash.duration, "DASH duration")?;
+        let dash_duration_ms = (dash.duration * 1_000.0).round();
+        if dash_duration_ms <= 0.0 || (dash_duration_ms - data.timelength as f64).abs() > 10_000.0 {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest returned conflicting DASH duration",
+            ));
+        }
+        minimum_buffer_time = reconcile_playback_alias(
+            dash.minimum_buffer_time_camel,
+            dash.min_buffer_time,
+            "minimum buffer time",
+        )?;
+        if minimum_buffer_time
+            .is_some_and(|value| !value.is_finite() || !(0.0..=60.0).contains(&value))
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest returned invalid minimum buffer time",
+            ));
+        }
+        video_tracks = map_playback_tracks(dash.video, true)?;
+        audio_tracks = map_playback_tracks(dash.audio.unwrap_or_default(), false)?;
+        if let Some(dolby) = dash.dolby {
+            dolby_type = dolby.dolby_type.filter(|value| *value > 0);
+            dolby_audio_tracks = map_playback_tracks(dolby.audio.unwrap_or_default(), false)?;
+        }
+        if let Some(lossless) = dash.flac {
+            lossless_display = lossless.display;
+            if let Some(audio) = lossless.audio {
+                lossless_audio_tracks = map_playback_tracks(vec![audio], false)?;
+            }
+        }
+    }
+    let progressive_segments = map_progressive_segments(data.durl.unwrap_or_default())?;
+    if video_tracks.is_empty()
+        && audio_tracks.is_empty()
+        && dolby_audio_tracks.is_empty()
+        && lossless_audio_tracks.is_empty()
+        && progressive_segments.is_empty()
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest returned no playable tracks",
+        ));
+    }
+    let expires_at_epoch_seconds = playback_manifest_expiration(
+        &video_tracks,
+        &audio_tracks,
+        &dolby_audio_tracks,
+        &lossless_audio_tracks,
+        &progressive_segments,
+    )?;
+    Ok(BilibiliPlaybackManifest {
+        aid: requested_aid,
+        bvid,
+        cid: requested_cid,
+        duration_ms: data.timelength,
+        current_quality: data.quality,
+        format,
+        accepted_formats,
+        accepted_qualities,
+        formats,
+        video_codec_id: data.video_codecid,
+        seek_parameter,
+        seek_type,
+        minimum_buffer_time,
+        video_tracks,
+        audio_tracks,
+        dolby_audio_tracks,
+        lossless_audio_tracks,
+        dolby_type,
+        lossless_display,
+        progressive_segments,
+        selected_audio_language,
+        selected_production_type: data.cur_production_type,
+        languages,
+        last_play_time_ms,
+        last_play_cid,
+        expires_at_epoch_seconds,
+    })
+}
+
+fn validated_playback_formats(value: &str) -> Result<Vec<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let formats = value
+        .split(',')
+        .map(|format| validated_bilibili_text(format, "accepted playback format", 128))
+        .collect::<Result<Vec<_>>>()?;
+    if formats.len() > 64 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest exceeded the accepted format limit",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    if formats.iter().any(|format| !unique.insert(format.clone())) {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest returned duplicate accepted formats",
+        ));
+    }
+    Ok(formats)
+}
+
+fn validated_playback_qualities(qualities: Vec<u32>) -> Result<Vec<u32>> {
+    if qualities.len() > 64 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest exceeded the accepted quality limit",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    if qualities
+        .iter()
+        .any(|quality| *quality == 0 || !unique.insert(*quality))
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest returned invalid accepted qualities",
+        ));
+    }
+    Ok(qualities)
+}
+
+fn playback_quality_descriptions(
+    qualities: &[u32],
+    descriptions: Vec<String>,
+) -> Result<BTreeMap<u32, String>> {
+    if !descriptions.is_empty() && descriptions.len() != qualities.len() {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback quality descriptions were inconsistent",
+        ));
+    }
+    qualities
+        .iter()
+        .copied()
+        .zip(descriptions)
+        .map(|(quality, description)| {
+            validated_bilibili_text(&description, "playback quality description", 256)
+                .map(|description| (quality, description))
+        })
+        .collect()
+}
+
+fn map_playback_formats(
+    formats: Vec<PlaybackFormatData>,
+    descriptions: &BTreeMap<u32, String>,
+) -> Result<Vec<BilibiliPlaybackFormat>> {
+    if formats.len() > 64 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest exceeded the format detail limit",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    formats
+        .into_iter()
+        .map(|format| {
+            if format.quality == 0 || !identities.insert(format.quality) {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback manifest returned duplicate format details",
+                ));
+            }
+            let name = validated_bilibili_text(&format.format, "playback format detail", 128)?;
+            let description =
+                optional_bounded_text(&format.new_description, "playback format description", 256)?
+                    .or_else(|| descriptions.get(&format.quality).cloned())
+                    .ok_or_else(|| {
+                        bilibili_upstream_error(
+                            "Bilibili playback format detail omitted its description",
+                        )
+                    })?;
+            let display_description =
+                optional_bounded_text(&format.display_desc, "playback display description", 256)?
+                    .unwrap_or_else(|| description.clone());
+            let superscript =
+                optional_bounded_text(&format.superscript, "playback superscript", 128)?;
+            let codecs = format
+                .codecs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|codec| validated_bilibili_text(&codec, "playback format codec", 256))
+                .collect::<Result<Vec<_>>>()?;
+            if codecs.len() > 16 {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback format detail exceeded the codec limit",
+                ));
+            }
+            Ok(BilibiliPlaybackFormat {
+                quality: format.quality,
+                format: name,
+                description,
+                display_description,
+                superscript,
+                codecs,
+            })
+        })
+        .collect()
+}
+
+fn map_playback_tracks(
+    tracks: Vec<PlaybackTrackData>,
+    video: bool,
+) -> Result<Vec<BilibiliPlaybackTrack>> {
+    if tracks.len() > 512 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest exceeded the track limit",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    tracks
+        .into_iter()
+        .map(|track| {
+            let track = map_playback_track(track, video)?;
+            if !identities.insert((
+                track.id,
+                track.codecs.clone(),
+                track.bandwidth,
+                track.url.clone(),
+            )) {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback manifest returned duplicate tracks",
+                ));
+            }
+            Ok(track)
+        })
+        .collect()
+}
+
+fn map_playback_track(track: PlaybackTrackData, video: bool) -> Result<BilibiliPlaybackTrack> {
+    if track.id == 0 || track.bandwidth == 0 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest returned an invalid track identity",
+        ));
+    }
+    let url = reconcile_playback_alias(track.base_url_camel, track.base_url, "track URL")?
+        .ok_or_else(|| bilibili_upstream_error("Bilibili playback track omitted its URL"))
+        .and_then(|url| validate_bilibili_media_url(&url))?;
+    let backup_urls = reconcile_playback_alias(
+        track.backup_urls_camel,
+        track.backup_url,
+        "track backup URLs",
+    )?
+    .unwrap_or_default();
+    let backup_urls = validate_bilibili_media_urls(backup_urls, &url)?;
+    let mime_type =
+        reconcile_playback_alias(track.mime_type_camel, track.mime_type, "track MIME type")?
+            .ok_or_else(|| bilibili_upstream_error("Bilibili playback track omitted its MIME type"))
+            .and_then(|value| validated_bilibili_text(&value, "playback track MIME type", 128))?;
+    let expected_prefix = if video { "video/" } else { "audio/" };
+    if !mime_type.starts_with(expected_prefix) {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback track returned a conflicting MIME type",
+        ));
+    }
+    let codecs = validated_bilibili_text(&track.codecs, "playback track codec", 256)?;
+    let width = track.width.filter(|value| *value > 0);
+    let height = track.height.filter(|value| *value > 0);
+    if video {
+        if width.is_none()
+            || height.is_none()
+            || width.is_some_and(|value| value > 16_384)
+            || height.is_some_and(|value| value > 16_384)
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback video track returned invalid dimensions",
+            ));
+        }
+    } else if width.is_some() || height.is_some() {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback audio track returned video dimensions",
+        ));
+    }
+    let frame_rate =
+        reconcile_playback_alias(track.frame_rate_camel, track.frame_rate, "track frame rate")?
+            .map(|value| optional_bounded_text(&value, "playback track frame rate", 64))
+            .transpose()?
+            .flatten();
+    let sample_aspect_ratio = track
+        .sar
+        .map(|value| optional_bounded_text(&value, "playback sample aspect ratio", 64))
+        .transpose()?
+        .flatten();
+    let start_with_sap = reconcile_playback_alias(
+        track.start_with_sap_camel,
+        track.start_with_sap,
+        "track SAP value",
+    )?;
+    let segment_base_camel = track.segment_base_camel.map(map_segment_base).transpose()?;
+    let segment_base_snake = track.segment_base.map(map_segment_base).transpose()?;
+    let segment_base =
+        reconcile_playback_alias(segment_base_camel, segment_base_snake, "track segment base")?;
+    Ok(BilibiliPlaybackTrack {
+        id: track.id,
+        url,
+        backup_urls,
+        bandwidth: track.bandwidth,
+        mime_type,
+        codecs,
+        width,
+        height,
+        frame_rate,
+        sample_aspect_ratio,
+        start_with_sap,
+        segment_base,
+        codec_id: track.codecid,
+    })
+}
+
+fn map_segment_base(segment: SegmentBaseData) -> Result<BilibiliSegmentBase> {
+    let initialization = reconcile_playback_alias(
+        segment.initialization_camel,
+        segment.initialization,
+        "segment initialization range",
+    )?
+    .ok_or_else(|| {
+        bilibili_upstream_error("Bilibili playback segment omitted initialization range")
+    })?;
+    let index_range = reconcile_playback_alias(
+        segment.index_range_camel,
+        segment.index_range,
+        "segment index range",
+    )?
+    .ok_or_else(|| bilibili_upstream_error("Bilibili playback segment omitted index range"))?;
+    validate_byte_range(&initialization, "segment initialization range")?;
+    validate_byte_range(&index_range, "segment index range")?;
+    Ok(BilibiliSegmentBase {
+        initialization,
+        index_range,
+    })
+}
+
+fn validate_byte_range(value: &str, context: &str) -> Result<()> {
+    let Some((start, end)) = value.split_once('-') else {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili playback returned an invalid {context}"
+        )));
+    };
+    let start = start.parse::<u64>().ok();
+    let end = end.parse::<u64>().ok();
+    if start.is_none() || end.is_none() || start > end {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili playback returned an invalid {context}"
+        )));
+    }
+    Ok(())
+}
+
+fn map_progressive_segments(
+    segments: Vec<ProgressiveSegmentData>,
+) -> Result<Vec<BilibiliProgressiveSegment>> {
+    if segments.len() > 256 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback manifest exceeded the progressive segment limit",
+        ));
+    }
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let expected_order = u32::try_from(index + 1).map_err(|_| {
+                bilibili_upstream_error("Bilibili playback segment order overflowed")
+            })?;
+            if segment.order != expected_order || segment.length == 0 || segment.size == 0 {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback manifest returned invalid progressive segments",
+                ));
+            }
+            let url = validate_bilibili_media_url(&segment.url)?;
+            let backup_urls = validate_bilibili_media_urls(segment.backup_url, &url)?;
+            Ok(BilibiliProgressiveSegment {
+                order: segment.order,
+                duration_ms: segment.length,
+                size: segment.size,
+                url,
+                backup_urls,
+            })
+        })
+        .collect()
+}
+
+fn map_playback_language_catalog(
+    catalog: PlaybackLanguageCatalogData,
+) -> Result<BilibiliPlaybackLanguageCatalog> {
+    if catalog.items.len() > 64 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback language catalog exceeded its limit",
+        ));
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let items = catalog
+        .items
+        .into_iter()
+        .map(|item| {
+            let language = validate_playback_language_parameter(&item.lang)?;
+            if !identities.insert((language.clone(), item.production_type)) {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback language catalog returned duplicate entries",
+                ));
+            }
+            Ok(BilibiliPlaybackLanguage {
+                language,
+                title: validated_bilibili_text(&item.title, "playback language title", 256)?,
+                subtitle_language: optional_bounded_text(
+                    &item.subtitle_lang,
+                    "playback subtitle language",
+                    32,
+                )?,
+                video_detected: item.video_detext,
+                mouth_shape_changed: item.video_mouth_shape_change,
+                production_type: item.production_type,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BilibiliPlaybackLanguageCatalog {
+        supported: catalog.support,
+        items,
+        open_message: optional_bounded_text(
+            &catalog.open_toast,
+            "playback language open message",
+            1024,
+        )?,
+        close_message: optional_bounded_text(
+            &catalog.close_toast,
+            "playback language close message",
+            1024,
+        )?,
+        default_title: optional_bounded_text(
+            &catalog.default_title,
+            "playback language default title",
+            256,
+        )?,
+    })
+}
+
+fn validate_playback_language_parameter(value: &str) -> Result<String> {
+    validate_subtitle_language(value, "playback audio language")
+}
+
+fn reconcile_playback_alias<T: PartialEq>(
+    camel: Option<T>,
+    snake: Option<T>,
+    context: &str,
+) -> Result<Option<T>> {
+    match (camel, snake) {
+        (Some(camel), Some(snake)) if camel != snake => Err(bilibili_upstream_error(format!(
+            "Bilibili playback manifest returned conflicting {context} aliases"
+        ))),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn validate_bilibili_media_urls(urls: Vec<String>, primary: &str) -> Result<Vec<String>> {
+    if urls.len() > 16 {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback track exceeded the backup URL limit",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::from([primary.to_owned()]);
+    urls.into_iter()
+        .map(|url| {
+            let url = validate_bilibili_media_url(&url)?;
+            if !unique.insert(url.clone()) {
+                return Err(bilibili_upstream_error(
+                    "Bilibili playback track returned duplicate media URLs",
+                ));
+            }
+            Ok(url)
+        })
+        .collect()
+}
+
+fn validate_bilibili_media_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback returned an invalid media URL",
+        ));
+    }
+    let url = Url::parse(value)
+        .map_err(|_| bilibili_upstream_error("Bilibili playback returned an invalid media URL"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| bilibili_upstream_error("Bilibili playback media URL omitted its host"))?;
+    let allowed_host = host == "bilivideo.com"
+        || host.ends_with(".bilivideo.com")
+        || host == "bilivideo.cn"
+        || host.ends_with(".bilivideo.cn")
+        || host.ends_with(".akamaized.net");
+    if url.scheme() != "https"
+        || !allowed_host
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !url.path().starts_with("/upgcxcode/")
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili playback returned an unsafe media URL",
+        ));
+    }
+    Ok(url.to_string())
+}
+
+fn playback_manifest_expiration(
+    video: &[BilibiliPlaybackTrack],
+    audio: &[BilibiliPlaybackTrack],
+    dolby: &[BilibiliPlaybackTrack],
+    lossless: &[BilibiliPlaybackTrack],
+    progressive: &[BilibiliProgressiveSegment],
+) -> Result<Option<u64>> {
+    let track_urls = video
+        .iter()
+        .chain(audio)
+        .chain(dolby)
+        .chain(lossless)
+        .flat_map(|track| std::iter::once(&track.url).chain(track.backup_urls.iter()));
+    let progressive_urls = progressive
+        .iter()
+        .flat_map(|segment| std::iter::once(&segment.url).chain(segment.backup_urls.iter()));
+    track_urls
+        .chain(progressive_urls)
+        .try_fold(None::<u64>, |expiry, url| {
+            let url = Url::parse(url).map_err(|_| {
+                bilibili_upstream_error("Bilibili playback media URL became invalid")
+            })?;
+            let deadline = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "deadline").then(|| value.into_owned()))
+                .map(|value| {
+                    value.parse::<u64>().map_err(|_| {
+                        bilibili_upstream_error(
+                            "Bilibili playback media URL contained an invalid deadline",
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(match (expiry, deadline) {
+                (Some(current), Some(deadline)) => Some(current.min(deadline)),
+                (None, Some(deadline)) => Some(deadline),
+                (expiry, None) => expiry,
+            })
+        })
 }
 
 fn parse_created_favorite_folders_response(
@@ -5903,6 +6862,219 @@ mod tests {
             let error =
                 normalize_bilibili_subtitle_url(rejected).expect_err("disallowed subtitle URL");
             assert_eq!(error.code, ErrorCode::UpstreamError, "{rejected}");
+        }
+    }
+
+    fn playback_track_fixture(id: u32, media: &str, codec: &str, codec_id: i64) -> Value {
+        let base = format!(
+            "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/99/12/106101299/{media}.m4s?deadline=2000000000"
+        );
+        let backup = format!(
+            "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/99/12/106101299/{media}.m4s?deadline=1999999999"
+        );
+        let video = media.starts_with("video");
+        json!({
+            "id": id,
+            "baseUrl": base,
+            "base_url": base,
+            "backupUrl": [backup],
+            "backup_url": [backup],
+            "bandwidth": if video { 537253 } else { 112268 },
+            "mimeType": if video { "video/mp4" } else { "audio/mp4" },
+            "mime_type": if video { "video/mp4" } else { "audio/mp4" },
+            "codecs": codec,
+            "width": if video { 960 } else { 0 },
+            "height": if video { 540 } else { 0 },
+            "frameRate": if video { "29.412" } else { "" },
+            "frame_rate": if video { "29.412" } else { "" },
+            "sar": if video { "1:1" } else { "" },
+            "startWithSap": if video { 1 } else { 0 },
+            "start_with_sap": if video { 1 } else { 0 },
+            "SegmentBase": {
+                "Initialization": "0-994",
+                "indexRange": "995-2370"
+            },
+            "segment_base": {
+                "initialization": "0-994",
+                "index_range": "995-2370"
+            },
+            "codecid": codec_id
+        })
+    }
+
+    fn playback_manifest_fixture() -> Value {
+        json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "quality": 64,
+                "format": "flv720",
+                "timelength": 212000,
+                "accept_format": "flv720,flv480,mp4",
+                "accept_description": ["720P 高清", "480P 清晰", "360P 流畅"],
+                "accept_quality": [64, 32, 16],
+                "video_codecid": 7,
+                "seek_param": "start",
+                "seek_type": "offset",
+                "dash": {
+                    "duration": 212,
+                    "minBufferTime": 1.5,
+                    "min_buffer_time": 1.5,
+                    "video": [
+                        playback_track_fixture(64, "video-avc", "avc1.64001F", 7),
+                        playback_track_fixture(64, "video-av1", "av01.0.08M.08", 13)
+                    ],
+                    "audio": [
+                        playback_track_fixture(30232, "audio-aac", "mp4a.40.2", 0)
+                    ],
+                    "dolby": {
+                        "type": 2,
+                        "audio": [
+                            playback_track_fixture(30250, "audio-dolby", "ec-3", 0)
+                        ]
+                    },
+                    "flac": {
+                        "display": true,
+                        "audio": playback_track_fixture(30251, "audio-flac", "fLaC", 0)
+                    }
+                },
+                "support_formats": [{
+                    "quality": 64,
+                    "format": "flv720",
+                    "new_description": "720P 高清",
+                    "display_desc": "720P",
+                    "superscript": "",
+                    "codecs": ["avc1.64001F", "av01.0.08M.08"]
+                }, {
+                    "quality": 32,
+                    "format": "flv480",
+                    "new_description": "480P 清晰",
+                    "display_desc": "480P",
+                    "superscript": "",
+                    "codecs": ["avc1.64001F"]
+                }, {
+                    "quality": 16,
+                    "format": "mp4",
+                    "new_description": "360P 流畅",
+                    "display_desc": "360P",
+                    "superscript": "",
+                    "codecs": ["avc1.64001E"]
+                }],
+                "cur_language": "en",
+                "cur_production_type": 1,
+                "language": {
+                    "support": true,
+                    "items": [{
+                        "lang": "en",
+                        "title": "English",
+                        "subtitle_lang": "en-US",
+                        "video_detext": true,
+                        "video_mouth_shape_change": false,
+                        "production_type": 1
+                    }],
+                    "open_toast": "已切换英语音轨",
+                    "close_toast": "已切回原音",
+                    "default_title": "原音"
+                },
+                "last_play_time": 12345,
+                "last_play_cid": 106101299
+            }
+        })
+    }
+
+    #[test]
+    fn playback_manifest_preserves_dash_codecs_audio_tiers_and_aliases() {
+        let bytes =
+            serde_json::to_vec(&playback_manifest_fixture()).expect("playback manifest fixture");
+        let manifest = parse_playback_manifest(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+            .expect("playback manifest");
+
+        assert_eq!(manifest.current_quality, 64);
+        assert_eq!(manifest.duration_ms, 212_000);
+        assert_eq!(manifest.accepted_qualities, vec![64, 32, 16]);
+        assert_eq!(manifest.formats.len(), 3);
+        assert_eq!(manifest.minimum_buffer_time, Some(1.5));
+        assert_eq!(manifest.video_tracks.len(), 2);
+        assert_eq!(manifest.video_tracks[0].codecs, "avc1.64001F");
+        assert_eq!(manifest.video_tracks[1].codec_id, Some(13));
+        assert_eq!(manifest.audio_tracks[0].id, 30_232);
+        assert_eq!(manifest.dolby_audio_tracks[0].id, 30_250);
+        assert_eq!(manifest.lossless_audio_tracks[0].id, 30_251);
+        assert_eq!(manifest.dolby_type, Some(2));
+        assert_eq!(manifest.lossless_display, Some(true));
+        assert_eq!(manifest.selected_audio_language.as_deref(), Some("en"));
+        assert_eq!(manifest.last_play_time_ms, Some(12_345));
+        assert_eq!(manifest.last_play_cid, Some(106_101_299));
+        assert_eq!(manifest.expires_at_epoch_seconds, Some(1_999_999_999));
+        assert_eq!(
+            manifest.video_tracks[0]
+                .segment_base
+                .as_ref()
+                .expect("segment base")
+                .index_range,
+            "995-2370"
+        );
+    }
+
+    #[test]
+    fn playback_manifest_preserves_progressive_segments_without_dash() {
+        let mut fixture = playback_manifest_fixture();
+        fixture["data"]["dash"] = Value::Null;
+        fixture["data"]["durl"] = json!([{
+            "order": 1,
+            "length": 212000,
+            "size": 70486426,
+            "url": "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/99/12/106101299/video.mp4?deadline=2000000000",
+            "backup_url": [
+                "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/99/12/106101299/video.mp4?deadline=1999999999"
+            ]
+        }]);
+        let bytes = serde_json::to_vec(&fixture).expect("progressive playback fixture");
+        let manifest = parse_playback_manifest(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+            .expect("progressive playback manifest");
+
+        assert!(manifest.video_tracks.is_empty());
+        assert!(manifest.audio_tracks.is_empty());
+        assert_eq!(manifest.progressive_segments.len(), 1);
+        assert_eq!(manifest.progressive_segments[0].order, 1);
+        assert_eq!(manifest.progressive_segments[0].duration_ms, 212_000);
+        assert_eq!(manifest.progressive_segments[0].size, 70_486_426);
+        assert_eq!(manifest.expires_at_epoch_seconds, Some(1_999_999_999));
+    }
+
+    #[test]
+    fn playback_manifest_rejects_alias_identity_url_and_timing_drift() {
+        for (pointer, value) in [
+            (
+                "/data/dash/video/0/base_url",
+                json!(
+                    "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/99/12/106101299/other.m4s?deadline=2000000000"
+                ),
+            ),
+            (
+                "/data/dash/video/0/baseUrl",
+                json!("https://127.0.0.1/upgcxcode/99/12/106101299/video.m4s?deadline=2000000000"),
+            ),
+            ("/data/dash/video/0/width", json!(0)),
+            ("/data/dash/video/0/mimeType", json!("audio/mp4")),
+            ("/data/dash/duration", json!(1)),
+            ("/data/accept_quality/1", json!(64)),
+            (
+                "/data/dash/audio/0/SegmentBase/Initialization",
+                json!("995-0"),
+            ),
+            (
+                "/data/dash/audio/0/backupUrl/0",
+                json!("https://example.test/upgcxcode/audio.m4s?deadline=2000000000"),
+            ),
+        ] {
+            let mut malformed = playback_manifest_fixture();
+            *malformed.pointer_mut(pointer).expect("fixture field") = value;
+            let bytes =
+                serde_json::to_vec(&malformed).expect("malformed playback manifest fixture");
+            let error = parse_playback_manifest(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+                .expect_err("playback manifest drift");
+            assert_eq!(error.code, ErrorCode::UpstreamError, "{pointer}");
         }
     }
 

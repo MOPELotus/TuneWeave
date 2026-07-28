@@ -3445,6 +3445,134 @@ pub struct VideoSubtitleDocument {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackRequest {
+    pub kind: VideoResourceKind,
+    pub part_id: String,
+    pub audio_language: Option<String>,
+    pub account: Option<String>,
+}
+
+impl VideoPlaybackRequest {
+    #[must_use]
+    pub fn new(kind: VideoResourceKind, part_id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            part_id: part_id.into(),
+            audio_language: None,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoPlaybackTrackKind {
+    Video,
+    Audio,
+    DolbyAudio,
+    LosslessAudio,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackSegmentBase {
+    pub initialization: String,
+    pub index_range: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackTrack {
+    pub kind: VideoPlaybackTrackKind,
+    pub id: u32,
+    pub url: String,
+    pub backup_urls: Vec<String>,
+    pub bandwidth: u64,
+    pub mime_type: String,
+    pub codecs: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub frame_rate: Option<String>,
+    pub sample_aspect_ratio: Option<String>,
+    pub start_with_sap: Option<u32>,
+    pub segment_base: Option<VideoPlaybackSegmentBase>,
+    pub codec_id: Option<i64>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackProgressiveSegment {
+    pub order: u32,
+    pub duration_ms: u64,
+    pub size: u64,
+    pub url: String,
+    pub backup_urls: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackFormat {
+    pub quality: u32,
+    pub format: String,
+    pub description: String,
+    pub display_description: String,
+    pub superscript: Option<String>,
+    pub codecs: Vec<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackLanguage {
+    pub language: String,
+    pub title: String,
+    pub subtitle_language: Option<String>,
+    pub video_detected: Option<bool>,
+    pub mouth_shape_changed: Option<bool>,
+    pub production_type: Option<u32>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackLanguageCatalog {
+    pub supported: bool,
+    pub items: Vec<VideoPlaybackLanguage>,
+    pub open_message: Option<String>,
+    pub close_message: Option<String>,
+    pub default_title: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoPlaybackManifest {
+    pub video_ref: ResourceRef,
+    pub part_ref: ResourceRef,
+    pub platform: Platform,
+    pub duration_ms: u64,
+    pub current_quality: u32,
+    pub format: String,
+    pub accepted_formats: Vec<String>,
+    pub accepted_qualities: Vec<u32>,
+    pub formats: Vec<VideoPlaybackFormat>,
+    pub video_codec_id: Option<i64>,
+    pub seek_parameter: Option<String>,
+    pub seek_type: Option<String>,
+    pub minimum_buffer_time: Option<f64>,
+    pub video_tracks: Vec<VideoPlaybackTrack>,
+    pub audio_tracks: Vec<VideoPlaybackTrack>,
+    pub dolby_audio_tracks: Vec<VideoPlaybackTrack>,
+    pub lossless_audio_tracks: Vec<VideoPlaybackTrack>,
+    pub dolby_type: Option<u32>,
+    pub lossless_display: Option<bool>,
+    pub progressive_segments: Vec<VideoPlaybackProgressiveSegment>,
+    pub selected_audio_language: Option<String>,
+    pub selected_production_type: Option<u32>,
+    pub languages: Option<VideoPlaybackLanguageCatalog>,
+    pub last_play_time_ms: Option<u64>,
+    pub last_play_part_ref: Option<ResourceRef>,
+    pub expires_at_epoch_seconds: Option<u64>,
+    pub headers: BTreeMap<String, String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
@@ -6701,6 +6829,75 @@ mod tests {
         assert_eq!(value["style"]["background_alpha"], 0.5);
         assert_eq!(value["cues"][0]["start_ms"], 12_180);
         assert_eq!(value["cues"][0]["text"], "♪ 字幕正文 ♪");
+
+        let manifest = VideoPlaybackManifest {
+            video_ref: part.video_ref.clone(),
+            part_ref: part.resource_ref.clone(),
+            platform: Platform::Bilibili,
+            duration_ms: 212_000,
+            current_quality: 64,
+            format: "flv720".to_owned(),
+            accepted_formats: vec!["flv720".to_owned()],
+            accepted_qualities: vec![64],
+            formats: vec![VideoPlaybackFormat {
+                quality: 64,
+                format: "flv720".to_owned(),
+                description: "720P 高清".to_owned(),
+                display_description: "720P".to_owned(),
+                superscript: None,
+                codecs: vec!["avc1.64001F".to_owned()],
+                extensions: Extensions::new(),
+            }],
+            video_codec_id: Some(7),
+            seek_parameter: Some("start".to_owned()),
+            seek_type: Some("offset".to_owned()),
+            minimum_buffer_time: Some(1.5),
+            video_tracks: vec![VideoPlaybackTrack {
+                kind: VideoPlaybackTrackKind::Video,
+                id: 64,
+                url: "https://example.test/video.m4s".to_owned(),
+                backup_urls: Vec::new(),
+                bandwidth: 537_253,
+                mime_type: "video/mp4".to_owned(),
+                codecs: "avc1.64001F".to_owned(),
+                width: Some(960),
+                height: Some(540),
+                frame_rate: Some("29.412".to_owned()),
+                sample_aspect_ratio: Some("1:1".to_owned()),
+                start_with_sap: Some(1),
+                segment_base: Some(VideoPlaybackSegmentBase {
+                    initialization: "0-994".to_owned(),
+                    index_range: "995-2370".to_owned(),
+                }),
+                codec_id: Some(7),
+                extensions: Extensions::new(),
+            }],
+            audio_tracks: Vec::new(),
+            dolby_audio_tracks: Vec::new(),
+            lossless_audio_tracks: Vec::new(),
+            dolby_type: None,
+            lossless_display: None,
+            progressive_segments: Vec::new(),
+            selected_audio_language: None,
+            selected_production_type: None,
+            languages: None,
+            last_play_time_ms: None,
+            last_play_part_ref: None,
+            expires_at_epoch_seconds: Some(2_000_000_000),
+            headers: BTreeMap::from([(
+                "Referer".to_owned(),
+                "https://www.bilibili.com/video/BV117411r7R1".to_owned(),
+            )]),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(manifest).expect("serialize playback manifest");
+        assert_eq!(value["part_ref"], "bilibili:cid:146044693");
+        assert_eq!(value["video_tracks"][0]["kind"], "video");
+        assert_eq!(value["video_tracks"][0]["id"], 64);
+        assert_eq!(
+            value["video_tracks"][0]["segment_base"]["index_range"],
+            "995-2370"
+        );
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,
