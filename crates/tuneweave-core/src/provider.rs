@@ -40,12 +40,12 @@ use crate::{
     PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
     PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult,
-    ProviderCredential, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
-    RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedRequest,
-    RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest, RelatedVideoList,
-    RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    ProviderCredential, ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
+    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationFeed,
+    RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest,
+    RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
     SearchTrendingRequest, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
@@ -1714,6 +1714,24 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::SessionManagement,
         ))
+    }
+
+    async fn logout_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderLogoutResult> {
+        if source_credential.is_some() || mode != CredentialMode::Server {
+            return Err(TuneWeaveError::unsupported(
+                self.platform(),
+                Capability::CallerManagedCredentials,
+            ));
+        }
+        Ok(ProviderLogoutResult {
+            removed: self.logout(account).await?,
+            caller_credential_discard_required: false,
+        })
     }
 
     async fn session_profile(&self, _account: &str) -> Result<AccountProfile> {

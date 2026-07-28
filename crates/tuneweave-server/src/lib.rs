@@ -10679,21 +10679,49 @@ async fn auth_session_refresh(
 #[derive(Serialize)]
 struct AuthSessionDeleteData {
     removed: bool,
+    caller_credential_discard_required: bool,
+}
+
+#[derive(Deserialize)]
+struct AuthSessionDeleteParams {
+    platform: String,
+    account: Option<String>,
+    credential_mode: Option<CredentialMode>,
 }
 
 async fn auth_session_delete(
     State(state): State<AppState>,
-    Query(params): Query<AuthSessionParams>,
+    headers: HeaderMap,
+    Query(params): Query<AuthSessionDeleteParams>,
 ) -> Result<Json<ApiResponse<AuthSessionDeleteData>>, ApiError> {
     let platform = parse_platform_parameter(&params.platform)?;
-    let account = account_alias(params.account.as_deref())?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let source_credential = caller_credentials.single_credential_for(platform)?;
+    let credential_mode = params
+        .credential_mode
+        .unwrap_or(if source_credential.is_some() {
+            CredentialMode::Client
+        } else {
+            CredentialMode::Server
+        });
+    let account = logout_account_alias(
+        params.account.as_deref(),
+        source_credential.is_some(),
+        credential_mode,
+    )?;
     let provider = state.registry.require(platform)?;
-    let removed = provider.logout(&account).await?;
-    Ok(Json(
-        ApiResponse::new(AuthSessionDeleteData { removed })
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    let result = provider
+        .logout_with_ownership(&account, source_credential, credential_mode)
+        .await?;
+    Ok(Json(auth_api_response(
+        AuthSessionDeleteData {
+            removed: result.removed,
+            caller_credential_discard_required: result.caller_credential_discard_required,
+        },
+        platform,
+        &account,
+        credential_mode,
+    )))
 }
 
 #[derive(Default, Deserialize)]
@@ -13453,6 +13481,34 @@ fn refresh_account_alias(
     }
 }
 
+fn logout_account_alias(
+    value: Option<&str>,
+    has_caller_credential: bool,
+    credential_mode: CredentialMode,
+) -> Result<String, TuneWeaveError> {
+    match (has_caller_credential, credential_mode) {
+        (false, CredentialMode::Server) => account_alias(value),
+        (false, CredentialMode::Client | CredentialMode::Both) => Err(
+            TuneWeaveError::invalid_request("caller-managed logout requires a caller credential"),
+        ),
+        (true, CredentialMode::Server) => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot close a server-only session",
+        )),
+        (true, CredentialMode::Client) => login_account_alias(value, credential_mode),
+        (true, CredentialMode::Both) => {
+            let account = value
+                .map(str::trim)
+                .filter(|account| !account.is_empty())
+                .ok_or_else(|| {
+                    TuneWeaveError::invalid_request(
+                        "both credential mode requires a server account alias",
+                    )
+                })?;
+            account_alias(Some(account))
+        }
+    }
+}
+
 fn finalize_auth_result(
     platform: Platform,
     credential_mode: CredentialMode,
@@ -14623,8 +14679,8 @@ mod tests {
         CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
         DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicGeneAttribute,
         MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGenePreferences, MusicProvider,
-        Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart,
-        RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
+        Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation, ProviderLogoutResult,
+        ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
         RelatedPlaylistSection, RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic,
         SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
         TrackLabel, VideoResolution,
@@ -17836,6 +17892,18 @@ mod tests {
 
         async fn logout(&self, _account: &str) -> Result<bool> {
             Ok(true)
+        }
+
+        async fn logout_with_ownership(
+            &self,
+            _account: &str,
+            source_credential: Option<&ProviderCredential>,
+            mode: CredentialMode,
+        ) -> Result<ProviderLogoutResult> {
+            Ok(ProviderLogoutResult {
+                removed: mode.persists_on_server(),
+                caller_credential_discard_required: source_credential.is_some(),
+            })
         }
 
         async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
@@ -28172,8 +28240,77 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["removed"], true);
+        assert_eq!(json["data"]["caller_credential_discard_required"], false);
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn auth_logout_closes_caller_credentials_without_claiming_to_delete_them() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/auth/session?platform=netease")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build caller logout request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["removed"], false);
+        assert_eq!(json["data"]["caller_credential_discard_required"], true);
+        assert!(json["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/v1/auth/session?platform=netease&account=personal&credential_mode=both")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("build both logout request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["removed"], true);
+        assert_eq!(json["data"]["caller_credential_discard_required"], true);
+        assert_eq!(json["meta"]["account"], "personal");
+
+        for path in [
+            "/v1/auth/session?platform=netease&credential_mode=server",
+            "/v1/auth/session?platform=netease&credential_mode=both",
+            "/v1/auth/session?platform=netease&account=personal",
+        ] {
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::DELETE)
+                        .uri(path)
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build invalid logout request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
     }
 
     #[tokio::test]

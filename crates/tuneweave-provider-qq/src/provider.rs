@@ -32,8 +32,8 @@ use tuneweave_core::{
     PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
     PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
-    ProviderAuthResult, ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality,
-    RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
+    ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
+    Quality, RecommendationFeed, RecommendationFeedAction, RecommendationFeedCard,
     RecommendationFeedCardKind, RecommendationFeedCursor, RecommendationFeedDirection,
     RecommendationFeedNiche, RecommendationFeedRequest, RecommendationFeedShelf,
     RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
@@ -6175,24 +6175,45 @@ impl MusicProvider for QqProvider {
     }
 
     async fn logout(&self, account: &str) -> Result<bool> {
-        let credential = match self.qq_credential(Some(account)) {
-            Ok(Some(credential)) => credential,
-            Ok(None) => return Ok(false),
-            Err(error) if error.code == ErrorCode::AuthenticationRequired => return Ok(false),
-            Err(error) => return Err(error),
+        Ok(self
+            .logout_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .removed)
+    }
+
+    async fn logout_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderLogoutResult> {
+        let caller_credential_discard_required = source_credential.is_some();
+        let Some(credential) = qq_logout_source(self, account, source_credential, mode)? else {
+            return Ok(ProviderLogoutResult {
+                removed: false,
+                caller_credential_discard_required,
+            });
         };
         let outcome = logout_qq_credential(&self.client, &credential).await?;
-        self.remove_qq_credential(account).map_err(|_| {
-            let upstream_state = match outcome {
-                QqLogoutOutcome::LoggedOut => "logged_out",
-                QqLogoutOutcome::CredentialExpired => "credential_expired",
-            };
-            TuneWeaveError::new(
-                ErrorCode::InternalError,
-                "QQ account was closed upstream but local credential removal failed",
-            )
-            .with_platform(Platform::Qq)
-            .with_details(json!({ "upstream_state": upstream_state }))
+        let removed = if mode.persists_on_server() {
+            self.remove_qq_credential(account).map_err(|_| {
+                let upstream_state = match outcome {
+                    QqLogoutOutcome::LoggedOut => "logged_out",
+                    QqLogoutOutcome::CredentialExpired => "credential_expired",
+                };
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "QQ account was closed upstream but local credential removal failed",
+                )
+                .with_platform(Platform::Qq)
+                .with_details(json!({ "upstream_state": upstream_state }))
+            })?
+        } else {
+            false
+        };
+        Ok(ProviderLogoutResult {
+            removed,
+            caller_credential_discard_required,
         })
     }
 
@@ -12104,6 +12125,45 @@ fn qq_refresh_source(
                 }
             }
             Ok(caller)
+        }
+    }
+}
+
+fn qq_logout_source(
+    provider: &QqProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<Option<QqCredential>> {
+    validate_qq_login_account(account, mode)?;
+    match source_credential {
+        None if mode != CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "caller-managed logout requires a caller credential",
+        )
+        .with_platform(Platform::Qq)),
+        None => match provider.qq_credential(Some(account)) {
+            Ok(credential) => Ok(credential),
+            Err(error) if error.code == ErrorCode::AuthenticationRequired => Ok(None),
+            Err(error) => Err(error),
+        },
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot close a server-only session",
+        )
+        .with_platform(Platform::Qq)),
+        Some(source) => {
+            let caller = parse_qq_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider.qq_credential(Some(account))?.ok_or_else(|| {
+                    qq_authentication_required(account, "QQ account was not found")
+                })?;
+                if caller.string_music_id() != stored.string_music_id() {
+                    return Err(TuneWeaveError::invalid_request(
+                        "caller credential and server account refer to different QQ identities",
+                    )
+                    .with_platform(Platform::Qq));
+                }
+            }
+            Ok(Some(caller))
         }
     }
 }
@@ -26261,6 +26321,74 @@ mod tests {
             .expect_err("identity mismatch")
             .code,
             ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn qq_logout_sources_reject_ambiguous_ownership_before_network_access() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let caller = ProviderCredential::new(
+            Platform::Qq,
+            QQ_CREDENTIAL_KIND,
+            serde_json::to_string(&credential).expect("serialize credential"),
+            None,
+        )
+        .expect("caller credential");
+        let client_only = QqProvider::new(QqConfig::default()).expect("client provider");
+        assert_eq!(
+            qq_logout_source(
+                &client_only,
+                "default",
+                Some(&caller),
+                CredentialMode::Client
+            )
+            .expect("client logout source"),
+            Some(credential.clone())
+        );
+        assert_eq!(
+            qq_logout_source(
+                &client_only,
+                "default",
+                Some(&caller),
+                CredentialMode::Server
+            )
+            .expect_err("server mode rejects caller source")
+            .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            qq_logout_source(&client_only, "default", None, CredentialMode::Client)
+                .expect_err("client mode requires caller source")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        assert!(
+            qq_logout_source(&client_only, "missing", None, CredentialMode::Server)
+                .expect("missing server logout is idempotent")
+                .is_none()
+        );
+
+        let store = Arc::new(RecordingCredentialStore::default());
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(store),
+            ..QqConfig::default()
+        })
+        .expect("stored provider");
+        provider
+            .persist_qq_credential("personal", &credential)
+            .expect("stored credential");
+        assert_eq!(
+            qq_logout_source(&provider, "personal", Some(&caller), CredentialMode::Both)
+                .expect("matching both source"),
+            Some(credential)
         );
     }
 

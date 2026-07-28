@@ -87,6 +87,14 @@ pub struct ProviderAuthResult {
     pub credential: Option<ProviderCredential>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderLogoutResult {
+    /// Whether a server-owned account alias was removed.
+    pub removed: bool,
+    /// Whether the caller must discard the credential it supplied.
+    pub caller_credential_discard_required: bool,
+}
+
 impl ProviderAuthResult {
     #[must_use]
     pub const fn server_managed(profile: AccountProfile) -> Self {
