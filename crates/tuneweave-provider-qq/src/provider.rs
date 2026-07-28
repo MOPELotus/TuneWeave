@@ -6148,19 +6148,30 @@ impl MusicProvider for QqProvider {
     }
 
     async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
-        let credential = self
-            .qq_credential(Some(account))?
-            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found"))?;
+        Ok(self
+            .refresh_session_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn refresh_session_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        let credential = qq_refresh_source(self, account, source_credential, mode)?;
         let refreshed = refresh_qq_credential(&self.client, &credential).await?;
-        let mut profile = self.persist_qq_credential(account, &refreshed)?;
-        profile
+        let mut result = self.finish_qq_authentication(account, &refreshed, mode)?;
+        result
+            .profile
             .extensions
             .insert("refreshed".to_owned(), json!(true));
-        profile.extensions.insert(
+        result.profile.extensions.insert(
             "credential_expires_at_epoch".to_owned(),
             json!(refreshed.expires_at_epoch()),
         );
-        Ok(profile)
+        Ok(result)
     }
 
     async fn logout(&self, account: &str) -> Result<bool> {
@@ -6296,6 +6307,7 @@ impl QqProvider {
         })
     }
 
+    #[cfg(test)]
     fn persist_qq_credential(
         &self,
         account: &str,
@@ -12057,6 +12069,43 @@ fn validate_qq_login_account(account: &str, mode: CredentialMode) -> Result<()> 
         .with_platform(Platform::Qq));
     }
     Ok(())
+}
+
+fn qq_refresh_source(
+    provider: &QqProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<QqCredential> {
+    validate_qq_login_account(account, mode)?;
+    match source_credential {
+        None if mode == CredentialMode::Client => Err(TuneWeaveError::invalid_request(
+            "client credential refresh requires a caller credential",
+        )
+        .with_platform(Platform::Qq)),
+        None => provider
+            .qq_credential(Some(account))?
+            .ok_or_else(|| qq_authentication_required(account, "QQ account was not found")),
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot refresh a server-only session",
+        )
+        .with_platform(Platform::Qq)),
+        Some(source) => {
+            let caller = parse_qq_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider.qq_credential(Some(account))?.ok_or_else(|| {
+                    qq_authentication_required(account, "QQ account was not found")
+                })?;
+                if caller.string_music_id() != stored.string_music_id() {
+                    return Err(TuneWeaveError::invalid_request(
+                        "caller credential and server account refer to different QQ identities",
+                    )
+                    .with_platform(Platform::Qq));
+                }
+            }
+            Ok(caller)
+        }
+    }
 }
 
 fn qq_authentication_required(account: &str, message: &str) -> TuneWeaveError {
@@ -26126,6 +26175,93 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].account, "green-vip");
         assert_eq!(stored[0].secret(), caller_credential.secret());
+    }
+
+    #[test]
+    fn qq_refresh_sources_enforce_ownership_and_identity_before_network_access() {
+        let credential = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 123456,
+            "str_musicid": "123456",
+            "musickey": "Q_H_L_private",
+            "loginType": 2
+        }))
+        .expect("credential")
+        .normalize()
+        .expect("normalized credential");
+        let raw = serde_json::to_string(&credential).expect("serialize credential");
+        let caller = ProviderCredential::new(Platform::Qq, QQ_CREDENTIAL_KIND, raw, None)
+            .expect("caller credential");
+        let client_only = QqProvider::new(QqConfig::default()).expect("client provider");
+        assert_eq!(
+            qq_refresh_source(
+                &client_only,
+                "default",
+                Some(&caller),
+                CredentialMode::Client
+            )
+            .expect("client refresh source"),
+            credential
+        );
+        assert_eq!(
+            qq_refresh_source(
+                &client_only,
+                "default",
+                Some(&caller),
+                CredentialMode::Server
+            )
+            .expect_err("server mode must reject caller input")
+            .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            qq_refresh_source(&client_only, "default", None, CredentialMode::Client)
+                .expect_err("client mode requires caller input")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+
+        let store = Arc::new(RecordingCredentialStore::default());
+        let provider = QqProvider::new(QqConfig {
+            credential_store: Some(store),
+            ..QqConfig::default()
+        })
+        .expect("stored provider");
+        provider
+            .persist_qq_credential("personal", &credential)
+            .expect("stored QQ credential");
+        assert_eq!(
+            qq_refresh_source(&provider, "personal", Some(&caller), CredentialMode::Both)
+                .expect("matching both source"),
+            credential
+        );
+
+        let different = serde_json::from_value::<QqCredential>(json!({
+            "musicid": 654321,
+            "str_musicid": "654321",
+            "musickey": "Q_H_L_other",
+            "loginType": 2
+        }))
+        .expect("different credential")
+        .normalize()
+        .expect("normalized different credential");
+        let different = ProviderCredential::new(
+            Platform::Qq,
+            QQ_CREDENTIAL_KIND,
+            serde_json::to_string(&different).expect("serialize different credential"),
+            None,
+        )
+        .expect("different caller credential");
+        assert_eq!(
+            qq_refresh_source(
+                &provider,
+                "personal",
+                Some(&different),
+                CredentialMode::Both
+            )
+            .expect_err("identity mismatch")
+            .code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[tokio::test]

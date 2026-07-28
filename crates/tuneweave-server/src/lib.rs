@@ -311,6 +311,27 @@ impl CallerCredentialSet {
         })
     }
 
+    fn single_credential_for(
+        &self,
+        platform: Platform,
+    ) -> Result<Option<&ProviderCredential>, TuneWeaveError> {
+        if self.credentials.len() > 1 {
+            return Err(TuneWeaveError::invalid_request(
+                "this authentication operation accepts at most one caller credential",
+            )
+            .with_platform(platform));
+        }
+        if self.credentials.is_empty() {
+            return Ok(None);
+        }
+        self.credentials.get(&platform).map(Some).ok_or_else(|| {
+            TuneWeaveError::invalid_request(
+                "caller credential platform does not match the authentication platform",
+            )
+            .with_platform(platform)
+        })
+    }
+
     fn scoped_state(&self, state: &AppState) -> Result<AppState, TuneWeaveError> {
         if self.providers.is_empty() {
             return Ok(state.clone());
@@ -10620,21 +10641,38 @@ async fn auth_session_get(
 struct AuthSessionBody {
     platform: String,
     account: Option<String>,
+    credential_mode: Option<CredentialMode>,
 }
 
 async fn auth_session_refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AuthSessionBody>, JsonRejection>,
-) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
-    let account = account_alias(body.account.as_deref())?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let source_credential = caller_credentials.single_credential_for(platform)?;
+    let credential_mode = body
+        .credential_mode
+        .unwrap_or(if source_credential.is_some() {
+            CredentialMode::Client
+        } else {
+            CredentialMode::Server
+        });
+    let account = refresh_account_alias(
+        body.account.as_deref(),
+        source_credential.is_some(),
+        credential_mode,
+    )?;
     let provider = state.registry.require(platform)?;
-    let profile = provider.refresh_session(&account).await?;
-    Ok(Json(
-        ApiResponse::new(profile)
-            .with_platform(platform)
-            .with_account(account),
+    let result = provider
+        .refresh_session_with_ownership(&account, source_credential, credential_mode)
+        .await?;
+    let data = finalize_auth_result(platform, credential_mode, result)?;
+    Ok(auth_json_response(
+        auth_api_response(data, platform, &account, credential_mode),
+        credential_mode.returns_to_caller(),
     ))
 }
 
@@ -13385,6 +13423,34 @@ fn login_account_alias(
         ));
     }
     account_alias(value)
+}
+
+fn refresh_account_alias(
+    value: Option<&str>,
+    has_caller_credential: bool,
+    credential_mode: CredentialMode,
+) -> Result<String, TuneWeaveError> {
+    match (has_caller_credential, credential_mode) {
+        (false, CredentialMode::Client) => Err(TuneWeaveError::invalid_request(
+            "client credential refresh requires a caller credential",
+        )),
+        (false, CredentialMode::Server | CredentialMode::Both) => account_alias(value),
+        (true, CredentialMode::Server) => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot refresh a server-only session",
+        )),
+        (true, CredentialMode::Client) => login_account_alias(value, credential_mode),
+        (true, CredentialMode::Both) => {
+            let account = value
+                .map(str::trim)
+                .filter(|account| !account.is_empty())
+                .ok_or_else(|| {
+                    TuneWeaveError::invalid_request(
+                        "both credential mode requires a server account alias",
+                    )
+                })?;
+            account_alias(Some(account))
+        }
+    }
 }
 
 fn finalize_auth_result(
@@ -17786,6 +17852,21 @@ mod tests {
                 .extensions
                 .insert("refreshed".to_owned(), json!(true));
             Ok(profile)
+        }
+
+        async fn refresh_session_with_ownership(
+            &self,
+            account: &str,
+            source_credential: Option<&ProviderCredential>,
+            mode: CredentialMode,
+        ) -> Result<ProviderAuthResult> {
+            if source_credential.is_some_and(|credential| credential.platform != Platform::Netease)
+            {
+                return Err(TuneWeaveError::invalid_request(
+                    "test refresh credential platform mismatch",
+                ));
+            }
+            Ok(test_auth_result(self.refresh_session(account).await?, mode))
         }
 
         async fn upload_account_avatar(
@@ -28169,6 +28250,115 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["extensions"]["refreshed"], true);
         assert_eq!(json["meta"]["account"], "personal");
+    }
+
+    #[tokio::test]
+    async fn auth_session_refresh_rotates_caller_credentials_without_server_alias_fallback() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=old-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let body =
+            serde_json::to_vec(&json!({ "platform": "netease" })).expect("serialize refresh body");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/auth/session/refresh")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::from(body))
+                    .expect("build caller refresh request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["data"]["authenticated"], true);
+        assert_eq!(json["data"]["account"], "default");
+        assert!(json["meta"].get("account").is_none());
+        let refreshed = json["data"]["caller_credential"]["value"]
+            .as_str()
+            .expect("refreshed credential");
+        assert_eq!(
+            CallerCredential::parse(refreshed)
+                .expect("parse refreshed credential")
+                .secret(),
+            "MUSIC_U=test-login-session"
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("old-session"));
+        assert!(!String::from_utf8_lossy(&body).contains("test-login-session"));
+
+        let body = serde_json::to_vec(&json!({
+            "platform": "netease",
+            "account": "personal",
+            "credential_mode": "both"
+        }))
+        .expect("serialize both refresh body");
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/auth/session/refresh")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::from(body))
+                    .expect("build both refresh request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(json["meta"]["account"], "personal");
+        assert!(json["data"]["caller_credential"]["value"].is_string());
+
+        for body in [
+            json!({
+                "platform": "netease",
+                "credential_mode": "server"
+            }),
+            json!({
+                "platform": "netease",
+                "credential_mode": "both"
+            }),
+        ] {
+            let request_body = serde_json::to_vec(&body).expect("serialize invalid refresh body");
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/auth/session/refresh")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                        .body(Body::from(request_body))
+                        .expect("build invalid refresh request"),
+                )
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        let (status, json) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/session/refresh",
+            Some(json!({
+                "platform": "netease",
+                "credential_mode": "client"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

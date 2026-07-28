@@ -1730,6 +1730,23 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn refresh_session_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        if source_credential.is_some() || mode != CredentialMode::Server {
+            return Err(TuneWeaveError::unsupported(
+                self.platform(),
+                Capability::CallerManagedCredentials,
+            ));
+        }
+        Ok(ProviderAuthResult::server_managed(
+            self.refresh_session(account).await?,
+        ))
+    }
+
     async fn upload_account_avatar(
         &self,
         _request: &ImageUploadRequest,
