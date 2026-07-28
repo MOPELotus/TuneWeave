@@ -40,9 +40,9 @@ use tuneweave_core::{
     SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
     SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
     StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
+    TrackVersionList, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -76,6 +76,8 @@ const RELATED_PLAYLIST_METHOD: &str = "GetRelatedPlaylist";
 const RELATED_MV_METHOD: &str = "GetSongRelatedMv";
 const TRACK_VERSION_MODULE: &str = "music.musichallSong.OtherVersionServer";
 const TRACK_VERSION_METHOD: &str = "GetOtherVersionSongs";
+const TRACK_FAVORITE_COUNT_MODULE: &str = "music.musicasset.SongFavRead";
+const TRACK_FAVORITE_COUNT_METHOD: &str = "GetSongFansNumberById";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1210,6 +1212,16 @@ struct QqTrackVersionResponse {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     version_list: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqTrackFavoriteCountResponse {
+    #[serde(rename = "m_numbers")]
+    numbers: BTreeMap<String, u64>,
+    #[serde(rename = "m_show")]
+    show: BTreeMap<String, String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3396,6 +3408,7 @@ impl MusicProvider for QqProvider {
             Capability::RelatedPlaylists,
             Capability::RelatedVideos,
             Capability::TrackVersions,
+            Capability::TrackFavoriteCounts,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3894,7 +3907,7 @@ impl MusicProvider for QqProvider {
     }
 
     async fn track_versions(&self, id: &str, account: Option<&str>) -> Result<TrackVersionList> {
-        let identifier = parse_qq_track_version_identifier(id)?;
+        let identifier = parse_qq_strict_track_identifier(id)?;
         self.validate_public_account(account)?;
         let response = self
             .client
@@ -3904,6 +3917,55 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ track version request returned no response"))?;
         map_qq_track_versions(id.trim(), &identifier, response)
+    }
+
+    async fn track_favorite_counts(
+        &self,
+        ids: &[String],
+        account: Option<&str>,
+    ) -> Result<Vec<TrackFavoriteCount>> {
+        if ids.is_empty() || ids.len() > 100 {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ track favorite count batches must contain 1 to 100 tracks",
+            )
+            .with_platform(Platform::Qq));
+        }
+        let requested_ids = ids
+            .iter()
+            .map(|id| id.trim().to_owned())
+            .collect::<Vec<_>>();
+        let identifiers = requested_ids
+            .iter()
+            .map(|id| parse_qq_strict_track_identifier(id))
+            .collect::<Result<Vec<_>>>()?;
+        self.validate_public_account(account)?;
+
+        let mut resolved_mids = BTreeMap::new();
+        let mut numeric_ids = Vec::with_capacity(identifiers.len());
+        for identifier in &identifiers {
+            let numeric_id = match identifier {
+                QqTrackIdentifier::Numeric(id) => *id,
+                QqTrackIdentifier::Mid(mid) => {
+                    if let Some(id) = resolved_mids.get(mid) {
+                        *id
+                    } else {
+                        let track = self.track(mid, account).await?;
+                        let id = qq_track_numeric_id(&track)?;
+                        resolved_mids.insert(mid.clone(), id);
+                        id
+                    }
+                }
+            };
+            numeric_ids.push(numeric_id);
+        }
+        let response = self
+            .client
+            .request_android(&[qq_track_favorite_count_request(&numeric_ids)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ track favorite count request returned no response"))?;
+        map_qq_track_favorite_counts(&requested_ids, &numeric_ids, response)
     }
 
     async fn artist_tracks(
@@ -7814,7 +7876,7 @@ fn qq_track_versions_request(identifier: &QqTrackIdentifier) -> QqApiRequest {
     QqApiRequest::new(TRACK_VERSION_MODULE, TRACK_VERSION_METHOD, param)
 }
 
-fn parse_qq_track_version_identifier(value: &str) -> Result<QqTrackIdentifier> {
+fn parse_qq_strict_track_identifier(value: &str) -> Result<QqTrackIdentifier> {
     let identifier = parse_qq_track_identifier(value)?;
     match &identifier {
         QqTrackIdentifier::Numeric(0) => {
@@ -7877,6 +7939,88 @@ fn map_qq_track_versions(
             ("response".to_owned(), response_raw),
         ]),
     })
+}
+
+fn qq_track_favorite_count_request(numeric_ids: &[u64]) -> QqApiRequest {
+    QqApiRequest::new(
+        TRACK_FAVORITE_COUNT_MODULE,
+        TRACK_FAVORITE_COUNT_METHOD,
+        json!({"v_songId": numeric_ids}),
+    )
+}
+
+fn map_qq_track_favorite_counts(
+    requested_ids: &[String],
+    numeric_ids: &[u64],
+    response: QqApiResponse,
+) -> Result<Vec<TrackFavoriteCount>> {
+    if requested_ids.len() != numeric_ids.len() {
+        return Err(qq_data_error(
+            "QQ track favorite count request identities became misaligned",
+        ));
+    }
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqTrackFavoriteCountResponse>(response_data).map_err(|error| {
+            qq_data_error(format!(
+                "QQ track favorite count response is malformed: {error}"
+            ))
+        })?;
+    let expected_keys = numeric_ids
+        .iter()
+        .map(u64::to_string)
+        .collect::<BTreeSet<_>>();
+    let actual_keys = parsed.numbers.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err(qq_data_error(
+            "QQ track favorite count response did not match the requested tracks",
+        ));
+    }
+    if parsed.show.keys().any(|key| !expected_keys.contains(key)) {
+        return Err(qq_data_error(
+            "QQ track favorite count response contains an unexpected display entry",
+        ));
+    }
+    for display in parsed.show.values() {
+        if display.len() > 512 || display.chars().any(char::is_control) {
+            return Err(qq_data_error(
+                "QQ track favorite count response contains an invalid display value",
+            ));
+        }
+    }
+
+    let response_metadata = qq_response_metadata(response_raw);
+    let data_extra = json!(parsed.extra);
+    requested_ids
+        .iter()
+        .zip(numeric_ids)
+        .enumerate()
+        .map(|(index, (requested_id, numeric_id))| {
+            let key = numeric_id.to_string();
+            let count = parsed.numbers.get(&key).copied().ok_or_else(|| {
+                qq_data_error("QQ track favorite count response lost a validated track")
+            })?;
+            let display_text = parsed
+                .show
+                .get(&key)
+                .filter(|display| !display.trim().is_empty())
+                .cloned();
+            Ok(TrackFavoriteCount {
+                track_ref: qq_ref(requested_id, "favorite count track")?,
+                count,
+                display_text,
+                extensions: Extensions::from([
+                    ("numeric_id".to_owned(), json!(numeric_id)),
+                    ("input_index".to_owned(), json!(index)),
+                    ("data_extra".to_owned(), data_extra.clone()),
+                    ("response_metadata".to_owned(), response_metadata.clone()),
+                ]),
+            })
+        })
+        .collect()
 }
 
 fn validate_qq_song_tag(tag: &QqRecommendationNewTrackTag, context: &str) -> Result<()> {
@@ -26728,6 +26872,101 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn track_favorite_count_request_and_mapping_preserve_order_duplicates_and_display_text() {
+        let request = qq_track_favorite_count_request(&[97_773, 100, 97_773]);
+        assert_eq!(request.module, TRACK_FAVORITE_COUNT_MODULE);
+        assert_eq!(request.method, TRACK_FAVORITE_COUNT_METHOD);
+        assert_eq!(request.param, json!({"v_songId": [97773, 100, 97773]}));
+
+        let data = json!({
+            "m_numbers": {"97773": 12_345_678, "100": 98_765},
+            "m_show": {"97773": "1234.5万", "100": "9.8万"},
+            "futureResponseField": true
+        });
+        let counts = map_qq_track_favorite_counts(
+            &[
+                "97773".to_owned(),
+                "003w2xz20QlUZt".to_owned(),
+                "97773".to_owned(),
+            ],
+            &[97_773, 100, 97_773],
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data, "futureEnvelopeField": true}),
+            },
+        )
+        .expect("map QQ track favorite counts");
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts[0].track_ref.to_string(), "qq:97773");
+        assert_eq!(counts[1].track_ref.to_string(), "qq:003w2xz20QlUZt");
+        assert_eq!(counts[2].track_ref.to_string(), "qq:97773");
+        assert_eq!(counts[0].count, 12_345_678);
+        assert_eq!(counts[0].display_text.as_deref(), Some("1234.5万"));
+        assert_eq!(counts[0].extensions["input_index"], 0);
+        assert_eq!(counts[1].extensions["input_index"], 1);
+        assert_eq!(counts[2].extensions["input_index"], 2);
+        assert_eq!(
+            counts[0].extensions["data_extra"]["futureResponseField"],
+            true
+        );
+        assert_eq!(
+            counts[0].extensions["response_metadata"]["futureEnvelopeField"],
+            true
+        );
+        assert!(counts[0].extensions["response_metadata"]["data"].is_null());
+    }
+
+    #[test]
+    fn track_favorite_count_mapping_rejects_missing_extra_and_malformed_entries() {
+        let requested = ["97773".to_owned()];
+        for data in [
+            json!({"m_numbers": {}, "m_show": {}}),
+            json!({"m_numbers": {"97773": 1, "100": 2}, "m_show": {}}),
+            json!({"m_numbers": {"97773": 1}, "m_show": {"100": "2"}}),
+            json!({"m_numbers": {"97773": 1}, "m_show": {"97773": "bad\nvalue"}}),
+            json!({"m_numbers": {"97773": -1}, "m_show": {}}),
+        ] {
+            let error = map_qq_track_favorite_counts(&requested, &[97_773], response(data))
+                .expect_err("invalid QQ track favorite count response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+        let error = map_qq_track_favorite_counts(
+            &requested,
+            &[],
+            response(json!({"m_numbers": {}, "m_show": {}})),
+        )
+        .expect_err("misaligned QQ track favorite count identities");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[tokio::test]
+    async fn track_favorite_counts_validate_batch_and_identity_before_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::TrackFavoriteCounts)
+        );
+        for ids in [Vec::new(), vec!["97773".to_owned(); 101]] {
+            let error = provider
+                .track_favorite_counts(&ids, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ track favorite count batch");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let error = provider
+            .track_favorite_counts(&["invalid-mid!".to_owned()], Some("missing-account"))
+            .await
+            .expect_err("invalid QQ track favorite count identity");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let missing = provider
+            .track_favorite_counts(&["97773".to_owned()], Some("missing-account"))
+            .await
+            .expect_err("missing QQ track favorite count account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -27998,6 +28237,34 @@ mod tests {
                         .is_some()
             }));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_track_favorite_counts_resolve_mid_and_preserve_duplicates() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let ids = [
+            "97773".to_owned(),
+            "0039MnYb0qxYhV".to_owned(),
+            "97773".to_owned(),
+        ];
+        let counts = provider
+            .track_favorite_counts(&ids, None)
+            .await
+            .expect("live QQ track favorite counts");
+        assert_eq!(counts.len(), ids.len());
+        assert_eq!(counts[0].track_ref.id(), ids[0]);
+        assert_eq!(counts[1].track_ref.id(), ids[1]);
+        assert_eq!(counts[2].track_ref.id(), ids[2]);
+        assert!(counts.iter().all(|item| item.count > 0));
+        assert_eq!(counts[0].count, counts[1].count);
+        assert_eq!(counts[0].count, counts[2].count);
+        assert_eq!(counts[0].display_text, counts[1].display_text);
+        assert_eq!(counts[0].display_text, counts[2].display_text);
     }
 
     #[tokio::test]

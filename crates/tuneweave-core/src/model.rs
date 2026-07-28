@@ -2843,6 +2843,14 @@ pub struct TrackVersionList {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackFavoriteCount {
+    pub track_ref: ResourceRef,
+    pub count: u64,
+    pub display_text: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -6060,6 +6068,22 @@ mod tests {
         assert_eq!(value["tracks"][0]["ref"], "qq:001version00001");
         assert_eq!(value["tracks"][1]["ref"], "qq:001version00002");
         assert_eq!(value["extensions"]["result_count"], 2);
+    }
+
+    #[test]
+    fn track_favorite_count_keeps_numeric_and_display_values_distinct() {
+        let count = TrackFavoriteCount {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid favorite count track reference"),
+            count: 12_345_678,
+            display_text: Some("1234.5万".to_owned()),
+            extensions: Extensions::from([("numeric_id".to_owned(), serde_json::json!(97773))]),
+        };
+        let value = serde_json::to_value(count).expect("serialize track favorite count");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["count"], 12_345_678);
+        assert_eq!(value["display_text"], "1234.5万");
+        assert_eq!(value["extensions"]["numeric_id"], 97_773);
     }
 
     #[test]

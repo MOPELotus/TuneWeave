@@ -51,9 +51,10 @@ use crate::{
     SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
     StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
     TrackAvailability, TrackAvailabilityRequest, TrackDetailBatchRequest, TrackEntitlement,
-    TrackLabelList, TrackVersionList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
+    TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserProfile,
+    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
+    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -772,6 +773,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackVersions,
+        ))
+    }
+
+    async fn track_favorite_counts(
+        &self,
+        _ids: &[String],
+        _account: Option<&str>,
+    ) -> Result<Vec<TrackFavoriteCount>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::TrackFavoriteCounts,
         ))
     }
 

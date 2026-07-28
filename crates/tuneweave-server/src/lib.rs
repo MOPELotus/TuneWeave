@@ -82,17 +82,17 @@ use tuneweave_core::{
     SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
     SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackIdentifierKind,
-    TrackLabelList, TrackVersionList, TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest,
-    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
-    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
-    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
-    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
-    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, User, UserProfile,
-    UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackFavoriteCount,
+    TrackIdentifierKind, TrackLabelList, TrackVersionList, TuneWeaveError, UniPlaylist,
+    UniPlaylistCreateRequest, UniPlaylistImportRequest, UniPlaylistImportResult,
+    UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
+    UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
+    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
+    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore,
+    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -282,7 +282,15 @@ pub fn build_router(state: AppState) -> Router {
             get(track_streams_get).post(track_streams_post),
         )
         .route("/tracks", get(tracks_get).post(tracks_post))
+        .route(
+            "/tracks/favorite-counts",
+            get(track_favorite_counts_get).post(track_favorite_counts_post),
+        )
         .route("/tracks/{reference}", get(track))
+        .route(
+            "/tracks/{reference}/favorite-count",
+            get(track_favorite_count),
+        )
         .route("/tracks/{reference}/similar", get(similar_tracks))
         .route("/tracks/{reference}/labels", get(track_labels))
         .route(
@@ -2120,6 +2128,30 @@ struct TrackBatchItemBody {
     song_type: Option<i64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackFavoriteCountParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackFavoriteCountBatchParams {
+    refs: Option<String>,
+    ids: Option<String>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackFavoriteCountBatchBody {
+    refs: Option<StreamReferenceInput>,
+    ids: Option<PlaylistReferenceInput>,
+    platform: Option<String>,
+    account: Option<String>,
+}
+
 async fn tracks_get(
     State(state): State<AppState>,
     params: Result<Query<TrackBatchParams>, QueryRejection>,
@@ -2196,6 +2228,129 @@ async fn tracks_response(
         })
         .await?;
     let mut response = ApiResponse::new(tracks).with_platform(selected_platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_favorite_count(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackFavoriteCountParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<TrackFavoriteCount>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let mut counts = provider
+        .track_favorite_counts(&[reference.id().to_owned()], account.as_deref())
+        .await?;
+    if counts.len() != 1 || counts[0].track_ref != reference {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "track favorite count provider returned a mismatched single result",
+        )
+        .with_platform(platform)
+        .into());
+    }
+    let count = counts.pop().expect("single favorite count was validated");
+    let mut response = ApiResponse::new(count).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_favorite_counts_get(
+    State(state): State<AppState>,
+    params: Result<Query<TrackFavoriteCountBatchParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<TrackFavoriteCount>>>, ApiError> {
+    let params = query_params(params)?;
+    track_favorite_counts_response(
+        &state,
+        params.refs.map(|value| vec![value]),
+        params.ids.map(|value| vec![value]),
+        params.platform.as_deref(),
+        params.account,
+    )
+    .await
+}
+
+async fn track_favorite_counts_post(
+    State(state): State<AppState>,
+    body: Result<Json<TrackFavoriteCountBatchBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<Vec<TrackFavoriteCount>>>, ApiError> {
+    let body = json_body(body)?;
+    track_favorite_counts_response(
+        &state,
+        body.refs.map(StreamReferenceInput::into_values),
+        body.ids.map(|ids| {
+            ids.into_values()
+                .into_iter()
+                .map(PlaylistReferenceValue::into_string)
+                .collect()
+        }),
+        body.platform.as_deref(),
+        body.account,
+    )
+    .await
+}
+
+async fn track_favorite_counts_response(
+    state: &AppState,
+    refs: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
+    platform: Option<&str>,
+    account: Option<String>,
+) -> Result<Json<ApiResponse<Vec<TrackFavoriteCount>>>, ApiError> {
+    let references = parse_track_batch_references(refs, ids, platform, state.default_platform)?;
+    if references.is_empty() || references.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "track favorite count batches must contain 1 to 100 references",
+        )
+        .into());
+    }
+    let selected_platform = references[0].platform();
+    if references
+        .iter()
+        .any(|reference| reference.platform() != selected_platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "track favorite count batches must use one platform",
+        )
+        .with_details(json!({
+            "platforms": references
+                .iter()
+                .map(ResourceRef::platform)
+                .collect::<BTreeSet<_>>()
+        }))
+        .into());
+    }
+    let account = optional_trimmed(account);
+    let provider = state.registry.require(selected_platform)?;
+    let ids = references
+        .iter()
+        .map(|reference| reference.id().to_owned())
+        .collect::<Vec<_>>();
+    let counts = provider
+        .track_favorite_counts(&ids, account.as_deref())
+        .await?;
+    if counts.len() != references.len()
+        || counts
+            .iter()
+            .zip(&references)
+            .any(|(count, reference)| &count.track_ref != reference)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "track favorite count provider returned mismatched batch results",
+        )
+        .with_platform(selected_platform)
+        .into());
+    }
+    let mut response = ApiResponse::new(counts).with_platform(selected_platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -17164,6 +17319,7 @@ mod tests {
                 Capability::RelatedPlaylists,
                 Capability::RelatedVideos,
                 Capability::TrackVersions,
+                Capability::TrackFavoriteCounts,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17757,6 +17913,28 @@ mod tests {
                     ("requested_identifier_kind".to_owned(), json!("numeric_id")),
                 ]),
             })
+        }
+
+        async fn track_favorite_counts(
+            &self,
+            ids: &[String],
+            account: Option<&str>,
+        ) -> Result<Vec<TrackFavoriteCount>> {
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    Ok(TrackFavoriteCount {
+                        track_ref: ResourceRef::new(self.platform(), id)
+                            .expect("valid QQ favorite count track reference"),
+                        count: 12_345_678,
+                        display_text: Some("1234.5万".to_owned()),
+                        extensions: Extensions::from([
+                            ("input_index".to_owned(), json!(index)),
+                            ("account".to_owned(), json!(account)),
+                        ]),
+                    })
+                })
+                .collect()
         }
 
         async fn artist_tracks(
@@ -22102,6 +22280,90 @@ mod tests {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_track_favorite_counts_support_single_and_ordered_duplicate_batches() {
+        let app = test_app_with_import_providers();
+        let (status, single) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/favorite-count?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{single}");
+        assert_eq!(single["data"]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(single["data"]["count"], 12_345_678);
+        assert_eq!(single["data"]["display_text"], "1234.5万");
+        assert_eq!(single["meta"]["account"], "green-vip");
+
+        let (status, get_batch) = json_response_from(
+            app.clone(),
+            "/v1/tracks/favorite-counts?refs=qq:97773,qq:0039MnYb0qxYhV,qq:97773",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{get_batch}");
+        let get_items = get_batch["data"].as_array().expect("GET favorite counts");
+        assert_eq!(get_items.len(), 3);
+        assert_eq!(get_items[0]["track_ref"], "qq:97773");
+        assert_eq!(get_items[1]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(get_items[2]["track_ref"], "qq:97773");
+        assert_eq!(get_items[0]["extensions"]["input_index"], 0);
+        assert_eq!(get_items[2]["extensions"]["input_index"], 2);
+
+        let (status, post_batch) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/tracks/favorite-counts",
+            Some(json!({
+                "ids": [97773, "0039MnYb0qxYhV", 97773],
+                "platform": "qq",
+                "account": "green-vip"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{post_batch}");
+        assert_eq!(post_batch["data"][0]["track_ref"], "qq:97773");
+        assert_eq!(post_batch["data"][1]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(post_batch["data"][2]["track_ref"], "qq:97773");
+        assert_eq!(post_batch["meta"]["platform"], "qq");
+        assert_eq!(post_batch["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn track_favorite_count_routes_reject_ambiguous_mixed_and_unknown_inputs() {
+        let app = test_app_with_import_providers();
+        for path in [
+            "/v1/tracks/favorite-counts",
+            "/v1/tracks/favorite-counts?refs=qq:1&ids=1",
+            "/v1/tracks/favorite-counts?refs=qq:1,netease:2",
+            "/v1/tracks/favorite-counts?refs=qq:1&platform=qq",
+            "/v1/tracks/favorite-counts?ids=&platform=qq",
+            "/v1/tracks/qq:97773/favorite-count?unknown=true",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+
+        for body in [
+            json!({}),
+            json!({"refs": ["qq:1"], "ids": [1]}),
+            json!({"refs": ["qq:1", "netease:2"]}),
+            json!({"refs": ["qq:1"], "platform": "qq"}),
+            json!({"ids": [], "platform": "qq"}),
+            json!({"ids": vec![1; 101], "platform": "qq"}),
+            json!({"ids": [1], "platform": "qq", "unknown": true}),
+        ] {
+            let (status, response) = json_request_from(
+                app.clone(),
+                Method::POST,
+                "/v1/tracks/favorite-counts",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(response["error"]["code"], "invalid_request");
         }
     }
 
