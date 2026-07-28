@@ -3110,21 +3110,22 @@ async fn digital_album(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<DigitalAlbum>>, ApiError> {
     let reference = parse_reference(reference)?;
-    let account = params
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|account| !account.is_empty());
+    let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let album = provider.digital_album(reference.id(), account).await?;
-    let mut response = ApiResponse::new(album).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let album = access
+        .provider
+        .digital_album(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(album, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3142,6 +3143,7 @@ struct DigitalAlbumListParams {
 async fn digital_albums(
     State(state): State<AppState>,
     Query(params): Query<DigitalAlbumListParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<DigitalAlbum>>>, ApiError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -3150,19 +3152,21 @@ async fn digital_albums(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = DigitalAlbumListRequest::new(limit, offset);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     request.area = optional_trimmed(params.area);
     request.kind = optional_trimmed(params.kind);
     request.catalog = optional_trimmed(params.catalog);
-    let page = provider.digital_albums(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let page = access.provider.digital_albums(&request).await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -3181,6 +3185,7 @@ struct DigitalAlbumChartParams {
 async fn digital_album_chart(
     State(state): State<AppState>,
     Query(params): Query<DigitalAlbumChartParams>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<DigitalAlbumChartEntry>>>, ApiError> {
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 20)?;
     if !(1..=100).contains(&limit) {
@@ -3197,23 +3202,26 @@ async fn digital_album_chart(
     }
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .digital_album_chart(&DigitalAlbumChartRequest {
             limit,
             offset,
-            account: account.clone(),
+            account: access.provider_account.clone(),
             period,
             kind,
             year,
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -16795,8 +16803,12 @@ mod tests {
             })
         }
 
-        async fn digital_album(&self, id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
-            Ok(sample_digital_album(id))
+        async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
+            let mut album = sample_digital_album(id);
+            album
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(album)
         }
 
         async fn digital_albums(
@@ -16815,6 +16827,9 @@ mod tests {
                     .extensions
                     .insert("catalog".to_owned(), json!(catalog));
             }
+            album
+                .extensions
+                .insert("account".to_owned(), json!(request.account));
             Ok(Page {
                 items: vec![album],
                 pagination: PageMeta {
@@ -16835,6 +16850,7 @@ mod tests {
             let mut extensions = tuneweave_core::Extensions::new();
             extensions.insert("period".to_owned(), json!(request.period));
             extensions.insert("kind".to_owned(), json!(request.kind));
+            extensions.insert("account".to_owned(), json!(request.account));
             if let Some(year) = request.year {
                 extensions.insert("year".to_owned(), json!(year));
             }
@@ -27061,6 +27077,57 @@ mod tests {
         assert_eq!(chart["meta"]["pagination"]["offset"], 3);
         assert_eq!(chart["meta"]["pagination"]["total"], 20);
         assert_eq!(chart["meta"]["account"], "vip");
+    }
+
+    #[tokio::test]
+    async fn digital_albums_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-digital-album-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, account_pointer) in [
+            (
+                "/v1/digital-albums/netease:120605500",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/digital-albums?platform=netease&catalog=latest",
+                "/data/0/extensions/account",
+            ),
+            (
+                "/v1/charts/digital-albums?platform=netease&period=year&year=2025",
+                "/data/0/extensions/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/digital-albums/netease:120605500?account=vip",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
