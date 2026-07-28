@@ -9,7 +9,7 @@ use tuneweave_core::{
     ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
     SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
     VideoDetailRequest, VideoPart, VideoPartListRequest, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder,
+    VideoSearchFilters, VideoSearchOrder, VideoSubtitle, VideoSubtitleList, VideoSubtitleRequest,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -19,9 +19,9 @@ use crate::client::{
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
     BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome, BilibiliQrPoll,
     BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist,
-    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliVideoPart,
-    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
-    BilibiliVideoView,
+    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliSubtitleCatalog,
+    BilibiliVideoPart, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
+    BilibiliVideoSearchOrder, BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -96,6 +96,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::PlaylistRead,
             Capability::VideoDetail,
             Capability::VideoParts,
+            Capability::VideoSubtitles,
         ])
     }
 
@@ -263,6 +264,43 @@ impl MusicProvider for BilibiliProvider {
             .video_view(&identity, credential.as_ref())
             .await?;
         map_bilibili_video_parts(view.aid, view.bvid, view.parts, request)
+    }
+
+    async fn video_subtitles(
+        &self,
+        id: &str,
+        request: &VideoSubtitleRequest,
+    ) -> Result<VideoSubtitleList> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive subtitles require kind=video",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive subtitles require an AID or BVID",
+            ));
+        }
+        let cid = parse_bilibili_part_id(&request.part_id)?;
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let view = self
+            .client
+            .video_view(&identity, credential.as_ref())
+            .await?;
+        if !view.parts.iter().any(|part| part.cid == cid) {
+            return Err(bilibili_invalid_request(
+                "Bilibili subtitle part does not belong to the requested video",
+            ));
+        }
+        let catalog = self
+            .client
+            .video_subtitles(view.aid, &view.bvid, cid, credential.as_ref())
+            .await?;
+        map_bilibili_subtitle_catalog(catalog)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1608,6 +1646,79 @@ fn map_bilibili_video_parts(
                 ("video_ref".to_owned(), json!(video_ref)),
             ]),
         },
+    })
+}
+
+fn parse_bilibili_part_id(value: &str) -> Result<u64> {
+    let value = value.trim();
+    let Some(value) = value.strip_prefix("cid:") else {
+        return Err(bilibili_invalid_request(
+            "Bilibili subtitle part must use the cid:<id> identity",
+        ));
+    };
+    if value.is_empty()
+        || value.len() > 20
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(bilibili_invalid_request(
+            "Bilibili subtitle CID must be a positive integer",
+        ));
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|cid| *cid > 0)
+        .ok_or_else(|| bilibili_invalid_request("Bilibili subtitle CID must be a positive integer"))
+}
+
+fn map_bilibili_subtitle_catalog(catalog: BilibiliSubtitleCatalog) -> Result<VideoSubtitleList> {
+    let video_ref = BilibiliVideoIdentity::Bvid(catalog.bvid.clone()).resource_ref()?;
+    let part_id = format!("cid:{}", catalog.cid);
+    let part_ref = ResourceRef::new(Platform::Bilibili, &part_id)
+        .map_err(|_| bilibili_data_error("Bilibili subtitle part identity was invalid"))?;
+    let mut items = Vec::with_capacity(catalog.subtitles.len());
+    for subtitle in catalog.subtitles {
+        let id = format!("subtitle:{}", subtitle.id_string);
+        let resource_ref = ResourceRef::new(Platform::Bilibili, &id)
+            .map_err(|_| bilibili_data_error("Bilibili subtitle identity was invalid"))?;
+        items.push(VideoSubtitle {
+            resource_ref,
+            video_ref: video_ref.clone(),
+            part_ref: part_ref.clone(),
+            platform: Platform::Bilibili,
+            id,
+            language: subtitle.language,
+            label: subtitle.label,
+            format: "bilibili_json".to_owned(),
+            locked: Some(subtitle.locked),
+            extensions: Extensions::from([
+                ("numeric_id".to_owned(), json!(subtitle.id)),
+                ("id_string".to_owned(), json!(subtitle.id_string)),
+                ("subtitle_type".to_owned(), json!(subtitle.subtitle_type)),
+                ("ai_type".to_owned(), json!(subtitle.ai_type)),
+                ("ai_status".to_owned(), json!(subtitle.ai_status)),
+                ("content_available".to_owned(), json!(true)),
+            ]),
+        });
+    }
+    Ok(VideoSubtitleList {
+        video_ref: video_ref.clone(),
+        part_ref: part_ref.clone(),
+        platform: Platform::Bilibili,
+        requires_login: catalog.requires_login,
+        can_submit: Some(catalog.can_submit),
+        default_language: catalog.default_language,
+        default_language_label: catalog.default_language_label,
+        items,
+        extensions: Extensions::from([
+            ("aid".to_owned(), json!(catalog.aid)),
+            ("bvid".to_owned(), json!(catalog.bvid)),
+            ("cid".to_owned(), json!(catalog.cid)),
+            ("video_ref".to_owned(), json!(video_ref)),
+            ("part_ref".to_owned(), json!(part_ref)),
+            ("catalog_source".to_owned(), json!("player_wbi_v2")),
+        ]),
     })
 }
 
@@ -3099,6 +3210,43 @@ mod tests {
             .expect_err("missing part account");
         assert_eq!(missing_part_account.code, ErrorCode::AuthenticationRequired);
         assert!(provider.capabilities().contains(&Capability::VideoParts));
+
+        let wrong_subtitle_kind = provider
+            .video_subtitles(
+                "bvid:BV117411r7R1",
+                &VideoSubtitleRequest::new(VideoResourceKind::Mv, "cid:146044693"),
+            )
+            .await
+            .expect_err("subtitle MV kind");
+        assert_eq!(wrong_subtitle_kind.code, ErrorCode::InvalidRequest);
+        let invalid_subtitle_part = provider
+            .video_subtitles(
+                "bvid:BV117411r7R1",
+                &VideoSubtitleRequest::new(VideoResourceKind::Video, "page:1"),
+            )
+            .await
+            .expect_err("invalid subtitle part");
+        assert_eq!(invalid_subtitle_part.code, ErrorCode::InvalidRequest);
+        let missing_subtitle_account = provider
+            .video_subtitles(
+                "bvid:BV117411r7R1",
+                &VideoSubtitleRequest {
+                    kind: VideoResourceKind::Video,
+                    part_id: "cid:146044693".to_owned(),
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing subtitle account");
+        assert_eq!(
+            missing_subtitle_account.code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::VideoSubtitles)
+        );
     }
 
     #[test]
@@ -3161,6 +3309,52 @@ mod tests {
         assert_eq!(
             page.pagination.extensions["video_ref"],
             "bilibili:bvid:BV17x411w7KC"
+        );
+    }
+
+    #[test]
+    fn subtitle_catalog_uses_stable_refs_and_keeps_platform_codes_typed() {
+        let catalog = map_bilibili_subtitle_catalog(BilibiliSubtitleCatalog {
+            aid: 60_977_932,
+            bvid: "BV1Jt411P77c".to_owned(),
+            cid: 106_101_299,
+            requires_login: false,
+            can_submit: true,
+            default_language: Some("zh-CN".to_owned()),
+            default_language_label: Some("中文（中国）".to_owned()),
+            subtitles: vec![crate::client::BilibiliSubtitle {
+                id: 13_643_112_644_608_002,
+                id_string: "13643112644608002".to_owned(),
+                language: "zh-Hans".to_owned(),
+                label: "中文（简体）".to_owned(),
+                locked: true,
+                resource_url: url::Url::parse(
+                    "https://aisubtitle.hdslb.com/bfs/subtitle/example.json?auth_key=redacted",
+                )
+                .expect("subtitle URL"),
+                subtitle_type: 0,
+                ai_type: 1,
+                ai_status: 2,
+            }],
+        })
+        .expect("mapped subtitle catalog");
+
+        assert_eq!(catalog.video_ref.to_string(), "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(catalog.part_ref.to_string(), "bilibili:cid:106101299");
+        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(
+            catalog.items[0].resource_ref.to_string(),
+            "bilibili:subtitle:13643112644608002"
+        );
+        assert_eq!(catalog.items[0].language, "zh-Hans");
+        assert_eq!(catalog.items[0].format, "bilibili_json");
+        assert_eq!(catalog.items[0].extensions["ai_type"], 1);
+        assert_eq!(catalog.items[0].extensions["ai_status"], 2);
+        assert_eq!(catalog.items[0].extensions["content_available"], true);
+        assert!(
+            !serde_json::to_string(&catalog)
+                .expect("serialize subtitle catalog")
+                .contains("auth_key")
         );
     }
 

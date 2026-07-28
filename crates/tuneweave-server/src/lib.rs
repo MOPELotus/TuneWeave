@@ -95,8 +95,8 @@ use tuneweave_core::{
     Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
     VideoPartListRequest, VideoRecommendationKind, VideoRecommendationRequest,
     VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest,
+    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleList,
+    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -572,6 +572,7 @@ pub fn build_router(state: AppState) -> Router {
             get(video_streams_get).post(video_streams_post),
         )
         .route("/videos/{reference}/parts", get(video_parts))
+        .route("/videos/{reference}/subtitles", get(video_subtitles))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
@@ -8921,6 +8922,15 @@ struct VideoPartParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoSubtitleParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    part: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoDetailBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -9053,6 +9063,42 @@ async fn video_parts(
         .response(page.items, platform)
         .with_pagination(page.pagination);
     Ok(Json(response))
+}
+
+async fn video_subtitles(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoSubtitleParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoSubtitleList>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let part_id = normalize_video_part_reference(
+        params
+            .part
+            .ok_or_else(|| TuneWeaveError::invalid_request("part is required"))?,
+        reference.platform(),
+    )?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoSubtitleRequest::new(kind, part_id);
+    request.account.clone_from(&access.provider_account);
+    let subtitles = access
+        .provider
+        .video_subtitles(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(subtitles, platform)))
 }
 
 async fn video_details_get(
@@ -14403,6 +14449,35 @@ fn parse_reference(reference: String) -> Result<ResourceRef, TuneWeaveError> {
     })
 }
 
+fn normalize_video_part_reference(
+    part: String,
+    expected_platform: Platform,
+) -> Result<String, TuneWeaveError> {
+    let part = part.trim();
+    if part.is_empty() || part.len() > 256 || part.chars().any(char::is_control) {
+        return Err(TuneWeaveError::invalid_request(
+            "part must contain a valid resource identity",
+        ));
+    }
+    let has_platform_prefix = part
+        .split_once(':')
+        .is_some_and(|(prefix, _)| prefix.parse::<Platform>().is_ok());
+    if !has_platform_prefix {
+        return Ok(part.to_owned());
+    }
+    let reference = parse_reference(part.to_owned())?;
+    if reference.platform() != expected_platform {
+        return Err(
+            TuneWeaveError::invalid_request("part platform must match the parent video")
+                .with_details(json!({
+                    "video_platform": expected_platform,
+                    "part_platform": reference.platform(),
+                })),
+        );
+    }
+    Ok(reference.id().to_owned())
+}
+
 fn parse_comment_target(kind: &str, reference: String) -> Result<CommentTarget, TuneWeaveError> {
     Ok(CommentTarget::new(
         parse_reference(reference)?,
@@ -15621,6 +15696,7 @@ mod tests {
                 Capability::VideoTaxonomy,
                 Capability::VideoDetail,
                 Capability::VideoParts,
+                Capability::VideoSubtitles,
                 Capability::VideoStats,
                 Capability::VideoStream,
                 Capability::VideoSubscriptionWrite,
@@ -17465,6 +17541,44 @@ mod tests {
                     has_more,
                     extensions: Extensions::new(),
                 },
+            })
+        }
+
+        async fn video_subtitles(
+            &self,
+            id: &str,
+            request: &VideoSubtitleRequest,
+        ) -> Result<VideoSubtitleList> {
+            let video_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid test video reference");
+            let part_ref = ResourceRef::new(Platform::Netease, &request.part_id)
+                .expect("valid test video part reference");
+            let subtitle_id = format!("subtitle:{id}:zh-CN");
+            Ok(VideoSubtitleList {
+                video_ref: video_ref.clone(),
+                part_ref: part_ref.clone(),
+                platform: Platform::Netease,
+                requires_login: false,
+                can_submit: Some(true),
+                default_language: Some("zh-CN".to_owned()),
+                default_language_label: Some("简体中文".to_owned()),
+                items: vec![tuneweave_core::VideoSubtitle {
+                    resource_ref: ResourceRef::new(Platform::Netease, &subtitle_id)
+                        .expect("valid test subtitle reference"),
+                    video_ref,
+                    part_ref,
+                    platform: Platform::Netease,
+                    id: subtitle_id,
+                    language: "zh-CN".to_owned(),
+                    label: "简体中文".to_owned(),
+                    format: "json".to_owned(),
+                    locked: Some(false),
+                    extensions: Extensions::from([
+                        ("kind".to_owned(), json!(request.kind)),
+                        ("account".to_owned(), json!(request.account)),
+                    ]),
+                }],
+                extensions: Extensions::new(),
             })
         }
 
@@ -26081,6 +26195,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_subtitles_require_a_matching_part_and_forward_account() {
+        for part in ["netease:segment:1", "segment:1"] {
+            let path = format!(
+                "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678/subtitles?part={part}&type=video&account=collector"
+            );
+            let (status, response) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"]["video_ref"],
+                "netease:D1C2B3A40987654321ABCDEF12345678"
+            );
+            assert_eq!(response["data"]["part_ref"], "netease:segment:1");
+            assert_eq!(response["data"]["items"][0]["language"], "zh-CN");
+            assert_eq!(response["data"]["items"][0]["format"], "json");
+            assert_eq!(
+                response["data"]["items"][0]["extensions"]["account"],
+                "collector"
+            );
+            assert_eq!(response["data"]["items"][0]["extensions"]["kind"], "video");
+            assert_eq!(response["meta"]["platform"], "netease");
+            assert_eq!(response["meta"]["account"], "collector");
+        }
+    }
+
+    #[tokio::test]
+    async fn video_subtitles_reject_missing_foreign_and_unknown_inputs() {
+        for path in [
+            "/v1/videos/netease:opaque/subtitles",
+            "/v1/videos/netease:opaque/subtitles?part=",
+            "/v1/videos/netease:opaque/subtitles?part=qq:cid:1",
+            "/v1/videos/netease:opaque/subtitles?part=segment:1&kind=unknown",
+            "/v1/videos/netease:opaque/subtitles?part=segment:1&unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
     async fn live_bilibili_video_parts_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -26111,6 +26265,28 @@ mod tests {
         assert_eq!(response["meta"]["pagination"]["total"], 10);
         assert_eq!(response["meta"]["pagination"]["next_offset"], 7);
         assert_eq!(response["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili subtitle access"]
+    async fn live_bilibili_subtitle_catalog_preserves_login_required_state() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV1Jt411P77c/subtitles?part=bilibili:cid:106101299",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["part_ref"], "bilibili:cid:106101299");
+        assert_eq!(response["data"]["requires_login"], true);
+        assert_eq!(response["data"]["items"], json!([]));
     }
 
     #[tokio::test]

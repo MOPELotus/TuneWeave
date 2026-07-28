@@ -3366,6 +3366,52 @@ pub struct VideoPart {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitleRequest {
+    pub kind: VideoResourceKind,
+    pub part_id: String,
+    pub account: Option<String>,
+}
+
+impl VideoSubtitleRequest {
+    #[must_use]
+    pub fn new(kind: VideoResourceKind, part_id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            part_id: part_id.into(),
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitle {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub video_ref: ResourceRef,
+    pub part_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    pub language: String,
+    pub label: String,
+    pub format: String,
+    pub locked: Option<bool>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoSubtitleList {
+    pub video_ref: ResourceRef,
+    pub part_ref: ResourceRef,
+    pub platform: Platform,
+    pub requires_login: bool,
+    pub can_submit: Option<bool>,
+    pub default_language: Option<String>,
+    pub default_language_label: Option<String>,
+    pub items: Vec<VideoSubtitle>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
@@ -6537,10 +6583,44 @@ mod tests {
             height: Some(1080),
             extensions: Extensions::new(),
         };
-        let value = serde_json::to_value(part).expect("serialize video part");
+        let value = serde_json::to_value(&part).expect("serialize video part");
         assert_eq!(value["ref"], "bilibili:cid:146044693");
         assert_eq!(value["video_ref"], "bilibili:bvid:BV117411r7R1");
         assert_eq!(value["page"], 1);
+
+        let subtitle_request = VideoSubtitleRequest::new(VideoResourceKind::Video, "cid:146044693");
+        assert_eq!(subtitle_request.part_id, "cid:146044693");
+        let subtitle = VideoSubtitle {
+            resource_ref: ResourceRef::new(Platform::Bilibili, "subtitle:13643112644608002")
+                .expect("valid subtitle reference"),
+            video_ref: part.video_ref.clone(),
+            part_ref: part.resource_ref.clone(),
+            platform: Platform::Bilibili,
+            id: "subtitle:13643112644608002".to_owned(),
+            language: "zh-Hans".to_owned(),
+            label: "中文（简体）".to_owned(),
+            format: "bilibili_json".to_owned(),
+            locked: Some(true),
+            extensions: Extensions::new(),
+        };
+        let list = VideoSubtitleList {
+            video_ref: part.video_ref.clone(),
+            part_ref: part.resource_ref.clone(),
+            platform: Platform::Bilibili,
+            requires_login: false,
+            can_submit: Some(true),
+            default_language: Some("zh-CN".to_owned()),
+            default_language_label: Some("中文（中国）".to_owned()),
+            items: vec![subtitle],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(list).expect("serialize subtitle list");
+        assert_eq!(value["part_ref"], "bilibili:cid:146044693");
+        assert_eq!(
+            value["items"][0]["ref"],
+            "bilibili:subtitle:13643112644608002"
+        );
+        assert_eq!(value["items"][0]["language"], "zh-Hans");
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,

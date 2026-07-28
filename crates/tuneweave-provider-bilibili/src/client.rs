@@ -47,6 +47,7 @@ const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wb
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
 const VIDEO_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/view";
+const VIDEO_PLAYER_ENDPOINT: &str = "https://api.bilibili.com/x/player/wbi/v2";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const FAVORITE_FOLDER_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/folder/info";
@@ -368,6 +369,31 @@ pub(crate) struct BilibiliVideoPart {
     pub width: u64,
     pub height: u64,
     pub rotated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSubtitleCatalog {
+    pub aid: u64,
+    pub bvid: String,
+    pub cid: u64,
+    pub requires_login: bool,
+    pub can_submit: bool,
+    pub default_language: Option<String>,
+    pub default_language_label: Option<String>,
+    pub subtitles: Vec<BilibiliSubtitle>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSubtitle {
+    pub id: u64,
+    pub id_string: String,
+    pub language: String,
+    pub label: String,
+    pub locked: bool,
+    pub resource_url: Url,
+    pub subtitle_type: i64,
+    pub ai_type: i64,
+    pub ai_status: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -950,6 +976,43 @@ struct VideoViewDimension {
     height: u64,
     #[serde(default)]
     rotate: u64,
+}
+
+#[derive(Deserialize)]
+struct VideoPlayerData {
+    aid: u64,
+    bvid: String,
+    cid: u64,
+    #[serde(default)]
+    need_login_subtitle: bool,
+    #[serde(default)]
+    subtitle: Option<VideoPlayerSubtitleContainer>,
+}
+
+#[derive(Default, Deserialize)]
+struct VideoPlayerSubtitleContainer {
+    #[serde(default)]
+    allow_submit: bool,
+    #[serde(default)]
+    lan: String,
+    #[serde(default)]
+    lan_doc: String,
+    #[serde(default)]
+    subtitles: Vec<VideoPlayerSubtitle>,
+}
+
+#[derive(Deserialize)]
+struct VideoPlayerSubtitle {
+    id: u64,
+    id_str: String,
+    lan: String,
+    lan_doc: String,
+    is_lock: bool,
+    subtitle_url: String,
+    #[serde(rename = "type")]
+    subtitle_type: i64,
+    ai_type: i64,
+    ai_status: i64,
 }
 
 #[derive(Deserialize)]
@@ -1773,6 +1836,53 @@ impl BilibiliClient {
             ));
         }
         parse_video_view_response(&bytes, identity)
+    }
+
+    pub(crate) async fn video_subtitles(
+        &self,
+        aid: u64,
+        bvid: &str,
+        cid: u64,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliSubtitleCatalog> {
+        if aid == 0 || cid == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili subtitle identity must be positive",
+            ));
+        }
+        crate::BilibiliVideoIdentity::parse(bvid).map_err(|_| {
+            invalid_bilibili_request("Bilibili subtitle request contains an invalid BVID")
+        })?;
+        let context = self
+            .signed_web_context(
+                &[
+                    ("aid".to_owned(), aid.to_string()),
+                    ("bvid".to_owned(), bvid.to_owned()),
+                    ("cid".to_owned(), cid.to_string()),
+                ],
+                credential,
+            )
+            .await?;
+        let endpoint = format!("{VIDEO_PLAYER_ENDPOINT}?{}", context.query);
+        let response = self
+            .http
+            .get(endpoint)
+            .header(COOKIE, context.cookie_header)
+            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili subtitle catalog", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle catalog response exceeded the size limit",
+            ));
+        }
+        parse_video_subtitle_catalog(&bytes, aid, bvid, cid)
     }
 
     pub(crate) async fn created_favorite_folders(
@@ -2666,6 +2776,86 @@ fn parse_video_view_response(
         },
         rights,
         parts,
+    })
+}
+
+fn parse_video_subtitle_catalog(
+    bytes: &[u8],
+    requested_aid: u64,
+    requested_bvid: &str,
+    requested_cid: u64,
+) -> Result<BilibiliSubtitleCatalog> {
+    let response: PassportResponse<VideoPlayerData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili subtitle catalog returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili subtitle catalog",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili subtitle catalog response did not contain data")
+    })?;
+    let bvid = match crate::BilibiliVideoIdentity::parse(&data.bvid).map_err(|_| {
+        bilibili_upstream_error("Bilibili subtitle catalog returned an invalid BVID")
+    })? {
+        crate::BilibiliVideoIdentity::Bvid(value) => value,
+        _ => unreachable!("BVID parser returned another identity type"),
+    };
+    if data.aid != requested_aid
+        || bvid != requested_bvid
+        || data.cid != requested_cid
+        || data.aid == 0
+        || data.cid == 0
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle catalog returned a conflicting identity",
+        ));
+    }
+    let subtitle = data.subtitle.unwrap_or_default();
+    if subtitle.subtitles.len() > 256 {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle catalog exceeded the track limit",
+        ));
+    }
+    let default_language = optional_subtitle_language(&subtitle.lan, "default subtitle language")?;
+    let default_language_label =
+        optional_bounded_text(&subtitle.lan_doc, "default subtitle language label", 512)?;
+    let mut identities = std::collections::BTreeSet::new();
+    let mut numeric_identities = std::collections::BTreeSet::new();
+    let mut subtitles = Vec::with_capacity(subtitle.subtitles.len());
+    for item in subtitle.subtitles {
+        let id_string = validate_subtitle_id(&item.id_str)?;
+        if item.id == 0
+            || !identities.insert(id_string.clone())
+            || !numeric_identities.insert(item.id)
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili subtitle catalog returned duplicate or invalid identities",
+            ));
+        }
+        subtitles.push(BilibiliSubtitle {
+            id: item.id,
+            id_string,
+            language: validate_subtitle_language(&item.lan, "subtitle language")?,
+            label: validated_bilibili_text(&item.lan_doc, "subtitle language label", 512)?,
+            locked: item.is_lock,
+            resource_url: normalize_bilibili_subtitle_url(&item.subtitle_url)?,
+            subtitle_type: item.subtitle_type,
+            ai_type: item.ai_type,
+            ai_status: item.ai_status,
+        });
+    }
+    Ok(BilibiliSubtitleCatalog {
+        aid: data.aid,
+        bvid,
+        cid: data.cid,
+        requires_login: data.need_login_subtitle,
+        can_submit: subtitle.allow_submit,
+        default_language,
+        default_language_label,
+        subtitles,
     })
 }
 
@@ -3710,6 +3900,85 @@ fn optional_bounded_text(value: &str, context: &str, limit: usize) -> Result<Opt
         )));
     }
     Ok(Some(value.to_owned()))
+}
+
+fn validate_subtitle_id(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 32
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle catalog returned an invalid string identity",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_subtitle_language(value: &str, context: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 32
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-')
+    {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn optional_subtitle_language(value: &str, context: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_subtitle_language(value, context).map(Some)
+}
+
+fn normalize_bilibili_subtitle_url(value: &str) -> Result<Url> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 8 * 1024 || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle catalog returned an invalid resource URL",
+        ));
+    }
+    let value = value
+        .strip_prefix("//")
+        .map_or_else(|| value.to_owned(), |value| format!("https://{value}"));
+    let url = Url::parse(&value).map_err(|_| {
+        bilibili_upstream_error("Bilibili subtitle catalog returned an invalid resource URL")
+    })?;
+    let allowed_host = matches!(
+        url.host_str(),
+        Some(
+            "aisubtitle.hdslb.com"
+                | "i0.hdslb.com"
+                | "i1.hdslb.com"
+                | "i2.hdslb.com"
+                | "s1.hdslb.com"
+        )
+    );
+    if url.scheme() != "https"
+        || !allowed_host
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !url.path().starts_with("/bfs/subtitle/")
+        || !url.path().ends_with(".json")
+        || url.path().len() > 1024
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili subtitle catalog returned a disallowed resource URL",
+        ));
+    }
+    Ok(url)
 }
 
 fn normalize_bilibili_image_url(value: &str, context: &str) -> Result<Option<String>> {
@@ -5206,6 +5475,109 @@ mod tests {
             .expect_err("video view drift");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn subtitle_catalog_preserves_tracks_without_exposing_untrusted_hosts() {
+        let fixture = json!({
+            "code": 0,
+            "message": "0",
+            "data": {
+                "aid": 60977932,
+                "bvid": "BV1Jt411P77c",
+                "cid": 106101299,
+                "need_login_subtitle": false,
+                "subtitle": {
+                    "allow_submit": true,
+                    "lan": "zh-CN",
+                    "lan_doc": "中文（中国）",
+                    "subtitles": [{
+                        "id": 13643112644608002_u64,
+                        "id_str": "13643112644608002",
+                        "lan": "zh-Hans",
+                        "lan_doc": "中文（简体）",
+                        "is_lock": true,
+                        "subtitle_url": "//aisubtitle.hdslb.com/bfs/subtitle/c49b18a284739d99df1e3723cdf72c0c82db98e0.json?auth_key=redacted",
+                        "type": 0,
+                        "ai_type": 0,
+                        "ai_status": 0
+                    }, {
+                        "id": 13643200114196484_u64,
+                        "id_str": "13643200114196484",
+                        "lan": "en-US",
+                        "lan_doc": "英语（美国）",
+                        "is_lock": false,
+                        "subtitle_url": "https://i0.hdslb.com/bfs/subtitle/2b38bc0f5d7671176964d4c3de441ed37568500c.json",
+                        "type": 0,
+                        "ai_type": 1,
+                        "ai_status": 2
+                    }]
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&fixture).expect("subtitle fixture");
+        let catalog = parse_video_subtitle_catalog(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+            .expect("subtitle catalog");
+        assert_eq!(catalog.subtitles.len(), 2);
+        assert_eq!(catalog.default_language.as_deref(), Some("zh-CN"));
+        assert_eq!(catalog.subtitles[0].id_string, "13643112644608002");
+        assert_eq!(
+            catalog.subtitles[0].resource_url.host_str(),
+            Some("aisubtitle.hdslb.com")
+        );
+        assert!(catalog.subtitles[0].locked);
+        assert_eq!(catalog.subtitles[1].ai_type, 1);
+
+        for (pointer, value) in [
+            ("/data/cid", json!(1)),
+            (
+                "/data/subtitle/subtitles/0/subtitle_url",
+                json!("https://127.0.0.1/bfs/subtitle/internal.json"),
+            ),
+            (
+                "/data/subtitle/subtitles/0/id_str",
+                json!("13643200114196484"),
+            ),
+            (
+                "/data/subtitle/subtitles/0/lan",
+                json!("zh-Hans?redirect=true"),
+            ),
+        ] {
+            let mut malformed = fixture.clone();
+            *malformed.pointer_mut(pointer).expect("fixture field") = value;
+            let bytes = serde_json::to_vec(&malformed).expect("malformed subtitle fixture");
+            let error =
+                parse_video_subtitle_catalog(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+                    .expect_err("subtitle catalog drift");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[test]
+    fn subtitle_catalog_preserves_login_required_empty_state() {
+        let bytes = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "0",
+            "data": {
+                "aid": 60977932,
+                "bvid": "BV1Jt411P77c",
+                "cid": 106101299,
+                "need_login_subtitle": true,
+                "subtitle": {
+                    "allow_submit": false,
+                    "lan": "",
+                    "lan_doc": "",
+                    "subtitles": []
+                }
+            }
+        }))
+        .expect("empty subtitle fixture");
+        let catalog = parse_video_subtitle_catalog(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299)
+            .expect("empty subtitle catalog");
+        assert!(catalog.requires_login);
+        assert!(catalog.subtitles.is_empty());
+        assert_eq!(catalog.default_language, None);
+        assert_eq!(catalog.default_language_label, None);
     }
 
     #[test]
