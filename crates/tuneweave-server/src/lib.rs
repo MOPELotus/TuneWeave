@@ -201,6 +201,7 @@ pub struct AppState {
 #[derive(Clone, Default)]
 struct CallerCredentialSet {
     credentials: BTreeMap<Platform, ProviderCredential>,
+    providers: BTreeMap<Platform, Arc<dyn MusicProvider>>,
 }
 
 #[derive(Clone, Copy)]
@@ -216,7 +217,9 @@ struct ProviderAccess {
 }
 
 impl CallerCredentialSet {
-    fn from_headers(headers: &HeaderMap) -> Result<Self, TuneWeaveError> {
+    fn parse_headers(
+        headers: &HeaderMap,
+    ) -> Result<BTreeMap<Platform, ProviderCredential>, TuneWeaveError> {
         let values = headers.get_all(CALLER_CREDENTIAL_HEADER);
         let count = values.iter().count();
         if count > MAX_CALLER_CREDENTIALS_PER_REQUEST {
@@ -239,7 +242,28 @@ impl CallerCredentialSet {
                 .with_platform(platform));
             }
         }
-        Ok(Self { credentials })
+        Ok(credentials)
+    }
+
+    fn from_headers(headers: &HeaderMap, state: &AppState) -> Result<Self, TuneWeaveError> {
+        let credentials = Self::parse_headers(headers)?;
+        let now = unix_time_seconds()?;
+        let mut providers = BTreeMap::new();
+        for (platform, credential) in &credentials {
+            if credential.is_expired_at(now) {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "caller credential has expired",
+                )
+                .with_platform(*platform));
+            }
+            let provider = state.registry.require(*platform)?;
+            providers.insert(*platform, provider.with_caller_credential(credential)?);
+        }
+        Ok(Self {
+            credentials,
+            providers,
+        })
     }
 
     fn select_provider(
@@ -249,28 +273,25 @@ impl CallerCredentialSet {
         explicit_account: Option<&str>,
         account_selection: AccountSelection,
     ) -> Result<ProviderAccess, TuneWeaveError> {
-        let provider = state.registry.require(platform)?;
-        if let Some(credential) = self.credentials.get(&platform) {
+        if self.credentials.contains_key(&platform) {
             if explicit_account.is_some() {
                 return Err(TuneWeaveError::invalid_request(
                     "caller credentials cannot be combined with a server account alias",
                 )
                 .with_platform(platform));
             }
-            if credential.is_expired_at(unix_time_seconds()?) {
-                return Err(TuneWeaveError::new(
-                    ErrorCode::AuthenticationRequired,
-                    "caller credential has expired",
-                )
-                .with_platform(platform));
-            }
             return Ok(ProviderAccess {
-                provider: provider.with_caller_credential(credential)?,
+                provider: self
+                    .providers
+                    .get(&platform)
+                    .cloned()
+                    .expect("validated caller credential always has a provider scope"),
                 provider_account: Some("default".to_owned()),
                 response_account: None,
             });
         }
 
+        let provider = state.registry.require(platform)?;
         let provider_account = match account_selection {
             AccountSelection::Optional => explicit_account
                 .map(str::trim)
@@ -992,7 +1013,7 @@ async fn search_default(
 ) -> Result<Json<ApiResponse<SearchDefaultKeyword>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -1021,7 +1042,7 @@ async fn search_trending(
 ) -> Result<Json<ApiResponse<SearchTrendingList>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -1059,7 +1080,7 @@ async fn search_suggestions(
         .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
     let client = parse_search_suggestion_client(params.client.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -1097,7 +1118,7 @@ async fn search_multi_match(
         .ok_or_else(|| TuneWeaveError::invalid_request("q must not be empty"))?;
     let kind = parse_search_kind(params.kind.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -1131,7 +1152,7 @@ async fn search_local_track_match_get(
     let duration_seconds = params.duration_seconds.map(Value::String);
     execute_local_track_match(
         &state,
-        CallerCredentialSet::from_headers(&headers)?,
+        CallerCredentialSet::from_headers(&headers, &state)?,
         LocalTrackMatchInput {
             title: params.title.unwrap_or_default(),
             album: params.album.unwrap_or_default(),
@@ -1156,7 +1177,7 @@ async fn search_local_track_match_post(
     let body = json_body(payload)?;
     execute_local_track_match(
         &state,
-        CallerCredentialSet::from_headers(&headers)?,
+        CallerCredentialSet::from_headers(&headers, &state)?,
         LocalTrackMatchInput {
             title: body.title,
             album: body.album,
@@ -1244,7 +1265,7 @@ async fn general_search(
         })
         .transpose()?;
     let platform = search_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -1290,7 +1311,7 @@ async fn search(
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = search_platform(&state, params.platform.as_deref())?;
-    let credentials = CallerCredentialSet::from_headers(&headers)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let access = credentials.select_provider(
         &state,
         platform,
@@ -3512,7 +3533,7 @@ async fn track_lyrics(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -3559,7 +3580,7 @@ async fn track_singing_annotations_availability(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -3586,7 +3607,7 @@ async fn track_multi_style_lyric_translations(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -3613,7 +3634,7 @@ async fn track_ai_lyric_dictionary_availability(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -3640,7 +3661,7 @@ async fn track_ai_lyric_dictionary(
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -5377,10 +5398,12 @@ async fn uni_playlist_create(
 
 async fn uni_playlist_import(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<NoQueryParams>, QueryRejection>,
     payload: Result<Json<UniPlaylistImportBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<UniPlaylistImportResult>>, ApiError> {
     let _ = query_params(params)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let body = json_body(payload)?;
     let name = body
         .name
@@ -5421,9 +5444,25 @@ async fn uni_playlist_import(
             .collect::<Result<Vec<_>, _>>()?,
     };
 
+    let source_accesses = request
+        .sources
+        .iter()
+        .map(|source| {
+            (source.playlist_ref.platform() != Platform::Uni)
+                .then(|| {
+                    credentials.select_provider(
+                        &state,
+                        source.playlist_ref.platform(),
+                        source.account.as_deref(),
+                        AccountSelection::Optional,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut loaded_sources = Vec::with_capacity(request.sources.len());
-    for source in &request.sources {
-        loaded_sources.push(load_uni_playlist_import_source(&state, source).await?);
+    for (source, access) in request.sources.iter().zip(source_accesses) {
+        loaded_sources.push(load_uni_playlist_import_source(&state, source, access).await?);
     }
     let playlist_name = request.name.clone().unwrap_or_else(|| {
         derive_uni_playlist_import_name(
@@ -5610,17 +5649,20 @@ fn normalize_uni_playlist_source_type(value: Option<&str>) -> Result<String, Tun
 async fn load_uni_playlist_import_source(
     state: &AppState,
     source: &UniPlaylistImportSourceRequest,
+    access: Option<ProviderAccess>,
 ) -> Result<LoadedUniPlaylistImportSource, TuneWeaveError> {
     if source.playlist_ref.platform() == Platform::Uni {
         return load_local_uni_playlist_import_source(state, source);
     }
     let platform = source.playlist_ref.platform();
-    let provider = state.registry.require(platform)?;
+    let access = access.expect("remote import source always has provider access");
+    let provider = access.provider;
+    let provider_account = access.provider_account;
     let playlist = provider
         .playlist_source(
             source.playlist_ref.id(),
             &source.source_type,
-            source.account.as_deref(),
+            provider_account.as_deref(),
         )
         .await?;
     if playlist.platform != platform
@@ -5638,7 +5680,7 @@ async fn load_uni_playlist_import_source(
     let mut items = Vec::new();
     loop {
         let mut page_request = PageRequest::new(100, offset);
-        page_request.account.clone_from(&source.account);
+        page_request.account.clone_from(&provider_account);
         let page = provider
             .playlist_source_items(source.playlist_ref.id(), &source.source_type, &page_request)
             .await?;
@@ -5675,7 +5717,7 @@ async fn load_uni_playlist_import_source(
             source_type: source.source_type.clone(),
             name: playlist.name,
             item_count,
-            account: source.account.clone(),
+            account: access.response_account,
             extensions: Extensions::from([("complete_pagination".to_owned(), json!(true))]),
         },
         description: playlist.description,
@@ -7190,7 +7232,7 @@ async fn playlist(
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
 ) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
-    let credentials = CallerCredentialSet::from_headers(&headers)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
     if platform == Platform::Uni {
@@ -7239,7 +7281,7 @@ async fn playlist_tracks(
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
-    let credentials = CallerCredentialSet::from_headers(&headers)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -7317,7 +7359,7 @@ async fn playlist_playable_items(
     Path(reference): Path<String>,
     Query(params): Query<PageParams>,
 ) -> Result<Json<ApiResponse<Vec<PlaylistPlayableEntry>>>, ApiError> {
-    let credentials = CallerCredentialSet::from_headers(&headers)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -11672,7 +11714,7 @@ async fn account_playlists(
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers)?.select_provider(
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -17807,6 +17849,21 @@ mod tests {
             "Test QQ Music"
         }
 
+        fn with_caller_credential(
+            &self,
+            credential: &ProviderCredential,
+        ) -> Result<Arc<dyn MusicProvider>> {
+            if credential.platform != Platform::Qq
+                || credential.kind != "qq_credential_v1"
+                || !credential.secret().contains("\"musickey\"")
+            {
+                return Err(TuneWeaveError::invalid_request(
+                    "test QQ caller credential is invalid",
+                ));
+            }
+            Ok(Arc::new(Self))
+        }
+
         fn capabilities(&self) -> BTreeSet<Capability> {
             BTreeSet::from([
                 Capability::PlaylistRead,
@@ -19701,16 +19758,15 @@ mod tests {
             CALLER_CREDENTIAL_HEADER,
             netease.value.parse().expect("NetEase header value"),
         );
-        let parsed = CallerCredentialSet::from_headers(&headers).expect("parse headers");
-        assert_eq!(parsed.credentials.len(), 2);
+        let parsed = CallerCredentialSet::parse_headers(&headers).expect("parse headers");
+        assert_eq!(parsed.len(), 2);
 
         headers.append(
             CALLER_CREDENTIAL_HEADER,
             qq.value.parse().expect("duplicate QQ header value"),
         );
-        let duplicate = CallerCredentialSet::from_headers(&headers)
-            .err()
-            .expect("duplicate platform must fail");
+        let duplicate =
+            CallerCredentialSet::parse_headers(&headers).expect_err("duplicate platform must fail");
         assert_eq!(duplicate.code, ErrorCode::InvalidRequest);
         assert!(!duplicate.message.contains("private"));
 
@@ -19721,9 +19777,8 @@ mod tests {
                 qq.value.parse().expect("caller credential header value"),
             );
         }
-        let error = CallerCredentialSet::from_headers(&oversized)
-            .err()
-            .expect("credential count must be bounded");
+        let error = CallerCredentialSet::parse_headers(&oversized)
+            .expect_err("credential count must be bounded");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         assert!(!error.message.contains(&qq.value));
     }
@@ -19736,12 +19791,13 @@ mod tests {
             CALLER_CREDENTIAL_HEADER,
             qq.value.parse().expect("QQ header value"),
         );
-        let credentials = CallerCredentialSet::from_headers(&headers).expect("parse headers");
         let mut registry = ProviderRegistry::new();
         registry
             .register(QqProvider::new(QqConfig::default()).expect("QQ provider"))
             .expect("register QQ provider");
         let state = AppState::new(registry, Platform::Qq);
+        let credentials =
+            CallerCredentialSet::from_headers(&headers, &state).expect("parse headers");
 
         let access = credentials
             .select_provider(&state, Platform::Qq, None, AccountSelection::Optional)
@@ -24941,6 +24997,85 @@ mod tests {
         assert_eq!(merged_again["data"]["sources"][0]["platform"], "uni");
         assert_eq!(merged_again["data"]["sources"][0]["item_count"], 4);
         assert_eq!(merged_again["data"]["sources"][1]["item_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_import_scopes_multiple_caller_credentials_by_source_platform() {
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=private-netease-session",
+                None,
+            )
+            .expect("NetEase provider credential"),
+        )
+        .expect("NetEase caller credential");
+        let qq = qq_caller_credential(None);
+        let body = serde_json::to_vec(&json!({
+            "sources": [
+                { "ref": "netease:3778678" },
+                { "ref": "qq:42" }
+            ]
+        }))
+        .expect("serialize request JSON");
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/uni/playlists/imports")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("build request");
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            netease.value.parse().expect("NetEase header value"),
+        );
+        request.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ header value"),
+        );
+        let response = test_app_with_import_providers()
+            .oneshot(request)
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let imported: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(imported["data"]["sources"][0]["account"], Value::Null);
+        assert_eq!(imported["data"]["sources"][1]["account"], Value::Null);
+        assert_eq!(
+            imported["data"]["playlist"]["item_count"], 4,
+            "both complete source lists must be merged"
+        );
+        assert_eq!(
+            imported["data"]["playlist"]["extensions"]["import_sources"][1]["account"],
+            Value::Null
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("private-netease-session"));
+
+        let conflict_body = serde_json::to_vec(&json!({
+            "sources": [
+                { "ref": "netease:3778678" },
+                { "ref": "qq:42", "account": "default" }
+            ]
+        }))
+        .expect("serialize conflict JSON");
+        let mut conflict = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/uni/playlists/imports")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(conflict_body))
+            .expect("build conflict request");
+        conflict.headers_mut().append(
+            CALLER_CREDENTIAL_HEADER,
+            qq.value.parse().expect("QQ conflict header value"),
+        );
+        let response = test_app_with_import_providers()
+            .oneshot(conflict)
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
