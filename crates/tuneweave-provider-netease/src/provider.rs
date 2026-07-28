@@ -3244,12 +3244,35 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
-        let account = normalize_account_label(Some(account))?.to_owned();
-        let client = self.client_for(Some(&account))?;
+        Ok(self
+            .refresh_session_with_ownership(account, None, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+
+    async fn refresh_session_with_ownership(
+        &self,
+        account: &str,
+        source_credential: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        let account = validate_netease_login_account(account, mode)?.to_owned();
+        let client = netease_refresh_source(self, &account, source_credential, mode)?;
         let refresh = client.refresh_session().await?;
-        self.install_session(&account, refresh.into_session_cookie())?;
-        let status = self.client_for(Some(&account))?.session_status().await?;
-        Ok(map_session_profile(&account, status))
+        let cookie = refresh.into_session_cookie();
+        let status = self
+            .client
+            .without_cookie()
+            .with_cookie(cookie.clone())
+            .session_status()
+            .await?;
+        let mut result = self.finish_netease_session(&account, None, cookie, mode)?;
+        result.profile = map_session_profile(&account, status);
+        result
+            .profile
+            .extensions
+            .insert("refreshed".to_owned(), json!(true));
+        Ok(result)
     }
 
     async fn upload_account_avatar(
@@ -10864,6 +10887,61 @@ fn parse_netease_caller_credential(credential: &ProviderCredential) -> Result<St
             .with_platform(Platform::Netease)
     })?;
     Ok(cookie.to_owned())
+}
+
+fn netease_refresh_source(
+    provider: &NeteaseProvider,
+    account: &str,
+    source_credential: Option<&ProviderCredential>,
+    mode: CredentialMode,
+) -> Result<NeteaseClient> {
+    validate_netease_login_account(account, mode)?;
+    match source_credential {
+        None if mode == CredentialMode::Client => Err(TuneWeaveError::invalid_request(
+            "client credential refresh requires a caller credential",
+        )
+        .with_platform(Platform::Netease)),
+        None => provider.client_for(Some(account)),
+        Some(_) if mode == CredentialMode::Server => Err(TuneWeaveError::invalid_request(
+            "a caller credential cannot refresh a server-only session",
+        )
+        .with_platform(Platform::Netease)),
+        Some(source) => {
+            let caller_cookie = parse_netease_caller_credential(source)?;
+            if mode == CredentialMode::Both {
+                let stored = provider.client_for(Some(account))?;
+                let stored_cookie = stored.configured_cookie().ok_or_else(|| {
+                    netease_authentication_required(account, "NetEase account was not found")
+                })?;
+                if !netease_cookies_share_identity(&caller_cookie, stored_cookie) {
+                    return Err(TuneWeaveError::invalid_request(
+                        "caller credential and server account refer to different NetEase identities",
+                    )
+                    .with_platform(Platform::Netease));
+                }
+            }
+            Ok(provider.client.without_cookie().with_cookie(caller_cookie))
+        }
+    }
+}
+
+fn netease_cookies_share_identity(left: &str, right: &str) -> bool {
+    authenticated_cookie_value(left)
+        .zip(authenticated_cookie_value(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn authenticated_cookie_value(cookie: &str) -> Option<&str> {
+    cookie.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == "MUSIC_U" && !value.is_empty()).then_some(value)
+    })
+}
+
+fn netease_authentication_required(account: &str, message: &str) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::AuthenticationRequired, message)
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "account": account }))
 }
 
 async fn request_netease_streams(
@@ -27100,6 +27178,146 @@ mod tests {
             provider
                 .capabilities()
                 .contains(&Capability::CallerManagedCredentials)
+        );
+    }
+
+    #[test]
+    fn netease_refresh_sources_enforce_ownership_and_identity_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        provider
+            .install_session(
+                "personal",
+                "MUSIC_U=same-session; __csrf=server-csrf".to_owned(),
+            )
+            .expect("install account session");
+        let matching = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "__csrf=caller-csrf; MUSIC_U=same-session",
+            None,
+        )
+        .expect("matching caller credential");
+        let selected =
+            netease_refresh_source(&provider, "personal", Some(&matching), CredentialMode::Both)
+                .expect("select matching caller credential");
+        assert_eq!(selected.configured_cookie(), Some(matching.secret()));
+
+        let mismatched = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=other-session",
+            None,
+        )
+        .expect("mismatched caller credential");
+        let Err(error) = netease_refresh_source(
+            &provider,
+            "personal",
+            Some(&mismatched),
+            CredentialMode::Both,
+        ) else {
+            panic!("different identity must fail");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let Err(error) = netease_refresh_source(&provider, "default", None, CredentialMode::Client)
+        else {
+            panic!("client refresh requires a credential");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let Err(error) = netease_refresh_source(
+            &provider,
+            "personal",
+            Some(&matching),
+            CredentialMode::Server,
+        ) else {
+            panic!("server refresh rejects caller credentials");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn caller_owned_netease_refresh_returns_new_cookie_without_persisting_it() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept refresh request");
+                let mut request = [0_u8; 16 * 1024];
+                let length = stream.read(&mut request).expect("read refresh request");
+                let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+                let expected_cookie = if request_index == 0 {
+                    "music_u=caller-session"
+                } else {
+                    "music_u=refreshed-session"
+                };
+                assert!(request.contains(expected_cookie));
+                let body = if request_index == 0 {
+                    r#"{"code":200}"#
+                } else {
+                    r#"{"code":200,"account":{"id":42},"profile":{"userId":42,"nickname":"TuneWeave"}}"#
+                };
+                let set_cookie = if request_index == 0 {
+                    "Set-Cookie: MUSIC_U=refreshed-session; Path=/; HttpOnly\r\nSet-Cookie: __csrf=refreshed-csrf; Path=/\r\n"
+                } else {
+                    ""
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{set_cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write refresh response");
+            }
+        });
+        let directory = TestCredentialDirectory::new();
+        let store = directory.store();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            web_base_url: format!("http://{address}"),
+            credential_store: Some(store.clone()),
+            ..NeteaseConfig::default()
+        })
+        .expect("build provider");
+        let source = ProviderCredential::new(
+            Platform::Netease,
+            NETEASE_CREDENTIAL_KIND,
+            "MUSIC_U=caller-session; __csrf=caller-csrf",
+            None,
+        )
+        .expect("caller credential");
+
+        let result = MusicProvider::refresh_session_with_ownership(
+            &provider,
+            "default",
+            Some(&source),
+            CredentialMode::Client,
+        )
+        .await
+        .expect("refresh caller credential");
+        server.join().expect("join refresh server");
+
+        assert!(result.profile.authenticated);
+        assert_eq!(result.profile.user_id.as_deref(), Some("42"));
+        assert_eq!(result.profile.extensions["refreshed"], true);
+        assert_eq!(
+            result
+                .credential
+                .expect("refreshed caller credential")
+                .secret(),
+            "MUSIC_U=refreshed-session; __csrf=refreshed-csrf"
+        );
+        assert!(
+            store
+                .load_platform(Platform::Netease)
+                .expect("stored credentials")
+                .is_empty()
+        );
+        assert!(
+            !provider
+                .client_for(Some("default"))
+                .expect("default client")
+                .is_authenticated()
         );
     }
 
