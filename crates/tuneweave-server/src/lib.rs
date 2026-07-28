@@ -8687,6 +8687,7 @@ struct MusicVideoListParams {
 async fn music_videos(
     State(state): State<AppState>,
     params: Result<Query<MusicVideoListParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
@@ -8696,6 +8697,12 @@ async fn music_videos(
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let catalog = parse_music_video_catalog(params.catalog.as_deref())?;
     let mut request = MusicVideoListRequest::new(catalog, limit, offset);
     request.area = params
@@ -8714,15 +8721,11 @@ async fn music_videos(
         .map(parse_music_video_order)
         .transpose()?;
     request.group_id = optional_trimmed(params.group_id);
-    request.account.clone_from(&account);
-    let provider = state.registry.require(platform)?;
-    let page = provider.music_videos(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    request.account.clone_from(&access.provider_account);
+    let page = access.provider.music_videos(&request).await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -8740,6 +8743,7 @@ struct VideoTaxonomyParams {
 async fn video_taxonomy(
     State(state): State<AppState>,
     params: Result<Query<VideoTaxonomyParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<VideoCatalogOption>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
@@ -8750,16 +8754,18 @@ async fn video_taxonomy(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = VideoTaxonomyRequest::new(kind, limit, offset);
-    request.account.clone_from(&account);
-    let provider = state.registry.require(platform)?;
-    let page = provider.video_taxonomy(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    request.account.clone_from(&access.provider_account);
+    let page = access.provider.video_taxonomy(&request).await?;
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -8837,6 +8843,7 @@ async fn video_detail(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<VideoDetailParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<VideoDetail>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
@@ -8846,24 +8853,28 @@ async fn video_detail(
     } else {
         parse_video_resource_kind(params.kind.as_deref(), reference.id())?
     };
-    let provider = state.registry.require(reference.platform())?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = VideoDetailRequest::new(kind);
-    request.account.clone_from(&account);
-    let detail = provider.video(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(detail).with_platform(reference.platform());
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    request.account.clone_from(&access.provider_account);
+    let detail = access.provider.video(reference.id(), &request).await?;
+    Ok(Json(access.response(detail, platform)))
 }
 
 async fn video_details_get(
     State(state): State<AppState>,
     params: Result<Query<VideoDetailBatchParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<VideoDetail>>>, ApiError> {
     let params = query_params(params)?;
     video_details_response(
         &state,
+        &headers,
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
         params.platform.as_deref(),
@@ -8875,11 +8886,13 @@ async fn video_details_get(
 
 async fn video_details_post(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<VideoDetailBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<VideoDetail>>>, ApiError> {
     let body = json_body(body)?;
     video_details_response(
         &state,
+        &headers,
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(StreamReferenceInput::into_values),
         body.platform.as_deref(),
@@ -8891,6 +8904,7 @@ async fn video_details_post(
 
 async fn video_details_response(
     state: &AppState,
+    headers: &HeaderMap,
     refs: Option<Vec<String>>,
     ids: Option<Vec<String>>,
     platform: Option<&str>,
@@ -8941,14 +8955,19 @@ async fn video_details_response(
         }
     };
     let account = optional_trimmed(account);
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        selected_platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = VideoDetailRequest::new(kind);
-    request.account.clone_from(&account);
+    request.account.clone_from(&access.provider_account);
     let ids = references
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let provider = state.registry.require(selected_platform)?;
-    let details = provider.videos(&ids, &request).await?;
+    let details = access.provider.videos(&ids, &request).await?;
     if details.len() != references.len() {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -8976,31 +8995,33 @@ async fn video_details_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    let mut response = ApiResponse::new(details).with_platform(selected_platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(details, selected_platform)))
 }
 
 async fn video_stats(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<VideoDetailParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<VideoStats>>, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let kind = parse_video_resource_kind(params.kind.as_deref(), reference.id())?;
-    let provider = state.registry.require(reference.platform())?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
     let mut request = VideoDetailRequest::new(kind);
-    request.account.clone_from(&account);
-    let stats = provider.video_stats(reference.id(), &request).await?;
-    let mut response = ApiResponse::new(stats).with_platform(reference.platform());
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    request.account.clone_from(&access.provider_account);
+    let stats = access
+        .provider
+        .video_stats(reference.id(), &request)
+        .await?;
+    Ok(Json(access.response(stats, platform)))
 }
 
 async fn video_stream(
@@ -25293,6 +25314,89 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(details["data"][0]["video"]["ref"], "qq:013xscuH0xlbie");
         assert_eq!(details["data"][1]["video"]["ref"], "qq:002abcXYZ");
+    }
+
+    #[tokio::test]
+    async fn video_directory_accepts_caller_credentials_without_server_aliases() {
+        let app = test_app_with_import_providers();
+        let netease = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-video-directory",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+
+        for path in [
+            "/v1/videos?platform=netease&catalog=mv_all&limit=2",
+            "/v1/videos/taxonomy?platform=netease&type=category&limit=9",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &netease).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, stats) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/videos/netease:22695250/stats?kind=mv",
+            None,
+            &netease,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["data"]["extensions"]["account"], "default");
+        assert!(stats["meta"].get("account").is_none());
+
+        let qq = qq_caller_credential(None);
+        let (status, single) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/videos/qq:013xscuH0xlbie",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(single["data"]["video"]["extensions"]["account"], "default");
+        assert!(single["meta"].get("account").is_none());
+
+        for (method, path, body) in [
+            (
+                Method::GET,
+                "/v1/videos/details?ids=013xscuH0xlbie&platform=qq",
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/videos/details",
+                Some(json!({"refs": ["qq:013xscuH0xlbie"]})),
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), method, path, body, &qq).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(
+                response["data"][0]["video"]["extensions"]["account"],
+                "default"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/videos/qq:013xscuH0xlbie?account=green-vip",
+            None,
+            &qq,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
