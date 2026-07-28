@@ -344,7 +344,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 用户收藏的播放列表目录通过 `GET /v1/users/bilibili:{mid}/playlists/favorite` 读取，分页与账户选择语义相同。B 站 Web 目录同时包含普通收藏夹和收藏的视频合集：前者返回 `bilibili:favorite:{media_id}`，后者返回 `bilibili:season:{season_id}`；失效条目保留 `invalid=true` 供调用方替换来源，不会被静默丢弃。两种目录始终与用户创建目录分开，适合作为后续 Uni Playlist 导入来源。
 
-两类资源都通过 `GET /v1/playlists/{ref}` 和 `GET /v1/playlists/{ref}/tracks` 访问。公开内容通常不需要账户；私有收藏夹由 `account` 选择 B 站登录态。由于 TuneWeave 的主要用途是音乐播放，列表中的 B 站视频会规范化为可播放的 `Track`，并在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid`、`extensions.bvid`、`extensions.cid` 中保留完整视频身份；原始视频详情仍通过 `/v1/videos/{ref}` 读取。
+Season 与收藏夹通过 `GET /v1/playlists/{ref}` 和 `GET /v1/playlists/{ref}/tracks` 访问；目录中出现的 `series:` 身份保持独立，待系列详情能力接入后才宣告可读取，不会误走 Season 协议。Season 详情只需 `bilibili:season:{season_id}`，provider 使用平台支持的零 owner 参数解析并校验真实 `mid`；公开内容通常不需要账户，私有收藏夹由 `account` 选择 B 站登录态。由于 TuneWeave 的主要用途是音乐播放，列表中的 B 站视频会规范化为可播放的 `Track`，并在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid`、`extensions.bvid`、`extensions.cid` 中保留完整视频身份；原始视频详情仍通过 `/v1/videos/{ref}` 读取。
 
 ### DigitalAlbum
 

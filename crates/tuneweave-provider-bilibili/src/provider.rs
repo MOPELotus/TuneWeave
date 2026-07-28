@@ -206,6 +206,36 @@ impl MusicProvider for BilibiliProvider {
         })
     }
 
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        let locator = parse_bilibili_playlist_locator(id)?;
+        let credential = self.optional_request_credential(account)?;
+        match locator {
+            BilibiliPlaylistLocator::Season(season_id) => {
+                let page = self
+                    .client
+                    .season_archives_page(season_id, 1, credential.as_ref())
+                    .await?;
+                let first_page_count = page.archives.len();
+                let mut playlist = map_space_playlist(page.season)?;
+                playlist
+                    .extensions
+                    .insert("detail_source".to_owned(), json!("season_archives"));
+                playlist
+                    .extensions
+                    .insert("archive_page_size".to_owned(), json!(page.page_size));
+                playlist.extensions.insert(
+                    "first_page_archive_count".to_owned(),
+                    json!(first_page_count),
+                );
+                Ok(playlist)
+            }
+            BilibiliPlaylistLocator::FavoriteFolder(_) => {
+                Err(unsupported_bilibili_playlist_kind("favorite"))
+            }
+            BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
+        }
+    }
+
     async fn user_created_playlists(
         &self,
         user_id: &str,
@@ -805,6 +835,47 @@ fn validate_bilibili_user_id(value: &str) -> Result<u64> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| bilibili_invalid_request("Bilibili user ID must be a positive integer"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BilibiliPlaylistLocator {
+    Season(u64),
+    FavoriteFolder(u64),
+    Series(u64),
+}
+
+fn parse_bilibili_playlist_locator(value: &str) -> Result<BilibiliPlaylistLocator> {
+    let value = value.trim();
+    let (kind, id) = value.split_once(':').ok_or_else(|| {
+        bilibili_invalid_request(
+            "Bilibili playlist ID must include season, favorite, or series type",
+        )
+    })?;
+    if id.is_empty()
+        || id.len() > 20
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || id.starts_with('0')
+    {
+        return Err(bilibili_invalid_request(
+            "Bilibili playlist ID must contain a positive numeric identity",
+        ));
+    }
+    let id = id.parse::<u64>().ok().filter(|id| *id > 0).ok_or_else(|| {
+        bilibili_invalid_request("Bilibili playlist ID must contain a positive numeric identity")
+    })?;
+    match kind {
+        "season" => Ok(BilibiliPlaylistLocator::Season(id)),
+        "favorite" => Ok(BilibiliPlaylistLocator::FavoriteFolder(id)),
+        "series" => Ok(BilibiliPlaylistLocator::Series(id)),
+        _ => Err(bilibili_invalid_request(
+            "Bilibili playlist ID has an unsupported type",
+        )),
+    }
+}
+
+fn unsupported_bilibili_playlist_kind(kind: &str) -> TuneWeaveError {
+    TuneWeaveError::unsupported(Platform::Bilibili, Capability::PlaylistRead)
+        .with_details(json!({ "playlist_kind": kind }))
 }
 
 fn bilibili_refresh_source(
@@ -1805,6 +1876,52 @@ mod tests {
         assert_eq!(series.extensions["creator_mode"], "auto");
     }
 
+    #[test]
+    fn playlist_locator_requires_explicit_nonzero_typed_identity() {
+        assert_eq!(
+            parse_bilibili_playlist_locator("season:3629748").expect("season locator"),
+            BilibiliPlaylistLocator::Season(3_629_748)
+        );
+        assert_eq!(
+            parse_bilibili_playlist_locator("favorite:2883236382")
+                .expect("favorite folder locator"),
+            BilibiliPlaylistLocator::FavoriteFolder(2_883_236_382)
+        );
+        assert_eq!(
+            parse_bilibili_playlist_locator("series:3908327").expect("series locator"),
+            BilibiliPlaylistLocator::Series(3_908_327)
+        );
+        for invalid in [
+            "",
+            "3629748",
+            "season:0",
+            "season:03629748",
+            "season:-1",
+            "playlist:1",
+            "season:1:2",
+        ] {
+            let error =
+                parse_bilibili_playlist_locator(invalid).expect_err("invalid playlist locator");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_detail_validates_kind_and_account_before_network_access() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let unsupported = provider
+            .playlist("favorite:2883236382", None)
+            .await
+            .expect_err("favorite detail is not implemented yet");
+        assert_eq!(unsupported.code, ErrorCode::CapabilityNotSupported);
+        assert_eq!(unsupported.details["playlist_kind"], "favorite");
+        let missing = provider
+            .playlist("season:3629748", Some("missing"))
+            .await
+            .expect_err("missing selected account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn created_favorite_folders_validate_identity_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
@@ -1971,5 +2088,20 @@ mod tests {
             page.pagination.extensions["directory_order"],
             json!(["favorite_folder", "season_or_series"])
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili season access"]
+    async fn live_playlist_detail_maps_public_season() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let playlist = provider
+            .playlist("season:3629748", None)
+            .await
+            .expect("live public season detail");
+        assert_eq!(playlist.resource_ref.to_string(), "bilibili:season:3629748");
+        assert_eq!(playlist.track_count, Some(617));
+        assert_eq!(playlist.extensions["owner_mid"], 327_961_371);
+        assert_eq!(playlist.extensions["detail_source"], "season_archives");
+        assert_eq!(playlist.extensions["first_page_archive_count"], 30);
     }
 }
