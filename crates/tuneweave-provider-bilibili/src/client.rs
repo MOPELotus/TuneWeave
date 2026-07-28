@@ -48,6 +48,7 @@ const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
+const FAVORITE_FOLDER_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/v3/fav/folder/info";
 const COLLECTED_PLAYLISTS_ENDPOINT: &str =
     "https://api.bilibili.com/x/v3/fav/folder/collected/list";
 const SPACE_PLAYLISTS_ENDPOINT: &str =
@@ -232,6 +233,46 @@ pub(crate) struct BilibiliCreatedFavoriteFolder {
     pub media_count: u64,
     pub child_friendly: bool,
     pub child_friendly_description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliFavoriteFolder {
+    pub media_id: u64,
+    pub folder_id: u64,
+    pub owner: BilibiliFavoriteFolderOwner,
+    pub attributes: u64,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub cover_type: u64,
+    pub description: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub invalid: bool,
+    pub favorite_state: bool,
+    pub like_state: bool,
+    pub media_count: u64,
+    pub pinned: bool,
+    pub child_friendly: bool,
+    pub child_friendly_description: String,
+    pub counts: BilibiliFavoriteFolderCounts,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliFavoriteFolderOwner {
+    pub id: u64,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub followed: bool,
+    pub vip_type: u64,
+    pub vip_status: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliFavoriteFolderCounts {
+    pub collect: u64,
+    pub play: u64,
+    pub thumb_up: u64,
+    pub share: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -735,6 +776,66 @@ struct CreatedFavoriteFolderItem {
     is_kid_playlist: bool,
     #[serde(default)]
     kid_playlist_desc: String,
+}
+
+#[derive(Deserialize)]
+struct FavoriteFolderData {
+    id: u64,
+    fid: u64,
+    mid: u64,
+    attr: u64,
+    title: String,
+    #[serde(default)]
+    cover: String,
+    upper: FavoriteFolderOwner,
+    #[serde(default)]
+    cover_type: u64,
+    #[serde(default)]
+    cnt_info: FavoriteFolderCounts,
+    #[serde(rename = "type")]
+    kind: u64,
+    #[serde(default)]
+    intro: String,
+    #[serde(default)]
+    ctime: u64,
+    #[serde(default)]
+    mtime: u64,
+    state: u64,
+    fav_state: u64,
+    like_state: u64,
+    media_count: u64,
+    #[serde(default)]
+    is_top: bool,
+    #[serde(default)]
+    is_kid_playlist: bool,
+    #[serde(default)]
+    kid_playlist_desc: String,
+}
+
+#[derive(Deserialize)]
+struct FavoriteFolderOwner {
+    mid: u64,
+    name: String,
+    #[serde(default)]
+    face: String,
+    #[serde(default)]
+    followed: bool,
+    #[serde(default)]
+    vip_type: u64,
+    #[serde(default)]
+    vip_statue: u64,
+}
+
+#[derive(Default, Deserialize)]
+struct FavoriteFolderCounts {
+    #[serde(default)]
+    collect: u64,
+    #[serde(default)]
+    play: u64,
+    #[serde(default)]
+    thumb_up: u64,
+    #[serde(default)]
+    share: u64,
 }
 
 #[derive(Deserialize)]
@@ -1429,6 +1530,39 @@ impl BilibiliClient {
             ));
         }
         parse_created_favorite_folders_response(&bytes, owner_id)
+    }
+
+    pub(crate) async fn favorite_folder(
+        &self,
+        media_id: u64,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliFavoriteFolder> {
+        if media_id == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili favorite folder media ID must be positive",
+            ));
+        }
+        let mut endpoint = Url::parse(FAVORITE_FOLDER_DETAIL_ENDPOINT)
+            .map_err(|_| bilibili_internal_error("Bilibili favorite folder endpoint is invalid"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("media_id", &media_id.to_string());
+        let mut request = self.http.get(endpoint).header(REFERER, WEB_REFERER);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili favorite folder", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili favorite folder response exceeded the size limit",
+            ));
+        }
+        parse_favorite_folder_response(&bytes, media_id)
     }
 
     pub(crate) async fn collected_playlists_page(
@@ -2160,6 +2294,99 @@ fn parse_created_favorite_folders_response(
         owner_id: requested_owner_id,
         folders,
     })
+}
+
+fn parse_favorite_folder_response(
+    bytes: &[u8],
+    requested_media_id: u64,
+) -> Result<BilibiliFavoriteFolder> {
+    let response: PassportResponse<FavoriteFolderData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili favorite folder returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili favorite folder",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili favorite folder response did not contain data")
+    })?;
+    let expected_media_id = data
+        .fid
+        .checked_mul(100)
+        .and_then(|prefix| prefix.checked_add(data.mid % 100));
+    if data.id == 0
+        || data.id != requested_media_id
+        || data.fid == 0
+        || data.mid == 0
+        || data.upper.mid != data.mid
+        || expected_media_id != Some(data.id)
+        || data.attr > u64::from(u32::MAX)
+        || data.cover_type > u64::from(u32::MAX)
+        || data.kind != 11
+        || data.upper.vip_type > 2
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili favorite folder returned an invalid identity or attribute",
+        ));
+    }
+    let invalid = validated_binary_state(data.state, "favorite folder state")?;
+    let favorite_state = validated_binary_state(data.fav_state, "favorite folder favorite state")?;
+    let like_state = validated_binary_state(data.like_state, "favorite folder like state")?;
+    let vip_status =
+        validated_binary_state(data.upper.vip_statue, "favorite folder owner VIP state")?;
+    let title = validated_bilibili_text(&data.title, "favorite folder title", 1024)?;
+    let description =
+        validated_bilibili_multiline_text(&data.intro, "favorite folder description", 64 * 1024)?;
+    let child_friendly_description = validated_bilibili_multiline_text(
+        &data.kid_playlist_desc,
+        "child-friendly favorite folder description",
+        4096,
+    )?;
+    let owner = BilibiliFavoriteFolderOwner {
+        id: data.upper.mid,
+        name: validated_bilibili_text(&data.upper.name, "favorite folder owner name", 512)?,
+        avatar_url: normalize_bilibili_image_url(&data.upper.face, "favorite folder owner avatar")?,
+        followed: data.upper.followed,
+        vip_type: data.upper.vip_type,
+        vip_status,
+    };
+    Ok(BilibiliFavoriteFolder {
+        media_id: data.id,
+        folder_id: data.fid,
+        owner,
+        attributes: data.attr,
+        title,
+        cover_url: normalize_bilibili_image_url(&data.cover, "favorite folder cover")?,
+        cover_type: data.cover_type,
+        description,
+        created_at: data.ctime,
+        updated_at: data.mtime,
+        invalid,
+        favorite_state,
+        like_state,
+        media_count: data.media_count,
+        pinned: data.is_top,
+        child_friendly: data.is_kid_playlist,
+        child_friendly_description,
+        counts: BilibiliFavoriteFolderCounts {
+            collect: data.cnt_info.collect,
+            play: data.cnt_info.play,
+            thumb_up: data.cnt_info.thumb_up,
+            share: data.cnt_info.share,
+        },
+    })
+}
+
+fn validated_binary_state(value: u64, context: &str) -> Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(bilibili_upstream_error(format!(
+            "Bilibili returned an invalid {context}"
+        ))),
+    }
 }
 
 fn parse_collected_playlists_response(
@@ -3617,7 +3844,7 @@ fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeave
         -101 | -111 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
         -400 | -304 | 400 => ErrorCode::InvalidRequest,
         -403 => ErrorCode::PermissionDenied,
-        -404 | 62002 => ErrorCode::ResourceNotFound,
+        -404 | 11010 | 62002 => ErrorCode::ResourceNotFound,
         -352 | -412 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
@@ -4351,6 +4578,118 @@ mod tests {
     }
 
     #[test]
+    fn favorite_folder_detail_preserves_owner_privacy_and_counts() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "id": 2883236382_u64,
+                "fid": 28832363,
+                "mid": 47275982,
+                "attr": 22,
+                "title": "相声",
+                "cover": "http://i2.hdslb.com/bfs/archive/folder.jpg",
+                "upper": {
+                    "mid": 47275982,
+                    "name": "荷花-Lotus",
+                    "face": "//i2.hdslb.com/bfs/face/avatar.jpg",
+                    "followed": false,
+                    "vip_type": 1,
+                    "vip_statue": 0
+                },
+                "cover_type": 2,
+                "cnt_info": {
+                    "collect": 3,
+                    "play": 2059,
+                    "thumb_up": 7,
+                    "share": 11
+                },
+                "type": 11,
+                "intro": "公开收藏夹\n音视频内容",
+                "ctime": 1705401630,
+                "mtime": 1705925782,
+                "state": 0,
+                "fav_state": 1,
+                "like_state": 0,
+                "media_count": 99,
+                "is_top": true,
+                "is_kid_playlist": false,
+                "kid_playlist_desc": ""
+            }
+        }))
+        .expect("favorite folder fixture");
+        let folder =
+            parse_favorite_folder_response(&response, 2_883_236_382).expect("favorite folder");
+        assert_eq!(folder.folder_id, 28_832_363);
+        assert_eq!(folder.owner.id, 47_275_982);
+        assert_eq!(folder.owner.name, "荷花-Lotus");
+        assert_eq!(
+            folder.cover_url.as_deref(),
+            Some("https://i2.hdslb.com/bfs/archive/folder.jpg")
+        );
+        assert_eq!(folder.description, "公开收藏夹\n音视频内容");
+        assert!(!folder.invalid);
+        assert!(folder.favorite_state);
+        assert!(!folder.like_state);
+        assert!(folder.pinned);
+        assert_eq!(folder.counts.play, 2_059);
+        assert_eq!(folder.media_count, 99);
+    }
+
+    #[test]
+    fn favorite_folder_detail_rejects_identity_and_state_drift() {
+        let base = json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "id": 1052622027,
+                "fid": 10526220,
+                "mid": 686127,
+                "attr": 54,
+                "title": "收藏夹",
+                "cover": "",
+                "upper": {
+                    "mid": 686127,
+                    "name": "创建者",
+                    "face": "",
+                    "followed": false,
+                    "vip_type": 2,
+                    "vip_statue": 1
+                },
+                "cover_type": 2,
+                "cnt_info": {},
+                "type": 11,
+                "intro": "",
+                "ctime": 0,
+                "mtime": 0,
+                "state": 0,
+                "fav_state": 0,
+                "like_state": 0,
+                "media_count": 1
+            }
+        });
+        for (pointer, value) in [
+            ("/data/id", json!(1052622028)),
+            ("/data/upper/mid", json!(686128)),
+            ("/data/type", json!(21)),
+            ("/data/like_state", json!(2)),
+        ] {
+            let mut malformed = base.clone();
+            *malformed.pointer_mut(pointer).expect("fixture field") = value;
+            let bytes = serde_json::to_vec(&malformed).expect("malformed fixture");
+            let error = parse_favorite_folder_response(&bytes, 1_052_622_027)
+                .expect_err("favorite folder drift");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+        let missing = parse_favorite_folder_response(
+            r#"{"code":11010,"message":"内容不存在","data":null}"#.as_bytes(),
+            1,
+        )
+        .expect_err("missing favorite folder");
+        assert_eq!(missing.code, ErrorCode::ResourceNotFound);
+    }
+
+    #[test]
     fn collected_playlists_keep_folders_seasons_and_invalid_entries_distinct() {
         let response = serde_json::to_vec(&json!({
             "code": 0,
@@ -4704,6 +5043,21 @@ mod tests {
                 .iter()
                 .all(|folder| folder.owner_id == 7_792_521)
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili favorite folder access"]
+    async fn live_public_favorite_folder_detail_is_available_anonymously() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let folder = client
+            .favorite_folder(2_883_236_382, None)
+            .await
+            .expect("live public favorite folder");
+        assert_eq!(folder.media_id, 2_883_236_382);
+        assert_eq!(folder.folder_id, 28_832_363);
+        assert_eq!(folder.owner.id, 47_275_982);
+        assert_eq!(folder.media_count, 99);
+        assert!(!folder.invalid);
     }
 
     #[tokio::test]

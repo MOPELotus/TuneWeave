@@ -344,7 +344,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 用户收藏的播放列表目录通过 `GET /v1/users/bilibili:{mid}/playlists/favorite` 读取，分页与账户选择语义相同。B 站 Web 目录同时包含普通收藏夹和收藏的视频合集：前者返回 `bilibili:favorite:{media_id}`，后者返回 `bilibili:season:{season_id}`；失效条目保留 `invalid=true` 供调用方替换来源，不会被静默丢弃。两种目录始终与用户创建目录分开，适合作为后续 Uni Playlist 导入来源。
 
-Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/items` 和 `GET /v1/playlists/{ref}/tracks` 访问；目录中出现的 `series:` 身份保持独立，待系列详情能力接入后才宣告可读取，不会误走 Season 协议。Season 详情只需 `bilibili:season:{season_id}`，provider 使用平台支持的零 owner 参数解析并校验真实 `mid`；公开内容通常不需要账户，私有收藏夹由 `account` 选择 B 站登录态。`/items` 将合集档案保持为强类型 `VideoDetail`，供 Uni Playlist 保存真正的视频项目；`/tracks` 是纯音乐客户端的兼容视图，并以 `normalized_from_video=true` 明示转换。两者都在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid` 和 `extensions.bvid` 中保留列表协议实际返回的视频身份；列表协议没有的分 P/CID、UP 主昵称、简介与清晰度不会猜测，后续由 `/v1/videos/{ref}` 详情链补全。
+Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/items` 和 `GET /v1/playlists/{ref}/tracks` 访问；目录中出现的 `series:` 身份保持独立，待系列详情能力接入后才宣告可读取，不会误走 Season 协议。Season 详情只需 `bilibili:season:{season_id}`，provider 使用平台支持的零 owner 参数解析并校验真实 `mid`；收藏夹详情使用 `bilibili:favorite:{media_id}`，同时保留完整 `media_id`、原始 `fid` 和 owner mid。公开内容默认匿名，私有收藏夹由 `account` 或调用方凭证选择精确 B 站登录态，权限不足与不存在不会变成空结果。`/items` 将合集档案保持为强类型 `VideoDetail`，供 Uni Playlist 保存真正的视频项目；`/tracks` 是纯音乐客户端的兼容视图，并以 `normalized_from_video=true` 明示转换。两者都在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid` 和 `extensions.bvid` 中保留列表协议实际返回的视频身份；列表协议没有的分 P/CID、UP 主昵称、简介与清晰度不会猜测，后续由 `/v1/videos/{ref}` 详情链补全。
 
 ### DigitalAlbum
 

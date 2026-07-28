@@ -16,8 +16,8 @@ use crate::client::{
     BilibiliClient, BilibiliCollectedPlaylist, BilibiliCollectedPlaylistKind,
     BilibiliCollectedPlaylistPage, BilibiliConfig, BilibiliCreatedFavoriteFolder,
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
-    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSeasonArchive,
-    BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
+    BilibiliFavoriteFolder, BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo,
+    BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
     BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
     BilibiliVideoSearchOrder,
 };
@@ -230,9 +230,11 @@ impl MusicProvider for BilibiliProvider {
                 );
                 Ok(playlist)
             }
-            BilibiliPlaylistLocator::FavoriteFolder(_) => {
-                Err(unsupported_bilibili_playlist_kind("favorite"))
-            }
+            BilibiliPlaylistLocator::FavoriteFolder(media_id) => self
+                .client
+                .favorite_folder(media_id, credential.as_ref())
+                .await
+                .and_then(map_favorite_folder),
             BilibiliPlaylistLocator::Series(_) => Err(unsupported_bilibili_playlist_kind("series")),
         }
     }
@@ -1424,6 +1426,70 @@ fn map_created_favorite_folder(folder: BilibiliCreatedFavoriteFolder) -> Result<
     })
 }
 
+fn map_favorite_folder(folder: BilibiliFavoriteFolder) -> Result<Playlist> {
+    let id = format!("favorite:{}", folder.media_id);
+    let resource_ref = ResourceRef::new(Platform::Bilibili, &id)
+        .map_err(|_| bilibili_data_error("Bilibili favorite folder identity was invalid"))?;
+    let owner_ref = ResourceRef::new(Platform::Bilibili, format!("user:{}", folder.owner.id))
+        .map_err(|_| bilibili_data_error("Bilibili favorite folder owner identity was invalid"))?;
+    let creator = ArtistSummary {
+        resource_ref: Some(owner_ref.clone()),
+        name: folder.owner.name,
+    };
+    let mut extensions = Extensions::from([
+        ("source".to_owned(), json!("detail")),
+        ("collection_kind".to_owned(), json!("favorite_folder")),
+        ("media_id".to_owned(), json!(folder.media_id)),
+        ("fid".to_owned(), json!(folder.folder_id)),
+        ("owner_mid".to_owned(), json!(folder.owner.id)),
+        ("owner_ref".to_owned(), json!(owner_ref)),
+        ("owner_followed".to_owned(), json!(folder.owner.followed)),
+        ("owner_vip_type".to_owned(), json!(folder.owner.vip_type)),
+        (
+            "owner_vip_status".to_owned(),
+            json!(folder.owner.vip_status),
+        ),
+        ("attr".to_owned(), json!(folder.attributes)),
+        ("private".to_owned(), json!(folder.attributes & 1 != 0)),
+        ("default".to_owned(), json!(folder.attributes & 2 == 0)),
+        ("cover_type".to_owned(), json!(folder.cover_type)),
+        ("invalid".to_owned(), json!(folder.invalid)),
+        ("fav_state".to_owned(), json!(folder.favorite_state)),
+        ("like_state".to_owned(), json!(folder.like_state)),
+        ("pinned".to_owned(), json!(folder.pinned)),
+        ("collect_count".to_owned(), json!(folder.counts.collect)),
+        ("play_count".to_owned(), json!(folder.counts.play)),
+        ("thumb_up_count".to_owned(), json!(folder.counts.thumb_up)),
+        ("share_count".to_owned(), json!(folder.counts.share)),
+        ("media_type".to_owned(), json!("video")),
+        ("child_friendly".to_owned(), json!(folder.child_friendly)),
+        (
+            "child_friendly_description".to_owned(),
+            json!(folder.child_friendly_description),
+        ),
+    ]);
+    insert_optional(&mut extensions, "owner_avatar_url", folder.owner.avatar_url);
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id,
+        name: folder.title,
+        description: folder.description,
+        cover_url: folder.cover_url,
+        creator: Some(creator),
+        track_count: Some(folder.media_count),
+        tags: Vec::new(),
+        subscribed: Some(folder.favorite_state),
+        created_at: (folder.created_at > 0)
+            .then(|| bilibili_unix_rfc3339(folder.created_at))
+            .flatten(),
+        updated_at: (folder.updated_at > 0)
+            .then(|| bilibili_unix_rfc3339(folder.updated_at))
+            .flatten(),
+        extensions,
+    })
+}
+
 fn validate_collected_playlist_page(
     page: &BilibiliCollectedPlaylistPage,
     requested_page: u32,
@@ -2222,17 +2288,65 @@ mod tests {
         assert!(detail.resolutions.is_empty());
     }
 
+    #[test]
+    fn favorite_folder_detail_maps_complete_playlist_metadata() {
+        let playlist = map_favorite_folder(BilibiliFavoriteFolder {
+            media_id: 2_883_236_382,
+            folder_id: 28_832_363,
+            owner: crate::client::BilibiliFavoriteFolderOwner {
+                id: 47_275_982,
+                name: "荷花-Lotus".to_owned(),
+                avatar_url: Some("https://i2.hdslb.com/bfs/face/avatar.jpg".to_owned()),
+                followed: false,
+                vip_type: 1,
+                vip_status: false,
+            },
+            attributes: 22,
+            title: "相声".to_owned(),
+            cover_url: Some("https://i2.hdslb.com/bfs/archive/folder.jpg".to_owned()),
+            cover_type: 2,
+            description: "公开收藏夹".to_owned(),
+            created_at: 1_705_401_630,
+            updated_at: 1_705_925_782,
+            invalid: false,
+            favorite_state: true,
+            like_state: false,
+            media_count: 99,
+            pinned: true,
+            child_friendly: false,
+            child_friendly_description: String::new(),
+            counts: crate::client::BilibiliFavoriteFolderCounts {
+                collect: 3,
+                play: 2_059,
+                thumb_up: 7,
+                share: 11,
+            },
+        })
+        .expect("mapped favorite folder");
+        assert_eq!(
+            playlist.resource_ref.to_string(),
+            "bilibili:favorite:2883236382"
+        );
+        assert_eq!(playlist.creator.as_ref().unwrap().name, "荷花-Lotus");
+        assert_eq!(playlist.track_count, Some(99));
+        assert_eq!(playlist.subscribed, Some(true));
+        assert_eq!(playlist.extensions["fid"], 28_832_363);
+        assert_eq!(playlist.extensions["private"], false);
+        assert_eq!(playlist.extensions["default"], false);
+        assert_eq!(playlist.extensions["play_count"], 2_059);
+    }
+
     #[tokio::test]
     async fn playlist_detail_validates_kind_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
         let unsupported = provider
-            .playlist("favorite:2883236382", None)
+            .playlist("series:3908327", None)
             .await
-            .expect_err("favorite detail is not implemented yet");
+            .expect_err("series detail is not implemented yet");
         assert_eq!(unsupported.code, ErrorCode::CapabilityNotSupported);
-        assert_eq!(unsupported.details["playlist_kind"], "favorite");
+        assert_eq!(unsupported.details["playlist_kind"], "series");
         let missing = provider
-            .playlist("season:3629748", Some("missing"))
+            .playlist("favorite:2883236382", Some("missing"))
             .await
             .expect_err("missing selected account");
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
@@ -2452,6 +2566,24 @@ mod tests {
         assert_eq!(playlist.extensions["owner_mid"], 327_961_371);
         assert_eq!(playlist.extensions["detail_source"], "season_archives");
         assert_eq!(playlist.extensions["first_page_archive_count"], 30);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili favorite folder access"]
+    async fn live_playlist_detail_maps_public_favorite_folder() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let playlist = provider
+            .playlist("favorite:2883236382", None)
+            .await
+            .expect("live public favorite folder detail");
+        assert_eq!(
+            playlist.resource_ref.to_string(),
+            "bilibili:favorite:2883236382"
+        );
+        assert_eq!(playlist.creator.as_ref().unwrap().name, "荷花-Lotus");
+        assert_eq!(playlist.track_count, Some(99));
+        assert_eq!(playlist.extensions["owner_mid"], 47_275_982);
+        assert_eq!(playlist.extensions["fid"], 28_832_363);
     }
 
     #[tokio::test]
