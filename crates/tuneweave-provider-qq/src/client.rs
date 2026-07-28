@@ -728,40 +728,7 @@ impl QqClient {
             )
             .with_platform(Platform::Qq)
         })?;
-        ensure_zero_code(&raw, "QQ API batch")?;
-        requests
-            .iter()
-            .enumerate()
-            .map(|(index, request)| {
-                let key = format!("req_{index}");
-                let response = raw
-                    .get(&key)
-                    .ok_or_else(|| qq_data_error(format!("QQ API response is missing {key}")))?;
-                let code = response
-                    .get("code")
-                    .and_then(platform_code)
-                    .ok_or_else(|| qq_data_error(format!("QQ API response {key} has no code")))?;
-                if !allow_business_errors || code == 0 {
-                    ensure_zero_code(
-                        response,
-                        &format!("QQ API {}.{}", request.module, request.method),
-                    )?;
-                }
-                let data = match response.get("data").cloned() {
-                    Some(data) => data,
-                    None if allow_business_errors => json!({}),
-                    None => {
-                        return Err(qq_data_error(format!(
-                            "QQ API response {key} is missing data"
-                        )));
-                    }
-                };
-                Ok(QqApiResponse {
-                    data,
-                    raw: response.clone(),
-                })
-            })
-            .collect()
+        parse_api_responses(&raw, requests, allow_business_errors)
     }
 
     fn lock_device(&self) -> Result<MutexGuard<'_, DeviceStore>> {
@@ -954,6 +921,47 @@ fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
     )
 }
 
+fn parse_api_responses(
+    raw: &Value,
+    requests: &[QqApiRequest],
+    allow_business_errors: bool,
+) -> Result<Vec<QqApiResponse>> {
+    ensure_zero_code(raw, "QQ API batch")?;
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            let key = format!("req_{index}");
+            let response = raw
+                .get(&key)
+                .ok_or_else(|| qq_data_error(format!("QQ API response is missing {key}")))?;
+            let code = response
+                .get("code")
+                .and_then(platform_code)
+                .ok_or_else(|| qq_data_error(format!("QQ API response {key} has no code")))?;
+            if !allow_business_errors || code == 0 {
+                ensure_zero_code(
+                    response,
+                    &format!("QQ API {}.{}", request.module, request.method),
+                )?;
+            }
+            let data = match response.get("data").cloned() {
+                Some(data) => data,
+                None if allow_business_errors => json!({}),
+                None => {
+                    return Err(qq_data_error(format!(
+                        "QQ API response {key} is missing data"
+                    )));
+                }
+            };
+            Ok(QqApiResponse {
+                data,
+                raw: response.clone(),
+            })
+        })
+        .collect()
+}
+
 fn is_anonymous_session_rejection(error: &TuneWeaveError) -> bool {
     error.code == ErrorCode::AuthenticationRequired
         && matches!(
@@ -1137,6 +1145,66 @@ mod tests {
         let error = ensure_zero_code(&json!({"code": 1001}), "search").expect_err("failure");
         assert_eq!(error.code, ErrorCode::UpstreamError);
         assert_eq!(error.details["platform_code"], 1001);
+    }
+
+    #[test]
+    fn batch_parser_keeps_top_level_and_subrequest_errors_distinct() {
+        let requests = [QqApiRequest::new("music.test", "First", json!({}))];
+        let Err(top_level) = parse_api_responses(
+            &json!({"code": 2001, "req_0": {"code": 0, "data": {}}}),
+            &requests,
+            false,
+        ) else {
+            panic!("top-level rate limit was accepted");
+        };
+        assert_eq!(top_level.code, ErrorCode::RateLimited);
+        assert_eq!(top_level.details["platform_code"], 2001);
+
+        let Err(subrequest) = parse_api_responses(
+            &json!({"code": 0, "req_0": {"code": "104400", "data": {}}}),
+            &requests,
+            false,
+        ) else {
+            panic!("subrequest authentication failure was accepted");
+        };
+        assert_eq!(subrequest.code, ErrorCode::AuthenticationRequired);
+        assert_eq!(subrequest.details["platform_code"], 104_400);
+        assert!(subrequest.message.contains("music.test.First"));
+    }
+
+    #[test]
+    fn batch_parser_only_allows_explicit_business_errors_and_preserves_order() {
+        let requests = [
+            QqApiRequest::new("music.test", "EmptyBusiness", json!({})),
+            QqApiRequest::new("music.test", "Success", json!({})),
+        ];
+        let raw = json!({
+            "code": 0,
+            "req_0": {"code": 10007, "message": "empty catalog"},
+            "req_1": {"code": 0, "data": {"position": 1}}
+        });
+        let Err(rejected) = parse_api_responses(&raw, &requests, false) else {
+            panic!("business error was accepted without an explicit caller branch");
+        };
+        assert_eq!(rejected.code, ErrorCode::UpstreamError);
+        assert_eq!(rejected.details["platform_code"], 10_007);
+
+        let accepted =
+            parse_api_responses(&raw, &requests, true).expect("explicit business response parsing");
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].raw["code"], 10_007);
+        assert_eq!(accepted[0].data, json!({}));
+        assert_eq!(accepted[1].data["position"], 1);
+
+        let Err(missing) = parse_api_responses(
+            &json!({"code": 0, "req_0": {"code": 0, "data": {}}}),
+            &requests,
+            true,
+        ) else {
+            panic!("missing ordered response was accepted");
+        };
+        assert_eq!(missing.code, ErrorCode::UpstreamError);
+        assert!(missing.message.contains("req_1"));
     }
 
     #[test]
