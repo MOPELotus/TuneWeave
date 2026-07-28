@@ -78,21 +78,21 @@ use tuneweave_core::{
     ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
     SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
     SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SimilarArtistList, SimilarArtistRequest,
-    SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
-    StreamOutcome, StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackCredits,
-    TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackFavoriteCount,
-    TrackIdentifierKind, TrackLabelList, TrackVersionList, TuneWeaveError, UniPlaylist,
-    UniPlaylistCreateRequest, UniPlaylistImportRequest, UniPlaylistImportResult,
-    UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
-    UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
-    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
-    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore,
-    User, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SimilarArtistList,
+    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
+    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
+    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
+    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
+    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
+    UniPlaylistItemStream, UniPlaylistStore, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -300,6 +300,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/related-videos", get(related_videos))
         .route("/tracks/{reference}/versions", get(track_versions))
         .route("/tracks/{reference}/credits", get(track_credits))
+        .route(
+            "/tracks/{reference}/sheet-music/availability",
+            get(sheet_music_availability),
+        )
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7605,6 +7609,12 @@ struct TrackCreditParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SheetMusicAvailabilityParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelatedPlaylistParams {
     #[serde(
         alias = "last",
@@ -7774,6 +7784,26 @@ async fn track_credits(
         .track_credits(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(credits).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn sheet_music_availability(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<SheetMusicAvailabilityParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<SheetMusicAvailability>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let availability = provider
+        .sheet_music_availability(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(availability).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -17349,6 +17379,7 @@ mod tests {
                 Capability::TrackVersions,
                 Capability::TrackFavoriteCounts,
                 Capability::TrackCredits,
+                Capability::SheetMusicAvailability,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17988,6 +18019,24 @@ mod tests {
                     extensions: Extensions::new(),
                 }],
                 summary: Some("完整制作班底".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
+        }
+
+        async fn sheet_music_availability(
+            &self,
+            id: &str,
+            account: Option<&str>,
+        ) -> Result<SheetMusicAvailability> {
+            Ok(SheetMusicAvailability {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid sheet music track reference"),
+                available: true,
+                ai_generated: false,
+                additional_catalog: true,
+                tablature: false,
+                standard_notation: true,
+                external_catalog: false,
                 extensions: Extensions::from([("account".to_owned(), json!(account))]),
             })
         }
@@ -22447,6 +22496,36 @@ mod tests {
         for path in [
             "/v1/tracks/qq:97773/credits?unknown=true",
             "/v1/tracks/not-a-reference/credits",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_sheet_music_availability_preserves_independent_flags_account_and_strict_queries() {
+        let app = test_app_with_import_providers();
+        let (status, availability) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/sheet-music/availability?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{availability}");
+        assert_eq!(availability["data"]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(availability["data"]["available"], true);
+        assert_eq!(availability["data"]["ai_generated"], false);
+        assert_eq!(availability["data"]["additional_catalog"], true);
+        assert_eq!(availability["data"]["tablature"], false);
+        assert_eq!(availability["data"]["standard_notation"], true);
+        assert_eq!(availability["data"]["external_catalog"], false);
+        assert_eq!(availability["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(availability["meta"]["platform"], "qq");
+        assert_eq!(availability["meta"]["account"], "green-vip");
+
+        for path in [
+            "/v1/tracks/qq:97773/sheet-music/availability?unknown=true",
+            "/v1/tracks/not-a-reference/sheet-music/availability",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");

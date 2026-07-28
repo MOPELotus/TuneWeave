@@ -1172,6 +1172,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 | GET | `/v1/tracks/{ref}/related-videos` | `previous_id?`（也接受 `lastmvid/last_mvid/cursor`）、`account?` | `RelatedVideoList`；相关 MV 使用 VID 作为资源身份、数字 `mvid` 作为真实换批游标 |
 | GET | `/v1/tracks/{ref}/versions` | `account?` | `TrackVersionList`；同曲其他版本的有序完整歌曲列表，不伪装成相似推荐或搜索结果 |
 | GET | `/v1/tracks/{ref}/credits` | `account?` | `TrackCredits`；按平台原生角色分组返回制作班底、艺人身份、头像、动作与关注态 |
+| GET | `/v1/tracks/{ref}/sheet-music/availability` | `account?` | `SheetMusicAvailability`；总可用性与 AI、附加目录、六线谱、标准谱、外部目录五个独立标志 |
 | GET | `/v1/tracks/{ref}/favorite-count` | `account?` | `TrackFavoriteCount`；收藏人数数值与平台展示文案分离 |
 | GET | `/v1/tracks/favorite-counts` | `refs` 或 `ids + platform?`、`account?` | `TrackFavoriteCount[]`；1–100 项、同平台、保序并保留重复项 |
 | POST | `/v1/tracks/favorite-counts` | JSON `{refs?|ids?, platform?, account?}`；`ids` 接受字符串、数字或数组 | `TrackFavoriteCount[]`；与 GET 共用平台原生批量能力 |
@@ -1312,6 +1313,8 @@ QQ 相关 MV 使用 `GET /v1/tracks/{qq-ref}/related-videos`，固定调用 Andr
 QQ 同曲其他版本使用 `GET /v1/tracks/{qq-ref}/versions`，固定调用 Android `music.musichallSong.OtherVersionServer/GetOtherVersionSongs`。数字引用原样提交正数 `songid`，MID 原样提交 `songmid`，不会先把一种身份改写成另一种；响应 `track_ref` 也保持调用方来源身份。`versionList` 作为不可续页的有序完整 `Track[]` 返回，每项复用 QQ 完整歌曲映射并保留从 0 开始的 `version_index`、数字 ID、MID、歌手、专辑、文件规格、付费状态和原始条目；平台合法的 `null` 目录映射为空列表，不伪造存在版本。非对象或畸形歌曲和超过 1000 项的异常响应明确失败，顶层未来字段及完整响应进入列表扩展。公开请求可匿名，显式账户只验证精确别名而不向不需要凭据的请求注入密钥。2026-07-28 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 Provider 和统一 HTTP 均返回相同规模的 10 项非空版本列表，两种来源引用及平台顺序保持正确。
 
 QQ 歌曲制作信息使用 `GET /v1/tracks/{qq-ref}/credits`，固定调用 Android `music.sociality.KolWorksTag/SongProducer`。数字歌曲 ID 只提交正数 `songid`，MID 只提交严格校验的 `songmid`，响应 `track_ref` 保持调用方来源身份。平台 `Lst` 的角色标题、原生类型及有序 `Producers` 映射为强类型分组；人员姓名、可选歌手 MID、HTTPS 头像、QQ 音乐或 HTTPS 动作地址和 `Follow=0/1` 关注态分别保存，未知关注值不会被误判为布尔值，原生字段仍进入扩展。平台合法空目录返回空分组；空白身份、危险 URL、畸形 MID、异常列表规模和错误容器明确失败。公开请求匿名，显式账户仅验证精确别名且不会注入不需要的登录凭据。2026-07-28 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 Provider 和统一 HTTP 均返回 10 个非空角色分组，首组“演唱”及人员“周杰伦”一致，来源引用保持正确。
+
+QQ 曲谱存在性使用 `GET /v1/tracks/{qq-ref}/sheet-music/availability`，固定调用 `music.mir.SheetMusicSvr/HasSheetMusic`，并按参考协议以精确覆盖的 `g_tk/uin/format/inCharset/outCharset/notice/needNewCode` 公共参数请求，不混入 Android 会话、Cookie 或调用方可注入字段。上游只接受歌曲 MID；MID 直接提交，数字 ID 先通过已验证的歌曲详情解析规范 MID，统一响应仍保持调用方原引用。`hasGuitar/hasMore/hasLDY/hasQRCX/hasChongChong` 分别映射为 AI 谱、附加目录、六线谱、标准谱和外部目录五个布尔字段，`available` 对全部字段取 OR，不使用会让低优先分支遮蔽其他能力的 `if/else`。五个字段全部必需且只接受布尔或 0/1，缺失和非二进制值拒绝为假状态；未知字段与完整响应保留。2026-07-28 数字 ID `97773` 与 MID `0039MnYb0qxYhV` 的真实 Provider/统一 HTTP 均返回可用，五个独立标志全为真且解析到相同 MID。
 
 QQ 歌曲收藏人数使用 Android `music.musicasset.SongFavRead/GetSongFansNumberById`。单曲 `GET /v1/tracks/{qq-ref}/favorite-count` 与批量 `GET/POST /v1/tracks/favorite-counts` 共用一次最多 100 项的原生 `v_songId` 请求；数字 ID 直接提交，MID 先通过歌曲详情解析数字身份，同批重复 MID 只解析一次。平台 `m_numbers` 映射为精确无符号 `count`，`m_show` 独立映射为可选 `display_text`，不会让“万”等展示缩写覆盖真实人数。批量输出严格恢复调用方引用、顺序和重复项，并保留 `input_index` 与解析后的数字 ID；人数键集合缺失或多出目标、展示键越界、负数、控制字符、身份错位及混合平台在明确层级失败。响应 data 中未来字段和剥离重复数据后的顶层响应元信息进入每项扩展，避免完整批量字典在每项复制导致二次方膨胀。公开请求匿名，显式账户只校验精确别名。2026-07-28 真实 Provider 与统一 HTTP 的单曲、GET 批量和 POST 批量均通过；`97773`、对应 MID `0039MnYb0qxYhV` 及重复数字 ID 返回相同正数和非空展示文案。
 

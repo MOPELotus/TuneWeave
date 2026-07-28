@@ -2879,6 +2879,18 @@ pub struct TrackCredits {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetMusicAvailability {
+    pub track_ref: ResourceRef,
+    pub available: bool,
+    pub ai_generated: bool,
+    pub additional_catalog: bool,
+    pub tablature: bool,
+    pub standard_notation: bool,
+    pub external_catalog: bool,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
     pub count: u64,
@@ -6147,6 +6159,29 @@ mod tests {
             "qq:0025NhlN2yWrP4"
         );
         assert_eq!(value["summary"], "完整制作班底");
+    }
+
+    #[test]
+    fn sheet_music_availability_keeps_each_source_and_format_independent() {
+        let availability = SheetMusicAvailability {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid sheet music track reference"),
+            available: true,
+            ai_generated: false,
+            additional_catalog: true,
+            tablature: false,
+            standard_notation: true,
+            external_catalog: false,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(availability).expect("serialize sheet music availability");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["available"], true);
+        assert_eq!(value["ai_generated"], false);
+        assert_eq!(value["additional_catalog"], true);
+        assert_eq!(value["tablature"], false);
+        assert_eq!(value["standard_notation"], true);
+        assert_eq!(value["external_catalog"], false);
     }
 
     #[test]

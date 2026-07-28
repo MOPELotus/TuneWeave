@@ -37,13 +37,13 @@ use tuneweave_core::{
     ResourceRef, Result, SearchItem, SearchKind, SearchOpaqueItem, SearchQuery, SearchSelector,
     SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
-    SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackCredit,
-    TrackCreditGroup, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
-    TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
-    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    SearchVariant, SheetMusicAvailability, SimilarArtistList, SimilarArtistRequest,
+    SimilarTrackList, SimilarTrackRequest, SimilarTrackSection, SimilarTrackSectionKind,
+    SingingAnnotationsAvailability, StoredAccountCredential, StreamRequest, SubscriptionResult,
+    Track, TrackCredit, TrackCreditGroup, TrackCredits, TrackDetailBatchRequest,
+    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
+    TrackVersionList, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -81,6 +81,8 @@ const TRACK_FAVORITE_COUNT_MODULE: &str = "music.musicasset.SongFavRead";
 const TRACK_FAVORITE_COUNT_METHOD: &str = "GetSongFansNumberById";
 const TRACK_CREDIT_MODULE: &str = "music.sociality.KolWorksTag";
 const TRACK_CREDIT_METHOD: &str = "SongProducer";
+const SHEET_MUSIC_MODULE: &str = "music.mir.SheetMusicSvr";
+const SHEET_MUSIC_AVAILABILITY_METHOD: &str = "HasSheetMusic";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1273,6 +1275,25 @@ struct QqTrackCreditsResponse {
     groups: Vec<QqTrackCreditGroup>,
     #[serde(default, rename = "ReinforceMsg")]
     summary: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqSheetMusicAvailabilityResponse {
+    #[serde(rename = "hasGuitar", deserialize_with = "deserialize_qq_binary_bool")]
+    has_ai_sheet: bool,
+    #[serde(rename = "hasMore", deserialize_with = "deserialize_qq_binary_bool")]
+    has_additional_catalog: bool,
+    #[serde(rename = "hasLDY", deserialize_with = "deserialize_qq_binary_bool")]
+    has_tablature: bool,
+    #[serde(rename = "hasQRCX", deserialize_with = "deserialize_qq_binary_bool")]
+    has_standard_notation: bool,
+    #[serde(
+        rename = "hasChongChong",
+        deserialize_with = "deserialize_qq_binary_bool"
+    )]
+    has_external_catalog: bool,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3461,6 +3482,7 @@ impl MusicProvider for QqProvider {
             Capability::TrackVersions,
             Capability::TrackFavoriteCounts,
             Capability::TrackCredits,
+            Capability::SheetMusicAvailability,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -4031,6 +4053,22 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ track credit request returned no response"))?;
         map_qq_track_credits(id.trim(), &identifier, response)
+    }
+
+    async fn sheet_music_availability(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<SheetMusicAvailability> {
+        let (identifier, song_mid) = self.resolve_sheet_music_mid(id, account).await?;
+        let response = self
+            .client
+            .request_with_exact_comm(
+                qq_sheet_music_availability_request(&song_mid),
+                &qq_sheet_music_comm(),
+            )
+            .await?;
+        map_qq_sheet_music_availability(id.trim(), &identifier, &song_mid, response)
     }
 
     async fn artist_tracks(
@@ -5451,6 +5489,25 @@ impl QqProvider {
             }
         };
         Ok((identifier, song_id))
+    }
+
+    async fn resolve_sheet_music_mid(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<(QqTrackIdentifier, String)> {
+        let identifier = parse_qq_strict_track_identifier(id)?;
+        self.validate_public_account(account)?;
+        let song_mid = match &identifier {
+            QqTrackIdentifier::Mid(mid) => mid.clone(),
+            QqTrackIdentifier::Numeric(_) => {
+                let track = self.track(id, account).await?;
+                let mid = track.resource_ref.id().to_owned();
+                validate_qq_media_id(&mid, "sheet music song MID")?;
+                mid
+            }
+        };
+        Ok((identifier, song_mid))
     }
 
     fn qq_credential(&self, account: Option<&str>) -> Result<Option<QqCredential>> {
@@ -8096,6 +8153,26 @@ fn qq_track_credits_request(identifier: &QqTrackIdentifier) -> QqApiRequest {
     QqApiRequest::new(TRACK_CREDIT_MODULE, TRACK_CREDIT_METHOD, param)
 }
 
+fn qq_sheet_music_availability_request(song_mid: &str) -> QqApiRequest {
+    QqApiRequest::new(
+        SHEET_MUSIC_MODULE,
+        SHEET_MUSIC_AVAILABILITY_METHOD,
+        json!({"songMid": song_mid}),
+    )
+}
+
+fn qq_sheet_music_comm() -> Value {
+    json!({
+        "g_tk": 5381,
+        "uin": "",
+        "format": "json",
+        "inCharset": "utf-8",
+        "outCharset": "utf-8",
+        "notice": 0,
+        "needNewCode": 1
+    })
+}
+
 fn map_qq_track_credits(
     requested_id: &str,
     identifier: &QqTrackIdentifier,
@@ -8152,6 +8229,50 @@ fn map_qq_track_credits(
         groups,
         summary,
         extensions: Extensions::from([
+            (
+                "requested_identifier_kind".to_owned(),
+                json!(match identifier {
+                    QqTrackIdentifier::Numeric(_) => "numeric_id",
+                    QqTrackIdentifier::Mid(_) => "mid",
+                }),
+            ),
+            ("extra".to_owned(), json!(parsed.extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_sheet_music_availability(
+    requested_id: &str,
+    identifier: &QqTrackIdentifier,
+    song_mid: &str,
+    response: QqApiResponse,
+) -> Result<SheetMusicAvailability> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed = serde_json::from_value::<QqSheetMusicAvailabilityResponse>(response_data)
+        .map_err(|error| {
+            qq_data_error(format!(
+                "QQ sheet music availability response is malformed: {error}"
+            ))
+        })?;
+    let available = parsed.has_ai_sheet
+        || parsed.has_additional_catalog
+        || parsed.has_tablature
+        || parsed.has_standard_notation
+        || parsed.has_external_catalog;
+    Ok(SheetMusicAvailability {
+        track_ref: qq_ref(requested_id, "sheet music track")?,
+        available,
+        ai_generated: parsed.has_ai_sheet,
+        additional_catalog: parsed.has_additional_catalog,
+        tablature: parsed.has_tablature,
+        standard_notation: parsed.has_standard_notation,
+        external_catalog: parsed.has_external_catalog,
+        extensions: Extensions::from([
+            ("song_mid".to_owned(), json!(song_mid)),
             (
                 "requested_identifier_kind".to_owned(),
                 json!(match identifier {
@@ -27337,6 +27458,125 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn sheet_music_availability_request_and_comm_match_the_mid_only_protocol() {
+        let request = qq_sheet_music_availability_request("0039MnYb0qxYhV");
+        assert_eq!(request.module, SHEET_MUSIC_MODULE);
+        assert_eq!(request.method, SHEET_MUSIC_AVAILABILITY_METHOD);
+        assert_eq!(request.param, json!({"songMid": "0039MnYb0qxYhV"}));
+        assert_eq!(
+            qq_sheet_music_comm(),
+            json!({
+                "g_tk": 5381,
+                "uin": "",
+                "format": "json",
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "notice": 0,
+                "needNewCode": 1
+            })
+        );
+    }
+
+    #[test]
+    fn sheet_music_availability_combines_every_independent_platform_flag() {
+        let fields = ["hasGuitar", "hasMore", "hasLDY", "hasQRCX", "hasChongChong"];
+        for field in fields {
+            let mut data = json!({
+                "hasGuitar": 0,
+                "hasMore": 0,
+                "hasLDY": 0,
+                "hasQRCX": 0,
+                "hasChongChong": 0,
+                "futureField": true
+            });
+            data[field] = json!(1);
+            let mapped = map_qq_sheet_music_availability(
+                "97773",
+                &QqTrackIdentifier::Numeric(97_773),
+                "0039MnYb0qxYhV",
+                response(data),
+            )
+            .expect("map independently available QQ sheet source");
+            assert!(mapped.available, "{field} must contribute to availability");
+            assert_eq!(mapped.track_ref.to_string(), "qq:97773");
+            assert_eq!(mapped.extensions["song_mid"], "0039MnYb0qxYhV");
+            assert_eq!(mapped.extensions["requested_identifier_kind"], "numeric_id");
+            assert_eq!(mapped.extensions["extra"]["futureField"], true);
+        }
+
+        let unavailable = map_qq_sheet_music_availability(
+            "0039MnYb0qxYhV",
+            &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+            "0039MnYb0qxYhV",
+            response(json!({
+                "hasGuitar": false,
+                "hasMore": false,
+                "hasLDY": false,
+                "hasQRCX": false,
+                "hasChongChong": false
+            })),
+        )
+        .expect("map unavailable QQ sheet status");
+        assert!(!unavailable.available);
+        assert!(!unavailable.ai_generated);
+        assert!(!unavailable.additional_catalog);
+        assert!(!unavailable.tablature);
+        assert!(!unavailable.standard_notation);
+        assert!(!unavailable.external_catalog);
+        assert_eq!(unavailable.extensions["requested_identifier_kind"], "mid");
+    }
+
+    #[test]
+    fn sheet_music_availability_rejects_missing_and_non_binary_flags() {
+        for data in [
+            json!({
+                "hasGuitar": 0,
+                "hasMore": 0,
+                "hasLDY": 0,
+                "hasQRCX": 0
+            }),
+            json!({
+                "hasGuitar": 2,
+                "hasMore": 0,
+                "hasLDY": 0,
+                "hasQRCX": 0,
+                "hasChongChong": 0
+            }),
+        ] {
+            let error = map_qq_sheet_music_availability(
+                "0039MnYb0qxYhV",
+                &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+                "0039MnYb0qxYhV",
+                response(data),
+            )
+            .expect_err("invalid QQ sheet music availability response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn sheet_music_availability_validates_identity_before_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SheetMusicAvailability)
+        );
+        for id in ["0", "invalid-mid!", "\n"] {
+            let error = provider
+                .sheet_music_availability(id, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ sheet music track identity");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let missing = provider
+            .sheet_music_availability("0039MnYb0qxYhV", Some("missing-account"))
+            .await
+            .expect_err("missing QQ sheet music account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -28658,6 +28898,34 @@ mod tests {
                     && group.credits.iter().all(|credit| !credit.name.is_empty())
             }));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_sheet_music_availability_accepts_numeric_id_and_mid() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        let numeric = provider
+            .sheet_music_availability("97773", None)
+            .await
+            .expect("live QQ numeric sheet music availability");
+        let mid = provider
+            .sheet_music_availability("0039MnYb0qxYhV", None)
+            .await
+            .expect("live QQ MID sheet music availability");
+        assert_eq!(numeric.track_ref.to_string(), "qq:97773");
+        assert_eq!(mid.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(numeric.available, mid.available);
+        assert_eq!(numeric.ai_generated, mid.ai_generated);
+        assert_eq!(numeric.additional_catalog, mid.additional_catalog);
+        assert_eq!(numeric.tablature, mid.tablature);
+        assert_eq!(numeric.standard_notation, mid.standard_notation);
+        assert_eq!(numeric.external_catalog, mid.external_catalog);
+        assert_eq!(numeric.extensions["song_mid"], "0039MnYb0qxYhV");
+        assert_eq!(mid.extensions["song_mid"], "0039MnYb0qxYhV");
     }
 
     #[tokio::test]

@@ -337,6 +337,25 @@ impl QqClient {
         response
     }
 
+    pub(crate) async fn request_with_exact_comm(
+        &self,
+        request: QqApiRequest,
+        comm: &Value,
+    ) -> Result<QqApiResponse> {
+        if !comm.is_object() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "QQ exact comm must be an object",
+            )
+            .with_platform(Platform::Qq));
+        }
+        self.post_api(comm, std::slice::from_ref(&request), None)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ exact-comm service returned no response"))
+    }
+
     pub(crate) async fn request_android_business(
         &self,
         request: QqApiRequest,

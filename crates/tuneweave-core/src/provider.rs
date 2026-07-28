@@ -47,14 +47,14 @@ use crate::{
     RelatedPlaylistRequest, RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result,
     SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
     SearchMultiMatchRequest, SearchQuery, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingList, SearchTrendingRequest, SimilarArtistList, SimilarArtistRequest,
-    SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
-    StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest,
-    TrackEntitlement, TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User,
-    UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyRequest,
+    SearchTrendingList, SearchTrendingRequest, SheetMusicAvailability, SimilarArtistList,
+    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
+    StreamBatch, StreamOutcome, StreamRequest, StyledRadioStationLibraryRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackCredits,
+    TrackDetailBatchRequest, TrackEntitlement, TrackFavoriteCount, TrackLabelList,
+    TrackVersionList, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
+    VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoRecommendationRequest,
+    VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -791,6 +791,17 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackCredits,
+        ))
+    }
+
+    async fn sheet_music_availability(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<SheetMusicAvailability> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SheetMusicAvailability,
         ))
     }
 
