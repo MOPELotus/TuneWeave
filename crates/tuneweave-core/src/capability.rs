@@ -118,6 +118,7 @@ pub enum Capability {
     ChallengeValidation,
     PrincipalStatus,
     SessionManagement,
+    CallerManagedCredentials,
     AccountProfile,
     AccountPlaylists,
     AccountAlbums,
@@ -245,6 +246,15 @@ mod tests {
             serde_json::to_value(Capability::UserMusicGene)
                 .expect("serialize user music gene capability"),
             serde_json::json!("user_music_gene")
+        );
+    }
+
+    #[test]
+    fn caller_managed_credentials_use_a_stable_discovery_name() {
+        assert_eq!(
+            serde_json::to_value(Capability::CallerManagedCredentials)
+                .expect("serialize caller-managed credential capability"),
+            serde_json::json!("caller_managed_credentials")
         );
     }
 

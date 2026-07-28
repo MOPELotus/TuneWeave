@@ -1905,6 +1905,7 @@ name = "tuneweave-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "hex",
  "serde",
  "serde_json",

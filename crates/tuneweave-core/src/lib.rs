@@ -1,6 +1,7 @@
 //! Platform-neutral domain types and provider interfaces for TuneWeave.
 
 mod auth;
+mod caller_credential;
 mod capability;
 mod credential_store;
 mod error;
@@ -16,6 +17,9 @@ pub use auth::{
     AccountProfile, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
     AuthPrincipalStatusRequest, AuthState, ChallengeMethod, PasswordFormat, PasswordLoginRequest,
     PrincipalType, ProviderQrPoll, ProviderQrStart,
+};
+pub use caller_credential::{
+    CALLER_CREDENTIAL_FORMAT, CALLER_CREDENTIAL_HEADER, CallerCredential, ProviderCredential,
 };
 pub use capability::Capability;
 pub use credential_store::{
