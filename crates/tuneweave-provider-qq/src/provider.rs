@@ -39,10 +39,11 @@ use tuneweave_core::{
     SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
     SearchVariant, SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
     SimilarTrackSection, SimilarTrackSectionKind, SingingAnnotationsAvailability,
-    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackDetailBatchRequest,
-    TrackDetailRequestItem, TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList,
-    TrackVersionList, TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video,
-    VideoDetail, VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
+    StoredAccountCredential, StreamRequest, SubscriptionResult, Track, TrackCredit,
+    TrackCreditGroup, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
+    TrackFavoriteCount, TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList,
+    TrialWindow, TuneWeaveError, User, UserProfile, UserProfileBackend, Video, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoResourceKind, VideoStream, VideoStreamRequest,
 };
 
 use crate::client::{
@@ -78,6 +79,8 @@ const TRACK_VERSION_MODULE: &str = "music.musichallSong.OtherVersionServer";
 const TRACK_VERSION_METHOD: &str = "GetOtherVersionSongs";
 const TRACK_FAVORITE_COUNT_MODULE: &str = "music.musicasset.SongFavRead";
 const TRACK_FAVORITE_COUNT_METHOD: &str = "GetSongFansNumberById";
+const TRACK_CREDIT_MODULE: &str = "music.sociality.KolWorksTag";
+const TRACK_CREDIT_METHOD: &str = "SongProducer";
 const SMARTBOX_MODULE: &str = "music.smartboxCgi.SmartBoxCgi";
 const SMARTBOX_METHOD: &str = "GetSmartBoxResult";
 const HOTKEY_MODULE: &str = "music.musicsearch.HotkeyService";
@@ -1222,6 +1225,54 @@ struct QqTrackFavoriteCountResponse {
     numbers: BTreeMap<String, u64>,
     #[serde(rename = "m_show")]
     show: BTreeMap<String, String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTrackCredit {
+    #[serde(rename = "Type")]
+    platform_type: i64,
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Icon")]
+    icon: String,
+    #[serde(rename = "Scheme")]
+    scheme: String,
+    #[serde(rename = "SingerMid")]
+    singer_mid: String,
+    #[serde(rename = "Follow")]
+    follow: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqTrackCreditGroup {
+    #[serde(rename = "Title")]
+    title: String,
+    #[serde(
+        rename = "Producers",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    credits: Vec<QqTrackCredit>,
+    #[serde(rename = "Type")]
+    platform_type: i64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct QqTrackCreditsResponse {
+    #[serde(
+        rename = "Lst",
+        default,
+        deserialize_with = "deserialize_qq_vec_or_empty"
+    )]
+    groups: Vec<QqTrackCreditGroup>,
+    #[serde(default, rename = "ReinforceMsg")]
+    summary: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3409,6 +3460,7 @@ impl MusicProvider for QqProvider {
             Capability::RelatedVideos,
             Capability::TrackVersions,
             Capability::TrackFavoriteCounts,
+            Capability::TrackCredits,
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
@@ -3966,6 +4018,19 @@ impl MusicProvider for QqProvider {
             .next()
             .ok_or_else(|| qq_data_error("QQ track favorite count request returned no response"))?;
         map_qq_track_favorite_counts(&requested_ids, &numeric_ids, response)
+    }
+
+    async fn track_credits(&self, id: &str, account: Option<&str>) -> Result<TrackCredits> {
+        let identifier = parse_qq_strict_track_identifier(id)?;
+        self.validate_public_account(account)?;
+        let response = self
+            .client
+            .request_android(&[qq_track_credits_request(&identifier)])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ track credit request returned no response"))?;
+        map_qq_track_credits(id.trim(), &identifier, response)
     }
 
     async fn artist_tracks(
@@ -8021,6 +8086,167 @@ fn map_qq_track_favorite_counts(
             })
         })
         .collect()
+}
+
+fn qq_track_credits_request(identifier: &QqTrackIdentifier) -> QqApiRequest {
+    let param = match identifier {
+        QqTrackIdentifier::Numeric(id) => json!({"songid": id}),
+        QqTrackIdentifier::Mid(mid) => json!({"songmid": mid}),
+    };
+    QqApiRequest::new(TRACK_CREDIT_MODULE, TRACK_CREDIT_METHOD, param)
+}
+
+fn map_qq_track_credits(
+    requested_id: &str,
+    identifier: &QqTrackIdentifier,
+    response: QqApiResponse,
+) -> Result<TrackCredits> {
+    let QqApiResponse {
+        data: response_data,
+        raw: response_raw,
+    } = response;
+    let parsed =
+        serde_json::from_value::<QqTrackCreditsResponse>(response_data).map_err(|error| {
+            qq_data_error(format!("QQ track credit response is malformed: {error}"))
+        })?;
+    if parsed.groups.len() > 100 {
+        return Err(qq_data_error(
+            "QQ track credit response exceeded its safe group bound",
+        ));
+    }
+    let summary = normalized_qq_credit_summary(&parsed.summary)?;
+    let mut groups = Vec::with_capacity(parsed.groups.len());
+    for group in parsed.groups {
+        if group.title.trim().is_empty()
+            || group.title.len() > 1_024
+            || group.title.chars().any(char::is_control)
+        {
+            return Err(qq_data_error(
+                "QQ track credit response contains an invalid group title",
+            ));
+        }
+        if group.credits.len() > 1_000 {
+            return Err(qq_data_error(
+                "QQ track credit response exceeded its safe person bound",
+            ));
+        }
+        let raw = serde_json::to_value(&group)
+            .map_err(|_| qq_data_error("failed to preserve QQ track credit group"))?;
+        let credits = group
+            .credits
+            .into_iter()
+            .map(map_qq_track_credit)
+            .collect::<Result<Vec<_>>>()?;
+        groups.push(TrackCreditGroup {
+            title: group.title.trim().to_owned(),
+            platform_type: group.platform_type,
+            credits,
+            extensions: Extensions::from([
+                ("extra".to_owned(), json!(group.extra)),
+                ("raw".to_owned(), raw),
+            ]),
+        });
+    }
+    Ok(TrackCredits {
+        track_ref: qq_ref(requested_id, "credited track")?,
+        groups,
+        summary,
+        extensions: Extensions::from([
+            (
+                "requested_identifier_kind".to_owned(),
+                json!(match identifier {
+                    QqTrackIdentifier::Numeric(_) => "numeric_id",
+                    QqTrackIdentifier::Mid(_) => "mid",
+                }),
+            ),
+            ("extra".to_owned(), json!(parsed.extra)),
+            ("response".to_owned(), response_raw),
+        ]),
+    })
+}
+
+fn map_qq_track_credit(credit: QqTrackCredit) -> Result<TrackCredit> {
+    let raw = serde_json::to_value(&credit)
+        .map_err(|_| qq_data_error("failed to preserve QQ track credit person"))?;
+    let name = credit.name.trim();
+    if name.is_empty() || name.len() > 1_024 || name.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ track credit response contains an invalid person name",
+        ));
+    }
+    let singer_mid = credit.singer_mid.trim();
+    let artist_ref = if singer_mid.is_empty() {
+        None
+    } else {
+        validate_qq_media_id(singer_mid, "track credit singer MID").map_err(|_| {
+            qq_data_error("QQ track credit response returned an invalid singer MID")
+        })?;
+        Some(qq_ref(singer_mid, "track credit singer")?)
+    };
+    let avatar_url = first_qq_display_url(&[(&credit.icon, "track credit avatar")])?;
+    let action_url = validate_qq_track_credit_action(&credit.scheme)?;
+    let followed = match credit.follow {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    Ok(TrackCredit {
+        name: name.to_owned(),
+        artist_ref,
+        avatar_url,
+        action_url,
+        followed,
+        platform_type: credit.platform_type,
+        extensions: Extensions::from([
+            ("follow_raw".to_owned(), json!(credit.follow)),
+            ("extra".to_owned(), json!(credit.extra)),
+            ("raw".to_owned(), raw),
+        ]),
+    })
+}
+
+fn normalized_qq_credit_summary(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 8_192
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(qq_data_error(
+            "QQ track credit response contains an invalid summary",
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn validate_qq_track_credit_action(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 8_192 || value.chars().any(char::is_control) {
+        return Err(qq_data_error(
+            "QQ track credit response contains an invalid action URL",
+        ));
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| qq_data_error("QQ track credit response contains a malformed action URL"))?;
+    match url.scheme() {
+        "qqmusic" if url.host_str().is_some() => {}
+        "http" | "https"
+            if url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none() => {}
+        _ => {
+            return Err(qq_data_error(
+                "QQ track credit response contains an unsafe action URL",
+            ));
+        }
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn validate_qq_song_tag(tag: &QqRecommendationNewTrackTag, context: &str) -> Result<()> {
@@ -26967,6 +27193,150 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn track_credit_requests_keep_numeric_and_mid_branches_and_map_grouped_people() {
+        let numeric = qq_track_credits_request(&QqTrackIdentifier::Numeric(97_773));
+        assert_eq!(numeric.module, TRACK_CREDIT_MODULE);
+        assert_eq!(numeric.method, TRACK_CREDIT_METHOD);
+        assert_eq!(numeric.param, json!({"songid": 97773}));
+        let mid = qq_track_credits_request(&QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()));
+        assert_eq!(mid.param, json!({"songmid": "0039MnYb0qxYhV"}));
+
+        let data = json!({
+            "Lst": [{
+                "Title": "制作人",
+                "Type": 1,
+                "Producers": [{
+                    "Type": 2,
+                    "Name": "周杰伦",
+                    "Icon": "https://y.qq.com/producer.jpg",
+                    "Scheme": "qqmusic://artist/0025NhlN2yWrP4",
+                    "SingerMid": "0025NhlN2yWrP4",
+                    "Follow": 0,
+                    "futurePersonField": true
+                }],
+                "futureGroupField": true
+            }],
+            "ReinforceMsg": "完整制作班底",
+            "futureResponseField": true
+        });
+        let credits = map_qq_track_credits(
+            "0039MnYb0qxYhV",
+            &QqTrackIdentifier::Mid("0039MnYb0qxYhV".to_owned()),
+            QqApiResponse {
+                data: data.clone(),
+                raw: json!({"code": 0, "data": data}),
+            },
+        )
+        .expect("map QQ track credits");
+        assert_eq!(credits.track_ref.to_string(), "qq:0039MnYb0qxYhV");
+        assert_eq!(credits.summary.as_deref(), Some("完整制作班底"));
+        assert_eq!(credits.groups[0].title, "制作人");
+        assert_eq!(credits.groups[0].platform_type, 1);
+        assert_eq!(credits.groups[0].credits[0].name, "周杰伦");
+        assert_eq!(
+            credits.groups[0].credits[0]
+                .artist_ref
+                .as_ref()
+                .expect("credited artist")
+                .to_string(),
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(credits.groups[0].credits[0].followed, Some(false));
+        assert_eq!(
+            credits.groups[0].credits[0].action_url.as_deref(),
+            Some("qqmusic://artist/0025NhlN2yWrP4")
+        );
+        assert_eq!(
+            credits.groups[0].credits[0].extensions["extra"]["futurePersonField"],
+            true
+        );
+        assert_eq!(
+            credits.groups[0].extensions["extra"]["futureGroupField"],
+            true
+        );
+        assert_eq!(credits.extensions["extra"]["futureResponseField"], true);
+        assert_eq!(credits.extensions["requested_identifier_kind"], "mid");
+    }
+
+    #[test]
+    fn track_credit_mapping_rejects_invalid_identity_text_urls_and_bounds() {
+        let valid = || {
+            json!({
+                "Title": "制作人",
+                "Type": 1,
+                "Producers": [{
+                    "Type": 2,
+                    "Name": "周杰伦",
+                    "Icon": "https://y.qq.com/producer.jpg",
+                    "Scheme": "qqmusic://artist/0025NhlN2yWrP4",
+                    "SingerMid": "0025NhlN2yWrP4",
+                    "Follow": 2
+                }]
+            })
+        };
+        let mut fixtures = Vec::new();
+        let mut bad_title = valid();
+        bad_title["Title"] = json!("");
+        fixtures.push(json!({"Lst": [bad_title], "ReinforceMsg": ""}));
+        let mut bad_name = valid();
+        bad_name["Producers"][0]["Name"] = json!("bad\nname");
+        fixtures.push(json!({"Lst": [bad_name], "ReinforceMsg": ""}));
+        let mut bad_mid = valid();
+        bad_mid["Producers"][0]["SingerMid"] = json!("bad-mid!");
+        fixtures.push(json!({"Lst": [bad_mid], "ReinforceMsg": ""}));
+        let mut bad_icon = valid();
+        bad_icon["Producers"][0]["Icon"] = json!("javascript:alert(1)");
+        fixtures.push(json!({"Lst": [bad_icon], "ReinforceMsg": ""}));
+        let mut bad_action = valid();
+        bad_action["Producers"][0]["Scheme"] = json!("file:///secret");
+        fixtures.push(json!({"Lst": [bad_action], "ReinforceMsg": ""}));
+        fixtures.push(json!({"Lst": vec![valid(); 101], "ReinforceMsg": ""}));
+
+        for data in fixtures {
+            let error =
+                map_qq_track_credits("97773", &QqTrackIdentifier::Numeric(97_773), response(data))
+                    .expect_err("invalid QQ track credit response");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+
+        let mapped = map_qq_track_credits(
+            "97773",
+            &QqTrackIdentifier::Numeric(97_773),
+            response(json!({"Lst": [valid()], "ReinforceMsg": ""})),
+        )
+        .expect("map unknown QQ follow value");
+        assert_eq!(mapped.groups[0].credits[0].followed, None);
+        assert_eq!(mapped.groups[0].credits[0].extensions["follow_raw"], 2);
+
+        let empty = map_qq_track_credits(
+            "97773",
+            &QqTrackIdentifier::Numeric(97_773),
+            response(json!({})),
+        )
+        .expect("map empty QQ track credit response");
+        assert!(empty.groups.is_empty());
+        assert_eq!(empty.summary, None);
+    }
+
+    #[tokio::test]
+    async fn track_credits_validate_identity_before_exact_account_and_network() {
+        let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        assert!(provider.capabilities().contains(&Capability::TrackCredits));
+        for id in ["0", "invalid-mid!", "\n"] {
+            let error = provider
+                .track_credits(id, Some("missing-account"))
+                .await
+                .expect_err("invalid QQ credited track identity");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let missing = provider
+            .track_credits("97773", Some("missing-account"))
+            .await
+            .expect_err("missing QQ track credit account");
+        assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[tokio::test]
     async fn related_mvs_validate_numeric_cursor_before_exact_account_and_network() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
@@ -28265,6 +28635,29 @@ mod tests {
         assert_eq!(counts[0].count, counts[2].count);
         assert_eq!(counts[0].display_text, counts[1].display_text);
         assert_eq!(counts[0].display_text, counts[2].display_text);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music services"]
+    async fn live_track_credits_keep_numeric_and_mid_source_identity() {
+        let provider = QqProvider::new(QqConfig {
+            device_path: std::env::var_os("TUNEWEAVE_QQ_LIVE_DEVICE").map(Into::into),
+            ..QqConfig::default()
+        })
+        .expect("provider");
+        for id in ["97773", "0039MnYb0qxYhV"] {
+            let credits = provider
+                .track_credits(id, None)
+                .await
+                .expect("live QQ track credits");
+            assert_eq!(credits.track_ref.id(), id);
+            assert!(!credits.groups.is_empty());
+            assert!(credits.groups.iter().all(|group| {
+                !group.title.is_empty()
+                    && !group.credits.is_empty()
+                    && group.credits.iter().all(|credit| !credit.name.is_empty())
+            }));
+        }
     }
 
     #[tokio::test]

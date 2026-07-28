@@ -2851,6 +2851,33 @@ pub struct TrackFavoriteCount {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackCredit {
+    pub name: String,
+    pub artist_ref: Option<ResourceRef>,
+    pub avatar_url: Option<String>,
+    pub action_url: Option<String>,
+    pub followed: Option<bool>,
+    pub platform_type: i64,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackCreditGroup {
+    pub title: String,
+    pub platform_type: i64,
+    pub credits: Vec<TrackCredit>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrackCredits {
+    pub track_ref: ResourceRef,
+    pub groups: Vec<TrackCreditGroup>,
+    pub summary: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistContentCount {
     pub category: Option<String>,
@@ -6084,6 +6111,42 @@ mod tests {
         assert_eq!(value["count"], 12_345_678);
         assert_eq!(value["display_text"], "1234.5万");
         assert_eq!(value["extensions"]["numeric_id"], 97_773);
+    }
+
+    #[test]
+    fn track_credit_contract_keeps_roles_people_and_summary_typed() {
+        let credits = TrackCredits {
+            track_ref: ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV")
+                .expect("valid credited track reference"),
+            groups: vec![TrackCreditGroup {
+                title: "制作人".to_owned(),
+                platform_type: 1,
+                credits: vec![TrackCredit {
+                    name: "周杰伦".to_owned(),
+                    artist_ref: Some(
+                        ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                            .expect("valid credited artist reference"),
+                    ),
+                    avatar_url: Some("https://y.qq.com/producer.jpg".to_owned()),
+                    action_url: Some("qqmusic://artist/0025NhlN2yWrP4".to_owned()),
+                    followed: Some(false),
+                    platform_type: 2,
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::new(),
+            }],
+            summary: Some("完整制作班底".to_owned()),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(credits).expect("serialize track credits");
+        assert_eq!(value["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(value["groups"][0]["title"], "制作人");
+        assert_eq!(value["groups"][0]["credits"][0]["name"], "周杰伦");
+        assert_eq!(
+            value["groups"][0]["credits"][0]["artist_ref"],
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(value["summary"], "完整制作班底");
     }
 
     #[test]

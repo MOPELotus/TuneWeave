@@ -81,7 +81,7 @@ use tuneweave_core::{
     SearchTrendingRequest, SearchVariant, SimilarArtistList, SimilarArtistRequest,
     SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability, StreamBatch,
     StreamOutcome, StreamRequest, StreamResolver, StreamVariant, StyledRadioStationLibraryRequest,
-    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest,
+    SubscriptionResult, Track, TrackAvailability, TrackAvailabilityRequest, TrackCredits,
     TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackFavoriteCount,
     TrackIdentifierKind, TrackLabelList, TrackVersionList, TuneWeaveError, UniPlaylist,
     UniPlaylistCreateRequest, UniPlaylistImportRequest, UniPlaylistImportResult,
@@ -299,6 +299,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/related-videos", get(related_videos))
         .route("/tracks/{reference}/versions", get(track_versions))
+        .route("/tracks/{reference}/credits", get(track_credits))
         .route(
             "/account/favorites/tracks/{reference}",
             put(track_subscribe).delete(track_unsubscribe),
@@ -7598,6 +7599,12 @@ struct TrackVersionParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TrackCreditParams {
+    account: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelatedPlaylistParams {
     #[serde(
         alias = "last",
@@ -7747,6 +7754,26 @@ async fn track_versions(
         .track_versions(reference.id(), account.as_deref())
         .await?;
     let mut response = ApiResponse::new(versions).with_platform(platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
+}
+
+async fn track_credits(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<TrackCreditParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<TrackCredits>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let provider = state.registry.require(platform)?;
+    let credits = provider
+        .track_credits(reference.id(), account.as_deref())
+        .await?;
+    let mut response = ApiResponse::new(credits).with_platform(platform);
     if let Some(account) = account {
         response = response.with_account(account);
     }
@@ -13749,7 +13776,8 @@ mod tests {
         PodcastCategory, PodcastCategoryRecommendation, ProviderQrStart, RadioCatalogOption,
         RadioPlaybackItem, RadioStyle, RadioStyleSource, RelatedPlaylistSection,
         RelatedPlaylistSectionKind, Result, SearchQuery, SimilarTrackSection,
-        SimilarTrackSectionKind, StreamRequest, TrackLabel, VideoResolution,
+        SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup, TrackLabel,
+        VideoResolution,
     };
 
     use super::*;
@@ -17320,6 +17348,7 @@ mod tests {
                 Capability::RelatedVideos,
                 Capability::TrackVersions,
                 Capability::TrackFavoriteCounts,
+                Capability::TrackCredits,
                 Capability::ArtistAlbums,
                 Capability::ArtistTracks,
                 Capability::ArtistVideos,
@@ -17935,6 +17964,32 @@ mod tests {
                     })
                 })
                 .collect()
+        }
+
+        async fn track_credits(&self, id: &str, account: Option<&str>) -> Result<TrackCredits> {
+            Ok(TrackCredits {
+                track_ref: ResourceRef::new(self.platform(), id)
+                    .expect("valid credited QQ track reference"),
+                groups: vec![TrackCreditGroup {
+                    title: "制作人".to_owned(),
+                    platform_type: 1,
+                    credits: vec![TrackCredit {
+                        name: "周杰伦".to_owned(),
+                        artist_ref: Some(
+                            ResourceRef::new(Platform::Qq, "0025NhlN2yWrP4")
+                                .expect("valid credited QQ artist reference"),
+                        ),
+                        avatar_url: Some("https://y.qq.com/producer.jpg".to_owned()),
+                        action_url: Some("qqmusic://artist/0025NhlN2yWrP4".to_owned()),
+                        followed: Some(false),
+                        platform_type: 2,
+                        extensions: Extensions::new(),
+                    }],
+                    extensions: Extensions::new(),
+                }],
+                summary: Some("完整制作班底".to_owned()),
+                extensions: Extensions::from([("account".to_owned(), json!(account))]),
+            })
         }
 
         async fn artist_tracks(
@@ -22364,6 +22419,38 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
             assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn qq_track_credits_preserve_roles_people_summary_account_and_strict_queries() {
+        let app = test_app_with_import_providers();
+        let (status, credits) = json_response_from(
+            app.clone(),
+            "/v1/tracks/qq:0039MnYb0qxYhV/credits?account=green-vip",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{credits}");
+        assert_eq!(credits["data"]["track_ref"], "qq:0039MnYb0qxYhV");
+        assert_eq!(credits["data"]["groups"][0]["title"], "制作人");
+        assert_eq!(credits["data"]["groups"][0]["platform_type"], 1);
+        assert_eq!(credits["data"]["groups"][0]["credits"][0]["name"], "周杰伦");
+        assert_eq!(
+            credits["data"]["groups"][0]["credits"][0]["artist_ref"],
+            "qq:0025NhlN2yWrP4"
+        );
+        assert_eq!(credits["data"]["summary"], "完整制作班底");
+        assert_eq!(credits["data"]["extensions"]["account"], "green-vip");
+        assert_eq!(credits["meta"]["platform"], "qq");
+        assert_eq!(credits["meta"]["account"], "green-vip");
+
+        for path in [
+            "/v1/tracks/qq:97773/credits?unknown=true",
+            "/v1/tracks/not-a-reference/credits",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
     }
 

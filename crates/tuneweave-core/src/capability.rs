@@ -81,6 +81,7 @@ pub enum Capability {
     RelatedVideos,
     TrackVersions,
     TrackFavoriteCounts,
+    TrackCredits,
     ArtistOverview,
     ArtistStats,
     ArtistCatalog,
@@ -199,6 +200,11 @@ mod tests {
             serde_json::to_value(Capability::TrackFavoriteCounts)
                 .expect("serialize track favorite count capability"),
             serde_json::json!("track_favorite_counts")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::TrackCredits)
+                .expect("serialize track credit capability"),
+            serde_json::json!("track_credits")
         );
     }
 
