@@ -4200,6 +4200,7 @@ impl MusicProvider for QqProvider {
             Capability::Favorites,
             Capability::QrLogin,
             Capability::PhoneLogin,
+            Capability::CallerManagedCredentials,
             Capability::SessionManagement,
             Capability::AccountPlaylists,
             Capability::AccountAlbums,

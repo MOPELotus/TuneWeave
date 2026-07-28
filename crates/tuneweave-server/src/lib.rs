@@ -42,21 +42,22 @@ use tuneweave_core::{
     CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
     CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
     CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
-    CountryCallingCodeGroup, CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry,
-    DigitalAlbumChartKind, DigitalAlbumChartPeriod, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult, ImageUploadRequest,
-    ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog, ListeningRightsAdRequest,
-    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsTimestamp,
-    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
-    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MultiStyleLyricTranslations,
-    MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder,
-    MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
-    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
+    DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult,
+    ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog,
+    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
+    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest,
+    MediaDownload, MediaStream, MembershipSummary, MemoryUniPlaylistStore,
+    MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
+    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
+    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
+    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
     PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
@@ -68,20 +69,21 @@ use tuneweave_core::{
     PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
     PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderCredential, ProviderRegistry, Quality,
-    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
-    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
-    RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
-    ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
-    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
-    SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
-    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
-    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
-    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PodcastTaxonomyRequest, PrincipalType, ProviderAuthResult, ProviderCredential,
+    ProviderRegistry, Quality, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
+    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedDirection,
+    RecommendationFeedRequest, RecommendationRequest, RecommendationSource, RelatedPlaylistList,
+    RelatedPlaylistRequest, RelatedVideoList, RelatedVideoRequest, ResolutionAttempt,
+    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchQuery, SearchSelector, SearchSuggestionClient, SearchSuggestionList,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource, SimilarArtistList,
+    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
+    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
     TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
@@ -120,10 +122,12 @@ enum StoredAuthKind {
     Qr {
         platform: Platform,
         account: String,
+        credential_mode: CredentialMode,
         provider_transaction_id: String,
     },
     Challenge {
         platform: Platform,
+        credential_mode: CredentialMode,
         request: AuthChallengeRequest,
     },
 }
@@ -10202,6 +10206,8 @@ struct AuthQrStartBody {
     platform: String,
     account: Option<String>,
     login_type: Option<String>,
+    #[serde(default)]
+    credential_mode: CredentialMode,
 }
 
 #[derive(Serialize)]
@@ -10218,12 +10224,15 @@ async fn auth_qr_start(
 ) -> Result<Json<ApiResponse<AuthQrStartData>>, ApiError> {
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
-    let account = account_alias(body.account.as_deref())?;
+    let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
-    let start = provider.start_qr_login(body.login_type.as_deref()).await?;
+    let start = provider
+        .start_qr_login_with_mode(body.login_type.as_deref(), body.credential_mode)
+        .await?;
     let transaction_id = state.auth_transactions.insert(StoredAuthKind::Qr {
         platform,
         account: account.clone(),
+        credential_mode: body.credential_mode,
         provider_transaction_id: start.provider_transaction_id,
     })?;
     let data = AuthQrStartData {
@@ -10232,11 +10241,12 @@ async fn auth_qr_start(
         image_data_url: start.image_data_url,
         expires_at: start.expires_at,
     };
-    Ok(Json(
-        ApiResponse::new(data)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(auth_api_response(
+        data,
+        platform,
+        &account,
+        body.credential_mode,
+    )))
 }
 
 #[derive(Serialize)]
@@ -10245,6 +10255,8 @@ struct AuthQrPollData {
     state: AuthState,
     message: Option<String>,
     profile: Option<AccountProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_credential: Option<CallerCredential>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10277,11 +10289,12 @@ async fn auth_country_calling_codes(
 async fn auth_qr_poll(
     State(state): State<AppState>,
     Path(transaction_id): Path<String>,
-) -> Result<Json<ApiResponse<AuthQrPollData>>, ApiError> {
+) -> Result<Response, ApiError> {
     let stored = state.auth_transactions.get(&transaction_id)?;
     let StoredAuthKind::Qr {
         platform,
         account,
+        credential_mode,
         provider_transaction_id,
     } = stored
     else {
@@ -10289,8 +10302,15 @@ async fn auth_qr_poll(
     };
     let provider = state.registry.require(platform)?;
     let poll = provider
-        .poll_qr_login(&provider_transaction_id, &account)
+        .poll_qr_login_with_mode(&provider_transaction_id, &account, credential_mode)
         .await?;
+    let caller_credential = finalize_qr_credential(
+        platform,
+        credential_mode,
+        poll.state,
+        poll.profile.as_ref(),
+        poll.credential,
+    )?;
     if poll.state.is_terminal() {
         state.auth_transactions.remove(&transaction_id)?;
     }
@@ -10299,11 +10319,11 @@ async fn auth_qr_poll(
         state: poll.state,
         message: poll.message,
         profile: poll.profile,
+        caller_credential,
     };
-    Ok(Json(
-        ApiResponse::new(data)
-            .with_platform(platform)
-            .with_account(account),
+    Ok(auth_json_response(
+        auth_api_response(data, platform, &account, credential_mode),
+        credential_mode.returns_to_caller() && poll.state == AuthState::Confirmed,
     ))
 }
 
@@ -10317,30 +10337,43 @@ struct AuthPasswordBody {
     #[serde(default)]
     password_format: PasswordFormat,
     country_code: Option<String>,
+    #[serde(default)]
+    credential_mode: CredentialMode,
+}
+
+#[derive(Serialize)]
+struct AuthLoginData {
+    #[serde(flatten)]
+    profile: AccountProfile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_credential: Option<CallerCredential>,
 }
 
 async fn auth_password(
     State(state): State<AppState>,
     payload: Result<Json<AuthPasswordBody>, JsonRejection>,
-) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
-    let account = account_alias(body.account.as_deref())?;
+    let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
-    let profile = provider
-        .password_login(&PasswordLoginRequest {
-            account: account.clone(),
-            principal_type: body.principal_type,
-            principal: body.principal,
-            password: body.password,
-            password_format: body.password_format,
-            country_code: optional_trimmed(body.country_code),
-        })
+    let result = provider
+        .password_login_with_mode(
+            &PasswordLoginRequest {
+                account: account.clone(),
+                principal_type: body.principal_type,
+                principal: body.principal,
+                password: body.password,
+                password_format: body.password_format,
+                country_code: optional_trimmed(body.country_code),
+            },
+            body.credential_mode,
+        )
         .await?;
-    Ok(Json(
-        ApiResponse::new(profile)
-            .with_platform(platform)
-            .with_account(account),
+    let data = finalize_auth_result(platform, body.credential_mode, result)?;
+    Ok(auth_json_response(
+        auth_api_response(data, platform, &account, body.credential_mode),
+        body.credential_mode.returns_to_caller(),
     ))
 }
 
@@ -10359,6 +10392,8 @@ struct AuthChallengeStartBody {
         alias = "countryCode"
     )]
     country_code: Option<Value>,
+    #[serde(default)]
+    credential_mode: CredentialMode,
 }
 
 #[derive(Serialize)]
@@ -10373,7 +10408,7 @@ async fn auth_challenge_start(
 ) -> Result<Json<ApiResponse<AuthChallengeStartData>>, ApiError> {
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
-    let account = account_alias(body.account.as_deref())?;
+    let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let principal = required_string_or_number("principal", &body.principal)?;
     let country_code = match body.country_code.as_ref() {
         None => "86".to_owned(),
@@ -10388,19 +10423,24 @@ async fn auth_challenge_start(
         principal,
         country_code: Some(country_code),
     };
-    provider.start_auth_challenge(&request).await?;
-    let transaction_id = state
-        .auth_transactions
-        .insert(StoredAuthKind::Challenge { platform, request })?;
+    provider
+        .start_auth_challenge_with_mode(&request, body.credential_mode)
+        .await?;
+    let transaction_id = state.auth_transactions.insert(StoredAuthKind::Challenge {
+        platform,
+        credential_mode: body.credential_mode,
+        request,
+    })?;
     let data = AuthChallengeStartData {
         transaction_id,
         method,
     };
-    Ok(Json(
-        ApiResponse::new(data)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(auth_api_response(
+        data,
+        platform,
+        &account,
+        body.credential_mode,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -10414,6 +10454,8 @@ struct AuthChallengeVerifyBody {
 struct AuthChallengeVerifyData {
     state: AuthState,
     profile: AccountProfile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_credential: Option<CallerCredential>,
 }
 
 #[derive(Deserialize)]
@@ -10511,24 +10553,37 @@ async fn auth_challenge_verify(
     State(state): State<AppState>,
     Path(transaction_id): Path<String>,
     payload: Result<Json<AuthChallengeVerifyBody>, JsonRejection>,
-) -> Result<Json<ApiResponse<AuthChallengeVerifyData>>, ApiError> {
+) -> Result<Response, ApiError> {
     let body = json_body(payload)?;
     let code = required_string_or_number("code", &body.code)?;
     let stored = state.auth_transactions.get(&transaction_id)?;
-    let StoredAuthKind::Challenge { platform, request } = stored else {
+    let StoredAuthKind::Challenge {
+        platform,
+        credential_mode,
+        request,
+    } = stored
+    else {
         return Err(auth_transaction_not_found().into());
     };
     let provider = state.registry.require(platform)?;
-    let profile = provider.verify_auth_challenge(&request, &code).await?;
+    let result = provider
+        .verify_auth_challenge_with_mode(&request, &code, credential_mode)
+        .await?;
+    let result = finalize_auth_result(platform, credential_mode, result)?;
     state.auth_transactions.remove(&transaction_id)?;
     let account = request.account;
-    Ok(Json(
-        ApiResponse::new(AuthChallengeVerifyData {
-            state: AuthState::Confirmed,
-            profile,
-        })
-        .with_platform(platform)
-        .with_account(account),
+    Ok(auth_json_response(
+        auth_api_response(
+            AuthChallengeVerifyData {
+                state: AuthState::Confirmed,
+                profile: result.profile,
+                caller_credential: result.caller_credential,
+            },
+            platform,
+            &account,
+            credential_mode,
+        ),
+        credential_mode.returns_to_caller(),
     ))
 }
 
@@ -13318,6 +13373,120 @@ fn account_alias(value: Option<&str>) -> Result<String, TuneWeaveError> {
     Ok(account.to_owned())
 }
 
+fn login_account_alias(
+    value: Option<&str>,
+    credential_mode: CredentialMode,
+) -> Result<String, TuneWeaveError> {
+    if credential_mode == CredentialMode::Client
+        && value.is_some_and(|account| !account.trim().is_empty())
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "client credential mode does not accept a server account alias",
+        ));
+    }
+    account_alias(value)
+}
+
+fn finalize_auth_result(
+    platform: Platform,
+    credential_mode: CredentialMode,
+    result: ProviderAuthResult,
+) -> Result<AuthLoginData, TuneWeaveError> {
+    if result.profile.platform != platform {
+        return Err(auth_provider_contract_error(
+            "authentication profile platform does not match the selected provider",
+        ));
+    }
+    let caller_credential =
+        finalize_provider_credential(platform, credential_mode, result.credential)?;
+    Ok(AuthLoginData {
+        profile: result.profile,
+        caller_credential,
+    })
+}
+
+fn finalize_qr_credential(
+    platform: Platform,
+    credential_mode: CredentialMode,
+    state: AuthState,
+    profile: Option<&AccountProfile>,
+    credential: Option<ProviderCredential>,
+) -> Result<Option<CallerCredential>, TuneWeaveError> {
+    if state != AuthState::Confirmed {
+        if profile.is_some() || credential.is_some() {
+            return Err(auth_provider_contract_error(
+                "non-confirmed QR result unexpectedly contained authentication material",
+            ));
+        }
+        return Ok(None);
+    }
+    let profile = profile.ok_or_else(|| {
+        auth_provider_contract_error("confirmed QR result did not contain an account profile")
+    })?;
+    if profile.platform != platform {
+        return Err(auth_provider_contract_error(
+            "QR account profile platform does not match the selected provider",
+        ));
+    }
+    finalize_provider_credential(platform, credential_mode, credential)
+}
+
+fn finalize_provider_credential(
+    platform: Platform,
+    credential_mode: CredentialMode,
+    credential: Option<ProviderCredential>,
+) -> Result<Option<CallerCredential>, TuneWeaveError> {
+    match (credential_mode.returns_to_caller(), credential) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => Err(auth_provider_contract_error(
+            "server-managed authentication unexpectedly returned credential material",
+        )),
+        (true, None) => Err(auth_provider_contract_error(
+            "caller-managed authentication did not return credential material",
+        )),
+        (true, Some(credential)) => {
+            if credential.platform != platform {
+                return Err(auth_provider_contract_error(
+                    "authentication credential platform does not match the selected provider",
+                ));
+            }
+            CallerCredential::issue(&credential).map(Some)
+        }
+    }
+}
+
+fn auth_provider_contract_error(message: &str) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::InternalError, message)
+}
+
+fn auth_api_response<T>(
+    data: T,
+    platform: Platform,
+    account: &str,
+    credential_mode: CredentialMode,
+) -> ApiResponse<T> {
+    let response = ApiResponse::new(data).with_platform(platform);
+    if credential_mode == CredentialMode::Client {
+        response
+    } else {
+        response.with_account(account)
+    }
+}
+
+fn auth_json_response<T: Serialize>(response: ApiResponse<T>, sensitive: bool) -> Response {
+    let mut response = Json(response).into_response();
+    if sensitive {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            "no-store".parse().expect("static header"),
+        );
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, "no-cache".parse().expect("static header"));
+    }
+    response
+}
+
 fn account_platform(state: &AppState, value: Option<&str>) -> Result<Platform, TuneWeaveError> {
     value.map_or(Ok(state.default_platform), parse_platform_parameter)
 }
@@ -14404,6 +14573,21 @@ mod tests {
 
     struct TestProvider;
 
+    fn test_auth_result(profile: AccountProfile, mode: CredentialMode) -> ProviderAuthResult {
+        ProviderAuthResult {
+            profile,
+            credential: mode.returns_to_caller().then(|| {
+                ProviderCredential::new(
+                    Platform::Netease,
+                    "cookie",
+                    "MUSIC_U=test-login-session",
+                    Some(1_900_000_000),
+                )
+                .expect("test provider credential")
+            }),
+        }
+    }
+
     #[async_trait]
     impl MusicProvider for TestProvider {
         fn platform(&self) -> Platform {
@@ -14520,6 +14704,7 @@ mod tests {
                 Capability::QrLogin,
                 Capability::PasswordLogin,
                 Capability::PhoneLogin,
+                Capability::CallerManagedCredentials,
                 Capability::CountryCallingCodes,
                 Capability::ChallengeValidation,
                 Capability::PrincipalStatus,
@@ -17453,11 +17638,34 @@ mod tests {
             })
         }
 
+        async fn poll_qr_login_with_mode(
+            &self,
+            provider_transaction_id: &str,
+            account: &str,
+            mode: CredentialMode,
+        ) -> Result<tuneweave_core::ProviderQrPoll> {
+            let mut poll = self.poll_qr_login(provider_transaction_id, account).await?;
+            if let Some(profile) = poll.profile.take() {
+                let result = test_auth_result(profile, mode);
+                poll.profile = Some(result.profile);
+                poll.credential = result.credential;
+            }
+            Ok(poll)
+        }
+
         async fn password_login(&self, request: &PasswordLoginRequest) -> Result<AccountProfile> {
             Ok(AccountProfile::authenticated(
                 Platform::Netease,
                 &request.account,
             ))
+        }
+
+        async fn password_login_with_mode(
+            &self,
+            request: &PasswordLoginRequest,
+            mode: CredentialMode,
+        ) -> Result<ProviderAuthResult> {
+            Ok(test_auth_result(self.password_login(request).await?, mode))
         }
 
         async fn start_auth_challenge(&self, _request: &AuthChallengeRequest) -> Result<()> {
@@ -17545,6 +17753,18 @@ mod tests {
             Ok(AccountProfile::authenticated(
                 Platform::Netease,
                 &request.account,
+            ))
+        }
+
+        async fn verify_auth_challenge_with_mode(
+            &self,
+            request: &AuthChallengeRequest,
+            code: &str,
+            mode: CredentialMode,
+        ) -> Result<ProviderAuthResult> {
+            Ok(test_auth_result(
+                self.verify_auth_challenge(request, code).await?,
+                mode,
             ))
         }
 
@@ -19829,6 +20049,16 @@ mod tests {
         path: &str,
         json_body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let (status, _, json) = json_request_with_headers(app, method, path, json_body).await;
+        (status, json)
+    }
+
+    async fn json_request_with_headers(
+        app: Router,
+        method: Method,
+        path: &str,
+        json_body: Option<Value>,
+    ) -> (StatusCode, HeaderMap, Value) {
         let mut request = Request::builder().method(method).uri(path);
         let body = if let Some(json_body) = json_body {
             request = request.header(header::CONTENT_TYPE, "application/json");
@@ -19841,11 +20071,12 @@ mod tests {
             .await
             .expect("request succeeds");
         let status = response.status();
+        let headers = response.headers().clone();
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("read body");
         let json = serde_json::from_slice(&body).expect("valid JSON");
-        (status, json)
+        (status, headers, json)
     }
 
     async fn binary_request_from(
@@ -27465,6 +27696,141 @@ mod tests {
         let output = serde_json::to_string(&json).expect("serialize response");
         assert!(!output.contains("private@example.test"));
         assert!(!output.contains("must-never-appear"));
+    }
+
+    #[tokio::test]
+    async fn password_auth_supports_client_and_both_credential_ownership() {
+        let (status, headers, client) = json_request_with_headers(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/password",
+            Some(json!({
+                "platform": "netease",
+                "principal_type": "email",
+                "principal": "private@example.test",
+                "password": "must-never-appear",
+                "credential_mode": "client"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::PRAGMA], "no-cache");
+        assert_eq!(client["data"]["account"], "default");
+        assert!(client["meta"].get("account").is_none());
+        assert_eq!(
+            client["data"]["caller_credential"]["format"],
+            tuneweave_core::CALLER_CREDENTIAL_FORMAT
+        );
+        let bearer = client["data"]["caller_credential"]["value"]
+            .as_str()
+            .expect("caller credential");
+        let credential = CallerCredential::parse(bearer).expect("parse caller credential");
+        assert_eq!(credential.platform, Platform::Netease);
+        assert_eq!(credential.kind, "cookie");
+        assert_eq!(credential.secret(), "MUSIC_U=test-login-session");
+        let serialized = serde_json::to_string(&client).expect("serialize client response");
+        assert!(!serialized.contains("MUSIC_U=test-login-session"));
+        assert!(!serialized.contains("private@example.test"));
+        assert!(!serialized.contains("must-never-appear"));
+
+        let (status, headers, both) = json_request_with_headers(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/password",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "principal_type": "email",
+                "principal": "private@example.test",
+                "password": "must-never-appear",
+                "credential_mode": "both"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::PRAGMA], "no-cache");
+        assert_eq!(both["data"]["account"], "personal");
+        assert_eq!(both["meta"]["account"], "personal");
+        assert!(both["data"]["caller_credential"]["value"].is_string());
+
+        let (status, rejected) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/password",
+            Some(json!({
+                "platform": "netease",
+                "account": "must-not-be-created",
+                "principal_type": "email",
+                "principal": "private@example.test",
+                "password": "must-never-appear",
+                "credential_mode": "client"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(rejected["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn multistep_authentication_fixes_client_ownership_on_the_initial_request() {
+        let app = test_app_with_provider();
+        let (status, start) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/qr",
+            Some(json!({
+                "platform": "netease",
+                "login_type": "pc",
+                "credential_mode": "client"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(start["meta"].get("account").is_none());
+        let transaction_id = start["data"]["transaction_id"]
+            .as_str()
+            .expect("QR transaction");
+        let path = format!("/v1/auth/qr/{transaction_id}");
+        let (status, headers, poll) =
+            json_request_with_headers(app.clone(), Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::PRAGMA], "no-cache");
+        assert_eq!(poll["data"]["state"], "confirmed");
+        assert!(poll["data"]["caller_credential"]["value"].is_string());
+        assert!(poll["meta"].get("account").is_none());
+        let (status, _) = json_response_from(app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let app = test_app_with_provider();
+        let (status, start) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(json!({
+                "platform": "netease",
+                "method": "sms",
+                "principal": "13800138000",
+                "country_code": "86",
+                "credential_mode": "client"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let transaction_id = start["data"]["transaction_id"]
+            .as_str()
+            .expect("challenge transaction");
+        let path = format!("/v1/auth/challenges/{transaction_id}/verify");
+        let (status, headers, verified) =
+            json_request_with_headers(app, Method::POST, &path, Some(json!({ "code": "1234" })))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::PRAGMA], "no-cache");
+        assert!(verified["data"]["caller_credential"]["value"].is_string());
+        assert!(verified["meta"].get("account").is_none());
     }
 
     #[tokio::test]
