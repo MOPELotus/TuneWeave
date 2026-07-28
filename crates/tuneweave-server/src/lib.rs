@@ -1824,6 +1824,7 @@ struct PodcastChartParams {
 async fn podcast_chart(
     State(state): State<AppState>,
     params: Result<Query<PodcastChartParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastChartEntry>>>, ApiError> {
     let params = query_params(params)?;
     let kind = parse_podcast_chart_kind(params.kind.as_deref())?;
@@ -1834,21 +1835,24 @@ async fn podcast_chart(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .podcast_chart(&PodcastChartRequest {
             kind,
             limit,
             offset,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -1866,6 +1870,7 @@ struct PodcastCreatorChartParams {
 async fn podcast_creator_chart(
     State(state): State<AppState>,
     params: Result<Query<PodcastCreatorChartParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastCreatorChartEntry>>>, ApiError> {
     let params = query_params(params)?;
     let kind = parse_podcast_creator_chart_kind(params.kind.as_deref())?;
@@ -1876,21 +1881,24 @@ async fn podcast_creator_chart(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .podcast_creator_chart(&PodcastCreatorChartRequest {
             kind,
             limit,
             offset,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -1907,6 +1915,7 @@ struct PodcastEpisodeChartParams {
 async fn podcast_episode_chart(
     State(state): State<AppState>,
     params: Result<Query<PodcastEpisodeChartParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisodeChartEntry>>>, ApiError> {
     let params = query_params(params)?;
     let kind = parse_podcast_episode_chart_kind(params.catalog.as_deref())?;
@@ -1917,21 +1926,24 @@ async fn podcast_episode_chart(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .podcast_episode_chart(&PodcastEpisodeChartRequest {
             kind,
             limit,
             offset,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -23482,6 +23494,47 @@ mod tests {
             hours["meta"]["pagination"]["extensions"]["offset_submitted"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn podcast_charts_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-podcast-chart-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for path in [
+            "/v1/charts/podcasts?kind=new&platform=netease",
+            "/v1/charts/podcast-creators?kind=new&platform=netease",
+            "/v1/episodes?catalog=toplist&platform=netease",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response["meta"]["pagination"]["extensions"]["request"]["account"], "default",
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/charts/podcasts?kind=new&platform=netease&account=podcast-user",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
