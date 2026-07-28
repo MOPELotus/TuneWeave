@@ -1138,7 +1138,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
-| GET | `/v1/search` | `q`（也接受 `keywords`）、`type?`（也接受 `kind`）、`variant?`、`platform?`、`account?`、`search_id?`（也接受 `searchid`）、`highlight?`、`selectors?`（URL 编码的 `[{id,name,type}]` JSON 数组）、分页 | 带 `type/data` 判别字段的统一 `SearchItem[]`；选择项与平台返回的二维 selector 目录位于分页扩展，未知查询字段会被拒绝 |
+| GET | `/v1/search` | `q`（也接受 `keywords`）、`type?`（也接受 `kind`）、`variant?`、`platform?`、`account?`、`search_id?`（也接受 `searchid`）、`highlight?`、`selectors?`（URL 编码的 `[{id,name,type}]` JSON 数组）、视频专用 `order?`、`duration?`、`category_id?`（也接受 `tids`）、分页 | 带 `type/data` 判别字段的统一 `SearchItem[]`；选择项、视频筛选与平台返回的二维 selector 目录位于分页扩展，未知查询字段会被拒绝 |
 | GET | `/v1/search/general` | `q`（也接受 `keywords/keyword`）、`platform?`、`account?`、`page?`、`limit?`（也接受 `num`）、`search_id?`（也接受 `searchid`）、`page_start?`（也接受 `cursor`，URL 编码 JSON 对象）、`highlight?` | `GeneralSearchResult`；保留搜索会话、多分类桶、直达结果、相关词和完整多字段续页游标 |
 | GET | `/v1/search/default` | `platform?`、`account?` | `SearchDefaultKeyword`；实际查询词、展示文案、搜索类型与可选图片 |
 | GET | `/v1/search/trending` | `platform?`、`account?`、`detail=brief|full` | `SearchTrendingList`；有序热搜关键词及可用的分数、说明和图标 |
@@ -1253,7 +1253,7 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 
 QQ 分类搜索固定使用 Android `music.search.SearchCgiService/DoSearchForQQMusicMobile`，启动时生成并在 `TUNEWEAVE_DATA_DIR/qq-device.json` 私有持久化 GUID、Android ID、IMEI、QIMEI 和匿名会话。TuneWeave 已实现歌曲、歌手、专辑、歌单、MV、歌词、用户、彩铃、节目专辑和节目十类；按真实静默失败边界使用歌曲/专辑/MV/歌词/彩铃 60、歌手 40、歌单 30、其余 10 的页宽，并用同批子请求按上游逻辑槽位实现统一 `limit=1..100` 与任意 `offset`。`search_id/searchid`、`highlight`、稀疏歌单缺口、非稀疏完整性、稳定身份和完整原项均保留。`selectors` 使用强类型 `id/name/type`，同一类型重复选择会在联网前拒绝，避免参考实现中映射只保留末项而向量保留全部的歧义；合法选择同时提交字符串键值映射 `selectors` 和保序对象数组 `vec_selectors`，响应的二维 selector 分组经结构校验后位于分页扩展 `selectors`，本次选择位于 `selected_filters`。命名账户用于搜索等公开元数据时只验证 `(qq, account)` 别名存在，不把账户密钥注入不需要认证的请求；真正的音源授权再由 provider 注入该账户。上游 Python、TuneWeave Rust provider 与统一 HTTP 均真实验证彩铃和 selector 分支：彩铃“周杰伦”返回总数 553，统一结果为可播放 `Track`；selector `id=4558/type=0` 返回 2 条且请求语义完整保留。
 
-B 站视频搜索使用 `platform=bilibili&kind=video`。provider 优先调用现行 WBI 搜索端点，自行取得并缓存 `buvid3/buvid4/b_nut`、Web Ticket 和 WBI 密钥，调用方不能覆盖签名、URL、Cookie 或请求头；平台明确返回风险票据时，客户端会在有限时间内切换到仍由 B 站提供的公开视频搜索兼容端点，不申请验证码、不回显票据，也不把风控响应伪装成空结果。匿名兼容请求不混入新设备 Cookie，选择账户时只携带对应 B 站账户 Cookie。结果保留 AID/BVID、UP 主、封面、时长、分区、标签、命中列、公开计数、发布时间和付费/合作标志，并以稳定 `bilibili:bvid:*` 或 `bilibili:aid:*` 引用返回；`limit=1..100` 与 `offset<1000` 可跨固定 20 项上游分页取数。当前只开放默认综合排序，排序、时长和分区筛选在强类型统一查询参数接入前会明确拒绝而不会被静默忽略。
+B 站视频搜索使用 `platform=bilibili&kind=video`。provider 优先调用现行 WBI 搜索端点，自行取得并缓存 `buvid3/buvid4/b_nut`、Web Ticket 和 WBI 密钥，调用方不能覆盖签名、URL、Cookie 或请求头；平台明确返回风险票据时，客户端会在有限时间内切换到仍由 B 站提供的公开视频搜索兼容端点，不申请验证码、不回显票据，也不把风控响应伪装成空结果。匿名兼容请求不混入新设备 Cookie，选择账户时只携带对应 B 站账户 Cookie。结果保留 AID/BVID、UP 主、封面、时长、分区、标签、命中列、公开计数、发布时间和付费/合作标志，并以稳定 `bilibili:bvid:*` 或 `bilibili:aid:*` 引用返回；`limit=1..100` 与 `offset<1000` 可跨固定 20 项上游分页取数。视频专用 `order` 接受 `relevance|most_played|newest|most_danmaku|most_favorited|most_commented`，`duration` 接受 `any|under_ten_minutes|ten_to_thirty_minutes|thirty_to_sixty_minutes|over_sixty_minutes`，`category_id` 接受正整数分区 ID；兼容参数同时接受 B 站排序值、时长数字 `0..4` 和 `tids`。这些筛选只允许用于 `kind=video`，不支持的平台会明确拒绝而不会静默忽略。
 
 QQ 综合搜索固定使用 Android `music.adaptor.SearchAdaptor/do_search_v2` 和 `search_type=100`。首请求生成或接受调用方 `search_id`；续页精确回传平台返回的 `sid/nextpage/nextpage_start`，不会把多字段游标压成普通 offset。歌曲、歌手、MV、专辑、歌单和节目六个桶按平台顺序映射为统一类型，各桶自身的计数、`more_info`、未知字段与原始数据均保留；直达分组和相关词独立建模。平台 CGI 包络的业务码先由共享客户端校验，模块 `data` 再由强类型综合搜索模型解析，缺失桶、非法会话、畸形条目或不前进的页码均拒绝为假成功。provider 与统一 HTTP 真实搜索“周杰伦”，首屏及携带同一会话和多字段游标的下一页均通过。
 

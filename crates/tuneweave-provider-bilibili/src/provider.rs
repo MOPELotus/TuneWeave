@@ -7,13 +7,14 @@ use tuneweave_core::{
     ErrorCode, Extensions, MusicProvider, Page, PageMeta, Platform, ProviderAuthResult,
     ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, ResourceRef, Result,
     SearchItem, SearchKind, SearchQuery, SearchVariant, StoredAccountCredential, TuneWeaveError,
-    Video,
+    Video, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder,
 };
 
 use crate::BilibiliVideoIdentity;
 use crate::client::{
     BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliCredentialRefresh,
     BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSessionStatus,
+    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -121,6 +122,7 @@ impl MusicProvider for BilibiliProvider {
                 "Bilibili video search offset must be below 1000",
             ));
         }
+        let filters = map_bilibili_video_search_filters(query.video_filters.as_ref())?;
         let credential = self.optional_request_credential(query.account.as_deref())?;
         const UPSTREAM_PAGE_SIZE: u32 = 20;
         let first_page = query.offset / UPSTREAM_PAGE_SIZE + 1;
@@ -134,7 +136,7 @@ impl MusicProvider for BilibiliProvider {
         while items.len() < query.limit as usize && current_page <= 50 {
             let page = self
                 .client
-                .search_videos_page(keyword, current_page, credential.as_ref())
+                .search_videos_page(keyword, current_page, filters, credential.as_ref())
                 .await?;
             if page.page_size != UPSTREAM_PAGE_SIZE {
                 return Err(bilibili_data_error(
@@ -179,6 +181,10 @@ impl MusicProvider for BilibiliProvider {
             extensions.insert("search_id".to_owned(), json!(search_id));
         }
         extensions.insert("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE));
+        extensions.insert(
+            "video_filters".to_owned(),
+            json!(query.video_filters.clone().unwrap_or_default()),
+        );
         if let Some(page_count) = page_count {
             extensions.insert("upstream_page_count".to_owned(), json!(page_count));
         }
@@ -507,6 +513,51 @@ fn validate_bilibili_login_account(account: &str, mode: CredentialMode) -> Resul
         .with_platform(Platform::Bilibili));
     }
     Ok(())
+}
+
+fn map_bilibili_video_search_filters(
+    filters: Option<&VideoSearchFilters>,
+) -> Result<BilibiliVideoSearchFilters> {
+    let filters = filters.cloned().unwrap_or_default();
+    let order = match filters.order {
+        VideoSearchOrder::Relevance => BilibiliVideoSearchOrder::Relevance,
+        VideoSearchOrder::MostPlayed => BilibiliVideoSearchOrder::MostPlayed,
+        VideoSearchOrder::Newest => BilibiliVideoSearchOrder::Newest,
+        VideoSearchOrder::MostDanmaku => BilibiliVideoSearchOrder::MostDanmaku,
+        VideoSearchOrder::MostFavorited => BilibiliVideoSearchOrder::MostFavorited,
+        VideoSearchOrder::MostCommented => BilibiliVideoSearchOrder::MostCommented,
+    };
+    let duration = match filters.duration {
+        VideoSearchDuration::Any => BilibiliVideoSearchDuration::Any,
+        VideoSearchDuration::UnderTenMinutes => BilibiliVideoSearchDuration::UnderTenMinutes,
+        VideoSearchDuration::TenToThirtyMinutes => BilibiliVideoSearchDuration::TenToThirtyMinutes,
+        VideoSearchDuration::ThirtyToSixtyMinutes => {
+            BilibiliVideoSearchDuration::ThirtyToSixtyMinutes
+        }
+        VideoSearchDuration::OverSixtyMinutes => BilibiliVideoSearchDuration::OverSixtyMinutes,
+    };
+    let category_id = filters
+        .category_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "0")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    bilibili_invalid_request(
+                        "Bilibili video search category ID must be a positive integer",
+                    )
+                })
+        })
+        .transpose()?;
+    Ok(BilibiliVideoSearchFilters {
+        order,
+        duration,
+        category_id,
+    })
 }
 
 fn bilibili_refresh_source(
@@ -1036,6 +1087,32 @@ mod tests {
         assert_eq!(video.extensions["collaborative"], true);
     }
 
+    #[test]
+    fn video_search_filters_map_every_unified_branch_and_validate_categories() {
+        let filters = map_bilibili_video_search_filters(Some(&VideoSearchFilters {
+            order: VideoSearchOrder::MostCommented,
+            duration: VideoSearchDuration::OverSixtyMinutes,
+            category_id: Some("193".to_owned()),
+        }))
+        .expect("mapped filters");
+        assert_eq!(filters.order, BilibiliVideoSearchOrder::MostCommented);
+        assert_eq!(
+            filters.duration,
+            BilibiliVideoSearchDuration::OverSixtyMinutes
+        );
+        assert_eq!(filters.category_id, Some(193));
+
+        let defaults = map_bilibili_video_search_filters(None).expect("default filters");
+        assert_eq!(defaults, BilibiliVideoSearchFilters::default());
+
+        let invalid = map_bilibili_video_search_filters(Some(&VideoSearchFilters {
+            category_id: Some("music".to_owned()),
+            ..VideoSearchFilters::default()
+        }))
+        .expect_err("invalid category");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+
     #[tokio::test]
     async fn video_search_rejects_unsupported_inputs_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
@@ -1049,6 +1126,7 @@ mod tests {
             search_id: None,
             highlight: false,
             selectors: Vec::new(),
+            video_filters: None,
         };
         assert_eq!(
             provider

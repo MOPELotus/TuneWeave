@@ -4214,6 +4214,12 @@ impl MusicProvider for QqProvider {
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
+        if query.video_filters.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ search does not support Bilibili video filters",
+            )
+            .with_platform(Platform::Qq));
+        }
         if query.kind != SearchKind::Track {
             return Err(TuneWeaveError::unsupported(
                 Platform::Qq,
@@ -4232,6 +4238,12 @@ impl MusicProvider for QqProvider {
     }
 
     async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        if query.video_filters.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ search does not support Bilibili video filters",
+            )
+            .with_platform(Platform::Qq));
+        }
         if query.kind == SearchKind::Track {
             let page = self.search(query).await?;
             return Ok(Page {
@@ -19711,6 +19723,7 @@ mod tests {
             search_id: None,
             highlight: false,
             selectors: Vec::new(),
+            video_filters: None,
         }
     }
 
@@ -27563,6 +27576,14 @@ mod tests {
     #[tokio::test]
     async fn typed_search_rejects_duplicate_selector_types_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
+        let mut filtered_query = search_query(SearchKind::Track, 5, 0);
+        filtered_query.video_filters = Some(tuneweave_core::VideoSearchFilters::default());
+        let error = provider
+            .search(&filtered_query)
+            .await
+            .expect_err("QQ must not ignore Bilibili video filters");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
         let mut query = search_query(SearchKind::Track, 5, 0);
         query.selectors = vec![
             SearchSelector {

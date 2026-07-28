@@ -113,8 +113,9 @@ pub use model::{
     UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream, User,
     UserMusicGene, UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail,
     VideoDetailRequest, VideoKind, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoStats, VideoStream,
-    VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoRecommendationView, VideoResolution, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;

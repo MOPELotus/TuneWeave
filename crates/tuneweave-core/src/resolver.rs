@@ -123,6 +123,7 @@ impl StreamResolver {
                     search_id: None,
                     highlight: false,
                     selectors: Vec::new(),
+                    video_filters: None,
                 };
                 let page = match provider.search(&search).await {
                     Ok(page) => page,

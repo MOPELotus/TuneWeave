@@ -783,6 +783,12 @@ impl MusicProvider for NeteaseProvider {
             )
             .with_platform(Platform::Netease));
         }
+        if query.video_filters.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase search does not support Bilibili video filters",
+            )
+            .with_platform(Platform::Netease));
+        }
         let keyword = query.query.trim();
         if keyword.is_empty() {
             return Err(TuneWeaveError::invalid_request(
@@ -844,6 +850,12 @@ impl MusicProvider for NeteaseProvider {
         if !query.selectors.is_empty() {
             return Err(TuneWeaveError::invalid_request(
                 "NetEase search does not support QQ selector filters",
+            )
+            .with_platform(Platform::Netease));
+        }
+        if query.video_filters.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase search does not support Bilibili video filters",
             )
             .with_platform(Platform::Netease));
         }
@@ -17800,6 +17812,7 @@ mod tests {
                 search_id: None,
                 highlight: false,
                 selectors: Vec::new(),
+                video_filters: None,
             },
         )
         .await
@@ -17820,6 +17833,7 @@ mod tests {
                 search_id: None,
                 highlight: false,
                 selectors: Vec::new(),
+                video_filters: None,
             },
         )
         .await
@@ -17837,6 +17851,13 @@ mod tests {
         let error = MusicProvider::search_catalog(&provider, &selector_query)
             .await
             .expect_err("NetEase must not ignore QQ selector filters");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let mut filtered_query = SearchQuery::tracks("故事", 10, 0);
+        filtered_query.video_filters = Some(tuneweave_core::VideoSearchFilters::default());
+        let error = MusicProvider::search_catalog(&provider, &filtered_query)
+            .await
+            .expect_err("NetEase must not ignore Bilibili video filters");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
 
         let error = MusicProvider::search_multi_match(
@@ -29900,6 +29921,7 @@ mod tests {
                 search_id: None,
                 highlight: false,
                 selectors: Vec::new(),
+                video_filters: None,
             },
         )
         .await
@@ -30162,6 +30184,7 @@ mod tests {
                     search_id: None,
                     highlight: false,
                     selectors: Vec::new(),
+                    video_filters: None,
                 },
             )
             .await
@@ -30209,6 +30232,7 @@ mod tests {
                     search_id: None,
                     highlight: false,
                     selectors: Vec::new(),
+                    video_filters: None,
                 },
             )
             .await

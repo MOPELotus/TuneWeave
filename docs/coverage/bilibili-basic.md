@@ -2,7 +2,7 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=24`、`partial=1`、`implemented=5`、`verified=4`；完整实现率为 `9/34 = 26.47%`，已触达率为 `10/34 = 29.41%`。
+状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=24`、`partial=0`、`implemented=6`、`verified=4`；完整实现率与已触达率均为 `10/34 = 29.41%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
@@ -22,7 +22,7 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BA07 | 登录账户 | Web 短信验证码登录 | `pending` | 复用发送阶段产生的 captcha key，完整处理绑定、风控和登录成功 Cookie |
 | BA08 | 登录账户 | 会话状态与账户资料 | `implemented` | `GET /v1/auth/session` 与 `/v1/account/profile` 固定调用 `x/web-interface/nav`，强类型映射登录态、UID、昵称、头像、验证状态、等级、认证、挂件、大会员、钱包及 WBI 实时口令等已知结构；登录 UID 必须与选中凭证一致，头像只接受 B 站 HTTPS 图片域名。`-101` 和 `isLogin=false` 作为未认证正常结果，不存在的精确别名不发网且不回退 `default`；调用方凭证与服务器多账户共用同一链路。匿名真实网络态及离线完整/畸形分支已通过，登录账户成功态待扫码联合验收 |
 | BA09 | 登录账户 | Cookie 刷新与退出 | `implemented` | `POST /v1/auth/session/refresh` 完整执行 Cookie 刷新状态检查、固定公钥 RSA-OAEP `correspondPath`、实时 `refresh_csrf`、新 Cookie/refresh token 轮换、旧 refresh token 确认及新会话身份检查；无需刷新时验证旧会话并按归属模式返回同一代际，任一步失败均不覆盖服务器凭据。`DELETE /v1/auth/session` 固定调用 Web 退出接口，只在上游确认退出或明确返回失效登录页后删除精确账户；网络、CSRF 和未知错误保留旧凭据。`server/client/both` 的来源隔离、同 UID 检查、原子替换/删除、响应脱敏和全部状态解析已离线验收，待真实扫码账户完成刷新与退出联合验证 |
-| BS01 | 搜索 | 视频直接搜索 | `partial` | `GET /v1/search?platform=bilibili&kind=video` 已接入视频专用搜索：先尝试现行 WBI 端点，若平台明确返回风险票据则在十分钟内使用仍可用的公开兼容端点，不申请、回显或自动处理 captcha。统一分页可跨上游页满足 `limit/offset`，结果强类型保留 AID/BVID、UP 主、封面、时长、分区、标签、命中列、计数、发布时间及付费/合作标志，未知 HTML 不会进入标题。默认排序真实返回过结果，后续重复验收触发 HTTP 412 时正确映射为可重试限流；排序、时长和分区筛选尚未进入统一查询模型，因此保持 `partial` |
+| BS01 | 搜索 | 视频直接搜索 | `implemented` | `GET /v1/search?platform=bilibili&kind=video` 已接入视频专用搜索：先尝试现行 WBI 端点，若平台明确返回风险票据则在十分钟内使用仍可用的公开兼容端点，不申请、回显或自动处理 captcha。统一分页可跨上游页满足 `limit/offset`，结果强类型保留 AID/BVID、UP 主、封面、时长、分区、标签、命中列、计数、发布时间及付费/合作标志，未知 HTML 不会进入标题。统一 `order` 完整覆盖综合、播放、最新、弹幕、收藏和评论排序，`duration` 覆盖平台五档时长，`category_id/tids` 保留正整数分区 ID；三类筛选在 HTTP、核心模型、provider 和两套搜索端点间均有强类型映射，其他平台会明确拒绝而不静默忽略。默认排序真实返回过结果，筛选分支完成离线验收；当前出口后续重复验收触发 HTTP 412，因此待筛选真实成功态后升级为 `verified` |
 | BS02 | 搜索 | 搜索建议 | `pending` | Web suggestion；关键词与展示高亮分离，空建议返回空列表而非错误 |
 | BS03 | 搜索 | 热门搜索 | `pending` | 热搜词、展示文本、排行与跳转元数据强类型映射；不跟随任意外部 URL |
 | BP01 | 列表与 Uni | 当前账户创建的收藏夹目录 | `pending` | 完整列出默认与自建收藏夹，保留 `media_id/fid`、隐私、数量和所有者身份 |

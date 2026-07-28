@@ -93,8 +93,9 @@ use tuneweave_core::{
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
     UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
     Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoStats,
-    VideoStream, VideoStreamRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoTaxonomyKind, VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -990,6 +991,10 @@ struct SearchParams {
     search_id: Option<String>,
     highlight: Option<String>,
     selectors: Option<String>,
+    order: Option<String>,
+    duration: Option<String>,
+    #[serde(alias = "tids")]
+    category_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1428,6 +1433,12 @@ async fn search(
         search_id,
         highlight: parse_bool_parameter("highlight", params.highlight.as_deref(), false)?,
         selectors: parse_search_selectors(params.selectors.as_deref())?,
+        video_filters: parse_video_search_filters(
+            kind,
+            params.order.as_deref(),
+            params.duration.as_deref(),
+            params.category_id.as_deref(),
+        )?,
     };
     let page = provider.search_catalog(&query).await?;
     let mut response = ApiResponse::new(page.items)
@@ -15007,6 +15018,111 @@ fn parse_search_selectors(value: Option<&str>) -> Result<Vec<SearchSelector>, Tu
         .collect()
 }
 
+fn parse_video_search_filters(
+    kind: SearchKind,
+    order: Option<&str>,
+    duration: Option<&str>,
+    category_id: Option<&str>,
+) -> Result<Option<VideoSearchFilters>, TuneWeaveError> {
+    if order.is_none() && duration.is_none() && category_id.is_none() {
+        return Ok(None);
+    }
+    if kind != SearchKind::Video {
+        return Err(TuneWeaveError::invalid_request(
+            "order, duration, and category_id are only valid for video search",
+        ));
+    }
+    let order = match order
+        .unwrap_or("relevance")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "relevance" | "default" | "totalrank" => VideoSearchOrder::Relevance,
+        "most_played" | "play" | "click" => VideoSearchOrder::MostPlayed,
+        "newest" | "latest" | "pubdate" => VideoSearchOrder::Newest,
+        "most_danmaku" | "danmaku" | "dm" => VideoSearchOrder::MostDanmaku,
+        "most_favorited" | "most_favourite" | "favorite" | "favourite" | "stow" => {
+            VideoSearchOrder::MostFavorited
+        }
+        "most_commented" | "comments" | "scores" => VideoSearchOrder::MostCommented,
+        value => {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "unsupported video search order: {value}"
+            ))
+            .with_details(json!({
+                "allowed": [
+                    "relevance",
+                    "most_played",
+                    "newest",
+                    "most_danmaku",
+                    "most_favorited",
+                    "most_commented"
+                ]
+            })));
+        }
+    };
+    let duration = match duration
+        .unwrap_or("any")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "any" | "all" | "0" => VideoSearchDuration::Any,
+        "under_ten_minutes" | "under_10_minutes" | "under_10m" | "1" => {
+            VideoSearchDuration::UnderTenMinutes
+        }
+        "ten_to_thirty_minutes" | "10_to_30_minutes" | "10_30m" | "2" => {
+            VideoSearchDuration::TenToThirtyMinutes
+        }
+        "thirty_to_sixty_minutes" | "30_to_60_minutes" | "30_60m" | "3" => {
+            VideoSearchDuration::ThirtyToSixtyMinutes
+        }
+        "over_sixty_minutes" | "over_60_minutes" | "over_60m" | "4" => {
+            VideoSearchDuration::OverSixtyMinutes
+        }
+        value => {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "unsupported video search duration: {value}"
+            ))
+            .with_details(json!({
+                "allowed": [
+                    "any",
+                    "under_ten_minutes",
+                    "ten_to_thirty_minutes",
+                    "thirty_to_sixty_minutes",
+                    "over_sixty_minutes"
+                ]
+            })));
+        }
+    };
+    let category_id = category_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "0")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map_or_else(
+                    || {
+                        Err(TuneWeaveError::invalid_request(
+                            "video search category_id must be a positive integer",
+                        ))
+                    },
+                    |value| Ok(value.to_string()),
+                )
+        })
+        .transpose()?;
+    Ok(Some(VideoSearchFilters {
+        order,
+        duration,
+        category_id,
+    }))
+}
+
 fn parse_search_variant(value: Option<&str>) -> Result<SearchVariant, TuneWeaveError> {
     match value
         .unwrap_or("default")
@@ -15558,6 +15674,7 @@ mod tests {
             extensions.insert("search_id".to_owned(), json!(query.search_id));
             extensions.insert("highlight".to_owned(), json!(query.highlight));
             extensions.insert("selectors".to_owned(), json!(query.selectors));
+            extensions.insert("video_filters".to_owned(), json!(query.video_filters));
             Ok(Page {
                 items: vec![item],
                 pagination: PageMeta {
@@ -21283,6 +21400,38 @@ mod tests {
             "second-session"
         );
         assert_eq!(json["meta"]["pagination"]["extensions"]["highlight"], false);
+    }
+
+    #[tokio::test]
+    async fn video_search_filters_are_typed_and_reference_compatible() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&kind=video&order=click&duration=2&tids=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["video_filters"],
+            json!({
+                "order": "most_played",
+                "duration": "ten_to_thirty_minutes",
+                "category_id": "3"
+            })
+        );
+
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/search?q=clock&kind=video&order=most_favorited&duration=over_60m&category_id=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["video_filters"],
+            json!({
+                "order": "most_favorited",
+                "duration": "over_sixty_minutes"
+            })
+        );
     }
 
     #[tokio::test]
@@ -27500,6 +27649,11 @@ mod tests {
             "/v1/search?q=clock&selectors=not-json",
             "/v1/search?q=clock&selectors=%5B%7B%22id%22%3A1%2C%22name%22%3A%22a%22%2C%22type%22%3A7%7D%2C%7B%22id%22%3A2%2C%22name%22%3A%22b%22%2C%22type%22%3A7%7D%5D",
             "/v1/search?q=clock&selectors=%5B%7B%22id%22%3A1%2C%22name%22%3A%22a%22%2C%22type%22%3A7%2C%22unknown%22%3Atrue%7D%5D",
+            "/v1/search?q=clock&order=click",
+            "/v1/search?q=clock&kind=video&order=oldest",
+            "/v1/search?q=clock&kind=video&duration=medium",
+            "/v1/search?q=clock&kind=video&category_id=-1",
+            "/v1/search?q=clock&kind=video&category_id=music",
             "/v1/search?q=clock&unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;

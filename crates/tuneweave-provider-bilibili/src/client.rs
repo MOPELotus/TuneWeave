@@ -202,6 +202,65 @@ pub(crate) struct BilibiliSearchVideo {
     pub rank_score: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum BilibiliVideoSearchOrder {
+    #[default]
+    Relevance,
+    MostPlayed,
+    Newest,
+    MostDanmaku,
+    MostFavorited,
+    MostCommented,
+}
+
+impl BilibiliVideoSearchOrder {
+    const fn parameter(self) -> &'static str {
+        match self {
+            Self::Relevance => "totalrank",
+            Self::MostPlayed => "click",
+            Self::Newest => "pubdate",
+            Self::MostDanmaku => "dm",
+            Self::MostFavorited => "stow",
+            Self::MostCommented => "scores",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum BilibiliVideoSearchDuration {
+    #[default]
+    Any,
+    UnderTenMinutes,
+    TenToThirtyMinutes,
+    ThirtyToSixtyMinutes,
+    OverSixtyMinutes,
+}
+
+impl BilibiliVideoSearchDuration {
+    const fn parameter(self) -> &'static str {
+        match self {
+            Self::Any => "0",
+            Self::UnderTenMinutes => "1",
+            Self::TenToThirtyMinutes => "2",
+            Self::ThirtyToSixtyMinutes => "3",
+            Self::OverSixtyMinutes => "4",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoSearchFilters {
+    pub order: BilibiliVideoSearchOrder,
+    pub duration: BilibiliVideoSearchDuration,
+    pub category_id: Option<u32>,
+}
+
+impl BilibiliVideoSearchFilters {
+    fn category_parameter(self) -> String {
+        self.category_id.unwrap_or_default().to_string()
+    }
+}
+
 impl fmt::Debug for BilibiliWebRequestContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -903,6 +962,7 @@ impl BilibiliClient {
         &self,
         keyword: &str,
         page: u32,
+        filters: BilibiliVideoSearchFilters,
         credential: Option<&BilibiliCredential>,
     ) -> Result<BilibiliVideoSearchPage> {
         validate_search_keyword(keyword)?;
@@ -913,10 +973,11 @@ impl BilibiliClient {
         }
         if self.video_search_compatibility_active()? {
             return self
-                .search_videos_compatibility_page(keyword, page, credential)
+                .search_videos_compatibility_page(keyword, page, filters, credential)
                 .await;
         }
         let query_visit_id = self.web_query_visit_id()?;
+        let category_id = filters.category_parameter();
         let context = self
             .signed_web_context(
                 &[
@@ -925,9 +986,12 @@ impl BilibiliClient {
                     ("context".to_owned(), String::new()),
                     ("search_type".to_owned(), "video".to_owned()),
                     ("keyword".to_owned(), keyword.to_owned()),
-                    ("order".to_owned(), "totalrank".to_owned()),
-                    ("duration".to_owned(), "0".to_owned()),
-                    ("tids".to_owned(), "0".to_owned()),
+                    ("order".to_owned(), filters.order.parameter().to_owned()),
+                    (
+                        "duration".to_owned(),
+                        filters.duration.parameter().to_owned(),
+                    ),
+                    ("tids".to_owned(), category_id),
                     ("page".to_owned(), page.to_string()),
                     ("page_size".to_owned(), VIDEO_SEARCH_PAGE_SIZE.to_string()),
                     ("pubtime_begin_s".to_owned(), "0".to_owned()),
@@ -960,7 +1024,7 @@ impl BilibiliClient {
             Ok(result) => Ok(result),
             Err(error) if is_video_search_risk_challenge(&error) => {
                 self.mark_video_search_challenged()?;
-                self.search_videos_compatibility_page(keyword, page, credential)
+                self.search_videos_compatibility_page(keyword, page, filters, credential)
                     .await
             }
             Err(error) => Err(error),
@@ -971,18 +1035,20 @@ impl BilibiliClient {
         &self,
         keyword: &str,
         page: u32,
+        filters: BilibiliVideoSearchFilters,
         credential: Option<&BilibiliCredential>,
     ) -> Result<BilibiliVideoSearchPage> {
         let mut endpoint = Url::parse(VIDEO_SEARCH_COMPATIBILITY_ENDPOINT).map_err(|_| {
             bilibili_internal_error("Bilibili video search compatibility endpoint is invalid")
         })?;
+        let category_id = filters.category_parameter();
         endpoint
             .query_pairs_mut()
             .append_pair("search_type", "video")
             .append_pair("keyword", keyword)
-            .append_pair("order", "totalrank")
-            .append_pair("duration", "0")
-            .append_pair("tids", "0")
+            .append_pair("order", filters.order.parameter())
+            .append_pair("duration", filters.duration.parameter())
+            .append_pair("tids", &category_id)
             .append_pair("page", &page.to_string());
         let cookie_header = credential.map(BilibiliCredential::cookie_header);
         let bytes = self
@@ -2894,6 +2960,15 @@ mod tests {
 
     #[test]
     fn video_search_mapping_preserves_identity_counts_and_pagination() {
+        let filters = BilibiliVideoSearchFilters {
+            order: BilibiliVideoSearchOrder::MostFavorited,
+            duration: BilibiliVideoSearchDuration::ThirtyToSixtyMinutes,
+            category_id: Some(3),
+        };
+        assert_eq!(filters.order.parameter(), "stow");
+        assert_eq!(filters.duration.parameter(), "3");
+        assert_eq!(filters.category_parameter(), "3");
+
         let response = serde_json::to_vec(&json!({
             "code": 0,
             "message": "0",
@@ -3033,7 +3108,7 @@ mod tests {
     async fn live_anonymous_video_search_uses_provider_managed_web_identity() {
         let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
         let page = client
-            .search_videos_page("周杰伦", 1, None)
+            .search_videos_page("周杰伦", 1, BilibiliVideoSearchFilters::default(), None)
             .await
             .expect("live video search");
         assert_eq!(page.page, 1);

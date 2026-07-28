@@ -36,6 +36,39 @@ pub enum SearchVariant {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoSearchOrder {
+    #[default]
+    Relevance,
+    MostPlayed,
+    Newest,
+    MostDanmaku,
+    MostFavorited,
+    MostCommented,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoSearchDuration {
+    #[default]
+    Any,
+    UnderTenMinutes,
+    TenToThirtyMinutes,
+    ThirtyToSixtyMinutes,
+    OverSixtyMinutes,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoSearchFilters {
+    #[serde(default)]
+    pub order: VideoSearchOrder,
+    #[serde(default)]
+    pub duration: VideoSearchDuration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
     #[default]
@@ -67,6 +100,8 @@ pub struct SearchQuery {
     pub highlight: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selectors: Vec<SearchSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_filters: Option<VideoSearchFilters>,
 }
 
 impl SearchQuery {
@@ -81,6 +116,7 @@ impl SearchQuery {
             search_id: None,
             highlight: false,
             selectors: Vec::new(),
+            video_filters: None,
         }
     }
 }
@@ -6838,6 +6874,26 @@ mod tests {
             value,
             serde_json::json!({"id": 4558, "name": "默认", "type": 0})
         );
+    }
+
+    #[test]
+    fn video_search_filters_keep_order_duration_and_category_typed() {
+        let filters = VideoSearchFilters {
+            order: VideoSearchOrder::MostPlayed,
+            duration: VideoSearchDuration::TenToThirtyMinutes,
+            category_id: Some("3".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_value(filters).expect("serialize video search filters"),
+            serde_json::json!({
+                "order": "most_played",
+                "duration": "ten_to_thirty_minutes",
+                "category_id": "3"
+            })
+        );
+
+        let query = SearchQuery::tracks("反方向的钟", 30, 0);
+        assert!(query.video_filters.is_none());
     }
 
     #[test]
