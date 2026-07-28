@@ -6648,13 +6648,20 @@ struct PlaylistAccountParams {
 
 async fn playlist_create(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<PlaylistCreateBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
     let body = json_body(payload)?;
     let platform = account_platform(&state, body.platform.as_deref())?;
-    let account = account_alias(body.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .create_playlist(&PlaylistCreateRequest {
             name: required_trimmed("name", body.name)?,
             visibility: parse_playlist_visibility(body.visibility.as_ref(), body.privacy.as_ref())?,
@@ -6662,15 +6669,12 @@ async fn playlist_create(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlist_update(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistUpdateBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
@@ -6687,10 +6691,16 @@ async fn playlist_update(
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     };
-    let account = account_alias(body.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .update_playlist(
             reference.id(),
             &PlaylistUpdateRequest {
@@ -6702,38 +6712,38 @@ async fn playlist_update(
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlist_delete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistAccountParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let params = query_params(params)?;
-    let account = account_alias(params.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .delete_playlists(&PlaylistDeleteRequest {
             playlist_refs: vec![reference],
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlists_delete(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<PlaylistDeleteBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -6745,28 +6755,32 @@ async fn playlists_delete(
         "playlist",
     )?;
     let platform = single_reference_platform("playlist deletion", &playlist_refs)?;
-    let account = account_alias(body.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .delete_playlists(&PlaylistDeleteRequest {
             playlist_refs,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlist_items_add(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Add,
@@ -6777,11 +6791,13 @@ async fn playlist_items_add(
 
 async fn playlist_items_remove(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Remove,
@@ -6792,11 +6808,13 @@ async fn playlist_items_remove(
 
 async fn playlist_tracks_add(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Add,
@@ -6807,11 +6825,13 @@ async fn playlist_tracks_add(
 
 async fn playlist_tracks_remove(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Remove,
@@ -6822,11 +6842,13 @@ async fn playlist_tracks_remove(
 
 async fn playlist_videos_add(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Add,
@@ -6837,11 +6859,13 @@ async fn playlist_videos_add(
 
 async fn playlist_videos_remove(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
     playlist_items_mutation(
         state,
+        headers,
         reference,
         payload,
         PlaylistItemMutationAction::Remove,
@@ -6852,6 +6876,7 @@ async fn playlist_videos_remove(
 
 async fn playlist_items_mutation(
     state: AppState,
+    headers: HeaderMap,
     reference: String,
     payload: Result<Json<PlaylistItemMutationBody>, JsonRejection>,
     action: PlaylistItemMutationAction,
@@ -6867,10 +6892,16 @@ async fn playlist_items_mutation(
         reference.platform(),
         "playlist item",
     )?;
-    let account = account_alias(body.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .mutate_playlist_items(
             reference.id(),
             action,
@@ -6881,15 +6912,12 @@ async fn playlist_items_mutation(
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn playlist_tracks_order(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistTrackOrderBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistTrackOrderResult>>, ApiError> {
@@ -6902,10 +6930,16 @@ async fn playlist_tracks_order(
         reference.platform(),
         "playlist track",
     )?;
-    let account = account_alias(body.account.as_deref())?;
     let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .reorder_playlist_tracks(
             reference.id(),
             &PlaylistTrackOrderRequest {
@@ -6914,11 +6948,7 @@ async fn playlist_tracks_order(
             },
         )
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn podcast_episode_order(
@@ -7175,6 +7205,7 @@ async fn podcast_episodes_delete(
 
 async fn account_playlists_order(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<PlaylistOrderBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistOrderResult>>, ApiError> {
     let body = json_body(payload)?;
@@ -7186,19 +7217,21 @@ async fn account_playlists_order(
         "playlist",
     )?;
     let platform = single_reference_platform("account playlist ordering", &playlist_refs)?;
-    let account = account_alias(body.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
+    let result = access
+        .provider
         .reorder_account_playlists(&PlaylistOrderRequest {
             playlist_refs,
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7223,7 +7256,14 @@ async fn playlist_cover_update(
 ) -> Result<Json<ApiResponse<PlaylistCoverUpdateResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let params = query_params(params)?;
-    let account = account_alias(params.account.as_deref())?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let account = access.required_account().to_owned();
     let request = parse_image_upload_request(
         headers,
         payload,
@@ -7237,16 +7277,11 @@ async fn playlist_cover_update(
             max_bytes: MAX_PLAYLIST_COVER_UPLOAD_BYTES,
         },
     )?;
-    let platform = reference.platform();
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let result = access
+        .provider
         .update_playlist_cover(reference.id(), &request)
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 fn parse_playlist_visibility(
@@ -20345,6 +20380,34 @@ mod tests {
         (status, json)
     }
 
+    async fn caller_binary_request(
+        app: Router,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        credential: &CallerCredential,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::from(body))
+                    .expect("build caller binary request"),
+            )
+            .await
+            .expect("caller binary request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read caller binary response body");
+        let json = serde_json::from_slice(&body).expect("valid caller binary response JSON");
+        (status, json)
+    }
+
     async fn json_response(path: &str) -> (StatusCode, Value) {
         json_response_from(test_app(), path).await
     }
@@ -25047,6 +25110,126 @@ mod tests {
             assert_eq!(result["meta"]["platform"], "qq");
             assert_eq!(result["meta"]["account"], "creator");
         }
+    }
+
+    #[tokio::test]
+    async fn playlist_writes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-playlist-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, created) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/playlists",
+            Some(json!({ "platform": "netease", "name": "混合歌单" })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["data"]["extensions"]["account"], "default");
+        assert!(created["meta"].get("account").is_none());
+
+        let (status, updated) = caller_json_request(
+            app.clone(),
+            Method::PATCH,
+            "/v1/playlists/netease:9001",
+            Some(json!({ "name": "调用方歌单" })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["data"]["extensions"]["account"], "default");
+        assert!(updated["meta"].get("account").is_none());
+
+        let (status, mutated) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/playlists/netease:9001/tracks",
+            Some(json!({ "refs": ["netease:123", "netease:456"] })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mutated["data"]["extensions"]["account"], "default");
+        assert!(mutated["meta"].get("account").is_none());
+
+        let (status, ordered) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/playlists/netease:9001/tracks/order",
+            Some(json!({ "refs": ["netease:456", "netease:123"] })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ordered["data"]["extensions"]["account"], "default");
+        assert!(ordered["meta"].get("account").is_none());
+
+        let (status, account_order) = caller_json_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/account/playlists/order",
+            Some(json!({
+                "refs": ["netease:9002", "netease:9001"]
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(account_order["data"]["extensions"]["account"], "default");
+        assert!(account_order["meta"].get("account").is_none());
+
+        let (status, cover) = caller_binary_request(
+            app.clone(),
+            Method::PUT,
+            "/v1/playlists/netease:9001/cover?filename=cover.png",
+            "image/png",
+            vec![0x89, b'P', b'N', b'G'],
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cover["data"]["image"]["extensions"]["account"], "default");
+        assert!(cover["meta"].get("account").is_none());
+
+        for (method, path, body) in [
+            (Method::DELETE, "/v1/playlists/netease:9001", None),
+            (
+                Method::DELETE,
+                "/v1/playlists",
+                Some(json!({ "refs": ["netease:9001", "netease:9002"] })),
+            ),
+        ] {
+            let (status, deleted) =
+                caller_json_request(app.clone(), method, path, body, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(deleted["data"]["extensions"]["account"], "default");
+            assert!(deleted["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::POST,
+            "/v1/playlists",
+            Some(json!({
+                "platform": "netease",
+                "account": "default",
+                "name": "冲突"
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
