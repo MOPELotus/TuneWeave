@@ -1240,7 +1240,7 @@ B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P
 | GET | `/v1/playlists/{ref}` | `account?` | `Playlist`；`uni:` 复用同一实体，混合项目数位于 `extensions.uni_item_count`，不伪装成纯歌曲数 |
 | GET | `/v1/playlists/{ref}/items` | 分页、`account?` | `PlaylistPlayableEntry[]`；统一返回 `track/mv/video/podcast_episode/radio_station`、资源引用、位置与紧凑快照；Uni 项提供稳定 `item_id`，外部只读项目为 `null` |
 | GET | `/v1/playlists/{ref}/tracks` | 分页、`account?` | `Track[]`；混合 Uni 歌单先过滤非歌曲再计算真实分页，B 站合集/收藏夹视频按可播放音频内容归一并保留 `video_ref` |
-| GET | `/v1/playlists/{ref}/items/{item_id}/stream` | 音质/后端/码率、`playback_platform?`、`fallback?`、`fallback_platforms?`、`unblock?`、`source?`、`account?`、`accounts?`、视频 `resolution?` | `UniPlaylistItemStream`；稳定项目身份、原始资源和统一 `MediaStream` 分离 |
+| GET | `/v1/playlists/{ref}/items/{item_id}/stream` | 音质/后端/码率、`playback_platform?`、`fallback?`、`fallback_platforms?`、`unblock?`、`source?`、`account?`、`accounts?`、视频 `resolution?` | `UniPlaylistItemStream`；稳定项目身份、原始资源和统一 `MediaStream` 分离；B 站视频默认原生音轨，显式 `resolution` 选择视频轨 |
 | GET | `/v1/playlists/{ref}/items/{item_id}/stream/redirect` | 同上 | 成功解析真实 URL 后返回 302 |
 | GET | `/v1/resources/{type}/{ref}/comments` | `account?`、`view?`、`sort?`、评论分页参数 | `target/comments/hot_comments/top_comments/current_comment/extensions`；统一评论目录，分页位于 `meta.pagination` |
 | GET | `/v1/resources/{type}/comments/stats` | `platform?`、`ids?`、`account?` | `CommentThreadStatsBatch`；同类型资源的批量评论、分享、点赞及最新条目统计 |
@@ -1649,6 +1649,10 @@ QQ Uni 来源支持两种稳定形态：`type=playlist` 导入一个已选择的
 一次导入接受 1–100 个来源，按请求中的来源顺序逐一完整读取所有分页，再按各来源内部位置生成新的稳定项目 ID；来源和条目都允许重复，不进行隐式去重。任何来源、分页或身份检查失败时目标歌单完全不创建；全部读取成功后，歌单级 `extensions.import_sources` 来源摘要、条目级来源索引/引用/类型和所有项目通过一次存储发布原子创建。未指定名称时使用来源名称按 `A + B` 派生并安全限制为 200 UTF-8 字节；单来源未指定描述时沿用其描述。公开来源的跨歌单完整合并、来源边界和重启恢复均已验证。
 
 B 站 `season` 与 `favorite_folder` 来源已接通真实导入，来源 `id` 使用不带类型前缀的正整数，provider 内部再绑定到不可混淆的 Season 或收藏夹身份。导入项目保持 `kind=video`；需求样例 `season:3629748` 实际遍历 617 项，`favorite_folder:2883236382` 实际返回 98 项，两者一次 HTTP 请求按来源顺序原子合并为 715 项。收藏夹元数据报告 99 项但平台列表过滤了其中 1 项，TuneWeave 保留真实来源总数与实际写入数，不生成虚假视频补齐。
+
+B 站 `video` 类型 Uni 项默认把视频视为可播放音频来源：未提交 `resolution` 时先用项目原始 B 站身份选择 BM02 音轨，`quality` 与 `accounts.bilibili` 指定的服务器账户或调用方托管凭证会进入同一播放请求。成功响应的统一 `MediaStream` 保留实际音质、码率、格式、编码、备用 URL、到期时间和必要 `Referer`，`extensions.transport=native_video_audio` 与完整强类型音轨结果用于区分来源；不会返回账户 Cookie。显式提交 `resolution=1..4320` 时改用原生视频轨，并标记 `transport=native_video`。Uni 项的 `/stream/redirect` 同样只是无缓存 302，无法代传 `MediaStream.headers`；需要 `Referer` 的客户端必须使用 JSON 端点自行发起媒体请求。
+
+只有原始 B 站音轨失败且 `fallback=true` 时，解析器才按 `playback_platform/fallback_platforms` 顺序搜索其他音乐平台；匹配使用 Uni 快照中的标题、艺人、时长、ISRC 和版本标签，保持严格阈值，翻唱、现场或版本冲突不会因“能播放”而被接受。每个平台可用 `accounts` 提交独立账户，全部候选、分数、账户和失败分类按尝试顺序返回。默认音乐回退列表不包含 B 站，普通歌曲不会反向搜索 B 站视频；B 站视频是原始项目时仍自动先尝试自身音轨。公开视频 `BV1Jt411P77c` 已通过真实 Uni HTTP 取得原生音轨，账户隔离、原音轨失败后 QQ 严格命中及显式视频轨分支完成自动化验收。
 
 ### 写操作
 

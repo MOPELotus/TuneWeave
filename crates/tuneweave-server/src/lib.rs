@@ -398,7 +398,6 @@ impl AppState {
             vec![
                 Platform::Netease,
                 Platform::Qq,
-                Platform::Bilibili,
                 Platform::Kugou,
                 Platform::Migu,
             ],
@@ -4472,7 +4471,11 @@ async fn resolve_uni_playlist_item_request(
             resolve_uni_podcast_episode_stream(&state, &item, &request).await?
         }
         UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video => {
-            resolve_uni_video_stream(&state, &item, &request, resolution).await?
+            let prefer_native_audio = item.kind == UniPlaylistItemKind::Video
+                && item.source_ref.platform() == Platform::Bilibili
+                && params.resolution.is_none();
+            resolve_uni_video_stream(&state, &item, &request, resolution, prefer_native_audio)
+                .await?
         }
         UniPlaylistItemKind::RadioStation => {
             resolve_uni_radio_stream(&state, &item, &request).await?
@@ -4531,6 +4534,7 @@ async fn resolve_uni_video_stream(
     item: &UniPlaylistItem,
     request: &ResolveRequest,
     resolution: u32,
+    prefer_native_audio: bool,
 ) -> Result<(MediaStream, Extensions), TuneWeaveError> {
     let origin_platform = item.source_ref.platform();
     let origin = track_from_uni_item(item.clone());
@@ -4559,6 +4563,80 @@ async fn resolve_uni_video_stream(
                 UniPlaylistItemKind::Video => VideoResourceKind::Video,
                 _ => unreachable!("video resolver only accepts MV or video items"),
             };
+            if prefer_native_audio {
+                if !provider.supports(Capability::VideoAudioStream) {
+                    let error = TuneWeaveError::unsupported(platform, Capability::VideoAudioStream);
+                    attempts.push(stream_failed_attempt(
+                        platform,
+                        account,
+                        Some(item.source_ref.clone()),
+                        Some(1.0),
+                        &error,
+                    ));
+                    last_error = Some(error);
+                    continue;
+                }
+                let mut audio_request = VideoAudioStreamRequest::new(kind, request.quality);
+                audio_request.account.clone_from(&account);
+                match provider
+                    .video_audio_stream(item.source_ref.id(), &audio_request)
+                    .await
+                {
+                    Ok(audio) if audio.available && audio.url.is_some() => {
+                        let mut stream = media_stream_from_video_audio(
+                            &item.source_ref,
+                            audio.clone(),
+                            account,
+                        )?;
+                        attempts.append(&mut stream.attempts);
+                        stream.attempts = attempts;
+                        return Ok((
+                            stream,
+                            Extensions::from([
+                                ("transport".to_owned(), json!("native_video_audio")),
+                                ("native_video_audio_stream".to_owned(), json!(audio)),
+                                ("video_audio_fallback".to_owned(), json!(false)),
+                            ]),
+                        ));
+                    }
+                    Ok(audio) => {
+                        let error = TuneWeaveError::new(
+                            ErrorCode::ResourceNotFound,
+                            "video item did not expose a playable audio stream URL",
+                        )
+                        .with_platform(platform)
+                        .with_details(json!({
+                            "video_ref": audio.video_ref,
+                            "part_ref": audio.part_ref,
+                            "requested_quality": audio.requested_quality,
+                            "actual_quality": audio.actual_quality,
+                            "tier": audio.tier,
+                            "platform_quality_id": audio.platform_quality_id,
+                            "downgraded": audio.downgraded,
+                            "message": audio.message
+                        }));
+                        attempts.push(stream_failed_attempt(
+                            platform,
+                            account,
+                            Some(item.source_ref.clone()),
+                            Some(1.0),
+                            &error,
+                        ));
+                        last_error = Some(error);
+                    }
+                    Err(error) => {
+                        attempts.push(stream_failed_attempt(
+                            platform,
+                            account,
+                            Some(item.source_ref.clone()),
+                            Some(1.0),
+                            &error,
+                        ));
+                        last_error = Some(error);
+                    }
+                }
+                continue;
+            }
             let mut video_request = VideoStreamRequest::new(kind, resolution);
             video_request.account.clone_from(&account);
             match provider
@@ -4866,6 +4944,48 @@ fn media_stream_from_video(
             platform: video.platform,
             account,
             candidate: Some(video.video_ref),
+            match_score: Some(1.0),
+            status: ResolutionStatus::Success,
+            error: None,
+        }],
+    })
+}
+
+fn media_stream_from_video_audio(
+    source_ref: &ResourceRef,
+    audio: VideoAudioStream,
+    account: Option<String>,
+) -> Result<MediaStream, TuneWeaveError> {
+    let url = audio.url.clone().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "video item did not expose a playable audio stream URL",
+        )
+        .with_platform(audio.platform)
+    })?;
+    Ok(MediaStream {
+        url,
+        backup_urls: audio.backup_urls,
+        headers: audio.headers,
+        expires_at: audio
+            .expires_at_epoch_seconds
+            .and_then(unix_epoch_seconds_rfc3339),
+        format: audio.mime_type,
+        codec: audio.codec,
+        bitrate: audio.bandwidth,
+        size: None,
+        duration_ms: audio.duration_ms,
+        requested_quality: audio.requested_quality,
+        actual_quality: audio.actual_quality.unwrap_or(Quality::Auto),
+        trial: None,
+        origin_track: Some(source_ref.clone()),
+        resolved_track: audio.video_ref.clone(),
+        resolved_platform: audio.platform,
+        match_score: Some(1.0),
+        attempts: vec![ResolutionAttempt {
+            platform: audio.platform,
+            account,
+            candidate: Some(audio.video_ref),
             match_score: Some(1.0),
             status: ResolutionStatus::Success,
             error: None,
@@ -15926,6 +16046,33 @@ fn unix_time_seconds() -> Result<u64, TuneWeaveError> {
         })
 }
 
+fn unix_epoch_seconds_rfc3339(timestamp: u64) -> Option<String> {
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds = timestamp % 86_400;
+    let z = days.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
 fn parse_optional_i64_parameter(
     name: &str,
     value: Option<&str>,
@@ -20011,6 +20158,95 @@ mod tests {
         }
     }
 
+    struct TestBilibiliProvider;
+
+    #[async_trait]
+    impl MusicProvider for TestBilibiliProvider {
+        fn platform(&self) -> Platform {
+            Platform::Bilibili
+        }
+
+        fn name(&self) -> &'static str {
+            "Test Bilibili"
+        }
+
+        fn capabilities(&self) -> BTreeSet<Capability> {
+            BTreeSet::from([Capability::VideoAudioStream, Capability::VideoStream])
+        }
+
+        async fn video_audio_stream(
+            &self,
+            id: &str,
+            request: &VideoAudioStreamRequest,
+        ) -> Result<VideoAudioStream> {
+            if id == "bvid:fallback" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "test Bilibili audio requires another account",
+                )
+                .with_platform(Platform::Bilibili));
+            }
+            Ok(VideoAudioStream {
+                video_ref: ResourceRef::new(Platform::Bilibili, id)
+                    .expect("valid Bilibili video reference"),
+                part_ref: ResourceRef::new(Platform::Bilibili, "cid:106101299")
+                    .expect("valid Bilibili part reference"),
+                platform: Platform::Bilibili,
+                available: true,
+                url: Some("https://audio.example.test/bilibili-native.m4s".to_owned()),
+                backup_urls: vec!["https://backup.example.test/bilibili-native.m4s".to_owned()],
+                headers: BTreeMap::from([(
+                    "Referer".to_owned(),
+                    "https://www.bilibili.com/video/BV1Jt411P77c".to_owned(),
+                )]),
+                expires_at_epoch_seconds: Some(2_000_000_000),
+                mime_type: Some("audio/mp4".to_owned()),
+                codec: Some("mp4a.40.2".to_owned()),
+                bandwidth: Some(192_000),
+                duration_ms: Some(266_000),
+                requested_quality: request.quality,
+                actual_quality: Some(Quality::Higher),
+                tier: Some(tuneweave_core::VideoAudioTier::Normal),
+                platform_quality_id: Some(30_280),
+                downgraded: request.quality != Quality::Higher,
+                message: None,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+
+        async fn video_stream(
+            &self,
+            id: &str,
+            request: &VideoStreamRequest,
+        ) -> Result<VideoStream> {
+            Ok(VideoStream {
+                video_ref: ResourceRef::new(Platform::Bilibili, id)
+                    .expect("valid Bilibili video reference"),
+                platform: Platform::Bilibili,
+                available: true,
+                url: Some("https://video.example.test/bilibili-native.m4s".to_owned()),
+                backup_urls: Vec::new(),
+                headers: BTreeMap::from([(
+                    "Referer".to_owned(),
+                    "https://www.bilibili.com/video/BV1Jt411P77c".to_owned(),
+                )]),
+                expires_at: Some("2033-05-18T03:33:20Z".to_owned()),
+                format: Some("video/mp4".to_owned()),
+                codec: Some("avc1.64001F".to_owned()),
+                width: Some(1_280),
+                height: Some(720),
+                size: None,
+                duration_ms: Some(266_000),
+                requested_resolution: request.resolution,
+                actual_resolution: Some(720),
+                platform_code: Some(64),
+                fee: None,
+                message: None,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+            })
+        }
+    }
+
     struct TestQqProvider;
 
     #[async_trait]
@@ -21828,6 +22064,56 @@ mod tests {
             .register(TestQqProvider)
             .expect("register QQ provider");
         build_router(AppState::new(registry, Platform::Netease))
+    }
+
+    fn test_app_with_bilibili_uni_items() -> Router {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(TestBilibiliProvider)
+            .expect("register Bilibili provider");
+        registry
+            .register(TestQqProvider)
+            .expect("register QQ provider");
+
+        let store = Arc::new(MemoryUniPlaylistStore::default());
+        let playlist_ref = ResourceRef::new(Platform::Uni, "pl_bilibili_audio")
+            .expect("valid Uni Playlist reference");
+        let mut playlist = UniPlaylist::new(
+            playlist_ref,
+            "B 站音频与回退",
+            "验证原始音轨优先和严格匹配回退",
+            1_753_137_600_000,
+        );
+        playlist.item_count = 2;
+        playlist.updated_at_ms = 1_753_137_600_200;
+        let item = |id: &str, source_id: &str, position: u64| {
+            let mut snapshot = UniPlaylistItemSnapshot::new("任性 (5525 Live版)");
+            snapshot.artists = vec!["周杰伦".to_owned()];
+            snapshot.duration_ms = Some(266_000);
+            snapshot
+                .extensions
+                .insert("playable".to_owned(), json!(true));
+            UniPlaylistItem {
+                id: id.to_owned(),
+                position,
+                kind: UniPlaylistItemKind::Video,
+                source_ref: ResourceRef::new(Platform::Bilibili, source_id)
+                    .expect("valid Bilibili source reference"),
+                snapshot,
+                added_at_ms: 1_753_137_600_100 + position,
+                extensions: Extensions::new(),
+            }
+        };
+        store
+            .create_with_items(
+                &playlist,
+                &[
+                    item("item_bili_native", "bvid:native", 0),
+                    item("item_bili_fallback", "bvid:fallback", 1),
+                ],
+            )
+            .expect("create Bilibili Uni Playlist");
+        build_router(AppState::new(registry, Platform::Bilibili).with_uni_playlist_store(store))
     }
 
     async fn json_response_from(app: Router, path: &str) -> (StatusCode, Value) {
@@ -27379,6 +27665,69 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live Bilibili playback access"]
+    async fn live_bilibili_uni_video_uses_the_native_audio_track() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let store = Arc::new(MemoryUniPlaylistStore::default());
+        let mut playlist = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_bilibili_live")
+                .expect("valid live Uni Playlist reference"),
+            "B 站真实音轨",
+            "",
+            1_753_137_600_000,
+        );
+        playlist.item_count = 1;
+        let mut snapshot = UniPlaylistItemSnapshot::new("测试视频音轨");
+        snapshot.duration_ms = Some(212_000);
+        let item = UniPlaylistItem {
+            id: "item_bilibili_live".to_owned(),
+            position: 0,
+            kind: UniPlaylistItemKind::Video,
+            source_ref: ResourceRef::new(Platform::Bilibili, "bvid:BV1Jt411P77c")
+                .expect("valid Bilibili video reference"),
+            snapshot,
+            added_at_ms: 1_753_137_600_000,
+            extensions: Extensions::new(),
+        };
+        store
+            .create_with_items(&playlist, &[item])
+            .expect("create live Bilibili Uni Playlist");
+        let app = build_router(
+            AppState::new(registry, Platform::Bilibili).with_uni_playlist_store(store),
+        );
+        let (status, response) = json_response_from(
+            app,
+            "/v1/playlists/uni:pl_bilibili_live/items/item_bilibili_live/stream?quality=high&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["data"]["source_ref"], "bilibili:bvid:BV1Jt411P77c");
+        assert_eq!(response["data"]["stream"]["resolved_platform"], "bilibili");
+        assert_eq!(
+            response["data"]["extensions"]["transport"],
+            "native_video_audio"
+        );
+        assert_eq!(
+            response["data"]["extensions"]["native_video_audio_stream"]["part_ref"],
+            "bilibili:cid:106101299"
+        );
+        assert_eq!(
+            response["data"]["stream"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert!(
+            response["data"]["stream"]["headers"]
+                .get("Cookie")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn qq_video_details_preserve_batch_order_duplicates_and_default_mv_kind() {
         let app = test_app_with_import_providers();
         let (status, single) = json_response_from(
@@ -29481,6 +29830,111 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(local_account["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn bilibili_uni_video_prefers_native_audio_and_then_strict_music_fallback() {
+        let defaults = AppState::new(ProviderRegistry::new(), Platform::Netease)
+            .resolver
+            .platform_sequence(Platform::Netease, &ResolveRequest::default());
+        assert!(!defaults.contains(&Platform::Bilibili));
+
+        let app = test_app_with_bilibili_uni_items();
+        let base = "/v1/playlists/uni:pl_bilibili_audio/items/item_bili_native/stream";
+        let (status, native_audio) = json_response_from(
+            app.clone(),
+            &format!("{base}?quality=high&fallback=false&accounts=bilibili=vip"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{native_audio}");
+        assert_eq!(
+            native_audio["data"]["stream"]["url"],
+            "https://audio.example.test/bilibili-native.m4s"
+        );
+        assert_eq!(
+            native_audio["data"]["stream"]["resolved_platform"],
+            "bilibili"
+        );
+        assert_eq!(native_audio["data"]["stream"]["actual_quality"], "higher");
+        assert_eq!(native_audio["data"]["stream"]["bitrate"], 192_000);
+        assert_eq!(
+            native_audio["data"]["stream"]["expires_at"],
+            "2033-05-18T03:33:20Z"
+        );
+        assert_eq!(
+            native_audio["data"]["stream"]["headers"]["Referer"],
+            "https://www.bilibili.com/video/BV1Jt411P77c"
+        );
+        assert!(
+            native_audio["data"]["stream"]["headers"]
+                .get("Cookie")
+                .is_none()
+        );
+        assert_eq!(
+            native_audio["data"]["stream"]["attempts"][0]["account"],
+            "vip"
+        );
+        assert_eq!(
+            native_audio["data"]["extensions"]["transport"],
+            "native_video_audio"
+        );
+        assert_eq!(
+            native_audio["data"]["extensions"]["native_video_audio_stream"]["extensions"]["account"],
+            "vip"
+        );
+        assert_eq!(
+            native_audio["data"]["extensions"]["video_audio_fallback"],
+            false
+        );
+
+        let (status, explicit_video) = json_response_from(
+            app.clone(),
+            &format!("{base}?resolution=720&fallback=false&accounts=bilibili=vip"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{explicit_video}");
+        assert_eq!(
+            explicit_video["data"]["stream"]["url"],
+            "https://video.example.test/bilibili-native.m4s"
+        );
+        assert_eq!(
+            explicit_video["data"]["extensions"]["transport"],
+            "native_video"
+        );
+        assert_eq!(
+            explicit_video["data"]["extensions"]["native_video_stream"]["requested_resolution"],
+            720
+        );
+
+        let (status, fallback) = json_response_from(
+            app,
+            "/v1/playlists/uni:pl_bilibili_audio/items/item_bili_fallback/stream?quality=lossless&fallback_platforms=qq&accounts=bilibili=expired,qq=green",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{fallback}");
+        assert_eq!(fallback["data"]["stream"]["resolved_platform"], "qq");
+        assert_eq!(
+            fallback["data"]["stream"]["resolved_track"],
+            "qq:qq-video-audio"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][0]["status"],
+            "authentication_required"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][0]["account"],
+            "expired"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][1]["status"],
+            "success"
+        );
+        assert_eq!(
+            fallback["data"]["stream"]["attempts"][1]["account"],
+            "green"
+        );
+        assert_eq!(fallback["data"]["extensions"]["transport"], "matched_audio");
+        assert_eq!(fallback["data"]["extensions"]["video_audio_fallback"], true);
     }
 
     #[tokio::test]
