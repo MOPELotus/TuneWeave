@@ -4102,12 +4102,14 @@ async fn track_stream(
 
 async fn uni_playlist_item_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((reference, item_id)): Path<(String, String)>,
     params: Result<Query<UniPlaylistItemStreamParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<UniPlaylistItemStream>>, ApiError> {
     let params = query_params(params)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let (result, legacy_account) =
-        resolve_uni_playlist_item_request(&state, reference, item_id, params).await?;
+        resolve_uni_playlist_item_request(&state, &credentials, reference, item_id, params).await?;
     let resolved_platform = result.stream.resolved_platform;
     let mut response = ApiResponse::new(result).with_platform(resolved_platform);
     if let Some(account) = legacy_account {
@@ -4118,16 +4120,20 @@ async fn uni_playlist_item_stream(
 
 async fn uni_playlist_item_stream_redirect(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((reference, item_id)): Path<(String, String)>,
     params: Result<Query<UniPlaylistItemStreamParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
-    let (result, _) = resolve_uni_playlist_item_request(&state, reference, item_id, params).await?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let (result, _) =
+        resolve_uni_playlist_item_request(&state, &credentials, reference, item_id, params).await?;
     Ok(download_redirect_response(&result.stream.url))
 }
 
 async fn resolve_uni_playlist_item_request(
     state: &AppState,
+    credentials: &CallerCredentialSet,
     reference: String,
     item_id: String,
     params: UniPlaylistItemStreamParams,
@@ -4166,10 +4172,12 @@ async fn resolve_uni_playlist_item_request(
             "resolution is only available for MV or video playlist items",
         ));
     }
-    let request = controls.resolve_request_with_accounts(
+    let mut request = controls.resolve_request_with_accounts(
         item.source_ref.platform(),
         parse_stream_accounts(params.accounts.as_deref())?,
     )?;
+    credentials.apply_stream_accounts(&mut request.accounts)?;
+    let state = credentials.scoped_state(state)?;
     let legacy_account = controls.account.clone();
     let stream_extensions = match item.kind {
         UniPlaylistItemKind::Track => {
@@ -4180,13 +4188,13 @@ async fn resolve_uni_playlist_item_request(
             )
         }
         UniPlaylistItemKind::PodcastEpisode => {
-            resolve_uni_podcast_episode_stream(state, &item, &request).await?
+            resolve_uni_podcast_episode_stream(&state, &item, &request).await?
         }
         UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video => {
-            resolve_uni_video_stream(state, &item, &request, resolution).await?
+            resolve_uni_video_stream(&state, &item, &request, resolution).await?
         }
         UniPlaylistItemKind::RadioStation => {
-            resolve_uni_radio_stream(state, &item, &request).await?
+            resolve_uni_radio_stream(&state, &item, &request).await?
         }
     };
     let (stream, mut extensions) = stream_extensions;
@@ -25517,6 +25525,50 @@ mod tests {
             "ste"
         );
         assert_eq!(origin_track["data"]["extensions"]["transport"], "audio");
+
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", "MUSIC_U=private-session", None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{}?fallback=false", item_stream_path(0)))
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value.clone())
+                    .body(Body::empty())
+                    .expect("caller playlist item stream request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let caller_stream: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            caller_stream["data"]["stream"]["attempts"][0]["account"],
+            "default"
+        );
+        assert!(caller_stream["meta"].get("account").is_none());
+        assert!(!String::from_utf8_lossy(&body).contains("private-session"));
+
+        let conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "{}?fallback=false&accounts=netease%3Ddefault",
+                        item_stream_path(0)
+                    ))
+                    .header(CALLER_CREDENTIAL_HEADER, credential.value)
+                    .body(Body::empty())
+                    .expect("conflicting playlist item stream request"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(conflict.status(), StatusCode::BAD_REQUEST);
 
         let (status, qq_track) = json_response_from(
             app.clone(),
