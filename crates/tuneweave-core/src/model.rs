@@ -3330,6 +3330,42 @@ impl VideoDetailRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoPartListRequest {
+    pub kind: VideoResourceKind,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl VideoPartListRequest {
+    #[must_use]
+    pub const fn new(kind: VideoResourceKind, limit: u32, offset: u32) -> Self {
+        Self {
+            kind,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoPart {
+    #[serde(rename = "ref")]
+    pub resource_ref: ResourceRef,
+    pub video_ref: ResourceRef,
+    pub platform: Platform,
+    pub id: String,
+    /// One-based position within the parent video.
+    pub page: u32,
+    pub title: String,
+    pub duration_ms: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VideoResolution {
     pub resolution: u32,
@@ -6484,6 +6520,27 @@ mod tests {
             ResourceRef::new(Platform::Netease, "22695250").expect("valid video reference");
         let detail_request = VideoDetailRequest::new(VideoResourceKind::Mv);
         assert_eq!(detail_request.kind, VideoResourceKind::Mv);
+
+        let part_request = VideoPartListRequest::new(VideoResourceKind::Video, 30, 0);
+        assert_eq!(part_request.kind, VideoResourceKind::Video);
+        let part = VideoPart {
+            resource_ref: ResourceRef::new(Platform::Bilibili, "cid:146044693")
+                .expect("valid video part reference"),
+            video_ref: ResourceRef::new(Platform::Bilibili, "bvid:BV117411r7R1")
+                .expect("valid parent video reference"),
+            platform: Platform::Bilibili,
+            id: "cid:146044693".to_owned(),
+            page: 1,
+            title: "正片".to_owned(),
+            duration_ms: Some(212_000),
+            width: Some(1920),
+            height: Some(1080),
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(part).expect("serialize video part");
+        assert_eq!(value["ref"], "bilibili:cid:146044693");
+        assert_eq!(value["video_ref"], "bilibili:bvid:BV117411r7R1");
+        assert_eq!(value["page"], 1);
 
         let stream_request = VideoStreamRequest::new(
             VideoResourceKind::Mv,

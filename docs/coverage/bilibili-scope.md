@@ -2,7 +2,7 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台项目范围账本：`pending` 尚未实现，`deferred` 已明确保留但按路线移出当前主线，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=10`、`deferred=5`、`partial=0`、`implemented=6`、`verified=13`；总项目范围完成度为 `19/34 = 55.88%`，排除延期登录链后的当前主线完成度为 `19/29 = 65.52%`。
+状态沿用其他平台项目范围账本：`pending` 尚未实现，`deferred` 已明确保留但按路线移出当前主线，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=9`、`deferred=5`、`partial=0`、`implemented=6`、`verified=14`；总项目范围完成度为 `20/34 = 58.82%`，排除延期登录链后的当前主线完成度为 `20/29 = 68.97%`。
 
 项目范围覆盖统一媒体后端所需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、字幕、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入；范围外但可能有媒体价值的能力只进入平台功能扩展候选池，不计入本表完成度。
 
@@ -34,7 +34,7 @@
 | BP07 | 列表与 Uni | 收藏夹视频分页 | `verified` | `GET /v1/playlists/bilibili:favorite:<media_id>/items` 固定调用 `x/v3/fav/resource/list`，固定当前收藏夹、全部分区、收藏时间顺序和 Web 类型；`/items` 返回强类型视频，`/tracks` 只提供带 `normalized_from_video` 的音乐客户端兼容视图。结果保留 AID/BVID、标题、封面、简介、UP 主、时长、分 P 数、失效状态、收藏/播放/弹幕计数及投稿/发布/收藏时间；失效视频仍保留可诊断身份但标记不可播放。统一 `offset/limit` 可跨上游 20 项页，并按上游原始坐标计算下一偏移：平台可能在仍有下一页时少返回一项，形成被过滤内容的分页空洞，不能误报失败或用 `offset+count` 造成重复。需求样例 `favorite:2883236382` 已真实验证 99 项、offset 18 跨页取 5 项，以及空洞 offset 39 后正确返回 `next_offset=45`；匿名公开与精确账户权限沿用 BP06 |
 | BP08 | 列表与 Uni | 合集与收藏夹导入 Uni Playlist | `verified` | B 站 provider 已扩展 `playlist_source/playlist_source_items`，`type=season` 和 `type=favorite_folder` 只接受无歧义正整数 ID，再分别绑定 `season:` 与 `favorite:` 强类型身份；默认 `type=playlist` 仍可读取已经带类型的统一引用，未知来源类型明确拒绝。两类来源沿 BP05/BP07 的原始下一偏移完整遍历，全部完成后才由现有 Uni 存储单次原子发布，视频保持 `kind=video` 而非伪造歌曲。真实 provider 遍历得到 `season:3629748` 的 617 项与 `favorite:2883236382` 的 98 个平台实际返回项目；真实 HTTP `POST /v1/uni/playlists/imports` 已分别验证收藏夹单源 98 项和两源有序合并 715 项，来源摘要为 `617,98`，回读首项类型为 B 站视频。收藏夹目录报告的第 99 项被平台过滤，不伪造项目补数 |
 | BV01 | 视频展示 | 视频详情与封面 | `verified` | `GET /v1/videos/bilibili:<aid-or-bvid>` 固定调用 `x/web-interface/view`，只接受 `kind=video` 的 AID/BVID，EP/SS 不会误走 UGC 协议；公开内容匿名可读，受限视频使用精确服务器账户或调用方凭证。响应交叉验证请求身份、AID/BVID、首 CID、分 P 数/顺序/唯一 CID、owner、统计身份、尺寸旋转和全部已知 rights 二值位，并将标题、完整简介、可信 HTTPS 封面、UP 主、时长、发布时间、分区、原创/转载状态、播放/弹幕/评论/收藏/投币/分享/点赞及付费/下载/互动/全景等能力映射为统一 `VideoDetail`。AID `85440373` 与 BVID `BV117411r7R1` 已真实收敛到同一 `bilibili:bvid:BV117411r7R1`；实际可用清晰度必须由 BM01 playurl 响应决定，本端点不以投稿尺寸伪造清晰度列表 |
-| BV02 | 视频展示 | 分 P 目录 | `pending` | `GET /v1/videos/{ref}/parts` 返回稳定 CID、页码、标题、尺寸与时长；多 P 不默认丢弃非首 P |
+| BV02 | 视频展示 | 分 P 目录 | `verified` | `GET /v1/videos/{ref}/parts` 复用已验证的 `x/web-interface/view` 详情协议，AID/BVID 输入先与响应交叉校验并统一为规范 BVID 父引用；每个分段以 `bilibili:cid:<cid>` 稳定标识，强类型保留从 1 开始的页码、标题、毫秒时长、尺寸、旋转状态和来源。客户端先校验完整目录的分 P 数、连续顺序、唯一 CID、首 CID 及维度，再应用 `limit=1..100/offset` 本地窗口，因此不会丢弃非首 P、重复首 P 或用分页遮蔽后段畸形数据。公开视频 `BV17x411w7KC` 已通过 provider 与统一 HTTP 真实验收：平台返回 10 P，从 offset 4 取 3 P 得到页码 5–7、总数 10 和下一偏移 7；错误类型、EP/SS、非法分页和不存在的精确账户均在发网前拒绝 |
 | BV03 | 视频展示 | 视频统计 | `pending` | 播放、点赞、投币、收藏、评论和分享计数按统一字段映射；账户点赞态与公开计数分离 |
 | BV04 | 视频展示 | 字幕目录与正文 | `pending` | 字幕是 B 站最接近歌词的时间文本能力；保留语言、名称、AI/人工类型、时间段和文本，不伪装为逐字歌词 |
 | BM01 | 播放下载 | DASH 播放信息 | `pending` | 以 AID/BVID + CID 请求 playurl，保留 DASH、DURL、格式、清晰度、编码、大小和备用 URL 分支 |

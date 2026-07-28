@@ -92,10 +92,11 @@ use tuneweave_core::{
     UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
     UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
     UniPlaylistItemStream, UniPlaylistStore, User, UserMusicGene, UserProfile, UserProfileBackend,
-    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyKind, VideoTaxonomyRequest,
+    Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
+    VideoPartListRequest, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
+    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -570,6 +571,7 @@ pub fn build_router(state: AppState) -> Router {
             "/videos/streams",
             get(video_streams_get).post(video_streams_post),
         )
+        .route("/videos/{reference}/parts", get(video_parts))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
         .route("/videos/{reference}/stream", get(video_stream))
@@ -8909,6 +8911,16 @@ struct VideoDetailParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VideoPartParams {
+    account: Option<String>,
+    #[serde(alias = "type")]
+    kind: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoDetailBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -9003,6 +9015,44 @@ async fn video_detail(
     request.account.clone_from(&access.provider_account);
     let detail = access.provider.video(reference.id(), &request).await?;
     Ok(Json(access.response(detail, platform)))
+}
+
+async fn video_parts(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<VideoPartParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<VideoPart>>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let kind = if reference.platform() == Platform::Qq && params.kind.is_none() {
+        VideoResourceKind::Mv
+    } else {
+        parse_video_resource_kind(params.kind.as_deref(), reference.id())?
+    };
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let mut request = VideoPartListRequest::new(kind, limit, offset);
+    request.account.clone_from(&access.provider_account);
+    let page = access
+        .provider
+        .video_parts(reference.id(), &request)
+        .await?;
+    let response = access
+        .response(page.items, platform)
+        .with_pagination(page.pagination);
+    Ok(Json(response))
 }
 
 async fn video_details_get(
@@ -15570,6 +15620,7 @@ mod tests {
                 Capability::VideoCatalog,
                 Capability::VideoTaxonomy,
                 Capability::VideoDetail,
+                Capability::VideoParts,
                 Capability::VideoStats,
                 Capability::VideoStream,
                 Capability::VideoSubscriptionWrite,
@@ -17368,6 +17419,52 @@ mod tests {
                     extensions: Extensions::new(),
                 }],
                 extensions: Extensions::new(),
+            })
+        }
+
+        async fn video_parts(
+            &self,
+            id: &str,
+            request: &VideoPartListRequest,
+        ) -> Result<Page<VideoPart>> {
+            let total = 3_u32;
+            let start = request.offset.min(total);
+            let end = start.saturating_add(request.limit).min(total);
+            let video_ref =
+                ResourceRef::new(Platform::Netease, id).expect("valid test video reference");
+            let items = (start..end)
+                .map(|index| {
+                    let page = index + 1;
+                    let part_id = format!("{id}:part:{page}");
+                    VideoPart {
+                        resource_ref: ResourceRef::new(Platform::Netease, &part_id)
+                            .expect("valid test video part reference"),
+                        video_ref: video_ref.clone(),
+                        platform: Platform::Netease,
+                        id: part_id,
+                        page,
+                        title: format!("第 {page} 段"),
+                        duration_ms: Some(60_000),
+                        width: Some(1920),
+                        height: Some(1080),
+                        extensions: Extensions::from([
+                            ("kind".to_owned(), json!(request.kind)),
+                            ("account".to_owned(), json!(request.account)),
+                        ]),
+                    }
+                })
+                .collect();
+            let has_more = end < total;
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(u64::from(total)),
+                    next_offset: has_more.then_some(end),
+                    has_more,
+                    extensions: Extensions::new(),
+                },
             })
         }
 
@@ -25936,6 +26033,84 @@ mod tests {
             );
             assert_eq!(detail["meta"]["account"], "collector", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn video_parts_preserve_parent_identity_pagination_kind_and_account() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/videos/netease:D1C2B3A40987654321ABCDEF12345678/parts?limit=1&offset=1&type=video&account=collector",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            response["data"][0]["video_ref"],
+            "netease:D1C2B3A40987654321ABCDEF12345678"
+        );
+        assert_eq!(
+            response["data"][0]["ref"],
+            "netease:D1C2B3A40987654321ABCDEF12345678:part:2"
+        );
+        assert_eq!(response["data"][0]["page"], 2);
+        assert_eq!(response["data"][0]["extensions"]["kind"], "video");
+        assert_eq!(response["data"][0]["extensions"]["account"], "collector");
+        assert_eq!(response["meta"]["platform"], "netease");
+        assert_eq!(response["meta"]["account"], "collector");
+        assert_eq!(response["meta"]["pagination"]["limit"], 1);
+        assert_eq!(response["meta"]["pagination"]["offset"], 1);
+        assert_eq!(response["meta"]["pagination"]["total"], 3);
+        assert_eq!(response["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(response["meta"]["pagination"]["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn video_parts_reject_invalid_pagination_kind_and_unknown_parameters() {
+        for path in [
+            "/v1/videos/netease:opaque/parts?limit=0",
+            "/v1/videos/netease:opaque/parts?limit=101",
+            "/v1/videos/netease:opaque/parts?limit=next",
+            "/v1/videos/netease:opaque/parts?offset=next",
+            "/v1/videos/netease:opaque/parts?kind=unknown",
+            "/v1/videos/netease:opaque/parts?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
+    async fn live_bilibili_video_parts_flow_through_unified_http() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV17x411w7KC/parts?limit=3&offset=4",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"].as_array().unwrap().len(), 3);
+        assert_eq!(response["data"][0]["page"], 5);
+        assert_eq!(
+            response["data"][0]["video_ref"],
+            "bilibili:bvid:BV17x411w7KC"
+        );
+        assert!(
+            response["data"][0]["ref"]
+                .as_str()
+                .unwrap()
+                .starts_with("bilibili:cid:")
+        );
+        assert_eq!(response["meta"]["pagination"]["total"], 10);
+        assert_eq!(response["meta"]["pagination"]["next_offset"], 7);
+        assert_eq!(response["meta"]["pagination"]["has_more"], true);
     }
 
     #[tokio::test]

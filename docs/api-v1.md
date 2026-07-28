@@ -348,6 +348,8 @@ Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/i
 
 B 站 UGC 视频详情通过 `GET /v1/videos/bilibili:bvid:{bvid}` 或 `GET /v1/videos/bilibili:aid:{aid}` 读取，`kind` 只能为 `video`。两种输入都会由平台响应交叉校验并规范化为 BVID 引用；EP/SS 保持独立，待 PGC 详情链接入前不会误用 UGC 端点。详情返回标题、简介、可信封面、UP 主、时间、时长、首 CID、分 P 数、分区、公开统计、状态和下载/付费/互动等 rights。`resolutions` 在 playurl 接入前保持空，并以 `resolutions_require_playurl=true` 明示，因为投稿尺寸不是账户当前真正可用的清晰度。
 
+B 站分 P 目录通过 `GET /v1/videos/{ref}/parts` 读取，接受同一 AID/BVID 身份、`kind/type=video`、`account` 及统一 `limit/offset`。每个 `VideoPart` 以 `bilibili:cid:{cid}` 作为稳定分段引用，同时用规范 BVID `video_ref` 指回父视频，并保留从 1 开始的 `page`、标题、毫秒时长、尺寸、旋转状态和平台来源。详情响应中的全部分 P 会先完成身份、顺序、唯一 CID 和维度校验，再应用本地分页；多 P 视频不会只保留首 P，超过目录尾部返回空页而不是重复首 P。
+
 ### DigitalAlbum
 
 ```json
@@ -1407,7 +1409,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/streams` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`resolution/res?`、`account?` | `VideoStream[]`；1–100 项，同平台、保序且保留重复项 |
 | POST | `/v1/videos/streams` | JSON `{refs?|ids/vids?, platform?, kind/type?, resolution/res?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoStream[]`；使用 provider 原生批量能力或统一逐项默认实现 |
 | GET | `/v1/videos/{ref}/stream/redirect` | 同上 | 有可用 URL 时返回 302，否则返回 404 |
-| GET | `/v1/videos/{ref}/parts` | 分页；B 站 项目范围阶段接入 | `VideoPart[]` |
+| GET | `/v1/videos/{ref}/parts` | `kind/type=video`、`account?`、`limit?`、`offset?` | `VideoPart[]`；稳定 CID、规范父视频引用与统一分页 |
 
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 

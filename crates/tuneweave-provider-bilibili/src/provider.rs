@@ -8,8 +8,8 @@ use tuneweave_core::{
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, ResourceRef, Result, SearchItem, SearchKind, SearchQuery,
     SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video, VideoDetail,
-    VideoDetailRequest, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder,
+    VideoDetailRequest, VideoPart, VideoPartListRequest, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -19,8 +19,9 @@ use crate::client::{
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
     BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome, BilibiliQrPoll,
     BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist,
-    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliVideoSearchDuration,
-    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder, BilibiliVideoView,
+    BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliVideoPart,
+    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
+    BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -94,6 +95,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::SearchVideos,
             Capability::PlaylistRead,
             Capability::VideoDetail,
+            Capability::VideoParts,
         ])
     }
 
@@ -229,6 +231,38 @@ impl MusicProvider for BilibiliProvider {
             .video_view(&identity, credential.as_ref())
             .await
             .and_then(map_bilibili_video_view)
+    }
+
+    async fn video_parts(
+        &self,
+        id: &str,
+        request: &VideoPartListRequest,
+    ) -> Result<Page<VideoPart>> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive parts require kind=video",
+            ));
+        }
+        if !(1..=100).contains(&request.limit) {
+            return Err(bilibili_invalid_request(
+                "Bilibili video part limit must be between 1 and 100",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive parts require an AID or BVID",
+            ));
+        }
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let view = self
+            .client
+            .video_view(&identity, credential.as_ref())
+            .await?;
+        map_bilibili_video_parts(view.aid, view.bvid, view.parts, request)
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
@@ -1499,6 +1533,81 @@ fn map_bilibili_video_view(view: BilibiliVideoView) -> Result<VideoDetail> {
             ("detail_source".to_owned(), json!("web_interface_view")),
             ("resolutions_require_playurl".to_owned(), json!(true)),
         ]),
+    })
+}
+
+fn map_bilibili_video_parts(
+    aid: u64,
+    bvid: String,
+    upstream_parts: Vec<BilibiliVideoPart>,
+    request: &VideoPartListRequest,
+) -> Result<Page<VideoPart>> {
+    let video_ref = BilibiliVideoIdentity::Bvid(bvid.clone()).resource_ref()?;
+    let total = u64::try_from(upstream_parts.len())
+        .map_err(|_| bilibili_data_error("Bilibili video part count overflowed"))?;
+    let mut parts = Vec::with_capacity(upstream_parts.len());
+    for part in upstream_parts {
+        let id = format!("cid:{}", part.cid);
+        let resource_ref = ResourceRef::new(Platform::Bilibili, &id)
+            .map_err(|_| bilibili_data_error("Bilibili video part identity was invalid"))?;
+        let page = u32::try_from(part.page)
+            .map_err(|_| bilibili_data_error("Bilibili video part page overflowed"))?;
+        let width = u32::try_from(part.width)
+            .map_err(|_| bilibili_data_error("Bilibili video part width overflowed"))?;
+        let height = u32::try_from(part.height)
+            .map_err(|_| bilibili_data_error("Bilibili video part height overflowed"))?;
+        let duration_ms = part
+            .duration_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| bilibili_data_error("Bilibili video part duration overflowed"))?;
+        parts.push(VideoPart {
+            resource_ref,
+            video_ref: video_ref.clone(),
+            platform: Platform::Bilibili,
+            id,
+            page,
+            title: part.title,
+            duration_ms: (duration_ms > 0).then_some(duration_ms),
+            width: (width > 0).then_some(width),
+            height: (height > 0).then_some(height),
+            extensions: Extensions::from([
+                ("aid".to_owned(), json!(aid)),
+                ("bvid".to_owned(), json!(bvid)),
+                ("cid".to_owned(), json!(part.cid)),
+                ("source".to_owned(), json!(part.source)),
+                ("rotated".to_owned(), json!(part.rotated)),
+            ]),
+        });
+    }
+    let start = usize::try_from(request.offset)
+        .map_err(|_| bilibili_invalid_request("Bilibili video part offset overflowed"))?;
+    let limit = usize::try_from(request.limit)
+        .map_err(|_| bilibili_invalid_request("Bilibili video part limit overflowed"))?;
+    let items = parts
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let returned = u32::try_from(items.len())
+        .map_err(|_| bilibili_data_error("Bilibili video part page overflowed"))?;
+    let next_offset = request
+        .offset
+        .checked_add(returned)
+        .ok_or_else(|| bilibili_data_error("Bilibili video part offset overflowed"))?;
+    let has_more = returned > 0 && u64::from(next_offset) < total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(total),
+            next_offset: has_more.then_some(next_offset),
+            has_more,
+            extensions: Extensions::from([
+                ("detail_source".to_owned(), json!("web_interface_view")),
+                ("video_ref".to_owned(), json!(video_ref)),
+            ]),
+        },
     })
 }
 
@@ -2951,6 +3060,108 @@ mod tests {
             .expect_err("missing account");
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
         assert!(provider.capabilities().contains(&Capability::VideoDetail));
+
+        let wrong_part_kind = provider
+            .video_parts(
+                "bvid:BV117411r7R1",
+                &VideoPartListRequest::new(VideoResourceKind::Mv, 30, 0),
+            )
+            .await
+            .expect_err("part MV kind");
+        assert_eq!(wrong_part_kind.code, ErrorCode::InvalidRequest);
+        let invalid_part_limit = provider
+            .video_parts(
+                "bvid:BV117411r7R1",
+                &VideoPartListRequest::new(VideoResourceKind::Video, 0, 0),
+            )
+            .await
+            .expect_err("zero part limit");
+        assert_eq!(invalid_part_limit.code, ErrorCode::InvalidRequest);
+        let episode_parts = provider
+            .video_parts(
+                "ep:123",
+                &VideoPartListRequest::new(VideoResourceKind::Video, 30, 0),
+            )
+            .await
+            .expect_err("episode parts");
+        assert_eq!(episode_parts.code, ErrorCode::InvalidRequest);
+        let missing_part_account = provider
+            .video_parts(
+                "bvid:BV117411r7R1",
+                &VideoPartListRequest {
+                    kind: VideoResourceKind::Video,
+                    limit: 30,
+                    offset: 0,
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing part account");
+        assert_eq!(missing_part_account.code, ErrorCode::AuthenticationRequired);
+        assert!(provider.capabilities().contains(&Capability::VideoParts));
+    }
+
+    #[test]
+    fn video_parts_keep_cid_identity_and_apply_a_local_window() {
+        let page = map_bilibili_video_parts(
+            170_001,
+            "BV17x411w7KC".to_owned(),
+            vec![
+                BilibiliVideoPart {
+                    cid: 279_786,
+                    page: 1,
+                    source: "vupload".to_owned(),
+                    title: "第一 P".to_owned(),
+                    duration_seconds: 120,
+                    width: 1920,
+                    height: 1080,
+                    rotated: false,
+                },
+                BilibiliVideoPart {
+                    cid: 279_787,
+                    page: 2,
+                    source: "vupload".to_owned(),
+                    title: "第二 P".to_owned(),
+                    duration_seconds: 0,
+                    width: 0,
+                    height: 0,
+                    rotated: false,
+                },
+                BilibiliVideoPart {
+                    cid: 279_788,
+                    page: 3,
+                    source: String::new(),
+                    title: "第三 P".to_owned(),
+                    duration_seconds: 180,
+                    width: 1080,
+                    height: 1920,
+                    rotated: true,
+                },
+            ],
+            &VideoPartListRequest::new(VideoResourceKind::Video, 1, 1),
+        )
+        .expect("mapped video part window");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].resource_ref.to_string(),
+            "bilibili:cid:279787"
+        );
+        assert_eq!(
+            page.items[0].video_ref.to_string(),
+            "bilibili:bvid:BV17x411w7KC"
+        );
+        assert_eq!(page.items[0].page, 2);
+        assert_eq!(page.items[0].duration_ms, None);
+        assert_eq!(page.items[0].width, None);
+        assert_eq!(page.items[0].height, None);
+        assert_eq!(page.pagination.total, Some(3));
+        assert_eq!(page.pagination.next_offset, Some(2));
+        assert!(page.pagination.has_more);
+        assert_eq!(
+            page.pagination.extensions["video_ref"],
+            "bilibili:bvid:BV17x411w7KC"
+        );
     }
 
     #[tokio::test]
@@ -3185,6 +3396,28 @@ mod tests {
         );
         assert!(by_bvid.resolutions.is_empty());
         assert_eq!(by_bvid.extensions["resolutions_require_playurl"], true);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
+    async fn live_video_parts_preserve_all_pages_and_support_offset_windows() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let request = VideoPartListRequest::new(VideoResourceKind::Video, 3, 4);
+        let page = provider
+            .video_parts("bvid:BV17x411w7KC", &request)
+            .await
+            .expect("multi-part video directory");
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.pagination.total, Some(10));
+        assert_eq!(page.pagination.offset, 4);
+        assert_eq!(page.pagination.next_offset, Some(7));
+        assert!(page.pagination.has_more);
+        for (index, part) in page.items.iter().enumerate() {
+            assert_eq!(part.page, u32::try_from(index).unwrap() + 5);
+            assert!(part.resource_ref.id().starts_with("cid:"));
+            assert_eq!(part.video_ref.to_string(), "bilibili:bvid:BV17x411w7KC");
+            assert_eq!(part.extensions["aid"], 170_001);
+        }
     }
 
     #[tokio::test]

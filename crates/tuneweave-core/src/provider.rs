@@ -55,8 +55,8 @@ use crate::{
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackEntitlement,
     TrackFavoriteCount, TrackLabelList, TrackVersionList, TuneWeaveError, User, UserMusicGene,
     UserProfile, UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest,
-    VideoRecommendationRequest, VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest,
-    VideoTaxonomyRequest,
+    VideoPart, VideoPartListRequest, VideoRecommendationRequest, VideoResourceKind, VideoStats,
+    VideoStream, VideoStreamRequest, VideoTaxonomyRequest,
 };
 
 /// A dynamically registered music platform adapter.
@@ -938,6 +938,17 @@ pub trait MusicProvider: Send + Sync {
             details.push(self.video(id, request).await?);
         }
         Ok(details)
+    }
+
+    async fn video_parts(
+        &self,
+        _id: &str,
+        _request: &VideoPartListRequest,
+    ) -> Result<Page<VideoPart>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoParts,
+        ))
     }
 
     async fn video_stats(&self, _id: &str, _request: &VideoDetailRequest) -> Result<VideoStats> {
