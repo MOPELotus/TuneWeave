@@ -2,14 +2,14 @@
 
 协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=28`、`partial=0`、`implemented=4`、`verified=2`，代码完成度 `6/34 = 17.65%`。
+状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=27`、`partial=0`、`implemented=4`、`verified=3`，代码完成度 `7/34 = 20.59%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
 | ID | 阶段 | 验收单元 | 状态 | 实施与验收边界 |
 | --- | --- | --- | --- | --- |
 | BF01 | 平台基础 | `bilibili:` 资源命名空间 | `verified` | `Platform`、统一引用解析和 API 包络已支持 B 站；视频、合集与收藏夹仍必须使用下列带类型身份，不能把数字 ID 混用 |
-| BF02 | 平台基础 | AV/BV/EP/SS 与 URL 输入解析 | `pending` | 参考 BBDown 先归一到视频 AID/BVID；有分集身份时保留 EP/SS 来源，URL 只解析固定 B 站主机，不发起任意跳转 |
+| BF02 | 平台基础 | AV/BV/EP/SS 与 URL 输入解析 | `verified` | 强类型区分 AID、BVID、Episode 与 Season，接受规范短 ID、`bilibili:` 引用及固定 `bilibili.com` Web 主机 URL，并输出稳定 `aid:/bvid:/ep:/season:` 身份。BVID 不再像参考工具一样提前丢失为 AID，EP/SS 来源保持可辨；纯数字、冲突参数、短链、用户信息、非默认端口、外域和未知页面均在发网前拒绝，解析过程无重定向或页面抓取副作用 |
 | BF03 | 平台基础 | 固定域名 HTTP 客户端与业务错误 | `pending` | 只允许已审查的 B 站 API、Passport、搜索和媒体域名；统一映射登录失效、权限、风控、限流、资源不存在和上游错误 |
 | BF04 | 平台基础 | WBI、buvid 与设备身份 | `pending` | WBI 密钥、混淆表、时间戳和设备 Cookie 由 provider 管理；不得允许调用方覆盖签名、URL、代理或请求头 |
 | BF05 | 平台基础 | 强类型凭证、多账户与调用方托管 | `implemented` | `bilibili_cookie_v1` 强类型保存并校验 `DedeUserID/DedeUserID__ckMd5/SESSDATA/bili_jct/sid/refresh_token`，Debug 与错误不回显秘密；二维码确认从首个账户功能起支持 `(bilibili, account)` 及 `server/client/both`，调用方凭证平台、类型、到期语义和内部字段均在发网前验证。三种归属模式和账户隔离已离线验收，待真实扫码确认后联合升为 `verified` |
