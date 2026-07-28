@@ -1707,23 +1707,26 @@ struct PodcastCategoriesParams {
 async fn podcast_categories(
     State(state): State<AppState>,
     params: Result<Query<PodcastCategoriesParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<PodcastTaxonomy>>, ApiError> {
     let params = query_params(params)?;
     let kind = parse_podcast_taxonomy_kind(params.kind.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let taxonomy = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let taxonomy = access
+        .provider
         .podcast_categories(&PodcastTaxonomyRequest {
             kind,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(taxonomy).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(taxonomy, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1736,19 +1739,22 @@ struct PodcastCategoryRecommendationParams {
 async fn podcast_category_recommendations(
     State(state): State<AppState>,
     params: Result<Query<PodcastCategoryRecommendationParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<PodcastCategoryRecommendations>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let recommendations = provider
-        .podcast_category_recommendations(account.as_deref())
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let recommendations = access
+        .provider
+        .podcast_category_recommendations(access.provider_account.as_deref())
         .await?;
-    let mut response = ApiResponse::new(recommendations).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(recommendations, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1767,6 +1773,7 @@ struct PodcastListParams {
 async fn podcasts(
     State(state): State<AppState>,
     params: Result<Query<PodcastListParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Podcast>>>, ApiError> {
     let params = query_params(params)?;
     let catalog = parse_podcast_catalog(params.catalog.as_deref())?;
@@ -1778,23 +1785,26 @@ async fn podcasts(
     let page = parse_optional_u32_parameter("page", params.page.as_deref())?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
         .podcasts(&PodcastListRequest {
             catalog,
             category_id: optional_trimmed(params.category_id),
             limit,
             offset,
             page,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
+    let response = access
+        .response(page.items, platform)
         .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
     Ok(Json(response))
 }
 
@@ -22752,6 +22762,57 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["response"]["code"], 200);
         assert_eq!(json["data"]["extensions"]["account"], "podcast-user");
         assert_eq!(json["meta"]["account"], "podcast-user");
+    }
+
+    #[tokio::test]
+    async fn podcast_catalog_accepts_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-podcast-catalog-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        for (path, account_pointer) in [
+            (
+                "/v1/podcasts/categories?platform=netease",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/podcasts/category-recommendations?platform=netease",
+                "/data/extensions/account",
+            ),
+            (
+                "/v1/podcasts?catalog=hot&limit=2&platform=netease",
+                "/data/0/extensions/request/account",
+            ),
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(
+                response.pointer(account_pointer),
+                Some(&json!("default")),
+                "{path}: {response}"
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/podcasts?catalog=hot&platform=netease&account=podcast-user",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
