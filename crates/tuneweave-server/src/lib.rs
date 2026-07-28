@@ -9928,6 +9928,7 @@ struct RecommendationFeedParams {
 async fn recommendation_feed(
     State(state): State<AppState>,
     params: Result<Query<RecommendationFeedParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RecommendationFeed>>, ApiError> {
     let params = query_params(params)?;
     let page = parse_u32_parameter("page", params.page.as_deref(), 1)?;
@@ -9937,21 +9938,23 @@ async fn recommendation_feed(
     let loaded_count = parse_u32_parameter("loaded_count", params.loaded_count.as_deref(), 0)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let feed = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let feed = access
+        .provider
         .recommendation_feed(&RecommendationFeedRequest {
             page,
             direction: parse_recommendation_feed_direction(params.direction.as_deref())?,
             loaded_count,
             seen_ids: parse_recommendation_feed_seen_ids(params.seen_ids.as_deref())?,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(feed).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(feed, platform)))
 }
 
 fn parse_recommendation_feed_direction(
@@ -10040,39 +10043,47 @@ struct RecommendationParams {
 async fn recommended_tracks(
     State(state): State<AppState>,
     params: Result<Query<RecommendationParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account.clone());
-    let request = recommendation_request(&params, account.clone())?;
-    let provider = state.registry.require(platform)?;
-    let page = provider.recommended_tracks(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let request = recommendation_request(&params, access.provider_account.clone())?;
+    let page = access.provider.recommended_tracks(&request).await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 async fn recommended_playlists(
     State(state): State<AppState>,
     params: Result<Query<RecommendationParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account.clone());
-    let request = recommendation_request(&params, account.clone())?;
-    let provider = state.registry.require(platform)?;
-    let page = provider.recommended_playlists(&request).await?;
-    let mut response = ApiResponse::new(page.items)
-        .with_platform(platform)
-        .with_pagination(page.pagination);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let request = recommendation_request(&params, access.provider_account.clone())?;
+    let page = access.provider.recommended_playlists(&request).await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
 }
 
 fn recommendation_request(
@@ -10130,10 +10141,16 @@ struct VideoRecommendationParams {
 async fn recommended_videos(
     State(state): State<AppState>,
     params: Result<Query<VideoRecommendationParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Video>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let kind = parse_video_recommendation_kind(params.kind.as_deref())?;
     let view = parse_video_recommendation_view(params.view.as_deref())?;
     let default_limit =
@@ -10149,20 +10166,19 @@ async fn recommended_videos(
         )
         .into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .recommended_videos(&VideoRecommendationRequest {
             kind,
             view,
             limit,
             offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -10211,10 +10227,16 @@ struct PodcastEpisodeRecommendationParams {
 async fn recommended_podcast_episodes(
     State(state): State<AppState>,
     params: Result<Query<PodcastEpisodeRecommendationParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<PodcastEpisode>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 10)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request(
@@ -10239,20 +10261,19 @@ async fn recommended_podcast_episodes(
         )
         .into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .recommended_podcast_episodes(&PodcastEpisodeRecommendationRequest {
             source,
             category_id,
             limit,
             offset: parse_u32_parameter("offset", params.offset.as_deref(), 0)?,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -10290,10 +10311,16 @@ struct PersonalFmParams {
 async fn personal_fm(
     State(state): State<AppState>,
     params: Result<Query<PersonalFmParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let account = account_alias(params.account.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
     let variant = parse_personal_fm_variant(params.backend.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 3)?;
     if !(1..=100).contains(&limit) {
@@ -10309,20 +10336,19 @@ async fn personal_fm(
         )
         .into());
     }
-    let provider = state.registry.require(platform)?;
-    let page = provider
+    let page = access
+        .provider
         .personal_fm(&PersonalFmRequest {
             variant,
             mode,
             sub_mode,
             limit,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
     Ok(Json(
-        ApiResponse::new(page.items)
-            .with_platform(platform)
-            .with_account(account)
+        access
+            .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
 }
@@ -10348,23 +10374,25 @@ async fn dislike_recommendation(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<RecommendationFeedbackParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<RecommendationDislikeResult>>, ApiError> {
     let params = query_params(params)?;
     let track_ref = parse_reference(reference)?;
     let platform = track_ref.platform();
-    let account = account_alias(params.account.as_deref())?;
-    let provider = state.registry.require(platform)?;
-    let result = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
         .dislike_recommendation(&RecommendationDislikeRequest {
             track_ref,
-            account: Some(account.clone()),
+            account: Some(access.required_account().to_owned()),
         })
         .await?;
-    Ok(Json(
-        ApiResponse::new(result)
-            .with_platform(platform)
-            .with_account(account),
-    ))
+    Ok(Json(access.response(result, platform)))
 }
 
 #[derive(Deserialize)]
@@ -31367,6 +31395,74 @@ mod tests {
         assert_eq!(playlists["data"][0]["ref"], "netease:99");
         assert_eq!(playlists["data"][0]["extensions"]["source"], "daily");
         assert_eq!(playlists["meta"]["pagination"]["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn recommendation_routes_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-recommendation-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, feed) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/recommendations/feed?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(feed["data"]["extensions"]["account"], "default");
+        assert!(feed["meta"].get("account").is_none());
+
+        for path in [
+            "/v1/recommendations/tracks?platform=netease",
+            "/v1/recommendations/playlists?platform=netease",
+            "/v1/recommendations/videos?platform=netease",
+            "/v1/recommendations/podcast-episodes?platform=netease",
+            "/v1/recommendations/personal-fm?platform=netease",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(
+                !response["data"]
+                    .as_array()
+                    .expect("recommendation data")
+                    .is_empty()
+            );
+            assert!(response["meta"].get("account").is_none(), "{path}");
+        }
+
+        let (status, disliked) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/recommendations/tracks/netease:347230/dislike",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disliked["data"]["extensions"]["account"], "default");
+        assert!(disliked["meta"].get("account").is_none());
+
+        for path in [
+            "/v1/recommendations/feed?platform=netease&account=listener",
+            "/v1/recommendations/personal-fm?platform=netease&account=listener",
+        ] {
+            let (status, response) =
+                caller_json_request(app.clone(), Method::GET, path, None, &credential).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
