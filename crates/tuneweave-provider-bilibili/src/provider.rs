@@ -8,7 +8,9 @@ use tuneweave_core::{
     ProviderQrStart, Result, StoredAccountCredential, TuneWeaveError,
 };
 
-use crate::client::{BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliQrPoll};
+use crate::client::{
+    BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliQrPoll, BilibiliSessionStatus,
+};
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
 
@@ -73,7 +75,11 @@ impl MusicProvider for BilibiliProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::QrLogin, Capability::CallerManagedCredentials])
+        BTreeSet::from([
+            Capability::QrLogin,
+            Capability::CallerManagedCredentials,
+            Capability::AccountProfile,
+        ])
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -155,6 +161,14 @@ impl MusicProvider for BilibiliProvider {
             }
         }
     }
+
+    async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+        let Some(credential) = self.selected_credential_optional(account)? else {
+            return Ok(unauthenticated_bilibili_profile(account, None));
+        };
+        let status = self.client.session_status(Some(&credential)).await?;
+        Ok(map_bilibili_session_profile(account, &credential, status))
+    }
 }
 
 impl BilibiliProvider {
@@ -215,25 +229,31 @@ impl BilibiliProvider {
 
     #[cfg(test)]
     fn selected_credential(&self, account: &str) -> Result<BilibiliCredential> {
+        self.selected_credential_optional(account)?.ok_or_else(|| {
+            bilibili_authentication_required(account, "Bilibili account was not found")
+        })
+    }
+
+    fn selected_credential_optional(&self, account: &str) -> Result<Option<BilibiliCredential>> {
         if let Some(credential) = &self.caller_credential {
             if account == "default" {
-                return Ok(credential.clone());
+                return Ok(Some(credential.clone()));
             }
             return Err(bilibili_authentication_required(
                 account,
                 "caller-managed Bilibili credentials do not expose server account aliases",
             ));
         }
-        let store = self.credential_store.as_ref().ok_or_else(|| {
-            bilibili_authentication_required(account, "Bilibili account storage is not configured")
-        })?;
-        let stored = store
+        let Some(store) = self.credential_store.as_ref() else {
+            return Ok(None);
+        };
+        let Some(stored) = store
             .load_platform(Platform::Bilibili)?
             .into_iter()
             .find(|credential| credential.account == account)
-            .ok_or_else(|| {
-                bilibili_authentication_required(account, "Bilibili account was not found")
-            })?;
+        else {
+            return Ok(None);
+        };
         if stored.kind != BILIBILI_CREDENTIAL_KIND {
             return Err(TuneWeaveError::new(
                 ErrorCode::InternalError,
@@ -257,6 +277,7 @@ impl BilibiliProvider {
                 )
                 .with_platform(Platform::Bilibili)
             })
+            .map(Some)
     }
 }
 
@@ -314,11 +335,36 @@ fn parse_bilibili_caller_credential(credential: &ProviderCredential) -> Result<B
         })
 }
 
-#[cfg(test)]
 fn bilibili_authentication_required(account: &str, message: &str) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::AuthenticationRequired, message)
         .with_platform(Platform::Bilibili)
         .with_details(json!({ "account": account }))
+}
+
+fn unauthenticated_bilibili_profile(account: &str, user_id: Option<&str>) -> AccountProfile {
+    let mut profile = AccountProfile::authenticated(Platform::Bilibili, account);
+    profile.authenticated = false;
+    profile.user_id = user_id.map(str::to_owned);
+    profile
+}
+
+fn map_bilibili_session_profile(
+    account: &str,
+    credential: &BilibiliCredential,
+    status: BilibiliSessionStatus,
+) -> AccountProfile {
+    let mut profile = if status.authenticated {
+        AccountProfile::authenticated(Platform::Bilibili, account)
+    } else {
+        unauthenticated_bilibili_profile(account, Some(credential.user_id()))
+    };
+    profile.user_id = status
+        .user_id
+        .or_else(|| Some(credential.user_id().to_owned()));
+    profile.nickname = status.nickname;
+    profile.avatar_url = status.avatar_url;
+    profile.extensions = status.extensions;
+    profile
 }
 
 #[cfg(test)]
@@ -455,6 +501,41 @@ mod tests {
                 .expect_err("invalid caller credential must fail");
             assert_eq!(error.code, ErrorCode::InvalidRequest);
         }
+    }
+
+    #[tokio::test]
+    async fn missing_account_session_is_anonymous_without_network_access() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let profile = provider
+            .session_profile("missing")
+            .await
+            .expect("missing account profile");
+        assert!(!profile.authenticated);
+        assert_eq!(profile.account, "missing");
+        assert!(profile.user_id.is_none());
+        let capabilities = provider.capabilities();
+        assert!(capabilities.contains(&Capability::AccountProfile));
+        assert!(!capabilities.contains(&Capability::SessionManagement));
+    }
+
+    #[test]
+    fn session_mapping_keeps_profile_summary_and_typed_extensions() {
+        let credential = sample_credential();
+        let status = BilibiliSessionStatus {
+            authenticated: true,
+            user_id: Some("47275982".to_owned()),
+            nickname: Some("Lotus".to_owned()),
+            avatar_url: Some("https://i0.hdslb.com/bfs/face/avatar.jpg".to_owned()),
+            extensions: std::collections::BTreeMap::from([
+                ("platform_code".to_owned(), json!(0)),
+                ("nav".to_owned(), json!({ "vip_status": 1 })),
+            ]),
+        };
+        let profile = map_bilibili_session_profile("personal", &credential, status);
+        assert!(profile.authenticated);
+        assert_eq!(profile.user_id.as_deref(), Some("47275982"));
+        assert_eq!(profile.nickname.as_deref(), Some("Lotus"));
+        assert_eq!(profile.extensions["nav"]["vip_status"], 1);
     }
 
     #[tokio::test]

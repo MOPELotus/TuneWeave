@@ -1544,6 +1544,8 @@ QQ 手机验证码使用 `music.login.LoginServer` 的 Android 链路。`princip
 
 QQ 会话状态固定调用 Android `music.UserInfo.userInfoServer/GetLoginUserInfo`，服务端凭据失效码返回正常的 `authenticated=false` 账户资料。不存在的 QQ 账户别名同样返回未认证资料，不会把缺失别名静默替换为 `default`。凭据自带的创建时间和有效秒数只有同时存在时才计算本地到期扩展，服务端检查结果始终具有更高优先级。
 
+B 站会话状态固定调用 Web `x/web-interface/nav`，只把强类型凭证生成的站点 Cookie 放入请求；二维码刷新令牌不会进入普通业务 Cookie。平台 `-101` 或 `isLogin=false` 返回正常的 `authenticated=false`，登录成功时 UID 必须与选中凭证一致，并映射昵称、受限头像 URL、邮箱/手机验证、等级、认证、挂件、大会员、钱包和 WBI 口令等已知账户字段。不存在的精确账户别名不访问上游且不回退 `default`，调用方托管凭证使用同一映射链路。
+
 QQ 会话刷新调用 Android `music.login.LoginServer/Login` 并固定 `loginMode=2`。`loginType=1`、`loginType=2` 和其他登录类型分别保留微信、QQ 及移动端/验证码凭据所需的不同字段集合，`comm.tmeLoginType` 与原凭据一致；旧凭据同时进入 Android `comm` 和 Cookie。只有平台返回成功且新凭据完整通过强类型校验后，才原子替换同一 `(qq, account)` 的凭据代际；网络、业务码、响应解析或写盘失败都不会预先删除旧凭据。
 
 QQ 退出调用同一 Android 登录服务的 `Logout`，并把精确账户凭据同时放入 `comm` 与 Cookie。平台成功或明确返回凭据已经失效时删除本地对应 `(qq, account)`；不存在的别名幂等返回 `removed=false`。限流、未知业务码和网络失败保留本地凭据以便重试，不会影响同平台其他账户；若上游已关闭会话但本地删除失败，则返回明确的本地持久化错误，而不是伪报退出完成。

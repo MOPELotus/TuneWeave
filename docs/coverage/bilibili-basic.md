@@ -2,7 +2,7 @@
 
 最后更新：2026-07-28。协议基线为 `nilaoda/BBDown@259a5558b1edc8aed054cd113f4ce3213886c929` 与 `bilibili-plugins/bilibili-api-collect@cfc5fddc446f8e82ea15ea32c42de425274779cc`。BBDown 用于核对视频身份解析、分 P 与 DASH 音视频取流行为；`bilibili-api-collect` 用于核对登录、搜索、用户空间、公开合集和收藏夹协议，不作为源码依赖。
 
-状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=30`、`partial=0`、`implemented=2`、`verified=2`，代码完成度 `4/34 = 11.76%`。
+状态沿用其他平台账本：`pending` 尚未实现，`partial` 缺少必要分支，`implemented` 已完成代码和离线验证但缺真实账户或真实网络成功态，`verified` 已完成对应真实路径验收。当前共 34 个验收单元：`pending=29`、`partial=0`、`implemented=3`、`verified=2`，代码完成度 `5/34 = 14.71%`。
 
 Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开列表、Uni Playlist 导入、视频信息、封面、分 P、仅音频播放及下载链。专栏、直播、漫画、游戏、钱包、装扮和纯社交功能不纳入 B 站范围；与视频/音频、播放列表或账户直接相关但低频的能力仍登记到后续 B 站全量账本，不能因不属于 Basic 而静默遗漏。
 
@@ -20,7 +20,7 @@ Basic 只覆盖普通音视频客户端必需的登录、搜索、个人/公开�
 | BA05 | 登录账户 | 国家/地区电话区号 | `pending` | 对接 Web country list 并映射统一国家区号模型 |
 | BA06 | 登录账户 | Web 短信验证码发送 | `pending` | 复用同一 captcha 事务和设备身份；手机号不持久化，发送与登录不得切换网络身份 |
 | BA07 | 登录账户 | Web 短信验证码登录 | `pending` | 复用发送阶段产生的 captcha key，完整处理绑定、风控和登录成功 Cookie |
-| BA08 | 登录账户 | 会话状态与账户资料 | `pending` | `x/web-interface/nav` 与当前账户资料；不存在的非默认别名不回退 `default` |
+| BA08 | 登录账户 | 会话状态与账户资料 | `implemented` | `GET /v1/auth/session` 与 `/v1/account/profile` 固定调用 `x/web-interface/nav`，强类型映射登录态、UID、昵称、头像、验证状态、等级、认证、挂件、大会员、钱包及 WBI 实时口令等已知结构；登录 UID 必须与选中凭证一致，头像只接受 B 站 HTTPS 图片域名。`-101` 和 `isLogin=false` 作为未认证正常结果，不存在的精确别名不发网且不回退 `default`；调用方凭证与服务器多账户共用同一链路。2026-07-28 匿名真实网络态及离线完整/畸形分支已通过，登录账户成功态待扫码联合验收 |
 | BA09 | 登录账户 | Cookie 刷新与退出 | `pending` | 完成 refresh_csrf/correspondPath 刷新链及退出；只有新凭证完整有效才原子替换，退出删除精确账户 |
 | BS01 | 搜索 | 视频直接搜索 | `pending` | Web 综合搜索中的 `video` 分支；完整保留页码、页大小、总数、排序、时长和分区筛选，不把专栏/直播混入视频结果 |
 | BS02 | 搜索 | 搜索建议 | `pending` | Web suggestion；关键词与展示高亮分离，空建议返回空列表而非错误 |

@@ -4,11 +4,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use qrcode::{QrCode, render::svg};
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{HeaderMap, SET_COOKIE},
+    header::{COOKIE, HeaderMap, SET_COOKIE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
 use url::Url;
 
@@ -16,6 +16,7 @@ const PASSPORT_QR_GENERATE_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/qrcode/generate?source=main-fe-header";
 const PASSPORT_QR_POLL_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
+const NAV_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/nav";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -174,6 +175,28 @@ impl BilibiliCredential {
     pub(crate) fn user_id(&self) -> &str {
         &self.dede_user_id
     }
+
+    fn cookie_header(&self) -> String {
+        let mut cookies = vec![
+            format!("DedeUserID={}", self.dede_user_id),
+            format!("DedeUserID__ckMd5={}", self.dede_user_id_ck_md5),
+            format!("SESSDATA={}", self.sessdata),
+            format!("bili_jct={}", self.bili_jct),
+        ];
+        if let Some(sid) = &self.sid {
+            cookies.push(format!("sid={sid}"));
+        }
+        cookies.join("; ")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BilibiliSessionStatus {
+    pub authenticated: bool,
+    pub user_id: Option<String>,
+    pub nickname: Option<String>,
+    pub avatar_url: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
 }
 
 impl fmt::Debug for BilibiliQrStart {
@@ -212,6 +235,175 @@ struct QrPollData {
     code: i64,
     #[serde(default)]
     message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct NavData {
+    #[serde(default, alias = "isLogin")]
+    is_login: bool,
+    #[serde(default)]
+    email_verified: Option<i64>,
+    #[serde(default)]
+    face: Option<String>,
+    #[serde(default)]
+    level_info: Option<NavLevelInfo>,
+    #[serde(default)]
+    mid: Option<u64>,
+    #[serde(default)]
+    mobile_verified: Option<i64>,
+    #[serde(default)]
+    money: Option<f64>,
+    #[serde(default)]
+    moral: Option<f64>,
+    #[serde(default)]
+    official: Option<NavOfficial>,
+    #[serde(default, alias = "officialVerify")]
+    official_verify: Option<NavOfficialVerify>,
+    #[serde(default)]
+    pendant: Option<NavPendant>,
+    #[serde(default)]
+    scores: Option<i64>,
+    #[serde(default)]
+    uname: Option<String>,
+    #[serde(default, alias = "vipDueDate")]
+    vip_due_date_ms: Option<u64>,
+    #[serde(default, alias = "vipStatus")]
+    vip_status: Option<i64>,
+    #[serde(default, alias = "vipType")]
+    vip_type: Option<i64>,
+    #[serde(default)]
+    vip_pay_type: Option<i64>,
+    #[serde(default)]
+    vip_theme_type: Option<i64>,
+    #[serde(default)]
+    vip_label: Option<NavVipLabel>,
+    #[serde(default)]
+    vip_avatar_subscript: Option<i64>,
+    #[serde(default)]
+    vip_nickname_color: Option<String>,
+    #[serde(default)]
+    vip: Option<NavVip>,
+    #[serde(default)]
+    wallet: Option<NavWallet>,
+    #[serde(default)]
+    has_shop: Option<bool>,
+    #[serde(default)]
+    shop_url: Option<String>,
+    #[serde(default)]
+    allowance_count: Option<i64>,
+    #[serde(default)]
+    answer_status: Option<i64>,
+    #[serde(default)]
+    is_senior_member: Option<i64>,
+    #[serde(default)]
+    wbi_img: Option<NavWbiImage>,
+    #[serde(default)]
+    is_jury: Option<bool>,
+    #[serde(default, flatten, skip_serializing)]
+    _extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavLevelInfo {
+    current_level: i64,
+    current_min: i64,
+    current_exp: i64,
+    next_exp: NavLevelThreshold,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum NavLevelThreshold {
+    Number(i64),
+    Text(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavOfficial {
+    role: i64,
+    title: String,
+    desc: String,
+    #[serde(rename = "type")]
+    kind: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavOfficialVerify {
+    #[serde(rename = "type")]
+    kind: i64,
+    desc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavPendant {
+    pid: i64,
+    name: String,
+    image: String,
+    expire: i64,
+    #[serde(default)]
+    image_enhance: Option<String>,
+    #[serde(default)]
+    image_enhance_frame: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavVipLabel {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    label_theme: String,
+    #[serde(default)]
+    text_color: String,
+    #[serde(default)]
+    bg_style: Option<i64>,
+    #[serde(default)]
+    bg_color: String,
+    #[serde(default)]
+    border_color: String,
+    #[serde(default)]
+    use_img_label: Option<bool>,
+    #[serde(default)]
+    img_label_uri_hans: String,
+    #[serde(default)]
+    img_label_uri_hant: String,
+    #[serde(default)]
+    img_label_uri_hans_static: String,
+    #[serde(default)]
+    img_label_uri_hant_static: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavVip {
+    #[serde(rename = "type")]
+    kind: i64,
+    status: i64,
+    due_date: u64,
+    vip_pay_type: i64,
+    theme_type: i64,
+    label: NavVipLabel,
+    avatar_subscript: i64,
+    nickname_color: String,
+    role: i64,
+    avatar_subscript_url: String,
+    tv_vip_status: i64,
+    tv_vip_pay_type: i64,
+    tv_due_date: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavWallet {
+    mid: u64,
+    bcoin_balance: f64,
+    coupon_balance: f64,
+    coupon_due_time: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NavWbiImage {
+    img_url: String,
+    sub_url: String,
 }
 
 impl BilibiliClient {
@@ -295,6 +487,28 @@ impl BilibiliClient {
         }
         parse_qr_poll_response(&bytes, &headers)
     }
+
+    pub(crate) async fn session_status(
+        &self,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliSessionStatus> {
+        let mut request = self.http.get(NAV_ENDPOINT);
+        if let Some(credential) = credential {
+            request = request.header(COOKIE, credential.cookie_header());
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili session endpoint", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili session response exceeded the size limit",
+            ));
+        }
+        parse_session_response(&bytes, credential.map(BilibiliCredential::user_id))
+    }
 }
 
 fn parse_qr_generate_response(bytes: &[u8]) -> Result<BilibiliQrStart> {
@@ -360,6 +574,143 @@ fn parse_qr_poll_response(bytes: &[u8], headers: &HeaderMap) -> Result<BilibiliQ
             },
         }),
     }
+}
+
+fn parse_session_response(
+    bytes: &[u8],
+    expected_user_id: Option<&str>,
+) -> Result<BilibiliSessionStatus> {
+    let response: PassportResponse<NavData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili session endpoint returned invalid JSON"))?;
+    if response.code == -101 {
+        return Ok(unauthenticated_session(
+            expected_user_id,
+            response.code,
+            None,
+        ));
+    }
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili session check",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response
+        .data
+        .ok_or_else(|| bilibili_upstream_error("Bilibili session response did not contain data"))?;
+    if !data.is_login {
+        return Ok(unauthenticated_session(
+            expected_user_id,
+            response.code,
+            Some(data),
+        ));
+    }
+    let user_id = data
+        .mid
+        .filter(|mid| *mid > 0)
+        .map(|mid| mid.to_string())
+        .ok_or_else(|| {
+            bilibili_upstream_error(
+                "Bilibili authenticated session did not contain a valid user ID",
+            )
+        })?;
+    if expected_user_id.is_some_and(|expected| expected != user_id) {
+        return Err(bilibili_upstream_error(
+            "Bilibili session user does not match the selected credential",
+        ));
+    }
+    let nickname = validated_display_text(data.uname.as_deref(), "nickname")?;
+    let avatar_url = validated_image_url(data.face.as_deref(), "avatar")?;
+    validate_binary_flag(data.email_verified, "email verification")?;
+    validate_binary_flag(data.mobile_verified, "mobile verification")?;
+    validate_binary_flag(data.vip_status, "VIP status")?;
+    let mut extensions = session_extensions(&data)?;
+    extensions.insert("platform_code".to_owned(), json!(response.code));
+    Ok(BilibiliSessionStatus {
+        authenticated: true,
+        user_id: Some(user_id),
+        nickname,
+        avatar_url,
+        extensions,
+    })
+}
+
+fn unauthenticated_session(
+    expected_user_id: Option<&str>,
+    platform_code: i64,
+    data: Option<NavData>,
+) -> BilibiliSessionStatus {
+    let mut extensions = BTreeMap::from([("platform_code".to_owned(), json!(platform_code))]);
+    if let Some(data) = data
+        && let Ok(value) = serde_json::to_value(data)
+    {
+        extensions.insert("nav".to_owned(), value);
+    }
+    BilibiliSessionStatus {
+        authenticated: false,
+        user_id: expected_user_id.map(str::to_owned),
+        nickname: None,
+        avatar_url: None,
+        extensions,
+    }
+}
+
+fn session_extensions(data: &NavData) -> Result<BTreeMap<String, Value>> {
+    let nav = serde_json::to_value(data).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "failed to serialize Bilibili account details",
+        )
+        .with_platform(Platform::Bilibili)
+    })?;
+    Ok(BTreeMap::from([("nav".to_owned(), nav)]))
+}
+
+fn validate_binary_flag(value: Option<i64>, context: &str) -> Result<()> {
+    if value.is_some_and(|value| !matches!(value, 0 | 1)) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili session returned an invalid {context} flag"
+        )));
+    }
+    Ok(())
+}
+
+fn validated_display_text(value: Option<&str>, context: &str) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili session returned an invalid {context}"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn validated_image_url(value: Option<&str>, context: &str) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let url = Url::parse(value).map_err(|_| {
+        bilibili_upstream_error(format!(
+            "Bilibili session returned an invalid {context} URL"
+        ))
+    })?;
+    let trusted_host = url
+        .host_str()
+        .is_some_and(|host| host == "hdslb.com" || host.ends_with(".hdslb.com"));
+    if url.scheme() != "https"
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !trusted_host
+    {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili session returned an unsafe {context} URL"
+        )));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn credential_from_qr_confirmation(
@@ -513,6 +864,26 @@ fn passport_http_error(status: StatusCode) -> TuneWeaveError {
     .retryable(status.is_server_error())
 }
 
+fn bilibili_network_error(error: reqwest::Error) -> TuneWeaveError {
+    let code = if error.is_timeout() {
+        ErrorCode::UpstreamTimeout
+    } else {
+        ErrorCode::UpstreamError
+    };
+    TuneWeaveError::new(code, "Bilibili API request failed")
+        .with_platform(Platform::Bilibili)
+        .retryable(true)
+}
+
+fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("{context} returned HTTP {status}"),
+    )
+    .with_platform(Platform::Bilibili)
+    .retryable(status.is_server_error())
+}
+
 fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeaveError {
     let error_code = match code {
         -101 | -111 | -400 | 86038 => ErrorCode::AuthenticationRequired,
@@ -573,6 +944,16 @@ mod tests {
             }
         }))
         .expect("serialize QR poll fixture")
+    }
+
+    fn nav_fixture(code: i64, data: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "code": code,
+            "message": if code == 0 { "0" } else { "账号未登录" },
+            "ttl": 1,
+            "data": data
+        }))
+        .expect("serialize nav fixture")
     }
 
     #[test]
@@ -734,6 +1115,103 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
+    #[test]
+    fn session_status_maps_authenticated_and_anonymous_responses() {
+        let authenticated = parse_session_response(
+            &nav_fixture(
+                0,
+                json!({
+                    "isLogin": true,
+                    "email_verified": 1,
+                    "mobile_verified": 0,
+                    "face": "https://i0.hdslb.com/bfs/face/avatar.jpg",
+                    "mid": 47275982,
+                    "uname": "Lotus",
+                    "vipDueDate": 1_700_000_000_000_u64,
+                    "vipStatus": 1,
+                    "vipType": 2,
+                    "wbi_img": {
+                        "img_url": "https://i0.hdslb.com/bfs/wbi/image.png",
+                        "sub_url": "https://i0.hdslb.com/bfs/wbi/sub.png"
+                    },
+                    "new_upstream_field": { "preserved_in_parser_only": true }
+                }),
+            ),
+            Some("47275982"),
+        )
+        .expect("authenticated nav response");
+        assert!(authenticated.authenticated);
+        assert_eq!(authenticated.user_id.as_deref(), Some("47275982"));
+        assert_eq!(authenticated.nickname.as_deref(), Some("Lotus"));
+        assert_eq!(
+            authenticated.avatar_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/face/avatar.jpg")
+        );
+        assert_eq!(authenticated.extensions["platform_code"], 0);
+        assert_eq!(authenticated.extensions["nav"]["vip_status"], 1);
+        assert!(
+            authenticated.extensions["nav"]
+                .get("new_upstream_field")
+                .is_none()
+        );
+
+        let anonymous = parse_session_response(
+            &nav_fixture(-101, json!({ "isLogin": false })),
+            Some("47275982"),
+        )
+        .expect("anonymous nav response");
+        assert!(!anonymous.authenticated);
+        assert_eq!(anonymous.user_id.as_deref(), Some("47275982"));
+        assert_eq!(anonymous.extensions["platform_code"], -101);
+    }
+
+    #[test]
+    fn session_status_rejects_identity_mismatch_flags_and_unsafe_avatar_urls() {
+        for (data, expected_message) in [
+            (
+                json!({ "isLogin": true, "mid": 1, "uname": "other" }),
+                "does not match",
+            ),
+            (
+                json!({ "isLogin": true, "mid": 47275982, "email_verified": 2 }),
+                "verification flag",
+            ),
+            (
+                json!({
+                    "isLogin": true,
+                    "mid": 47275982,
+                    "face": "javascript:alert(1)"
+                }),
+                "avatar URL",
+            ),
+        ] {
+            let error = parse_session_response(&nav_fixture(0, data), Some("47275982"))
+                .expect_err("invalid session response must fail");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+            assert!(error.message.contains(expected_message));
+        }
+    }
+
+    #[test]
+    fn session_cookie_excludes_refresh_material_and_debug_redacts_secrets() {
+        let credential = BilibiliCredential {
+            dede_user_id: "47275982".to_owned(),
+            dede_user_id_ck_md5: "0123456789abcdef".to_owned(),
+            sessdata: "private-session".to_owned(),
+            bili_jct: "0123456789abcdef0123456789abcdef".to_owned(),
+            sid: Some("private-sid".to_owned()),
+            refresh_token: "private-refresh".to_owned(),
+        }
+        .normalize()
+        .expect("credential");
+        let cookie = credential.cookie_header();
+        assert!(cookie.contains("SESSDATA=private-session"));
+        assert!(cookie.contains("sid=private-sid"));
+        assert!(!cookie.contains("private-refresh"));
+        let debug = format!("{credential:?}");
+        assert!(!debug.contains("private"));
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_qr_creation_returns_a_trusted_scannable_url() {
@@ -758,5 +1236,17 @@ mod tests {
             .await
             .expect("live QR polling");
         assert_eq!(state, BilibiliQrPoll::Waiting);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili API access"]
+    async fn live_anonymous_session_reports_logged_out() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let session = client
+            .session_status(None)
+            .await
+            .expect("live anonymous session status");
+        assert!(!session.authenticated);
+        assert!(session.user_id.is_none());
     }
 }
