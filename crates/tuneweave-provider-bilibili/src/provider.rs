@@ -3,14 +3,17 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    AccountCredentialStore, AccountProfile, AuthState, Capability, CredentialMode, ErrorCode,
-    MusicProvider, Platform, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
-    ProviderQrPoll, ProviderQrStart, Result, StoredAccountCredential, TuneWeaveError,
+    AccountCredentialStore, AccountProfile, AuthState, Capability, CreatorSummary, CredentialMode,
+    ErrorCode, Extensions, MusicProvider, Page, PageMeta, Platform, ProviderAuthResult,
+    ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, ResourceRef, Result,
+    SearchItem, SearchKind, SearchQuery, SearchVariant, StoredAccountCredential, TuneWeaveError,
+    Video,
 };
 
+use crate::BilibiliVideoIdentity;
 use crate::client::{
     BilibiliClient, BilibiliConfig, BilibiliCredential, BilibiliCredentialRefresh,
-    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSessionStatus,
+    BilibiliLogoutOutcome, BilibiliQrPoll, BilibiliSearchVideo, BilibiliSessionStatus,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -81,7 +84,115 @@ impl MusicProvider for BilibiliProvider {
             Capability::CallerManagedCredentials,
             Capability::AccountProfile,
             Capability::SessionManagement,
+            Capability::SearchVideos,
         ])
+    }
+
+    async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        if query.kind != SearchKind::Video {
+            return Err(TuneWeaveError::unsupported(
+                Platform::Bilibili,
+                capability_for_search(query.kind),
+            ));
+        }
+        if query.variant != SearchVariant::Default {
+            return Err(bilibili_invalid_request(
+                "Bilibili video search only supports the default backend",
+            ));
+        }
+        if query.search_id.is_some() || !query.selectors.is_empty() {
+            return Err(bilibili_invalid_request(
+                "Bilibili video search does not accept search_id or selectors",
+            ));
+        }
+        let keyword = query.query.trim();
+        if keyword.is_empty() || keyword.len() > 512 || keyword.chars().any(char::is_control) {
+            return Err(bilibili_invalid_request(
+                "Bilibili video search keyword is invalid",
+            ));
+        }
+        if !(1..=100).contains(&query.limit) {
+            return Err(bilibili_invalid_request(
+                "Bilibili video search limit must be between 1 and 100",
+            ));
+        }
+        if query.offset >= 1_000 {
+            return Err(bilibili_invalid_request(
+                "Bilibili video search offset must be below 1000",
+            ));
+        }
+        let credential = self.optional_request_credential(query.account.as_deref())?;
+        const UPSTREAM_PAGE_SIZE: u32 = 20;
+        let first_page = query.offset / UPSTREAM_PAGE_SIZE + 1;
+        let first_skip = (query.offset % UPSTREAM_PAGE_SIZE) as usize;
+        let mut current_page = first_page;
+        let mut total = None;
+        let mut page_count = None;
+        let mut search_id = None;
+        let mut items = Vec::with_capacity(query.limit as usize);
+
+        while items.len() < query.limit as usize && current_page <= 50 {
+            let page = self
+                .client
+                .search_videos_page(keyword, current_page, credential.as_ref())
+                .await?;
+            if page.page_size != UPSTREAM_PAGE_SIZE {
+                return Err(bilibili_data_error(
+                    "Bilibili video search changed its page size",
+                ));
+            }
+            if total.is_some_and(|total| total != page.total)
+                || page_count.is_some_and(|count| count != page.page_count)
+            {
+                return Err(bilibili_data_error(
+                    "Bilibili video search pagination changed during traversal",
+                ));
+            }
+            total = Some(page.total);
+            page_count = Some(page.page_count);
+            search_id.get_or_insert(page.search_id);
+            let skip = if current_page == first_page {
+                first_skip
+            } else {
+                0
+            };
+            let page_item_count = page.videos.len();
+            for video in page.videos.into_iter().skip(skip) {
+                if items.len() == query.limit as usize {
+                    break;
+                }
+                items.push(SearchItem::Video(map_bilibili_search_video(video)?));
+            }
+            let known_page_count = page_count.unwrap_or_default();
+            if current_page >= known_page_count || page_item_count < UPSTREAM_PAGE_SIZE as usize {
+                break;
+            }
+            current_page += 1;
+        }
+
+        let total = total.unwrap_or_default();
+        let consumed = u64::from(query.offset).saturating_add(items.len() as u64);
+        let has_more = consumed < total;
+        let returned_count = u32::try_from(items.len()).unwrap_or(query.limit);
+        let mut extensions = Extensions::new();
+        if let Some(search_id) = search_id {
+            extensions.insert("search_id".to_owned(), json!(search_id));
+        }
+        extensions.insert("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE));
+        if let Some(page_count) = page_count {
+            extensions.insert("upstream_page_count".to_owned(), json!(page_count));
+        }
+        Ok(Page {
+            items,
+            pagination: PageMeta {
+                limit: query.limit,
+                offset: query.offset,
+                total: Some(total),
+                next_offset: has_more.then(|| query.offset.saturating_add(returned_count)),
+                has_more,
+                extensions,
+            },
+        })
     }
 
     async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
@@ -301,7 +412,6 @@ impl BilibiliProvider {
         })
     }
 
-    #[cfg(test)]
     fn selected_credential(&self, account: &str) -> Result<BilibiliCredential> {
         self.selected_credential_optional(account)?.ok_or_else(|| {
             bilibili_authentication_required(account, "Bilibili account was not found")
@@ -352,6 +462,16 @@ impl BilibiliProvider {
                 .with_platform(Platform::Bilibili)
             })
             .map(Some)
+    }
+
+    fn optional_request_credential(
+        &self,
+        account: Option<&str>,
+    ) -> Result<Option<BilibiliCredential>> {
+        if let Some(account) = account {
+            return self.selected_credential(account).map(Some);
+        }
+        Ok(self.caller_credential.clone())
     }
 
     fn remove_bilibili_credential(&self, account: &str) -> Result<bool> {
@@ -531,6 +651,114 @@ fn map_bilibili_session_profile(
     profile.avatar_url = status.avatar_url;
     profile.extensions = status.extensions;
     profile
+}
+
+fn map_bilibili_search_video(item: BilibiliSearchVideo) -> Result<Video> {
+    let identity = item.bvid.as_ref().map_or_else(
+        || BilibiliVideoIdentity::Aid(item.aid),
+        |bvid| BilibiliVideoIdentity::Bvid(bvid.clone()),
+    );
+    let id = identity.canonical_id();
+    let resource_ref = identity.resource_ref()?;
+    let creator_ref = ResourceRef::new(Platform::Bilibili, format!("user:{}", item.author_id))
+        .map_err(|_| bilibili_data_error("Bilibili search creator identity was invalid"))?;
+    let mut extensions = Extensions::from([
+        ("aid".to_owned(), json!(item.aid)),
+        ("duration_text".to_owned(), json!(item.duration_text)),
+        ("tags".to_owned(), json!(item.tags)),
+        ("hit_columns".to_owned(), json!(item.hit_columns)),
+    ]);
+    insert_optional(&mut extensions, "bvid", item.bvid);
+    insert_optional(&mut extensions, "danmaku_count", item.danmaku_count);
+    insert_optional(&mut extensions, "favorite_count", item.favorite_count);
+    insert_optional(&mut extensions, "comment_count", item.comment_count);
+    insert_optional(&mut extensions, "category_id", item.category_id);
+    insert_optional(&mut extensions, "category_name", item.category_name);
+    insert_optional(&mut extensions, "sent_at_unix", item.sent_at);
+    insert_optional(&mut extensions, "paid", item.paid);
+    insert_optional(&mut extensions, "collaborative", item.collaborative);
+    insert_optional(&mut extensions, "rank_score", item.rank_score);
+    Ok(Video {
+        resource_ref,
+        platform: Platform::Bilibili,
+        id,
+        title: item.title,
+        creators: vec![CreatorSummary {
+            resource_ref: Some(creator_ref),
+            name: item.author,
+            avatar_url: None,
+        }],
+        description: item.description,
+        cover_url: Some(item.cover_url),
+        duration_ms: item.duration_seconds.checked_mul(1_000),
+        published_at: item.published_at.and_then(bilibili_unix_rfc3339),
+        play_count: item.play_count,
+        subscribed: None,
+        extensions,
+    })
+}
+
+fn insert_optional<T: serde::Serialize>(extensions: &mut Extensions, key: &str, value: Option<T>) {
+    if let Some(value) = value
+        && let Ok(value) = serde_json::to_value(value)
+    {
+        extensions.insert(key.to_owned(), value);
+    }
+}
+
+const fn capability_for_search(kind: SearchKind) -> Capability {
+    match kind {
+        SearchKind::Track => Capability::SearchTracks,
+        SearchKind::Album => Capability::SearchAlbums,
+        SearchKind::Artist => Capability::SearchArtists,
+        SearchKind::Playlist => Capability::SearchPlaylists,
+        SearchKind::User => Capability::SearchUsers,
+        SearchKind::Mv => Capability::SearchMvs,
+        SearchKind::Lyric => Capability::SearchLyrics,
+        SearchKind::RadioStation => Capability::SearchRadioStations,
+        SearchKind::Podcast => Capability::SearchPodcasts,
+        SearchKind::Video => Capability::SearchVideos,
+        SearchKind::Mixed => Capability::SearchMixed,
+        SearchKind::Voice => Capability::SearchVoices,
+        SearchKind::Ringtone => Capability::SearchRingtones,
+    }
+}
+
+fn bilibili_unix_rfc3339(timestamp: u64) -> Option<String> {
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds = timestamp % 86_400;
+    let z = days.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn bilibili_invalid_request(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::invalid_request(message).with_platform(Platform::Bilibili)
+}
+
+fn bilibili_data_error(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::UpstreamError, message)
+        .with_platform(Platform::Bilibili)
+        .retryable(true)
 }
 
 #[cfg(test)]
@@ -764,6 +992,93 @@ mod tests {
         assert_eq!(profile.user_id.as_deref(), Some("47275982"));
         assert_eq!(profile.nickname.as_deref(), Some("Lotus"));
         assert_eq!(profile.extensions["nav"]["vip_status"], 1);
+    }
+
+    #[test]
+    fn video_search_mapping_uses_stable_video_and_creator_references() {
+        let video = map_bilibili_search_video(BilibiliSearchVideo {
+            aid: 78_977_417,
+            bvid: Some("BV1KJ411C7Un".to_owned()),
+            title: "初音未来".to_owned(),
+            author: "MitchieM".to_owned(),
+            author_id: 5_669_526,
+            description: "音乐视频".to_owned(),
+            cover_url: "https://i1.hdslb.com/bfs/archive/cover.jpg".to_owned(),
+            duration_seconds: 242,
+            duration_text: "4:02".to_owned(),
+            play_count: Some(2_915_520),
+            danmaku_count: Some(14_572),
+            favorite_count: Some(114_102),
+            comment_count: Some(6_124),
+            published_at: Some(1_579_877_678),
+            sent_at: Some(1_593_099_008),
+            category_id: Some("30".to_owned()),
+            category_name: Some("VOCALOID·UTAU".to_owned()),
+            tags: vec!["音乐".to_owned()],
+            hit_columns: vec!["title".to_owned()],
+            paid: Some(false),
+            collaborative: Some(true),
+            rank_score: Some(109_020_056),
+        })
+        .expect("mapped video");
+        assert_eq!(video.resource_ref.to_string(), "bilibili:bvid:BV1KJ411C7Un");
+        assert_eq!(video.id, "bvid:BV1KJ411C7Un");
+        assert_eq!(video.duration_ms, Some(242_000));
+        assert_eq!(video.published_at.as_deref(), Some("2020-01-24T14:54:38Z"));
+        assert_eq!(
+            video.creators[0]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("bilibili:user:5669526")
+        );
+        assert_eq!(video.extensions["collaborative"], true);
+    }
+
+    #[tokio::test]
+    async fn video_search_rejects_unsupported_inputs_before_network_access() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let mut query = SearchQuery {
+            query: "music".to_owned(),
+            kind: SearchKind::Track,
+            variant: SearchVariant::Default,
+            limit: 20,
+            offset: 0,
+            account: None,
+            search_id: None,
+            highlight: false,
+            selectors: Vec::new(),
+        };
+        assert_eq!(
+            provider
+                .search_catalog(&query)
+                .await
+                .expect_err("track search is unsupported")
+                .code,
+            ErrorCode::CapabilityNotSupported
+        );
+        query.kind = SearchKind::Video;
+        query.offset = 1_000;
+        assert_eq!(
+            provider
+                .search_catalog(&query)
+                .await
+                .expect_err("large offset must fail")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        query.offset = 0;
+        query.account = Some("missing".to_owned());
+        assert_eq!(
+            provider
+                .search_catalog(&query)
+                .await
+                .expect_err("missing selected account must fail")
+                .code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(provider.capabilities().contains(&Capability::SearchVideos));
     }
 
     #[tokio::test]

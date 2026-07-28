@@ -1,6 +1,14 @@
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
-use aws_lc_rs::digest::{SHA256, digest};
+use aws_lc_rs::{
+    digest::{SHA256, digest},
+    hmac,
+};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD},
@@ -9,13 +17,15 @@ use num_bigint::BigUint;
 use qrcode::{QrCode, render::svg};
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{COOKIE, HeaderMap, SET_COOKIE},
+    header::{COOKIE, HeaderMap, REFERER, SET_COOKIE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
 use url::Url;
+
+use crate::wbi::WbiKeys;
 
 const PASSPORT_QR_GENERATE_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/qrcode/generate?source=main-fe-header";
@@ -29,8 +39,23 @@ const COOKIE_CONFIRM_ENDPOINT: &str =
     "https://passport.bilibili.com/x/passport-login/web/confirm/refresh";
 const LOGOUT_ENDPOINT: &str = "https://passport.bilibili.com/login/exit/v2";
 const NAV_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/nav";
+const DEVICE_IDENTITY_ENDPOINT: &str = "https://api.bilibili.com/x/frontend/finger/spi";
+const WEB_HOME_ENDPOINT: &str = "https://www.bilibili.com/";
+const WEB_TICKET_ENDPOINT: &str =
+    "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket";
+const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/type";
+const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
+    "https://api.bilibili.com/x/web-interface/search/type";
+const WEB_REFERER: &str = "https://www.bilibili.com/";
+const VIDEO_SEARCH_REFERER: &str = "https://search.bilibili.com/";
+const VIDEO_SEARCH_WEB_LOCATION: &str = "1430654";
+const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
+const WBI_CACHE_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+const WEB_TICKET_HMAC_KEY: &[u8] = b"XgwSnGZ1p";
+const WEB_TICKET_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
+const VIDEO_SEARCH_COMPATIBILITY_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const COOKIE_REFRESH_RSA_MODULUS_BASE64URL: &str = concat!(
     "y4HdjgJHBlbaBN04VERG4qNBIFHP6a3GozCl75AihQloSWCXC5HDNgyinEnhaQ_4",
     "-gaMud_GF50elYXLlCToR9se9Z8z433U3KjM-3Yx7ptKkmQNAMggQwAVKgq3zYAoi",
@@ -63,6 +88,128 @@ impl fmt::Debug for BilibiliConfig {
 #[derive(Clone)]
 pub struct BilibiliClient {
     http: Client,
+    web_state: Arc<Mutex<BilibiliWebState>>,
+}
+
+#[derive(Default)]
+struct BilibiliWebState {
+    device: Option<BilibiliWebDevice>,
+    wbi: Option<CachedWbiKeys>,
+    ticket: Option<CachedWebTicket>,
+    query_visit_id: Option<String>,
+    video_search_challenged_at: Option<Instant>,
+}
+
+#[derive(Clone)]
+struct CachedWbiKeys {
+    keys: WbiKeys,
+    cached_at: Instant,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct BilibiliWebDevice {
+    buvid3: String,
+    buvid4: String,
+    b_nut: String,
+}
+
+impl fmt::Debug for BilibiliWebDevice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BilibiliWebDevice")
+            .field("buvid3_configured", &(!self.buvid3.is_empty()))
+            .field("buvid4_configured", &(!self.buvid4.is_empty()))
+            .field("b_nut_configured", &(!self.b_nut.is_empty()))
+            .finish()
+    }
+}
+
+impl BilibiliWebDevice {
+    fn cookie_header(&self) -> String {
+        let mut value = format!("buvid3={}; buvid4={}", self.buvid3, self.buvid4);
+        if !self.b_nut.is_empty() {
+            value.push_str("; b_nut=");
+            value.push_str(&self.b_nut);
+        }
+        value
+    }
+}
+
+#[derive(Clone)]
+struct CachedWebTicket {
+    ticket: String,
+    cached_at: Instant,
+    lifetime: Duration,
+}
+
+impl CachedWebTicket {
+    fn is_current(&self) -> bool {
+        self.cached_at
+            .elapsed()
+            .saturating_add(WEB_TICKET_EXPIRY_MARGIN)
+            < self.lifetime
+    }
+}
+
+impl fmt::Debug for CachedWebTicket {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CachedWebTicket")
+            .field("ticket", &"[redacted]")
+            .field("is_current", &self.is_current())
+            .finish()
+    }
+}
+
+struct BilibiliWebRequestContext {
+    query: String,
+    cookie_header: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoSearchPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub page_count: u32,
+    pub search_id: String,
+    pub videos: Vec<BilibiliSearchVideo>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSearchVideo {
+    pub aid: u64,
+    pub bvid: Option<String>,
+    pub title: String,
+    pub author: String,
+    pub author_id: u64,
+    pub description: String,
+    pub cover_url: String,
+    pub duration_seconds: u64,
+    pub duration_text: String,
+    pub play_count: Option<u64>,
+    pub danmaku_count: Option<u64>,
+    pub favorite_count: Option<u64>,
+    pub comment_count: Option<u64>,
+    pub published_at: Option<u64>,
+    pub sent_at: Option<u64>,
+    pub category_id: Option<String>,
+    pub category_name: Option<String>,
+    pub tags: Vec<String>,
+    pub hit_columns: Vec<String>,
+    pub paid: Option<bool>,
+    pub collaborative: Option<bool>,
+    pub rank_score: Option<u64>,
+}
+
+impl fmt::Debug for BilibiliWebRequestContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BilibiliWebRequestContext")
+            .field("query", &"[redacted]")
+            .field("cookie_header", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -283,6 +430,121 @@ struct CookieRefreshData {
 }
 
 #[derive(Deserialize)]
+struct DeviceIdentityData {
+    b_3: String,
+    b_4: String,
+}
+
+#[derive(Deserialize)]
+struct WebTicketData {
+    ticket: String,
+    created_at: u64,
+    ttl: u64,
+    nav: WebTicketNav,
+}
+
+#[derive(Deserialize)]
+struct WebTicketNav {
+    img: String,
+    sub: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum VideoSearchPayload {
+    Results(VideoSearchData),
+    Voucher { v_voucher: String },
+}
+
+#[derive(Deserialize)]
+struct VideoSearchData {
+    page: u32,
+    pagesize: u32,
+    #[serde(rename = "numResults")]
+    num_results: FlexibleU64,
+    #[serde(rename = "numPages")]
+    num_pages: u32,
+    seid: FlexibleText,
+    #[serde(default)]
+    result: Vec<VideoSearchItem>,
+}
+
+#[derive(Deserialize)]
+struct VideoSearchItem {
+    #[serde(default)]
+    r#type: String,
+    aid: FlexibleU64,
+    #[serde(default)]
+    bvid: String,
+    title: String,
+    #[serde(default)]
+    author: String,
+    mid: FlexibleU64,
+    #[serde(default)]
+    description: String,
+    pic: String,
+    duration: String,
+    #[serde(default)]
+    play: Option<FlexibleU64>,
+    #[serde(default)]
+    video_review: Option<FlexibleU64>,
+    #[serde(default)]
+    favorites: Option<FlexibleU64>,
+    #[serde(default)]
+    review: Option<FlexibleU64>,
+    #[serde(default)]
+    pubdate: Option<FlexibleU64>,
+    #[serde(default)]
+    senddate: Option<FlexibleU64>,
+    #[serde(default)]
+    typeid: Option<FlexibleText>,
+    #[serde(default)]
+    typename: Option<String>,
+    #[serde(default)]
+    tag: String,
+    #[serde(default)]
+    hit_columns: Option<Vec<String>>,
+    #[serde(default)]
+    is_pay: Option<FlexibleU64>,
+    #[serde(default)]
+    is_union_video: Option<FlexibleU64>,
+    #[serde(default)]
+    rank_score: Option<FlexibleU64>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FlexibleU64 {
+    Number(u64),
+    Text(String),
+}
+
+impl FlexibleU64 {
+    fn get(&self) -> Option<u64> {
+        match self {
+            Self::Number(value) => Some(*value),
+            Self::Text(value) => value.parse().ok(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FlexibleText {
+    Text(String),
+    Number(u64),
+}
+
+impl FlexibleText {
+    fn into_string(self) -> String {
+        match self {
+            Self::Text(value) => value,
+            Self::Number(value) => value.to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct LogoutResponse {
     code: i64,
     #[serde(default)]
@@ -486,7 +748,10 @@ impl BilibiliClient {
             )
             .with_platform(Platform::Bilibili)
         })?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            web_state: Arc::new(Mutex::new(BilibiliWebState::default())),
+        })
     }
 
     pub(crate) async fn create_qr_login(&self) -> Result<BilibiliQrStart> {
@@ -634,6 +899,347 @@ impl BilibiliClient {
         parse_logout_response(&bytes)
     }
 
+    pub(crate) async fn search_videos_page(
+        &self,
+        keyword: &str,
+        page: u32,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliVideoSearchPage> {
+        validate_search_keyword(keyword)?;
+        if !(1..=50).contains(&page) {
+            return Err(invalid_bilibili_request(
+                "Bilibili video search page must be between 1 and 50",
+            ));
+        }
+        if self.video_search_compatibility_active()? {
+            return self
+                .search_videos_compatibility_page(keyword, page, credential)
+                .await;
+        }
+        let query_visit_id = self.web_query_visit_id()?;
+        let context = self
+            .signed_web_context(
+                &[
+                    ("__refresh__".to_owned(), "true".to_owned()),
+                    ("_extra".to_owned(), String::new()),
+                    ("context".to_owned(), String::new()),
+                    ("search_type".to_owned(), "video".to_owned()),
+                    ("keyword".to_owned(), keyword.to_owned()),
+                    ("order".to_owned(), "totalrank".to_owned()),
+                    ("duration".to_owned(), "0".to_owned()),
+                    ("tids".to_owned(), "0".to_owned()),
+                    ("page".to_owned(), page.to_string()),
+                    ("page_size".to_owned(), VIDEO_SEARCH_PAGE_SIZE.to_string()),
+                    ("pubtime_begin_s".to_owned(), "0".to_owned()),
+                    ("pubtime_end_s".to_owned(), "0".to_owned()),
+                    ("from_source".to_owned(), String::new()),
+                    ("from_spmid".to_owned(), "333.337".to_owned()),
+                    ("platform".to_owned(), "pc".to_owned()),
+                    ("highlight".to_owned(), "1".to_owned()),
+                    ("single_column".to_owned(), "0".to_owned()),
+                    ("qv_id".to_owned(), query_visit_id),
+                    ("ad_resource".to_owned(), "5654".to_owned()),
+                    ("source_tag".to_owned(), "3".to_owned()),
+                    ("gaia_vtoken".to_owned(), String::new()),
+                    ("category_id".to_owned(), String::new()),
+                    ("dynamic_offset".to_owned(), "0".to_owned()),
+                    ("web_roll_page".to_owned(), "0".to_owned()),
+                    (
+                        "web_location".to_owned(),
+                        VIDEO_SEARCH_WEB_LOCATION.to_owned(),
+                    ),
+                ],
+                credential,
+            )
+            .await?;
+        let endpoint = format!("{VIDEO_SEARCH_ENDPOINT}?{}", context.query);
+        let bytes = self
+            .video_search_response(endpoint, Some(&context.cookie_header))
+            .await?;
+        match parse_video_search_response(&bytes, page) {
+            Ok(result) => Ok(result),
+            Err(error) if is_video_search_risk_challenge(&error) => {
+                self.mark_video_search_challenged()?;
+                self.search_videos_compatibility_page(keyword, page, credential)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn search_videos_compatibility_page(
+        &self,
+        keyword: &str,
+        page: u32,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliVideoSearchPage> {
+        let mut endpoint = Url::parse(VIDEO_SEARCH_COMPATIBILITY_ENDPOINT).map_err(|_| {
+            bilibili_internal_error("Bilibili video search compatibility endpoint is invalid")
+        })?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("search_type", "video")
+            .append_pair("keyword", keyword)
+            .append_pair("order", "totalrank")
+            .append_pair("duration", "0")
+            .append_pair("tids", "0")
+            .append_pair("page", &page.to_string());
+        let cookie_header = credential.map(BilibiliCredential::cookie_header);
+        let bytes = self
+            .video_search_response(endpoint.to_string(), cookie_header.as_deref())
+            .await?;
+        parse_video_search_response(&bytes, page)
+    }
+
+    async fn video_search_response(
+        &self,
+        endpoint: String,
+        cookie_header: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let mut request = self
+            .http
+            .get(endpoint)
+            .header(REFERER, VIDEO_SEARCH_REFERER);
+        if let Some(cookie_header) = cookie_header {
+            request = request.header(COOKIE, cookie_header);
+        }
+        let response = request.send().await.map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili video search", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili video search response exceeded the size limit",
+            ));
+        }
+        Ok(bytes.to_vec())
+    }
+
+    fn video_search_compatibility_active(&self) -> Result<bool> {
+        let mut state = self.web_state()?;
+        let Some(challenged_at) = state.video_search_challenged_at else {
+            return Ok(false);
+        };
+        if challenged_at.elapsed() < VIDEO_SEARCH_COMPATIBILITY_LIFETIME {
+            return Ok(true);
+        }
+        state.video_search_challenged_at = None;
+        Ok(false)
+    }
+
+    fn mark_video_search_challenged(&self) -> Result<()> {
+        self.web_state()?.video_search_challenged_at = Some(Instant::now());
+        Ok(())
+    }
+
+    fn web_query_visit_id(&self) -> Result<String> {
+        let mut state = self.web_state()?;
+        if let Some(query_visit_id) = &state.query_visit_id {
+            return Ok(query_visit_id.clone());
+        }
+        const ALPHABET: &[u8; 62] =
+            b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let query_visit_id = rand::random::<[u8; 32]>()
+            .into_iter()
+            .map(|byte| char::from(ALPHABET[usize::from(byte) % ALPHABET.len()]))
+            .collect::<String>();
+        state.query_visit_id = Some(query_visit_id.clone());
+        Ok(query_visit_id)
+    }
+
+    async fn signed_web_context(
+        &self,
+        parameters: &[(String, String)],
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliWebRequestContext> {
+        let device = self.web_device().await?;
+        let ticket = self.web_ticket(credential, &device).await?;
+        let keys = self.wbi_keys(credential, &device).await?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| bilibili_internal_error("system time precedes the Unix epoch"))?
+            .as_secs();
+        let query = keys.sign(parameters, timestamp)?;
+        let device_cookie = format!("{}; bili_ticket={}", device.cookie_header(), ticket.ticket);
+        let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
+            format!("{}; {device_cookie}", credential.cookie_header())
+        });
+        Ok(BilibiliWebRequestContext {
+            query,
+            cookie_header,
+        })
+    }
+
+    async fn web_device(&self) -> Result<BilibiliWebDevice> {
+        if let Some(device) = self.web_state()?.device.clone() {
+            return Ok(device);
+        }
+        let response = self
+            .http
+            .get(DEVICE_IDENTITY_ENDPOINT)
+            .header(REFERER, WEB_REFERER)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error(
+                "Bilibili device identity endpoint",
+                status,
+            ));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili device identity response exceeded the size limit",
+            ));
+        }
+        let mut device = parse_device_identity_response(&bytes)?;
+        device.b_nut = self.web_cookie_timestamp(&device).await?;
+        self.web_state()?.device = Some(device.clone());
+        Ok(device)
+    }
+
+    async fn web_cookie_timestamp(&self, device: &BilibiliWebDevice) -> Result<String> {
+        let response = self
+            .http
+            .head(WEB_HOME_ENDPOINT)
+            .header(COOKIE, device.cookie_header())
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error(
+                "Bilibili web identity endpoint",
+                status,
+            ));
+        }
+        let value = response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|header| header.to_str().ok())
+            .filter_map(|header| header.split(';').next())
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(name, value)| (name == "b_nut").then(|| value.to_owned()))
+            .ok_or_else(|| bilibili_upstream_error("Bilibili web identity did not return b_nut"))?;
+        if value.is_empty() || value.len() > 20 || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(bilibili_upstream_error(
+                "Bilibili web identity returned an invalid b_nut",
+            ));
+        }
+        Ok(value)
+    }
+
+    async fn web_ticket(
+        &self,
+        credential: Option<&BilibiliCredential>,
+        device: &BilibiliWebDevice,
+    ) -> Result<CachedWebTicket> {
+        if let Some(ticket) = self.web_state()?.ticket.clone()
+            && ticket.is_current()
+        {
+            return Ok(ticket);
+        }
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| bilibili_internal_error("system time precedes the Unix epoch"))?
+            .as_secs();
+        let key = hmac::Key::new(hmac::HMAC_SHA256, WEB_TICKET_HMAC_KEY);
+        let signature = hex::encode(hmac::sign(&key, format!("ts{timestamp}").as_bytes()));
+        let mut endpoint = Url::parse(WEB_TICKET_ENDPOINT)
+            .map_err(|_| bilibili_internal_error("Bilibili web ticket endpoint is invalid"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("key_id", "ec02")
+            .append_pair("hexsign", &signature)
+            .append_pair("context[ts]", &timestamp.to_string())
+            .append_pair(
+                "csrf",
+                credential.map_or("", |credential| credential.bili_jct.as_str()),
+            );
+        let device_cookie = device.cookie_header();
+        let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
+            format!("{}; {device_cookie}", credential.cookie_header())
+        });
+        let response = self
+            .http
+            .post(endpoint)
+            .header(COOKIE, cookie_header)
+            .header(REFERER, WEB_REFERER)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili web ticket endpoint", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili web ticket response exceeded the size limit",
+            ));
+        }
+        let (ticket, keys) = parse_web_ticket_response(&bytes)?;
+        let mut state = self.web_state()?;
+        state.ticket = Some(ticket.clone());
+        state.wbi = Some(CachedWbiKeys {
+            keys,
+            cached_at: Instant::now(),
+        });
+        Ok(ticket)
+    }
+
+    async fn wbi_keys(
+        &self,
+        credential: Option<&BilibiliCredential>,
+        device: &BilibiliWebDevice,
+    ) -> Result<WbiKeys> {
+        if let Some(cached) = self.web_state()?.wbi.clone()
+            && cached.cached_at.elapsed() < WBI_CACHE_LIFETIME
+        {
+            return Ok(cached.keys);
+        }
+        let device_cookie = device.cookie_header();
+        let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
+            format!("{}; {device_cookie}", credential.cookie_header())
+        });
+        let response = self
+            .http
+            .get(NAV_ENDPOINT)
+            .header(COOKIE, cookie_header)
+            .header(REFERER, WEB_REFERER)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili WBI key endpoint", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili WBI key response exceeded the size limit",
+            ));
+        }
+        let keys = parse_wbi_keys_response(&bytes)?;
+        self.web_state()?.wbi = Some(CachedWbiKeys {
+            keys: keys.clone(),
+            cached_at: Instant::now(),
+        });
+        Ok(keys)
+    }
+
+    fn web_state(&self) -> Result<std::sync::MutexGuard<'_, BilibiliWebState>> {
+        self.web_state
+            .lock()
+            .map_err(|_| bilibili_internal_error("Bilibili web identity cache is unavailable"))
+    }
+
     async fn cookie_refresh_info(&self, credential: &BilibiliCredential) -> Result<CookieInfoData> {
         let response = self
             .http
@@ -743,6 +1349,331 @@ impl BilibiliClient {
         }
         parse_cookie_confirm_response(&bytes)
     }
+}
+
+fn parse_device_identity_response(bytes: &[u8]) -> Result<BilibiliWebDevice> {
+    let response: PassportResponse<DeviceIdentityData> =
+        serde_json::from_slice(bytes).map_err(|_| {
+            bilibili_upstream_error("Bilibili device identity endpoint returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili device identity",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili device identity response did not contain data")
+    })?;
+    validate_cookie_value(&data.b_3, "buvid3", 512)?;
+    validate_cookie_value(&data.b_4, "buvid4", 1024)?;
+    Ok(BilibiliWebDevice {
+        buvid3: data.b_3,
+        buvid4: data.b_4,
+        b_nut: String::new(),
+    })
+}
+
+fn parse_web_ticket_response(bytes: &[u8]) -> Result<(CachedWebTicket, WbiKeys)> {
+    let response: PassportResponse<WebTicketData> =
+        serde_json::from_slice(bytes).map_err(|_| {
+            bilibili_upstream_error("Bilibili web ticket endpoint returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili web ticket request",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili web ticket response did not contain data")
+    })?;
+    if data.created_at == 0
+        || data.ttl <= WEB_TICKET_EXPIRY_MARGIN.as_secs()
+        || data.ttl > 7 * 24 * 60 * 60
+        || data.ticket.len() < 64
+        || data.ticket.len() > 4096
+        || data.ticket.split('.').count() != 3
+        || data
+            .ticket
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili web ticket response contained invalid credentials",
+        ));
+    }
+    let keys = WbiKeys::from_image_urls(&data.nav.img, &data.nav.sub)
+        .map_err(|_| bilibili_upstream_error("Bilibili web ticket returned invalid WBI keys"))?;
+    Ok((
+        CachedWebTicket {
+            ticket: data.ticket,
+            cached_at: Instant::now(),
+            lifetime: Duration::from_secs(data.ttl),
+        },
+        keys,
+    ))
+}
+
+fn parse_video_search_response(
+    bytes: &[u8],
+    requested_page: u32,
+) -> Result<BilibiliVideoSearchPage> {
+    let response: PassportResponse<VideoSearchPayload> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili video search returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili video search",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = match response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili video search response did not contain data")
+    })? {
+        VideoSearchPayload::Results(data) => data,
+        VideoSearchPayload::Voucher { v_voucher } => {
+            if v_voucher.trim().is_empty() || v_voucher.len() > 4096 {
+                return Err(bilibili_upstream_error(
+                    "Bilibili video search returned an invalid risk-control challenge",
+                ));
+            }
+            return Err(TuneWeaveError::new(
+                ErrorCode::RateLimited,
+                "Bilibili video search was challenged",
+            )
+            .with_platform(Platform::Bilibili)
+            .retryable(true)
+            .with_details(json!({ "platform_code": 0, "risk_challenge": true })));
+        }
+    };
+    if data.page != requested_page || data.pagesize != VIDEO_SEARCH_PAGE_SIZE || data.num_pages > 50
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili video search returned inconsistent pagination",
+        ));
+    }
+    let total = data
+        .num_results
+        .get()
+        .filter(|total| *total <= 1_000)
+        .ok_or_else(|| {
+            bilibili_upstream_error("Bilibili video search returned an invalid total")
+        })?;
+    let mut videos = Vec::with_capacity(data.result.len());
+    for item in data.result {
+        videos.push(map_video_search_item(item)?);
+    }
+    Ok(BilibiliVideoSearchPage {
+        page: data.page,
+        page_size: data.pagesize,
+        total,
+        page_count: data.num_pages,
+        search_id: validated_search_text(&data.seid.into_string(), "search ID", 256)?,
+        videos,
+    })
+}
+
+fn is_video_search_risk_challenge(error: &TuneWeaveError) -> bool {
+    error.code == ErrorCode::RateLimited
+        && error.details.get("risk_challenge").and_then(Value::as_bool) == Some(true)
+}
+
+fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
+    if !item.r#type.is_empty() && item.r#type != "video" {
+        return Err(bilibili_upstream_error(
+            "Bilibili video search returned a non-video item",
+        ));
+    }
+    let aid =
+        item.aid.get().filter(|value| *value > 0).ok_or_else(|| {
+            bilibili_upstream_error("Bilibili video search returned an invalid AID")
+        })?;
+    let bvid = (!item.bvid.trim().is_empty())
+        .then(|| crate::BilibiliVideoIdentity::parse(&item.bvid))
+        .transpose()
+        .map_err(|_| bilibili_upstream_error("Bilibili video search returned an invalid BVID"))?
+        .map(|identity| match identity {
+            crate::BilibiliVideoIdentity::Bvid(value) => value,
+            _ => unreachable!("BVID parser returned another identity type"),
+        });
+    let author_id = item.mid.get().filter(|value| *value > 0).ok_or_else(|| {
+        bilibili_upstream_error("Bilibili video search returned an invalid creator ID")
+    })?;
+    let title = clean_search_text(&item.title, "title", 1024)?;
+    let author = clean_search_text(&item.author, "creator name", 512)?;
+    let description = clean_search_text(&item.description, "description", 16 * 1024)?;
+    let cover_url = normalize_search_image_url(&item.pic)?;
+    let duration_seconds = parse_duration_seconds(&item.duration)?;
+    let tags = item
+        .tag
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .take(100)
+        .map(|value| validated_search_text(value, "tag", 256))
+        .collect::<Result<Vec<_>>>()?;
+    let hit_columns = item
+        .hit_columns
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| validated_search_text(&value, "hit column", 64))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BilibiliSearchVideo {
+        aid,
+        bvid,
+        title,
+        author,
+        author_id,
+        description,
+        cover_url,
+        duration_seconds,
+        duration_text: item.duration,
+        play_count: optional_flexible_u64(item.play, "play count")?,
+        danmaku_count: optional_flexible_u64(item.video_review, "danmaku count")?,
+        favorite_count: optional_flexible_u64(item.favorites, "favorite count")?,
+        comment_count: optional_flexible_u64(item.review, "comment count")?,
+        published_at: optional_flexible_u64(item.pubdate, "publish timestamp")?,
+        sent_at: optional_flexible_u64(item.senddate, "send timestamp")?,
+        category_id: item
+            .typeid
+            .map(FlexibleText::into_string)
+            .map(|value| validated_search_text(&value, "category ID", 64))
+            .transpose()?,
+        category_name: item
+            .typename
+            .map(|value| clean_search_text(&value, "category name", 256))
+            .transpose()?,
+        tags,
+        hit_columns,
+        paid: optional_binary_flag(item.is_pay, "paid flag")?,
+        collaborative: optional_binary_flag(item.is_union_video, "collaboration flag")?,
+        rank_score: optional_flexible_u64(item.rank_score, "rank score")?,
+    })
+}
+
+fn optional_flexible_u64(value: Option<FlexibleU64>, context: &str) -> Result<Option<u64>> {
+    value
+        .map(|value| {
+            value.get().ok_or_else(|| {
+                bilibili_upstream_error(format!(
+                    "Bilibili video search returned an invalid {context}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn optional_binary_flag(value: Option<FlexibleU64>, context: &str) -> Result<Option<bool>> {
+    optional_flexible_u64(value, context)?
+        .map(|value| match value {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(bilibili_upstream_error(format!(
+                "Bilibili video search returned an invalid {context}"
+            ))),
+        })
+        .transpose()
+}
+
+fn validate_search_keyword(value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(invalid_bilibili_request(
+            "Bilibili video search keyword is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn clean_search_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    let value = value
+        .replace("<em class=\"keyword\">", "")
+        .replace("<em class='keyword'>", "")
+        .replace("</em>", "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    validated_search_text(&value, context, limit)
+}
+
+fn validated_search_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili video search returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn normalize_search_image_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("//")
+        .map_or_else(|| value.to_owned(), |value| format!("https://{value}"));
+    validated_image_url(Some(&value), "search cover")?
+        .ok_or_else(|| bilibili_upstream_error("Bilibili video search did not return a cover"))
+}
+
+fn parse_duration_seconds(value: &str) -> Result<u64> {
+    let parts = value
+        .split(':')
+        .map(|part| part.parse::<u64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| {
+            bilibili_upstream_error("Bilibili video search returned an invalid duration")
+        })?;
+    match parts.as_slice() {
+        [minutes, seconds] if *minutes <= 100_000 && *seconds < 60 => minutes
+            .checked_mul(60)
+            .and_then(|value| value.checked_add(*seconds))
+            .ok_or_else(|| bilibili_upstream_error("Bilibili video search duration overflowed")),
+        [hours, minutes, seconds] if *hours <= 10_000 && *minutes < 60 && *seconds < 60 => hours
+            .checked_mul(3_600)
+            .and_then(|value| value.checked_add(minutes * 60))
+            .and_then(|value| value.checked_add(*seconds))
+            .ok_or_else(|| bilibili_upstream_error("Bilibili video search duration overflowed")),
+        _ => Err(bilibili_upstream_error(
+            "Bilibili video search returned an invalid duration",
+        )),
+    }
+}
+
+fn parse_wbi_keys_response(bytes: &[u8]) -> Result<WbiKeys> {
+    let response: PassportResponse<NavData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili WBI key endpoint returned invalid JSON"))?;
+    if !matches!(response.code, 0 | -101) {
+        return Err(platform_business_error(
+            "Bilibili WBI key request",
+            response.code,
+            &response.message,
+        ));
+    }
+    let image = response
+        .data
+        .and_then(|data| data.wbi_img)
+        .ok_or_else(|| bilibili_upstream_error("Bilibili WBI key response did not contain keys"))?;
+    WbiKeys::from_image_urls(&image.img_url, &image.sub_url)
+        .map_err(|_| bilibili_upstream_error("Bilibili WBI key response contained invalid keys"))
+}
+
+fn validate_cookie_value(value: &str, name: &str, limit: usize) -> Result<()> {
+    if value.len() < 16
+        || value.len() > limit
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b';' | b',' | b' '))
+    {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili device identity returned an invalid {name}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_cookie_info_response(bytes: &[u8]) -> Result<CookieInfoData> {
@@ -1385,18 +2316,32 @@ fn bilibili_network_error(error: reqwest::Error) -> TuneWeaveError {
 }
 
 fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
-    TuneWeaveError::new(
-        ErrorCode::UpstreamError,
-        format!("{context} returned HTTP {status}"),
-    )
-    .with_platform(Platform::Bilibili)
-    .retryable(status.is_server_error())
+    let code = match status {
+        StatusCode::BAD_REQUEST => ErrorCode::InvalidRequest,
+        StatusCode::UNAUTHORIZED => ErrorCode::AuthenticationRequired,
+        StatusCode::FORBIDDEN => ErrorCode::PermissionDenied,
+        StatusCode::NOT_FOUND => ErrorCode::ResourceNotFound,
+        StatusCode::PRECONDITION_FAILED | StatusCode::TOO_MANY_REQUESTS => ErrorCode::RateLimited,
+        _ => ErrorCode::UpstreamError,
+    };
+    TuneWeaveError::new(code, format!("{context} returned HTTP {status}"))
+        .with_platform(Platform::Bilibili)
+        .retryable(
+            status.is_server_error()
+                || matches!(
+                    status,
+                    StatusCode::PRECONDITION_FAILED | StatusCode::TOO_MANY_REQUESTS
+                ),
+        )
 }
 
 fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeaveError {
     let error_code = match code {
-        -101 | -111 | -400 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
-        -412 => ErrorCode::RateLimited,
+        -101 | -111 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
+        -400 | -304 | 400 => ErrorCode::InvalidRequest,
+        -403 => ErrorCode::PermissionDenied,
+        -404 | 62002 => ErrorCode::ResourceNotFound,
+        -352 | -412 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
     let message = if message.trim().is_empty() {
@@ -1406,7 +2351,7 @@ fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeave
     };
     TuneWeaveError::new(error_code, message)
         .with_platform(Platform::Bilibili)
-        .retryable(matches!(code, -412))
+        .retryable(matches!(code, -352 | -412))
         .with_details(json!({ "platform_code": code }))
 }
 
@@ -1421,6 +2366,10 @@ fn bilibili_internal_error(message: impl Into<String>) -> TuneWeaveError {
 }
 
 fn invalid_credential(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::invalid_request(message).with_platform(Platform::Bilibili)
+}
+
+fn invalid_bilibili_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Bilibili)
 }
 
@@ -1844,6 +2793,203 @@ mod tests {
         assert_eq!(csrf_error.code, ErrorCode::AuthenticationRequired);
     }
 
+    #[test]
+    fn web_device_and_wbi_keys_are_strictly_parsed() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let first_query_visit_id = client.web_query_visit_id().expect("query visit ID");
+        let second_query_visit_id = client.web_query_visit_id().expect("cached query visit ID");
+        assert_eq!(first_query_visit_id, second_query_visit_id);
+        assert_eq!(first_query_visit_id.len(), 32);
+        assert!(
+            first_query_visit_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        );
+        assert!(
+            !client
+                .video_search_compatibility_active()
+                .expect("initial search protocol")
+        );
+        client
+            .mark_video_search_challenged()
+            .expect("mark challenged search");
+        assert!(
+            client
+                .video_search_compatibility_active()
+                .expect("cached search protocol")
+        );
+
+        let mut device = parse_device_identity_response(
+            br#"{"code":0,"message":"ok","data":{"b_3":"54E5EFC1-3C8F-F690-2261-439E4F6A20A979439infoc","b_4":"F6E0FD4B-520C-1902-4F7B-E461D8D1F5AB79044-024072309-666onEZSnlHVPjoRp4kDYg=="}}"#,
+        )
+        .expect("device identity");
+        device.b_nut = "1721975923".to_owned();
+        assert!(device.cookie_header().contains("buvid3="));
+        assert!(device.cookie_header().contains("buvid4="));
+        assert!(device.cookie_header().contains("b_nut=1721975923"));
+        assert!(!format!("{device:?}").contains("54E5EFC1"));
+
+        let keys = parse_wbi_keys_response(&nav_fixture(
+            -101,
+            json!({
+                "isLogin": false,
+                "wbi_img": {
+                    "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                    "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"
+                }
+            }),
+        ))
+        .expect("anonymous WBI keys");
+        assert!(
+            keys.sign(&[("keyword".to_owned(), "音乐".to_owned())], 1)
+                .expect("signed query")
+                .contains("w_rid=")
+        );
+
+        assert!(
+            parse_device_identity_response(
+                br#"{"code":0,"message":"ok","data":{"b_3":"unsafe;cookie","b_4":"valid-device-value"}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn web_ticket_keeps_ticket_and_wbi_lifetimes_together() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "data": {
+                "ticket": concat!(
+                    "eyJhbGciOiJIUzI1NiIsImtpZCI6InMwMyIsInR5cCI6IkpXVCJ9.",
+                    "eyJleHAiOjE3MjM2OTMwODAsImlhdCI6MTcyMzQzMzgyMCwicGx0IjotMX0.",
+                    "efOwv7i4m0ykABrXEDHGAechU2AByMcP_-3EYpQrNKs"
+                ),
+                "created_at": 1723433820_u64,
+                "ttl": 259200,
+                "nav": {
+                    "img": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                    "sub": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"
+                }
+            }
+        }))
+        .expect("ticket fixture");
+        let (ticket, keys) = parse_web_ticket_response(&response).expect("web ticket");
+        assert!(ticket.is_current());
+        assert!(!format!("{ticket:?}").contains("eyJ"));
+        assert!(
+            keys.sign(&[("keyword".to_owned(), "音乐".to_owned())], 1)
+                .expect("signed query")
+                .contains("w_rid=")
+        );
+
+        for invalid in [
+            br#"{"code":400,"message":"bad request","data":null}"#.as_slice(),
+            br#"{"code":0,"message":"OK","data":{"ticket":"short","created_at":1,"ttl":259200,"nav":{"img":"","sub":""}}}"#
+                .as_slice(),
+        ] {
+            assert!(parse_web_ticket_response(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn video_search_mapping_preserves_identity_counts_and_pagination() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "0",
+            "data": {
+                "seid": 8850295244740510044_u64,
+                "page": 2,
+                "pagesize": VIDEO_SEARCH_PAGE_SIZE,
+                "numResults": "41",
+                "numPages": 3,
+                "result": [{
+                    "type": "video",
+                    "aid": 78977417,
+                    "bvid": "BV1KJ411C7Un",
+                    "title": "初音<em class=\"keyword\">未来</em>",
+                    "author": "MitchieM",
+                    "mid": 5669526,
+                    "description": "音乐 &amp; 视频",
+                    "pic": "//i1.hdslb.com/bfs/archive/cover.jpg",
+                    "duration": "4:02",
+                    "play": "2915520",
+                    "video_review": 14572,
+                    "favorites": 114102,
+                    "review": 6124,
+                    "pubdate": 1579877678,
+                    "senddate": 1593099008,
+                    "typeid": "30",
+                    "typename": "VOCALOID·UTAU",
+                    "tag": "音乐,初音未来",
+                    "hit_columns": ["title", "tag"],
+                    "is_pay": 0,
+                    "is_union_video": 1,
+                    "rank_score": 109020056
+                }]
+            }
+        }))
+        .expect("search fixture");
+        let page = parse_video_search_response(&response, 2).expect("search page");
+        assert_eq!(page.total, 41);
+        assert_eq!(page.page_count, 3);
+        assert_eq!(page.search_id, "8850295244740510044");
+        assert_eq!(page.videos[0].bvid.as_deref(), Some("BV1KJ411C7Un"));
+        assert_eq!(page.videos[0].title, "初音未来");
+        assert_eq!(page.videos[0].description, "音乐 & 视频");
+        assert_eq!(page.videos[0].duration_seconds, 242);
+        assert_eq!(page.videos[0].play_count, Some(2_915_520));
+        assert_eq!(page.videos[0].collaborative, Some(true));
+        assert_eq!(page.videos[0].hit_columns, ["title", "tag"]);
+
+        let nullable_hit_columns: VideoSearchItem = serde_json::from_value(json!({
+            "type": "video",
+            "aid": 1,
+            "bvid": "BV1xx411c7mD",
+            "title": "title",
+            "author": "author",
+            "mid": 1,
+            "description": "",
+            "pic": "//i0.hdslb.com/bfs/archive/cover.jpg",
+            "duration": "0:01",
+            "hit_columns": null
+        }))
+        .expect("nullable hit columns");
+        assert!(nullable_hit_columns.hit_columns.is_none());
+    }
+
+    #[test]
+    fn video_search_maps_business_errors_without_exposing_challenges() {
+        let blocked = parse_video_search_response(
+            br#"{"code":-412,"message":"request blocked","data":null}"#,
+            1,
+        )
+        .expect_err("blocked search");
+        assert_eq!(blocked.code, ErrorCode::RateLimited);
+        assert!(blocked.retryable);
+        assert!(!is_video_search_risk_challenge(&blocked));
+        let blocked_http =
+            bilibili_http_error("Bilibili video search", StatusCode::PRECONDITION_FAILED);
+        assert_eq!(blocked_http.code, ErrorCode::RateLimited);
+        assert!(blocked_http.retryable);
+
+        let voucher = parse_video_search_response(
+            br#"{"code":0,"message":"0","data":{"v_voucher":"private-voucher"}}"#,
+            1,
+        )
+        .expect_err("risk challenge");
+        assert_eq!(voucher.code, ErrorCode::RateLimited);
+        assert!(is_video_search_risk_challenge(&voucher));
+        assert!(!format!("{voucher:?}").contains("private-voucher"));
+
+        let malformed = parse_video_search_response(
+            br#"{"code":0,"message":"0","data":{"seid":"1","page":2,"pagesize":30,"numResults":0,"numPages":0,"result":[]}}"#,
+            2,
+        )
+        .expect_err("changed page size");
+        assert_eq!(malformed.code, ErrorCode::UpstreamError);
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_qr_creation_returns_a_trusted_scannable_url() {
@@ -1880,5 +3026,18 @@ mod tests {
             .expect("live anonymous session status");
         assert!(!session.authenticated);
         assert!(session.user_id.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili search access"]
+    async fn live_anonymous_video_search_uses_provider_managed_web_identity() {
+        let client = BilibiliClient::new(&BilibiliConfig::default()).expect("Bilibili client");
+        let page = client
+            .search_videos_page("周杰伦", 1, None)
+            .await
+            .expect("live video search");
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, VIDEO_SEARCH_PAGE_SIZE);
+        assert!(!page.videos.is_empty());
     }
 }
