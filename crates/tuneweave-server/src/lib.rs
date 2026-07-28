@@ -2159,6 +2159,7 @@ struct AudioRecognizeBody {
 
 async fn audio_recognize(
     State(state): State<AppState>,
+    headers: HeaderMap,
     payload: Result<Json<AudioRecognizeBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AudioRecognition>>, ApiError> {
     let body = json_body(payload)?;
@@ -2178,19 +2179,21 @@ async fn audio_recognize(
     }
     let platform = account_platform(&state, body.platform.as_deref())?;
     let account = optional_trimmed(body.account);
-    let provider = state.registry.require(platform)?;
-    let recognition = provider
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let recognition = access
+        .provider
         .recognize_audio(&AudioRecognitionRequest {
             fingerprint: fingerprint.to_owned(),
             duration_seconds: body.duration_seconds,
-            account: account.clone(),
+            account: access.provider_account.clone(),
         })
         .await?;
-    let mut response = ApiResponse::new(recognition).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    Ok(Json(access.response(recognition, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2203,17 +2206,22 @@ struct AudioCdnParams {
 async fn audio_cdn_dispatch(
     State(state): State<AppState>,
     params: Result<Query<AudioCdnParams>, QueryRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<AudioCdnDispatch>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let account = optional_trimmed(params.account);
-    let provider = state.registry.require(platform)?;
-    let dispatch = provider.audio_cdn_dispatch(account.as_deref()).await?;
-    let mut response = ApiResponse::new(dispatch).with_platform(platform);
-    if let Some(account) = account {
-        response = response.with_account(account);
-    }
-    Ok(Json(response))
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let dispatch = access
+        .provider
+        .audio_cdn_dispatch(access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(dispatch, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -15861,6 +15869,7 @@ mod tests {
                 "duration_seconds".to_owned(),
                 json!(request.duration_seconds),
             );
+            extensions.insert("account".to_owned(), json!(request.account));
             Ok(AudioRecognition {
                 matches: vec![AudioRecognitionMatch {
                     track,
@@ -24018,6 +24027,60 @@ mod tests {
         assert_eq!(json["data"]["extensions"]["account"], "green-vip");
         assert_eq!(json["meta"]["platform"], "netease");
         assert_eq!(json["meta"]["account"], "green-vip");
+    }
+
+    #[tokio::test]
+    async fn audio_tools_accept_caller_credentials_without_server_aliases() {
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-audio-tools-session",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+
+        let (status, recognition) = caller_json_request(
+            app.clone(),
+            Method::POST,
+            "/v1/audio/recognize",
+            Some(json!({
+                "platform": "netease",
+                "fingerprint": "shazam-v2-fingerprint",
+                "duration_seconds": 6
+            })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recognition["data"]["extensions"]["account"], "default");
+        assert!(recognition["meta"].get("account").is_none());
+
+        let (status, dispatch) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/media/cdn?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dispatch["data"]["extensions"]["account"], "default");
+        assert!(dispatch["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/media/cdn?platform=netease&account=green-vip",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
