@@ -44,6 +44,7 @@ const MOBILE_MQTT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MOBILE_MQTT_EVENT_TIMEOUT: Duration = Duration::from_secs(25);
 const MOBILE_MQTT_MAX_PACKET_BYTES: u32 = 1024 * 1024;
 const MOBILE_MQTT_MAX_REDIRECTS: usize = 3;
+const QQ_SIGNATURE_MAX_REDIRECTS: usize = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QqQrLoginKind {
@@ -1047,16 +1048,7 @@ async fn authorize_qq_qr(client: &QqClient, uin: &str, sigx: &str) -> Result<QqC
         ("pt_light", "0"),
         ("pt_3rd_aid", "100497308"),
     ]);
-    let response = client
-        .login_http()
-        .get(endpoint)
-        .header(header::REFERER, QQ_LOGIN_REFERER)
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_redirect_or_success(response.status(), "QQ login signature exchange")?;
-    let oauth_cookies = response_cookies(&response)?;
+    let oauth_cookies = collect_qq_signature_cookies(client, endpoint).await?;
     let p_skey = oauth_cookies
         .get("p_skey")
         .cloned()
@@ -1115,6 +1107,67 @@ async fn authorize_qq_qr(client: &QqClient, uin: &str, sigx: &str) -> Result<QqC
         )
         .await?;
     parse_login_credential(response.data)
+}
+
+async fn collect_qq_signature_cookies(
+    client: &QqClient,
+    mut endpoint: Url,
+) -> Result<BTreeMap<String, String>> {
+    validate_qq_signature_redirect(&endpoint)?;
+    let mut cookies = BTreeMap::new();
+    for redirect_count in 0..=QQ_SIGNATURE_MAX_REDIRECTS {
+        let mut request = client
+            .login_http()
+            .get(endpoint.clone())
+            .header(header::REFERER, QQ_LOGIN_REFERER)
+            .timeout(LOGIN_REQUEST_TIMEOUT);
+        if !cookies.is_empty() {
+            request = request.header(header::COOKIE, cookie_header(&cookies)?);
+        }
+        let response = request.send().await.map_err(login_network_error)?;
+        ensure_redirect_or_success(response.status(), "QQ login signature exchange")?;
+        merge_nonempty_response_cookies(&mut cookies, &response)?;
+        if !response.status().is_redirection() {
+            return Ok(cookies);
+        }
+        if redirect_count == QQ_SIGNATURE_MAX_REDIRECTS {
+            return Err(login_data_error(
+                "QQ login signature exchange exceeded its redirect limit",
+            ));
+        }
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                login_data_error("QQ login signature exchange redirect is missing location")
+            })?;
+        endpoint = endpoint
+            .join(location)
+            .map_err(|_| login_data_error("QQ login signature exchange redirect is malformed"))?;
+        validate_qq_signature_redirect(&endpoint)?;
+    }
+    Err(login_data_error(
+        "QQ login signature exchange exceeded its redirect limit",
+    ))
+}
+
+fn validate_qq_signature_redirect(endpoint: &Url) -> Result<()> {
+    let host = endpoint.host_str().unwrap_or_default();
+    if endpoint.scheme() != "https"
+        || endpoint.port_or_known_default() != Some(443)
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || !matches!(
+            host,
+            "ssl.ptlogin2.graph.qq.com" | "ptlogin2.graph.qq.com" | "graph.qq.com"
+        )
+    {
+        return Err(login_data_error(
+            "QQ login signature exchange redirected outside the fixed QQ Graph hosts",
+        ));
+    }
+    Ok(())
 }
 
 fn qq_qr_poll_cookies(qrsig: &str) -> Result<BTreeMap<String, String>> {
@@ -1382,7 +1435,22 @@ fn merge_response_cookies(
     cookies: &mut BTreeMap<String, String>,
     response: &Response,
 ) -> Result<()> {
-    for value in response.headers().get_all(header::SET_COOKIE) {
+    merge_cookie_headers(cookies, response.headers(), true)
+}
+
+fn merge_nonempty_response_cookies(
+    cookies: &mut BTreeMap<String, String>,
+    response: &Response,
+) -> Result<()> {
+    merge_cookie_headers(cookies, response.headers(), false)
+}
+
+fn merge_cookie_headers(
+    cookies: &mut BTreeMap<String, String>,
+    headers: &header::HeaderMap,
+    remove_empty: bool,
+) -> Result<()> {
+    for value in headers.get_all(header::SET_COOKIE) {
         let value = value
             .to_str()
             .map_err(|_| login_data_error("QQ login response contains an invalid Set-Cookie"))?;
@@ -1392,9 +1460,9 @@ fn merge_response_cookies(
             .ok_or_else(|| login_data_error("QQ login response contains a malformed cookie"))?;
         validate_cookie_name(name)?;
         validate_cookie_value(value)?;
-        if value.is_empty() {
+        if value.is_empty() && remove_empty {
             cookies.remove(name);
-        } else {
+        } else if !value.is_empty() {
             cookies.insert(name.to_owned(), value.to_owned());
         }
     }
@@ -1627,6 +1695,57 @@ mod tests {
         assert!(validate_cookie_value("safe/value").is_ok());
         assert!(validate_cookie_value("unsafe;next=value").is_err());
         assert!(validate_cookie_value("unsafe\r\nheader").is_err());
+    }
+
+    #[test]
+    fn signature_cookie_collection_keeps_valid_domain_value_before_empty_cleanup() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(
+            header::SET_COOKIE,
+            header::HeaderValue::from_static(
+                "p_skey=oauth-value; Domain=graph.qq.com; Path=/; Secure",
+            ),
+        );
+        headers.append(
+            header::SET_COOKIE,
+            header::HeaderValue::from_static("p_skey=; Domain=qq.com; Path=/; Max-Age=0"),
+        );
+
+        let mut signature_cookies = BTreeMap::new();
+        merge_cookie_headers(&mut signature_cookies, &headers, false)
+            .expect("collect QQ signature cookies");
+        assert_eq!(
+            signature_cookies.get("p_skey").map(String::as_str),
+            Some("oauth-value")
+        );
+
+        let mut ordinary_cookies = BTreeMap::new();
+        merge_cookie_headers(&mut ordinary_cookies, &headers, true)
+            .expect("merge ordinary QQ cookies");
+        assert!(!ordinary_cookies.contains_key("p_skey"));
+    }
+
+    #[test]
+    fn signature_redirects_stay_on_fixed_https_qq_graph_hosts() {
+        for endpoint in [
+            "https://ssl.ptlogin2.graph.qq.com/check_sig",
+            "https://ptlogin2.graph.qq.com/check_sig",
+            "https://graph.qq.com/oauth2.0/login_jump",
+        ] {
+            validate_qq_signature_redirect(&Url::parse(endpoint).expect("QQ Graph URL"))
+                .expect("allowed QQ Graph redirect");
+        }
+        for endpoint in [
+            "http://graph.qq.com/oauth2.0/login_jump",
+            "https://graph.qq.com.evil.test/oauth2.0/login_jump",
+            "https://user@graph.qq.com/oauth2.0/login_jump",
+            "https://graph.qq.com:444/oauth2.0/login_jump",
+        ] {
+            assert!(
+                validate_qq_signature_redirect(&Url::parse(endpoint).expect("test URL")).is_err(),
+                "unsafe QQ Graph redirect was accepted: {endpoint}"
+            );
+        }
     }
 
     #[test]
