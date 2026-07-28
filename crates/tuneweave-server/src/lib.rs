@@ -17449,6 +17449,7 @@ mod tests {
                 state: AuthState::Confirmed,
                 message: None,
                 profile: Some(AccountProfile::authenticated(Platform::Netease, account)),
+                credential: None,
             })
         }
 

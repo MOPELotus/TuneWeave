@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::Platform;
+use crate::{Platform, ProviderCredential};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,6 +13,31 @@ pub enum AuthState {
     Confirmed,
     Expired,
     Failed,
+}
+
+/// Selects who owns a credential created by a successful authentication flow.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialMode {
+    /// Persist the credential under the server-side `(platform, account)` key.
+    #[default]
+    Server,
+    /// Return the credential to the caller without persisting it on the server.
+    Client,
+    /// Persist and return the exact same credential generation.
+    Both,
+}
+
+impl CredentialMode {
+    #[must_use]
+    pub const fn persists_on_server(self) -> bool {
+        matches!(self, Self::Server | Self::Both)
+    }
+
+    #[must_use]
+    pub const fn returns_to_caller(self) -> bool {
+        matches!(self, Self::Client | Self::Both)
+    }
 }
 
 impl AuthState {
@@ -53,6 +78,23 @@ pub struct AccountProfile {
     pub avatar_url: Option<String>,
     pub authenticated: bool,
     pub extensions: BTreeMap<String, Value>,
+}
+
+/// Provider authentication output before its credential is wrapped for a public API response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderAuthResult {
+    pub profile: AccountProfile,
+    pub credential: Option<ProviderCredential>,
+}
+
+impl ProviderAuthResult {
+    #[must_use]
+    pub const fn server_managed(profile: AccountProfile) -> Self {
+        Self {
+            profile,
+            credential: None,
+        }
+    }
 }
 
 impl AccountProfile {
@@ -181,6 +223,9 @@ pub struct ProviderQrPoll {
     pub state: AuthState,
     pub message: Option<String>,
     pub profile: Option<AccountProfile>,
+    /// Present only for a confirmed caller-managed login result.
+    #[serde(skip)]
+    pub credential: Option<ProviderCredential>,
 }
 
 #[cfg(test)]
@@ -223,5 +268,20 @@ mod tests {
         assert!(AuthState::Confirmed.is_terminal());
         assert!(AuthState::Expired.is_terminal());
         assert!(AuthState::Failed.is_terminal());
+    }
+
+    #[test]
+    fn credential_modes_preserve_the_default_server_ownership_contract() {
+        assert_eq!(CredentialMode::default(), CredentialMode::Server);
+        assert!(CredentialMode::Server.persists_on_server());
+        assert!(!CredentialMode::Server.returns_to_caller());
+        assert!(!CredentialMode::Client.persists_on_server());
+        assert!(CredentialMode::Client.returns_to_caller());
+        assert!(CredentialMode::Both.persists_on_server());
+        assert!(CredentialMode::Both.returns_to_caller());
+        assert_eq!(
+            serde_json::from_str::<CredentialMode>("\"client\"").expect("client mode"),
+            CredentialMode::Client
+        );
     }
 }

@@ -6013,21 +6013,25 @@ impl MusicProvider for QqProvider {
                 state: AuthState::Waiting,
                 message: Some("waiting for QR scan".to_owned()),
                 profile: None,
+                credential: None,
             }),
             QqQrPollOutcome::Scanned => Ok(ProviderQrPoll {
                 state: AuthState::Scanned,
                 message: Some("QR scanned; waiting for confirmation".to_owned()),
                 profile: None,
+                credential: None,
             }),
             QqQrPollOutcome::Expired => Ok(ProviderQrPoll {
                 state: AuthState::Expired,
                 message: Some("QR login expired".to_owned()),
                 profile: None,
+                credential: None,
             }),
             QqQrPollOutcome::Failed(message) => Ok(ProviderQrPoll {
                 state: AuthState::Failed,
                 message: Some(message),
                 profile: None,
+                credential: None,
             }),
             QqQrPollOutcome::Confirmed(credential) => {
                 let profile = self.persist_qq_credential(account, &credential)?;
@@ -6035,6 +6039,7 @@ impl MusicProvider for QqProvider {
                     state: AuthState::Confirmed,
                     message: Some("QQ Music account authenticated".to_owned()),
                     profile: Some(profile),
+                    credential: None,
                 })
             }
         }

@@ -2997,6 +2997,7 @@ impl MusicProvider for NeteaseProvider {
             message: check.message,
             profile: (state == AuthState::Confirmed)
                 .then(|| AccountProfile::authenticated(Platform::Netease, account)),
+            credential: None,
         })
     }
 

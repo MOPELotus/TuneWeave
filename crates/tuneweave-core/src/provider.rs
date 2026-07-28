@@ -20,10 +20,10 @@ use crate::{
     CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
     CommentReactionPage, CommentReportRequest, CommentReportResult, CommentThreadStatsBatch,
     CommentThreadStatsRequest, CommentWriteRequest, CountryCallingCodeGroup,
-    CountryCallingCodeListRequest, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartRequest,
-    DigitalAlbumListRequest, DimensionChart, DimensionChartRequest, DimensionChartTrackSnapshot,
-    ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult, ImageUploadRequest,
-    ImageUploadResult, ListeningRightsAdCatalog, ListeningRightsAdRequest,
+    CountryCallingCodeListRequest, CredentialMode, DigitalAlbum, DigitalAlbumChartEntry,
+    DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
+    DimensionChartTrackSnapshot, ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult,
+    ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog, ListeningRightsAdRequest,
     ListeningRightsGainRequest, ListeningRightsGainResult, LocalTrackMatchRequest,
     LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
     MultiStyleLyricTranslations, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
@@ -39,8 +39,8 @@ use crate::{
     PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
     PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
     PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderCredential,
-    ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult,
+    ProviderCredential, ProviderDescriptor, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
     RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest, RadioStyleCatalog,
     RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
     RecommendationDislikeResult, RecommendationFeed, RecommendationFeedRequest,
@@ -93,6 +93,16 @@ pub trait MusicProvider: Send + Sync {
 
     fn supports(&self, capability: Capability) -> bool {
         self.capabilities().contains(&capability)
+    }
+
+    fn require_credential_mode(&self, mode: CredentialMode) -> Result<()> {
+        if mode.returns_to_caller() && !self.supports(Capability::CallerManagedCredentials) {
+            return Err(TuneWeaveError::unsupported(
+                self.platform(),
+                Capability::CallerManagedCredentials,
+            ));
+        }
+        Ok(())
     }
 
     async fn search(&self, _query: &SearchQuery) -> Result<Page<Track>> {
@@ -1581,6 +1591,15 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn start_qr_login_with_mode(
+        &self,
+        login_type: Option<&str>,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrStart> {
+        self.require_credential_mode(mode)?;
+        self.start_qr_login(login_type).await
+    }
+
     async fn poll_qr_login(
         &self,
         _provider_transaction_id: &str,
@@ -1592,10 +1611,31 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn poll_qr_login_with_mode(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrPoll> {
+        self.require_credential_mode(mode)?;
+        self.poll_qr_login(provider_transaction_id, account).await
+    }
+
     async fn password_login(&self, _request: &PasswordLoginRequest) -> Result<AccountProfile> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PasswordLogin,
+        ))
+    }
+
+    async fn password_login_with_mode(
+        &self,
+        request: &PasswordLoginRequest,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        self.require_credential_mode(mode)?;
+        Ok(ProviderAuthResult::server_managed(
+            self.password_login(request).await?,
         ))
     }
 
@@ -1604,6 +1644,15 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::PhoneLogin,
         ))
+    }
+
+    async fn start_auth_challenge_with_mode(
+        &self,
+        request: &AuthChallengeRequest,
+        mode: CredentialMode,
+    ) -> Result<()> {
+        self.require_credential_mode(mode)?;
+        self.start_auth_challenge(request).await
     }
 
     async fn validate_auth_challenge(
@@ -1645,6 +1694,18 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PhoneLogin,
+        ))
+    }
+
+    async fn verify_auth_challenge_with_mode(
+        &self,
+        request: &AuthChallengeRequest,
+        code: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        self.require_credential_mode(mode)?;
+        Ok(ProviderAuthResult::server_managed(
+            self.verify_auth_challenge(request, code).await?,
         ))
     }
 

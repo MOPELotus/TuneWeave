@@ -15,8 +15,8 @@ mod uni_playlist_store;
 
 pub use auth::{
     AccountProfile, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthState, ChallengeMethod, PasswordFormat, PasswordLoginRequest,
-    PrincipalType, ProviderQrPoll, ProviderQrStart,
+    AuthPrincipalStatusRequest, AuthState, ChallengeMethod, CredentialMode, PasswordFormat,
+    PasswordLoginRequest, PrincipalType, ProviderAuthResult, ProviderQrPoll, ProviderQrStart,
 };
 pub use caller_credential::{
     CALLER_CREDENTIAL_FORMAT, CALLER_CREDENTIAL_HEADER, CallerCredential, ProviderCredential,
