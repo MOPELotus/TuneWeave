@@ -108,7 +108,7 @@ use tuneweave_core::{
     VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 
-pub use response::{ApiError, ApiResponse, ResponseMeta};
+pub use response::{ApiError, ApiResponse, REQUEST_ID_HEADER, ResponseMeta};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
@@ -973,6 +973,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .nest("/v1", versioned)
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            response::request_context_middleware,
+        ))
 }
 
 #[derive(Debug, Serialize)]
@@ -23704,11 +23707,76 @@ mod tests {
 
     #[tokio::test]
     async fn health_uses_the_success_envelope() {
-        let (status, json) = json_response("/healthz").await;
+        let (status, headers, json) =
+            json_request_with_headers(test_app(), Method::GET, "/healthz", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
         assert_eq!(json["data"]["status"], "ok");
-        assert!(json["meta"]["request_id"].is_string());
+        let request_id = headers
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("response request ID");
+        assert!(request_id.starts_with("tw-"));
+        assert_eq!(request_id.len(), 27);
+        assert_eq!(json["meta"]["request_id"], request_id);
+    }
+
+    #[tokio::test]
+    async fn caller_request_id_is_validated_and_shared_by_header_and_envelopes() {
+        let caller_request_id = "client-42:search.1";
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/capabilities?platform=unknown")
+                    .header(REQUEST_ID_HEADER, caller_request_id)
+                    .body(Body::empty())
+                    .expect("build caller request ID request"),
+            )
+            .await
+            .expect("caller request ID response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(caller_request_id)
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read caller request ID response");
+        let json: Value = serde_json::from_slice(&body).expect("request ID error JSON");
+        assert_eq!(json["meta"]["request_id"], caller_request_id);
+    }
+
+    #[tokio::test]
+    async fn invalid_request_id_is_rejected_without_echoing_it() {
+        let invalid_request_id = "private value must not leak";
+        let response = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, invalid_request_id)
+                    .body(Body::empty())
+                    .expect("build invalid request ID request"),
+            )
+            .await
+            .expect("invalid request ID response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let generated_request_id = response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("generated response request ID")
+            .to_owned();
+        assert!(generated_request_id.starts_with("tw-"));
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read invalid request ID response");
+        assert!(!String::from_utf8_lossy(&body).contains(invalid_request_id));
+        let json: Value = serde_json::from_slice(&body).expect("invalid request ID JSON");
+        assert_eq!(json["error"]["code"], "invalid_request");
+        assert_eq!(json["meta"]["request_id"], generated_request_id);
     }
 
     #[tokio::test]

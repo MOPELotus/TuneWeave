@@ -9,6 +9,7 @@
 - 请求与响应使用 UTF-8 JSON。媒体数据不经过 TuneWeave 中转，接口返回带有效期的 URL 与必要请求头。
 - 所有平台原始 ID 按字符串处理。公开引用写成 `<platform>:<id>`，例如 `netease:123456`、`qq:0039MnYb0qxYhV`、`bilibili:bvid:BV1xx411c7mD`。
 - 时间使用 RFC 3339；时长统一为毫秒；文件大小统一为字节；码率统一为 bit/s。
+- 调用方可选提交一次 `X-Request-ID`。值必须为 1–64 个 ASCII 字符，以字母或数字开头，其余只允许字母、数字、`-`、`_`、`.`、`:`；重复、超长或其他字符会在业务处理前返回 `400 invalid_request`。服务端未接受调用方值时生成不可预测的 `tw-` ID。所有响应都在 `X-Request-ID` 头返回最终 ID，JSON 成功/失败包络的 `meta.request_id` 与该头严格相同；无效原值不会进入响应或日志。
 
 ### 平台选择
 
@@ -58,7 +59,7 @@
   "ok": true,
   "data": {},
   "meta": {
-    "request_id": "01J...",
+    "request_id": "tw-...",
     "platform": "netease",
     "account": "default",
     "cached": false
@@ -79,7 +80,7 @@
     "details": {}
   },
   "meta": {
-    "request_id": "01J..."
+    "request_id": "tw-..."
   }
 }
 ```

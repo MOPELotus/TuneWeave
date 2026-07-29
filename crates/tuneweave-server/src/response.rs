@@ -1,18 +1,24 @@
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::Instant;
 
 use axum::{
     Json,
-    http::StatusCode,
+    extract::{MatchedPath, Request},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
+use rand::{RngExt, distr::Alphanumeric};
 use serde::Serialize;
 use serde_json::Value;
+use tracing::Instrument;
 use tuneweave_core::{ErrorCode, PageMeta, Platform, TuneWeaveError};
 
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+const MAX_REQUEST_ID_LENGTH: usize = 64;
+
+tokio::task_local! {
+    static CURRENT_REQUEST_ID: String;
+}
 
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T> {
@@ -65,18 +71,169 @@ pub struct ResponseMeta {
 impl ResponseMeta {
     #[must_use]
     pub fn new() -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis());
-        let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         Self {
-            request_id: format!("tw-{timestamp:x}-{sequence:x}"),
+            request_id: current_request_id(),
             platform: None,
             account: None,
             pagination: None,
             cached: false,
         }
     }
+}
+
+pub(crate) async fn request_context_middleware(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str)
+        .to_owned();
+    let (request_id, caller_supplied, rejection) = match caller_request_id(request.headers()) {
+        Ok(Some(request_id)) => (request_id, true, None),
+        Ok(None) => (generate_request_id(), false, None),
+        Err(message) => (generate_request_id(), false, Some(message)),
+    };
+    let span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        route = %route,
+        operation = %route,
+    );
+    let scoped_request_id = request_id.clone();
+    CURRENT_REQUEST_ID
+        .scope(
+            scoped_request_id,
+            async move {
+                let mut response = if let Some(message) = rejection {
+                    ApiError::from(TuneWeaveError::invalid_request(message)).into_response()
+                } else {
+                    next.run(request).await
+                };
+                response.headers_mut().insert(
+                    REQUEST_ID_HEADER,
+                    HeaderValue::from_str(&request_id)
+                        .expect("validated or generated request IDs are valid header values"),
+                );
+                log_request_completion(
+                    &request_id,
+                    &method,
+                    &route,
+                    response.status(),
+                    caller_supplied,
+                    started,
+                );
+                response
+            }
+            .instrument(span),
+        )
+        .await
+}
+
+fn caller_request_id(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
+    let mut values = headers.get_all(REQUEST_ID_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err("x-request-id must be supplied at most once");
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| "x-request-id must contain valid ASCII text")?;
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_REQUEST_ID_LENGTH
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(byte))
+    {
+        return Err(
+            "x-request-id must be 1 to 64 ASCII characters using letters, digits, '-', '_', '.', or ':'",
+        );
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn current_request_id() -> String {
+    CURRENT_REQUEST_ID
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| generate_request_id())
+}
+
+fn generate_request_id() -> String {
+    let suffix = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect::<String>();
+    format!("tw-{suffix}")
+}
+
+fn log_request_completion(
+    request_id: &str,
+    method: &axum::http::Method,
+    route: &str,
+    status: StatusCode,
+    caller_supplied: bool,
+    started: Instant,
+) {
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let status_code = status.as_u16();
+    if status.is_server_error() {
+        tracing::error!(
+            request_id,
+            method = %method,
+            route,
+            operation = route,
+            status = status_code,
+            duration_ms,
+            caller_supplied_request_id = caller_supplied,
+            "HTTP request completed"
+        );
+    } else if status.is_client_error() {
+        tracing::warn!(
+            request_id,
+            method = %method,
+            route,
+            operation = route,
+            status = status_code,
+            duration_ms,
+            caller_supplied_request_id = caller_supplied,
+            "HTTP request completed"
+        );
+    } else if is_quiet_route(route) {
+        tracing::debug!(
+            request_id,
+            method = %method,
+            route,
+            operation = route,
+            status = status_code,
+            duration_ms,
+            caller_supplied_request_id = caller_supplied,
+            "HTTP request completed"
+        );
+    } else {
+        tracing::info!(
+            request_id,
+            method = %method,
+            route,
+            operation = route,
+            status = status_code,
+            duration_ms,
+            caller_supplied_request_id = caller_supplied,
+            "HTTP request completed"
+        );
+    }
+}
+
+fn is_quiet_route(route: &str) -> bool {
+    matches!(
+        route,
+        "/v1/auth/qr/{transaction_id}" | "/v1/tracks/{reference}/stream/content"
+    )
 }
 
 impl Default for ResponseMeta {

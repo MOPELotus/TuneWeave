@@ -36,6 +36,8 @@ TUNEWEAVE_LOG_TO_FILE
 
 所有 HTTP API 经过统一访问日志中间件。服务接收符合格式和长度限制的调用方 request ID，或生成新的安全 ID，并在响应头中返回。内部 provider、后台任务和错误事件必须继承同一关联 ID。
 
+当前统一 Router 已接入请求上下文中间件：只接受单个 1–64 字符的安全 `X-Request-ID`，否则在进入 handler/provider 前以新生成的 ID 返回标准错误；随机 ID、响应头、成功包络与错误包络共用同一个 task-local 值。每个请求建立携带 `request_id/method/route/operation` 的 tracing span，受同一请求 future 驱动的 provider 调用继承该 span；完成事件记录受控 Axum 路由模板、状态和耗时，不读取或记录原始 URI、查询字符串及请求体。二维码轮询与本地媒体内容交付的成功明细降为 `debug`，失败仍按状态输出 `warn/error`。
+
 成功请求至少记录：
 
 - `request_id`、HTTP 方法、路由模板和统一操作名称；
