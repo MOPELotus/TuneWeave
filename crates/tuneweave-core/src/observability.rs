@@ -5,6 +5,7 @@ use crate::{ErrorCode, Platform};
 /// Coarse, searchable classification of a provider's business response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpstreamBusinessClass {
+    NotInspected,
     Success,
     AllowedError,
     RejectedError,
@@ -15,6 +16,7 @@ impl UpstreamBusinessClass {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::NotInspected => "not_inspected",
             Self::Success => "success",
             Self::AllowedError => "business_error_allowed",
             Self::RejectedError => "business_error",
@@ -166,6 +168,10 @@ mod tests {
 
     #[test]
     fn business_classes_have_stable_searchable_names() {
+        assert_eq!(
+            UpstreamBusinessClass::NotInspected.as_str(),
+            "not_inspected"
+        );
         assert_eq!(UpstreamBusinessClass::Success.as_str(), "success");
         assert_eq!(
             UpstreamBusinessClass::AllowedError.as_str(),

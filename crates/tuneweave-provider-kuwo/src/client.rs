@@ -21,7 +21,8 @@ use tokio::sync::Mutex;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
     Platform, Playlist, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
-    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
+    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError, UpstreamBusinessClass,
+    UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
@@ -71,6 +72,7 @@ impl fmt::Debug for KuwoConfig {
 #[derive(Clone)]
 pub struct KuwoClient {
     http: Client,
+    proxy_configured: bool,
     web_session: Arc<Mutex<Option<KuwoWebSession>>>,
 }
 
@@ -102,6 +104,47 @@ struct KuwoWebSession {
 enum KuwoSignedResponse {
     Body(Vec<u8>),
     SessionRejected,
+}
+
+#[derive(Clone, Copy)]
+enum KuwoSignedEndpoint {
+    TrackDetail,
+    Playback,
+    Playlist,
+}
+
+impl KuwoSignedEndpoint {
+    const fn url(self) -> &'static str {
+        match self {
+            Self::TrackDetail => TRACK_DETAIL_ENDPOINT,
+            Self::Playback => PLAYBACK_ENDPOINT,
+            Self::Playlist => PLAYLIST_ENDPOINT,
+        }
+    }
+
+    const fn parse_operation(self) -> &'static str {
+        match self {
+            Self::TrackDetail => "Kuwo track detail",
+            Self::Playback => "Kuwo public playback",
+            Self::Playlist => "Kuwo public playlist",
+        }
+    }
+
+    const fn log_operation(self) -> &'static str {
+        match self {
+            Self::TrackDetail => "track_detail",
+            Self::Playback => "public_playback",
+            Self::Playlist => "playlist_page",
+        }
+    }
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::TrackDetail => "/api/www/music/musicInfo",
+            Self::Playback => "/api/v1/www/music/playUrl",
+            Self::Playlist => "/api/www/playlist/playListInfo",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -546,6 +589,7 @@ impl KuwoClient {
         })?;
         Ok(Self {
             http,
+            proxy_configured: config.proxy_url.is_some(),
             web_session: Arc::new(Mutex::new(None)),
         })
     }
@@ -579,17 +623,34 @@ impl KuwoClient {
             request_id: new_request_id(),
             plat: "web_www",
         };
-        let response = self
-            .http
-            .get(SEARCH_ENDPOINT)
-            .header(ACCEPT, "application/json, text/plain")
-            .header(REFERER, SEARCH_REFERER)
-            .query(&query)
-            .send()
-            .await
-            .map_err(kuwo_network_error)?;
-        let bytes = read_bounded_response(response, "Kuwo search").await?;
-        parse_search_response(&bytes, page, page_size)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(SEARCH_ENDPOINT)
+                .header(ACCEPT, "application/json, text/plain")
+                .header(REFERER, SEARCH_REFERER)
+                .query(&query)
+                .send()
+                .await
+                .map_err(kuwo_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Kuwo search").await?;
+            parse_search_response(&bytes, page, page_size)
+        }
+        .await;
+        self.log_upstream_request(
+            "search",
+            "www.kuwo.cn",
+            "/search/searchMusicBykeyWord",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn track_detail(&self, music_id: &str) -> Result<Track> {
@@ -628,14 +689,16 @@ impl KuwoClient {
         page_size: u32,
     ) -> Result<KuwoPlaylistPage> {
         let mut transient_retry_available = true;
+        let mut retry_count = 0_u8;
         for force_refresh in [false, true] {
             let response = loop {
                 match self
-                    .signed_get_playlist(playlist_id, page, page_size, force_refresh)
+                    .signed_get_playlist(playlist_id, page, page_size, force_refresh, retry_count)
                     .await
                 {
                     Err(error) if error.retryable && transient_retry_available => {
                         transient_retry_available = false;
+                        retry_count = retry_count.saturating_add(1);
                         tokio::time::sleep(PLAYLIST_TRANSIENT_RETRY_DELAY).await;
                     }
                     result => break result?,
@@ -643,7 +706,10 @@ impl KuwoClient {
             };
             let bytes = match response {
                 KuwoSignedResponse::Body(bytes) => bytes,
-                KuwoSignedResponse::SessionRejected if !force_refresh => continue,
+                KuwoSignedResponse::SessionRejected if !force_refresh => {
+                    retry_count = retry_count.saturating_add(1);
+                    continue;
+                }
                 KuwoSignedResponse::SessionRejected => {
                     return Err(kuwo_upstream_error(
                         "Kuwo rejected a freshly established web session",
@@ -652,7 +718,10 @@ impl KuwoClient {
             };
             match parse_playlist_response(&bytes, playlist_id, page, page_size) {
                 Ok(page) => return Ok(page),
-                Err(_) if !force_refresh && is_signed_session_rejection(&bytes) => continue,
+                Err(_) if !force_refresh && is_signed_session_rejection(&bytes) => {
+                    retry_count = retry_count.saturating_add(1);
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -932,61 +1001,95 @@ impl KuwoClient {
 
     async fn download_word_lyrics(&self, music_id: &str) -> Result<KuwoWordLyrics> {
         let url = build_word_lyric_url(music_id)?;
-        let response = self
-            .http
-            .get(url)
-            .header(ACCEPT, "application/octet-stream, */*")
-            .header(REFERER, WEB_REFERER)
-            .send()
-            .await
-            .map_err(kuwo_network_error)?;
-        let bytes = read_bounded_response_with_limit(
-            response,
-            "Kuwo word-synced lyrics",
-            MAX_LYRIC_RESPONSE_BYTES,
-        )
-        .await?;
-        let byte_length = bytes.len();
-        let text = decode_word_lyrics(&bytes)?;
-        let marker_count = count_lrcx_word_markers(&text);
-        if marker_count == 0 {
-            return Err(kuwo_upstream_error(
-                "Kuwo LRCX response omitted word timing markers",
-            ));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(url)
+                .header(ACCEPT, "application/octet-stream, */*")
+                .header(REFERER, WEB_REFERER)
+                .send()
+                .await
+                .map_err(kuwo_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response_with_limit(
+                response,
+                "Kuwo word-synced lyrics",
+                MAX_LYRIC_RESPONSE_BYTES,
+            )
+            .await?;
+            let byte_length = bytes.len();
+            let text = decode_word_lyrics(&bytes)?;
+            let marker_count = count_lrcx_word_markers(&text);
+            if marker_count == 0 {
+                return Err(kuwo_upstream_error(
+                    "Kuwo LRCX response omitted word timing markers",
+                ));
+            }
+            Ok(KuwoWordLyrics {
+                text,
+                byte_length,
+                marker_count,
+            })
         }
-        Ok(KuwoWordLyrics {
-            text,
-            byte_length,
-            marker_count,
-        })
+        .await;
+        self.log_upstream_request(
+            "lyric_download_lrcx",
+            "newlyric.kuwo.cn",
+            "/newlyric.lrc",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     async fn download_mobile_lyrics(&self, music_id: &str) -> Result<KuwoPlainLyrics> {
-        let response = self
-            .http
-            .get(MOBILE_LYRIC_ENDPOINT)
-            .header(ACCEPT, "application/json, text/plain")
-            .header(REFERER, WEB_REFERER)
-            .query(&KuwoMobileLyricQuery {
-                music_id,
-                https_status: 1,
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(MOBILE_LYRIC_ENDPOINT)
+                .header(ACCEPT, "application/json, text/plain")
+                .header(REFERER, WEB_REFERER)
+                .query(&KuwoMobileLyricQuery {
+                    music_id,
+                    https_status: 1,
+                })
+                .send()
+                .await
+                .map_err(kuwo_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response_with_limit(
+                response,
+                "Kuwo mobile lyrics",
+                MAX_LYRIC_RESPONSE_BYTES,
+            )
+            .await?;
+            let byte_length = bytes.len();
+            let (text, line_count) = parse_mobile_lyrics(&bytes, music_id)?;
+            Ok(KuwoPlainLyrics {
+                text,
+                byte_length,
+                line_count,
             })
-            .send()
-            .await
-            .map_err(kuwo_network_error)?;
-        let bytes = read_bounded_response_with_limit(
-            response,
-            "Kuwo mobile lyrics",
-            MAX_LYRIC_RESPONSE_BYTES,
-        )
-        .await?;
-        let byte_length = bytes.len();
-        let (text, line_count) = parse_mobile_lyrics(&bytes, music_id)?;
-        Ok(KuwoPlainLyrics {
-            text,
-            byte_length,
-            line_count,
-        })
+        }
+        .await;
+        self.log_upstream_request(
+            "lyric_download_lrc",
+            "m.kuwo.cn",
+            "/newh5/singles/songinfoandlrc",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     async fn signed_get_track_detail(
@@ -995,7 +1098,7 @@ impl KuwoClient {
         force_refresh: bool,
     ) -> Result<KuwoSignedResponse> {
         self.signed_get(
-            TRACK_DETAIL_ENDPOINT,
+            KuwoSignedEndpoint::TrackDetail,
             &KuwoTrackDetailQuery {
                 mid: music_id,
                 https_status: 1,
@@ -1004,8 +1107,8 @@ impl KuwoClient {
                 from: "",
             },
             WEB_REFERER,
-            "Kuwo track detail",
             force_refresh,
+            u8::from(force_refresh),
         )
         .await
     }
@@ -1016,7 +1119,7 @@ impl KuwoClient {
         force_refresh: bool,
     ) -> Result<KuwoSignedResponse> {
         self.signed_get(
-            PLAYBACK_ENDPOINT,
+            KuwoSignedEndpoint::Playback,
             &KuwoPlaybackQuery {
                 mid: music_id,
                 media_type: "music",
@@ -1027,8 +1130,8 @@ impl KuwoClient {
                 request_id: new_request_id(),
             },
             WEB_REFERER,
-            "Kuwo public playback",
             force_refresh,
+            u8::from(force_refresh),
         )
         .await
     }
@@ -1039,10 +1142,11 @@ impl KuwoClient {
         page: u32,
         page_size: u32,
         force_refresh: bool,
+        retry_count: u8,
     ) -> Result<KuwoSignedResponse> {
         let referer = format!("https://www.kuwo.cn/playlist_detail/{playlist_id}");
         self.signed_get(
-            PLAYLIST_ENDPOINT,
+            KuwoSignedEndpoint::Playlist,
             &KuwoPlaylistQuery {
                 pid: playlist_id,
                 pn: page,
@@ -1053,47 +1157,76 @@ impl KuwoClient {
                 from: "",
             },
             &referer,
-            "Kuwo public playlist",
             force_refresh,
+            retry_count,
         )
         .await
     }
 
     async fn signed_get<Q>(
         &self,
-        endpoint: &'static str,
+        endpoint: KuwoSignedEndpoint,
         query: &Q,
         referer: &str,
-        operation: &'static str,
         force_refresh: bool,
+        retry_count: u8,
     ) -> Result<KuwoSignedResponse>
     where
         Q: Serialize + ?Sized,
     {
         let session = self.web_session(force_refresh).await?;
         let secret = new_web_secret(&session.cookie_value)?;
-        let response = self
-            .http
-            .get(endpoint)
-            .header(ACCEPT, "application/json")
-            .header(REFERER, referer)
-            .header(
-                COOKIE,
-                format!("{WEB_SESSION_COOKIE}={}", session.cookie_value),
-            )
-            .header("Secret", secret)
-            .query(query)
-            .send()
-            .await
-            .map_err(kuwo_network_error)?;
-        if matches!(
-            response.status(),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
-            return Ok(KuwoSignedResponse::SessionRejected);
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint.url())
+                .header(ACCEPT, "application/json")
+                .header(REFERER, referer)
+                .header(
+                    COOKIE,
+                    format!("{WEB_SESSION_COOKIE}={}", session.cookie_value),
+                )
+                .header("Secret", secret)
+                .query(query)
+                .send()
+                .await
+                .map_err(kuwo_network_error)?;
+            http_status = Some(response.status());
+            if matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ) {
+                return Ok(KuwoSignedResponse::SessionRejected);
+            }
+            let bytes = read_bounded_response(response, endpoint.parse_operation()).await?;
+            Ok(KuwoSignedResponse::Body(bytes))
         }
-        let bytes = read_bounded_response(response, operation).await?;
-        Ok(KuwoSignedResponse::Body(bytes))
+        .await;
+        let (business_class, upstream_outcome) = match &outcome {
+            Ok(KuwoSignedResponse::Body(_)) => (
+                UpstreamBusinessClass::NotInspected,
+                UpstreamOutcome::Success,
+            ),
+            Ok(KuwoSignedResponse::SessionRejected) => (
+                UpstreamBusinessClass::AllowedError,
+                UpstreamOutcome::Success,
+            ),
+            Err(error) => kuwo_upstream_classification(error),
+        };
+        self.emit_upstream_request(
+            endpoint.log_operation(),
+            "www.kuwo.cn",
+            endpoint.path(),
+            http_status,
+            started,
+            retry_count,
+            retry_count > 0,
+            business_class,
+            upstream_outcome,
+        );
+        outcome
     }
 
     async fn web_session(&self, force_refresh: bool) -> Result<KuwoWebSession> {
@@ -1104,23 +1237,129 @@ impl KuwoClient {
         {
             return Ok(session.clone());
         }
-        let response = self
-            .http
-            .get(HOME_ENDPOINT)
-            .header(ACCEPT, "text/html,application/xhtml+xml")
-            .send()
-            .await
-            .map_err(kuwo_network_error)?;
-        let headers = response.headers().clone();
-        let _body = read_bounded_response(response, "Kuwo web session").await?;
-        let cookie_value = extract_web_session_cookie(&headers)?;
-        let session = KuwoWebSession {
-            cookie_value,
-            refresh_after: Instant::now() + WEB_SESSION_TTL,
-        };
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(HOME_ENDPOINT)
+                .header(ACCEPT, "text/html,application/xhtml+xml")
+                .send()
+                .await
+                .map_err(kuwo_network_error)?;
+            http_status = Some(response.status());
+            let headers = response.headers().clone();
+            let _body = read_bounded_response(response, "Kuwo web session").await?;
+            let cookie_value = extract_web_session_cookie(&headers)?;
+            Ok(KuwoWebSession {
+                cookie_value,
+                refresh_after: Instant::now() + WEB_SESSION_TTL,
+            })
+        }
+        .await;
+        self.log_upstream_request(
+            "web_session",
+            "www.kuwo.cn",
+            "/",
+            http_status,
+            started,
+            u8::from(force_refresh),
+            force_refresh,
+            &outcome,
+        );
+        let session = outcome?;
         *current = Some(session.clone());
         Ok(session)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        retry_count: u8,
+        fallback: bool,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, upstream_outcome) = match outcome {
+            Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+            Err(error) => kuwo_upstream_classification(error),
+        };
+        self.emit_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            retry_count,
+            fallback,
+            business_class,
+            upstream_outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_upstream_request(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        retry_count: u8,
+        fallback: bool,
+        business_class: UpstreamBusinessClass,
+        outcome: UpstreamOutcome,
+    ) {
+        UpstreamRequestSummary {
+            provider: Platform::Kuwo,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count,
+            proxy: self.proxy_configured,
+            fallback,
+            outcome,
+        }
+        .emit();
+    }
+}
+
+fn kuwo_upstream_classification(
+    error: &TuneWeaveError,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    let business_class = if error
+        .details
+        .get("platform_code")
+        .and_then(serde_json::Value::as_i64)
+        .is_some()
+        || matches!(
+            error.code,
+            ErrorCode::AuthenticationRequired
+                | ErrorCode::PermissionDenied
+                | ErrorCode::ResourceNotFound
+                | ErrorCode::Conflict
+                | ErrorCode::RateLimited
+                | ErrorCode::MatchRejected
+        ) {
+        UpstreamBusinessClass::RejectedError
+    } else {
+        UpstreamBusinessClass::Unavailable
+    };
+    (
+        business_class,
+        UpstreamOutcome::Failure {
+            code: error.code,
+            retryable: error.retryable,
+        },
+    )
 }
 
 fn build_word_lyric_url(music_id: &str) -> Result<Url> {
@@ -2350,6 +2589,36 @@ fn kuwo_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_summary_separates_business_and_transport_failures() {
+        let denied = TuneWeaveError::new(ErrorCode::PermissionDenied, "sensitive platform text")
+            .with_platform(Platform::Kuwo);
+        assert_eq!(
+            kuwo_upstream_classification(&denied),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::PermissionDenied,
+                    retryable: false
+                }
+            )
+        );
+
+        let timeout = TuneWeaveError::new(ErrorCode::UpstreamTimeout, "sensitive transport text")
+            .with_platform(Platform::Kuwo)
+            .retryable(true);
+        assert_eq!(
+            kuwo_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true
+                }
+            )
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const SEARCH_RESPONSE: &str = r#"{
