@@ -7,6 +7,7 @@ mod credential_store;
 mod error;
 mod matcher;
 mod model;
+mod observability;
 mod platform;
 mod provider;
 mod registry;
@@ -128,6 +129,7 @@ pub use model::{
     VideoSubtitleRequest, VideoSubtitleStyle, VideoTaxonomyKind, VideoTaxonomyRequest,
     VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
+pub use observability::{UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary};
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
 pub use registry::ProviderRegistry;

@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha1::{Digest, Sha1};
 use tokio::sync::Mutex as AsyncMutex;
-use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{
+    AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError, UpstreamBusinessClass,
+    UpstreamOutcome, UpstreamRequestSummary,
+};
 
 use crate::{
     device::{DeviceStore, QqDevice, unix_seconds_now},
@@ -586,23 +589,38 @@ impl QqClient {
             .with_platform(Platform::Qq)
         })?;
         endpoint.query_pairs_mut().append_pair("key", keyword);
-        let response = self
-            .http
-            .get(endpoint)
-            .send()
-            .await
-            .map_err(network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .send()
+                .await
+                .map_err(network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(http_error(status));
+            }
+            response.json().await.map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    format!("QQ quick search returned invalid JSON: {error}"),
+                )
+                .with_platform(Platform::Qq)
+            })
         }
-        response.json().await.map_err(|error| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("QQ quick search returned invalid JSON: {error}"),
-            )
-            .with_platform(Platform::Qq)
-        })
+        .await;
+        self.log_simple_upstream_request(
+            "quick_search",
+            "c.y.qq.com",
+            "/splcloud/fcgi-bin/smartbox_new.fcg",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn ensure_qimei(&self) -> Result<()> {
@@ -830,65 +848,52 @@ impl QqClient {
         started: Instant,
         outcome: &Result<Vec<QqApiResponse>>,
     ) {
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let http_status = http_status.map_or(0, |status| status.as_u16());
-        let http_completed = http_status != 0;
-        let (business_class, final_class) = qq_upstream_classification(outcome);
-        if let Err(error) = outcome {
-            tracing::error!(
-                provider = "qq",
-                operation,
-                upstream_host = "u.y.qq.com",
-                endpoint,
-                http_status,
-                http_completed,
-                business_class,
-                duration_ms,
-                request_count,
-                retry_count = 0_u8,
-                proxy = self.proxy_configured,
-                fallback = false,
-                final_class,
-                retryable = error.retryable,
-                "QQ upstream request completed"
-            );
-        } else if business_class == "business_error_allowed" {
-            tracing::warn!(
-                provider = "qq",
-                operation,
-                upstream_host = "u.y.qq.com",
-                endpoint,
-                http_status,
-                http_completed,
-                business_class,
-                duration_ms,
-                request_count,
-                retry_count = 0_u8,
-                proxy = self.proxy_configured,
-                fallback = false,
-                final_class,
-                retryable = false,
-                "QQ upstream request completed"
-            );
-        } else {
-            tracing::info!(
-                provider = "qq",
-                operation,
-                upstream_host = "u.y.qq.com",
-                endpoint,
-                http_status,
-                http_completed,
-                business_class,
-                duration_ms,
-                request_count,
-                retry_count = 0_u8,
-                proxy = self.proxy_configured,
-                fallback = false,
-                final_class,
-                retryable = false,
-                "QQ upstream request completed"
-            );
+        let (business_class, outcome) = qq_upstream_classification(outcome);
+        UpstreamRequestSummary {
+            provider: Platform::Qq,
+            operation,
+            upstream_host: "u.y.qq.com",
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: Some(request_count),
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome,
         }
+        .emit();
+    }
+
+    fn log_simple_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, outcome) = match outcome {
+            Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+            Err(error) => qq_upstream_error_classification(error),
+        };
+        UpstreamRequestSummary {
+            provider: Platform::Qq,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome,
+        }
+        .emit();
     }
 
     fn lock_device(&self) -> Result<MutexGuard<'_, DeviceStore>> {
@@ -1157,27 +1162,43 @@ fn response_has_anonymous_session_rejection(response: &Value) -> bool {
 
 fn qq_upstream_classification(
     outcome: &Result<Vec<QqApiResponse>>,
-) -> (&'static str, &'static str) {
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
     match outcome {
         Ok(responses)
             if responses
                 .iter()
                 .any(|response| response.raw.get("code").and_then(platform_code) != Some(0)) =>
         {
-            ("business_error_allowed", "success")
+            (
+                UpstreamBusinessClass::AllowedError,
+                UpstreamOutcome::Success,
+            )
         }
-        Ok(_) => ("success", "success"),
-        Err(error)
-            if error
-                .details
-                .get("platform_code")
-                .and_then(platform_code)
-                .is_some() =>
-        {
-            ("business_error", error.code.as_str())
-        }
-        Err(error) => ("unavailable", error.code.as_str()),
+        Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+        Err(error) => qq_upstream_error_classification(error),
     }
+}
+
+fn qq_upstream_error_classification(
+    error: &TuneWeaveError,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    let business_class = if error
+        .details
+        .get("platform_code")
+        .and_then(platform_code)
+        .is_some()
+    {
+        UpstreamBusinessClass::RejectedError
+    } else {
+        UpstreamBusinessClass::Unavailable
+    };
+    (
+        business_class,
+        UpstreamOutcome::Failure {
+            code: error.code,
+            retryable: error.retryable,
+        },
+    )
 }
 
 fn is_anonymous_session_rejection(error: &TuneWeaveError) -> bool {
@@ -1431,7 +1452,10 @@ mod tests {
             data: json!({"secret": "not inspected"}),
             raw: json!({"code": 0, "message": "not logged"}),
         }]);
-        assert_eq!(qq_upstream_classification(&success), ("success", "success"));
+        assert_eq!(
+            qq_upstream_classification(&success),
+            (UpstreamBusinessClass::Success, UpstreamOutcome::Success)
+        );
 
         let allowed = Ok(vec![QqApiResponse {
             data: json!({}),
@@ -1439,7 +1463,10 @@ mod tests {
         }]);
         assert_eq!(
             qq_upstream_classification(&allowed),
-            ("business_error_allowed", "success")
+            (
+                UpstreamBusinessClass::AllowedError,
+                UpstreamOutcome::Success
+            )
         );
 
         let business_error = Err(TuneWeaveError::new(
@@ -1450,7 +1477,13 @@ mod tests {
         .with_details(json!({"platform_code": 2001})));
         assert_eq!(
             qq_upstream_classification(&business_error),
-            ("business_error", "rate_limited")
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::RateLimited,
+                    retryable: false
+                }
+            )
         );
 
         let timeout = Err(TuneWeaveError::new(
@@ -1460,7 +1493,13 @@ mod tests {
         .with_platform(Platform::Qq));
         assert_eq!(
             qq_upstream_classification(&timeout),
-            ("unavailable", "upstream_timeout")
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: false
+                }
+            )
         );
     }
 
