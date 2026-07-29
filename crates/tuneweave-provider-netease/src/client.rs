@@ -771,32 +771,45 @@ impl NeteaseClient {
                 .with_platform(Platform::Netease)
         })?;
 
-        let initiate = self
+        let initiate_request = self
             .http
             .post(format!("{object_url}?uploads"))
             .timeout(Duration::from_secs(300))
             .header("x-nos-token", token.clone())
-            .header("X-Nos-Meta-Content-Type", content_type.clone())
-            .send()
-            .await
-            .map_err(request_error)?;
-        ensure_voice_upload_http_success(initiate.status(), "multipart initiation")?;
-        let initiate_xml = initiate.text().await.map_err(request_error)?;
-        let upload_id = xml_element_text(&initiate_xml, "UploadId").ok_or_else(|| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                "NetEase voice upload initiation did not return an upload id",
-            )
-            .with_platform(Platform::Netease)
-        })?;
+            .header("X-Nos-Meta-Content-Type", content_type.clone());
+        let started = Instant::now();
+        let mut http_status = None;
+        let initiate_outcome = async {
+            let response = initiate_request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            ensure_voice_upload_http_success(response.status(), "multipart initiation")?;
+            let initiate_xml = response.text().await.map_err(request_error)?;
+            xml_element_text(&initiate_xml, "UploadId").ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase voice upload initiation did not return an upload id",
+                )
+                .with_platform(Platform::Netease)
+            })
+        }
+        .await;
+        self.log_validated_upstream_request(
+            "voice_upload_initiate",
+            "ymusic.nos-hz.163yun.com",
+            "/{object_key}",
+            http_status,
+            started,
+            &initiate_outcome,
+        );
+        let upload_id = initiate_outcome?;
 
         let mut etags = Vec::new();
         for (index, chunk) in data.chunks(VOICE_UPLOAD_PART_BYTES).enumerate() {
             let part_number = index + 1;
-            let mut part_url = Url::parse(&object_url).map_err(|error| {
+            let mut part_url = Url::parse(&object_url).map_err(|_| {
                 TuneWeaveError::new(
                     ErrorCode::InternalError,
-                    format!("invalid NetEase voice upload URL: {error}"),
+                    "failed to construct the NetEase voice upload URL",
                 )
                 .with_platform(Platform::Netease)
             })?;
@@ -804,58 +817,84 @@ impl NeteaseClient {
                 .query_pairs_mut()
                 .append_pair("partNumber", &part_number.to_string())
                 .append_pair("uploadId", &upload_id);
-            let response = self
+            let request = self
                 .http
                 .put(part_url)
                 .timeout(Duration::from_secs(300))
                 .header("x-nos-token", token.clone())
                 .header(header::CONTENT_TYPE, content_type.clone())
                 .header(header::CONTENT_LENGTH, chunk.len())
-                .body(chunk.to_vec())
-                .send()
-                .await
-                .map_err(request_error)?;
-            ensure_voice_upload_http_success(response.status(), "multipart part upload")?;
-            let etag = response
-                .headers()
-                .get(header::ETAG)
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    TuneWeaveError::new(
-                        ErrorCode::UpstreamError,
-                        "NetEase voice upload part did not return an ETag",
-                    )
-                    .with_platform(Platform::Netease)
-                })?;
-            etags.push(etag.to_owned());
+                .body(chunk.to_vec());
+            let started = Instant::now();
+            let mut http_status = None;
+            let part_outcome = async {
+                let response = request.send().await.map_err(request_error)?;
+                http_status = Some(response.status());
+                ensure_voice_upload_http_success(response.status(), "multipart part upload")?;
+                response
+                    .headers()
+                    .get(header::ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        TuneWeaveError::new(
+                            ErrorCode::UpstreamError,
+                            "NetEase voice upload part did not return an ETag",
+                        )
+                        .with_platform(Platform::Netease)
+                    })
+            }
+            .await;
+            self.log_validated_upstream_request(
+                "voice_upload_part",
+                "ymusic.nos-hz.163yun.com",
+                "/{object_key}",
+                http_status,
+                started,
+                &part_outcome,
+            );
+            etags.push(part_outcome?);
         }
 
         let completion_xml = voice_upload_completion_xml(&etags);
-        let mut completion_url = Url::parse(&object_url).map_err(|error| {
+        let mut completion_url = Url::parse(&object_url).map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("invalid NetEase voice upload completion URL: {error}"),
+                "failed to construct the NetEase voice upload completion URL",
             )
             .with_platform(Platform::Netease)
         })?;
         completion_url
             .query_pairs_mut()
             .append_pair("uploadId", &upload_id);
-        let completion = self
+        let completion_request = self
             .http
             .post(completion_url)
             .timeout(Duration::from_secs(300))
             .header("x-nos-token", token)
             .header(header::CONTENT_TYPE, "text/plain;charset=UTF-8")
             .header("X-Nos-Meta-Content-Type", content_type)
-            .body(completion_xml)
-            .send()
-            .await
-            .map_err(request_error)?;
-        ensure_voice_upload_http_success(completion.status(), "multipart completion")?;
-        let completion_body = completion.text().await.map_err(request_error)?;
+            .body(completion_xml);
+        let started = Instant::now();
+        let mut http_status = None;
+        let completion_outcome = async {
+            let response = completion_request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            ensure_voice_upload_http_success(response.status(), "multipart completion")?;
+            response.text().await.map_err(request_error)
+        }
+        .await;
+        self.log_validated_upstream_request(
+            "voice_upload_complete",
+            "ymusic.nos-hz.163yun.com",
+            "/{object_key}",
+            http_status,
+            started,
+            &completion_outcome,
+        );
+        let completion_body = completion_outcome?;
         Ok(json!({
             "part_count": etags.len(),
             "part_bytes": VOICE_UPLOAD_PART_BYTES,
