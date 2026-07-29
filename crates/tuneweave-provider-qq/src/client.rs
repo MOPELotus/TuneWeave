@@ -216,7 +216,9 @@ pub struct QqClient {
 
 impl QqClient {
     pub fn new(config: QqConfig) -> Result<Self> {
-        let mut builder = Client::builder().user_agent(ANDROID_USER_AGENT);
+        let mut builder = Client::builder()
+            .user_agent(ANDROID_USER_AGENT)
+            .redirect(Policy::none());
         let mut login_builder = Client::builder()
             .user_agent(WEB_USER_AGENT)
             .redirect(Policy::none());
@@ -1273,7 +1275,12 @@ fn network_error(error: reqwest::Error) -> TuneWeaveError {
     } else {
         ErrorCode::UpstreamError
     };
-    TuneWeaveError::new(code, format!("QQ API request failed: {error}"))
+    let message = if error.is_timeout() {
+        "QQ API request timed out"
+    } else {
+        "QQ API request failed"
+    };
+    TuneWeaveError::new(code, message)
         .with_platform(Platform::Qq)
         .retryable(true)
 }
