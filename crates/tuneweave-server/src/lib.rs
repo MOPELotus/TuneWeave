@@ -408,6 +408,7 @@ impl AppState {
                 Platform::Netease,
                 Platform::Qq,
                 Platform::Kugou,
+                Platform::Kuwo,
                 Platform::Migu,
             ],
         )
@@ -22551,6 +22552,111 @@ mod tests {
         }
     }
 
+    struct TestKuwoProvider;
+
+    #[async_trait]
+    impl MusicProvider for TestKuwoProvider {
+        fn platform(&self) -> Platform {
+            Platform::Kuwo
+        }
+
+        fn name(&self) -> &'static str {
+            "Test Kuwo Music"
+        }
+
+        fn capabilities(&self) -> BTreeSet<Capability> {
+            BTreeSet::from([
+                Capability::AudioDownload,
+                Capability::AudioStream,
+                Capability::SearchTracks,
+                Capability::TrackDetail,
+            ])
+        }
+
+        async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
+            Ok(Page {
+                items: vec![test_kuwo_track("215257")],
+                pagination: PageMeta {
+                    limit: query.limit,
+                    offset: query.offset,
+                    total: Some(1),
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([("query".to_owned(), json!(query.query))]),
+                },
+            })
+        }
+
+        async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+            if account.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "test Kuwo public track does not accept an account",
+                ));
+            }
+            Ok(test_kuwo_track(id))
+        }
+
+        async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+            Ok(MediaStream {
+                url: format!("https://er-sycdn.kuwo.cn/test/audio/{}.mp3", track.id),
+                backup_urls: Vec::new(),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: Some("mp3".to_owned()),
+                codec: Some("mp3".to_owned()),
+                bitrate: Some(128_000),
+                size: None,
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: Quality::Standard,
+                trial: None,
+                origin_track: None,
+                resolved_track: track.resource_ref.clone(),
+                resolved_platform: Platform::Kuwo,
+                match_score: None,
+                attempts: Vec::new(),
+            })
+        }
+
+        async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+            Ok(MediaDownload {
+                track_ref: track.resource_ref.clone(),
+                platform: Platform::Kuwo,
+                available: true,
+                url: Some(format!(
+                    "https://er-sycdn.kuwo.cn/test/download/{}.mp3",
+                    track.id
+                )),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: Some("mp3".to_owned()),
+                codec: Some("mp3".to_owned()),
+                bitrate: Some(128_000),
+                size: None,
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: Quality::Standard,
+                platform_code: Some(200),
+                fee: None,
+                message: None,
+                extensions: Extensions::new(),
+            })
+        }
+    }
+
+    fn test_kuwo_track(id: &str) -> Track {
+        let mut track = Track::new(
+            ResourceRef::new(Platform::Kuwo, id).expect("valid Kuwo track reference"),
+            "反方向的钟",
+        );
+        track.artists.push(ArtistSummary {
+            resource_ref: None,
+            name: "周杰伦".to_owned(),
+        });
+        track.duration_ms = Some(258_000);
+        track
+    }
+
     fn test_migu_track(id: &str) -> Track {
         let mut track = Track::new(
             ResourceRef::new(Platform::Migu, id).expect("valid Migu track reference"),
@@ -23003,6 +23109,17 @@ mod tests {
         registry
             .register(TestMiguProvider)
             .expect("register Migu provider");
+        build_router(AppState::new(registry, Platform::Netease))
+    }
+
+    fn test_app_with_kuwo() -> Router {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(TestProvider)
+            .expect("register NetEase provider");
+        registry
+            .register(TestKuwoProvider)
+            .expect("register Kuwo provider");
         build_router(AppState::new(registry, Platform::Netease))
     }
 
@@ -33725,6 +33842,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kuwo_participates_in_resolver_uni_and_media_redirects() {
+        let defaults = AppState::new(ProviderRegistry::new(), Platform::Netease)
+            .resolver
+            .platform_sequence(Platform::Netease, &ResolveRequest::default());
+        assert_eq!(
+            defaults,
+            vec![
+                Platform::Netease,
+                Platform::Qq,
+                Platform::Kugou,
+                Platform::Kuwo,
+                Platform::Migu
+            ]
+        );
+
+        let app = test_app_with_kuwo();
+        let (status, resolved) = json_response_from(
+            app.clone(),
+            "/v1/tracks/netease:185809/stream?quality=lossless&playback_platform=kuwo&fallback=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["data"]["origin_track"], "netease:185809");
+        assert_eq!(resolved["data"]["resolved_platform"], "kuwo");
+        assert_eq!(resolved["data"]["resolved_track"], "kuwo:215257");
+        assert_eq!(resolved["data"]["match_score"], 1.0);
+        assert_eq!(resolved["data"]["requested_quality"], "lossless");
+        assert_eq!(resolved["data"]["actual_quality"], "standard");
+        assert_eq!(
+            resolved["data"]["attempts"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(resolved["data"]["attempts"][0]["platform"], "kuwo");
+        assert_eq!(resolved["data"]["attempts"][0]["status"], "success");
+
+        let (status, unblocked) = json_response_from(
+            app.clone(),
+            "/v1/tracks/netease:185809/stream?unblock=true&source=kuwo",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unblocked}");
+        assert_eq!(unblocked["data"]["resolved_platform"], "kuwo");
+        assert_eq!(unblocked["data"]["attempts"][0]["platform"], "kuwo");
+
+        let (status, materialized) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/materialize/items",
+            Some(json!({
+                "items": [{
+                    "ref": "kuwo:41378936",
+                    "kind": "track"
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{materialized}");
+        let item = materialized["data"]["items"][0].clone();
+        let (status, uni_stream) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/items/stream",
+            Some(json!({
+                "item": item,
+                "quality": "hires",
+                "fallback": false
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uni_stream}");
+        assert_eq!(uni_stream["data"]["source_ref"], "kuwo:41378936");
+        assert_eq!(uni_stream["data"]["stream"]["resolved_platform"], "kuwo");
+        assert_eq!(uni_stream["data"]["stream"]["actual_quality"], "standard");
+        assert_eq!(uni_stream["data"]["extensions"]["client_hosted"], true);
+        assert_eq!(uni_stream["data"]["extensions"]["persisted"], false);
+
+        for (path, expected_location) in [
+            (
+                "/v1/tracks/kuwo:41378936/stream/redirect?quality=hires&fallback=false",
+                "https://er-sycdn.kuwo.cn/test/audio/41378936.mp3",
+            ),
+            (
+                "/v1/tracks/kuwo:41378936/download/redirect?quality=hires",
+                "https://er-sycdn.kuwo.cn/test/download/41378936.mp3",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("build Kuwo redirect request"),
+                )
+                .await
+                .expect("Kuwo redirect request succeeds");
+            assert_eq!(response.status(), StatusCode::FOUND, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_location),
+                "{path}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("private, no-store"),
+                "{path}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::REFERRER_POLICY)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-referrer"),
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn migu_participates_in_resolver_uni_and_media_redirects() {
         let defaults = AppState::new(ProviderRegistry::new(), Platform::Netease)
             .resolver
@@ -33735,6 +33977,7 @@ mod tests {
                 Platform::Netease,
                 Platform::Qq,
                 Platform::Kugou,
+                Platform::Kuwo,
                 Platform::Migu
             ]
         );
