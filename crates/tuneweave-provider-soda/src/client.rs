@@ -894,15 +894,40 @@ impl SodaClient {
             ));
         }
         let mut last_error = None;
-        for url in std::iter::once(&media.main_url).chain(&media.backup_urls) {
-            let response = match self.http.get(url).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(soda_network_error(error));
-                    continue;
-                }
+        for (index, url) in std::iter::once(&media.main_url)
+            .chain(&media.backup_urls)
+            .enumerate()
+        {
+            let started = Instant::now();
+            let mut http_status = None;
+            let outcome = async {
+                let response = self
+                    .http
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(soda_network_error)?;
+                http_status = Some(response.status());
+                read_bounded_media_response(response, media.spec.size).await
+            }
+            .await;
+            let retry_count = u8::try_from(index).unwrap_or(u8::MAX);
+            let (business_class, upstream_outcome) = match &outcome {
+                Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+                Err(error) => soda_upstream_classification(error),
             };
-            match read_bounded_media_response(response, media.spec.size).await {
+            self.emit_upstream_request_with_retry(
+                "authorized_media_download",
+                "*-luna.douyinvod.com",
+                "/{authorized_media_path}",
+                http_status,
+                started,
+                retry_count,
+                index > 0,
+                business_class,
+                upstream_outcome,
+            );
+            match outcome {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => last_error = Some(error),
             }
@@ -917,24 +942,42 @@ impl SodaClient {
             SodaTrackIdentityInput::Direct(identity) => return Ok(identity),
             SodaTrackIdentityInput::ShortLink(url) => url,
         };
-        let response = self
-            .http
-            .head(short_url)
-            .send()
-            .await
-            .map_err(soda_network_error)?;
-        if !response.status().is_redirection() {
-            return Err(soda_upstream_error(
-                "Soda short link did not return a redirect",
-            ));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .head(short_url)
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            if !response.status().is_redirection() {
+                return Err(soda_upstream_error(
+                    "Soda short link did not return a redirect",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    soda_upstream_error("Soda short link omitted its redirect location")
+                })?;
+            parse_short_redirect_location(location).map_err(|_| {
+                soda_upstream_error("Soda short link returned an untrusted destination")
+            })
         }
-        let location = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| soda_upstream_error("Soda short link omitted its redirect location"))?;
-        parse_short_redirect_location(location)
-            .map_err(|_| soda_upstream_error("Soda short link returned an untrusted destination"))
+        .await;
+        self.log_upstream_request(
+            "short_link_resolve",
+            "qishui.douyin.com",
+            "/s/{short_code}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -973,6 +1016,32 @@ impl SodaClient {
         business_class: UpstreamBusinessClass,
         outcome: UpstreamOutcome,
     ) {
+        self.emit_upstream_request_with_retry(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            0,
+            false,
+            business_class,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_upstream_request_with_retry(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        retry_count: u8,
+        fallback: bool,
+        business_class: UpstreamBusinessClass,
+        outcome: UpstreamOutcome,
+    ) {
         UpstreamRequestSummary {
             provider: Platform::Soda,
             operation,
@@ -982,9 +1051,9 @@ impl SodaClient {
             business_class,
             duration: started.elapsed(),
             batch_size: None,
-            retry_count: 0,
+            retry_count,
             proxy: self.proxy_configured,
-            fallback: false,
+            fallback,
             outcome,
         }
         .emit();
