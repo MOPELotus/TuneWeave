@@ -1471,6 +1471,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 咪咕公开音源协议不需要账户、设备注册或用户签名。歌曲搜索、歌单详情、歌单歌曲、资源详情、实时权益和 H5 播放六个 API 入口均固定为官方 HTTPS 域名和标准端口；H5 二进制信封使用平台公开客户端协议常量解密响应，不是用户凭据，也不能由请求覆盖。Provider 禁用重定向，连接和整次请求分别限制为 10 秒与 20 秒；普通 API 最多读取 8 MiB，歌词最多 4 MiB，声明长度与分块累计长度都会独立执行上限。429 映射为可重试 `rate_limited`，5xx 为可重试上游错误，其余 4xx 不重试；业务码、结构漂移、身份错位和权限不足保持不同失败语义。请求不能提交目标 URL、Cookie、任意头或请求级代理，部署方只有 `TUNEWEAVE_MIGU_PROXY` 可配置服务端代理。全新数据目录下的全部真实网络用例已通过，免费歌曲实际从受信 CDN 读取 1 KiB 媒体，会员歌曲保持 65–125 秒试听，非法传输覆盖与非法歌单身份均在联网或媒体跳转前返回 400。
 
+酷我公开歌曲搜索使用 `GET /v1/search?platform=kuwo&kind=track&q=...`。旧参考项目的 `/api/www/search/searchMusicBykeyWord` 已被平台拒绝，Provider 固定访问当前官网实际使用的 HTTPS `/search/searchMusicBykeyWord`，不接受账户、Cookie、目标 URL、请求头或请求级代理；部署方只能通过 `TUNEWEAVE_KUWO_PROXY` 配置服务端正向代理。统一身份要求上游 `MUSIC_<rid>` 中的 `rid` 为规范正整数，并返回 `kuwo:<rid>`；歌手、专辑、别名、时长、MV、目录权益和媒体规格以强类型结构保存，不携带旧响应中的不可信媒体标签。已确认的 `s/h/p/ff/hr/dtsx` 分别映射低、标准、高品、无损、Hi-Res 与环绕音质，语义尚未验证的 `zply/zpga*` 等级只保留平台原码。目录在线和付费标志不足以证明当前匿名请求可播，因此只有明确离线时才设置 `playable=false`。上游页码从 0 开始且已真实接受固定 100 项页宽；统一任意 offset 和 `limit=1..100` 最多读取两个连续页并复核总数。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

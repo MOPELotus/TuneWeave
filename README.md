@@ -38,6 +38,7 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_NETEASE_REAL_IP`：可选的服务端固定 IPv4 请求身份，同时写入网易云协议请求的 `X-Real-IP` 与 `X-Forwarded-For`。
 - `TUNEWEAVE_NETEASE_RANDOM_CN_IP`：设为 `true/yes/on/1` 时，启动网易云 provider 时生成一个中国 IPv4 请求身份，并像参考实现的 `global.cnIp` 一样由该实例的所有协议请求复用；短信验证码发送、校验与登录还会在同一 10 分钟事务窗口内固定匿名设备会话；不能与固定真实 IP 同时启用。
 - `TUNEWEAVE_QQ_PROXY`：可选的 QQ 音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。QQ Android 设备、QIMEI 和匿名会话自动原子保存到私有数据目录的 `qq-device.json`，服务重启后复用。
+- `TUNEWEAVE_KUWO_PROXY`：可选的酷我音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 - `TUNEWEAVE_BILIBILI_PROXY`：可选的 B 站服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 - `TUNEWEAVE_KUGOU_PROXY`：可选的酷狗服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。酷狗匿名 GUID、派生 MID 和移动端注册 `dfid` 自动原子保存到私有数据目录的 `kugou-device.json`，服务重启后复用。
 - `TUNEWEAVE_MIGU_PROXY`：可选的咪咕音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。

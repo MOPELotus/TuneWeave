@@ -16,6 +16,7 @@ use tuneweave_core::{
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
 use tuneweave_provider_kugou::{KugouConfig, KugouProvider};
+use tuneweave_provider_kuwo::{KuwoConfig, KuwoProvider};
 use tuneweave_provider_migu::{MiguConfig, MiguProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
@@ -79,6 +80,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     })?)?;
     registry.register(MiguProvider::new(MiguConfig {
         proxy_url: env::var("TUNEWEAVE_MIGU_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
+    })?)?;
+    registry.register(KuwoProvider::new(KuwoConfig {
+        proxy_url: env::var("TUNEWEAVE_KUWO_PROXY")
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
     })?)?;
