@@ -2307,25 +2307,40 @@ impl BilibiliClient {
         &self,
         credential: &BilibiliCredential,
     ) -> Result<BilibiliLogoutOutcome> {
-        let response = self
-            .http
-            .post(LOGOUT_ENDPOINT)
-            .header(COOKIE, credential.cookie_header())
-            .form(&[("biliCSRF", credential.bili_jct.as_str())])
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(LOGOUT_ENDPOINT)
+                .header(COOKIE, credential.cookie_header())
+                .form(&[("biliCSRF", credential.bili_jct.as_str())])
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili logout response exceeded the size limit",
+                ));
+            }
+            parse_logout_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili logout response exceeded the size limit",
-            ));
-        }
-        parse_logout_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "logout",
+            "passport.bilibili.com",
+            "/login/exit/v2",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn search_suggestions(
@@ -3682,24 +3697,39 @@ impl BilibiliClient {
     }
 
     async fn cookie_refresh_info(&self, credential: &BilibiliCredential) -> Result<CookieInfoData> {
-        let response = self
-            .http
-            .get(COOKIE_INFO_ENDPOINT)
-            .header(COOKIE, credential.cookie_header())
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(COOKIE_INFO_ENDPOINT)
+                .header(COOKIE, credential.cookie_header())
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili cookie status response exceeded the size limit",
+                ));
+            }
+            parse_cookie_info_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili cookie status response exceeded the size limit",
-            ));
-        }
-        parse_cookie_info_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "credential_refresh_status",
+            "passport.bilibili.com",
+            "/x/passport-login/web/cookie/info",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn cookie_refresh_csrf(
@@ -3709,24 +3739,39 @@ impl BilibiliClient {
     ) -> Result<String> {
         validate_correspond_path(correspond_path)?;
         let endpoint = format!("{COOKIE_CORRESPOND_ENDPOINT}{correspond_path}");
-        let response = self
-            .http
-            .get(endpoint)
-            .header(COOKIE, credential.cookie_header())
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(COOKIE, credential.cookie_header())
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili cookie correspondence response exceeded the size limit",
+                ));
+            }
+            parse_refresh_csrf_html(&bytes)
         }
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili cookie correspondence response exceeded the size limit",
-            ));
-        }
-        parse_refresh_csrf_html(&bytes)
+        .await;
+        self.log_upstream_request(
+            "credential_refresh_csrf",
+            "www.bilibili.com",
+            "/correspond/1/{ciphertext}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn rotate_cookie(
@@ -3735,31 +3780,46 @@ impl BilibiliClient {
         refresh_csrf: &str,
     ) -> Result<BilibiliCredential> {
         validate_refresh_csrf(refresh_csrf)?;
-        let response = self
-            .http
-            .post(COOKIE_REFRESH_ENDPOINT)
-            .header(COOKIE, credential.cookie_header())
-            .form(&[
-                ("csrf", credential.bili_jct.as_str()),
-                ("refresh_csrf", refresh_csrf),
-                ("source", "main_web"),
-                ("refresh_token", credential.refresh_token.as_str()),
-            ])
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(COOKIE_REFRESH_ENDPOINT)
+                .header(COOKIE, credential.cookie_header())
+                .form(&[
+                    ("csrf", credential.bili_jct.as_str()),
+                    ("refresh_csrf", refresh_csrf),
+                    ("source", "main_web"),
+                    ("refresh_token", credential.refresh_token.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili cookie refresh response exceeded the size limit",
+                ));
+            }
+            parse_cookie_refresh_response(&bytes, &headers, credential.user_id())
         }
-        let headers = response.headers().clone();
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili cookie refresh response exceeded the size limit",
-            ));
-        }
-        parse_cookie_refresh_response(&bytes, &headers, credential.user_id())
+        .await;
+        self.log_upstream_request(
+            "credential_refresh_rotate",
+            "passport.bilibili.com",
+            "/x/passport-login/web/cookie/refresh",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn confirm_cookie_refresh(
@@ -3767,28 +3827,43 @@ impl BilibiliClient {
         credential: &BilibiliCredential,
         previous_refresh_token: &str,
     ) -> Result<()> {
-        let response = self
-            .http
-            .post(COOKIE_CONFIRM_ENDPOINT)
-            .header(COOKIE, credential.cookie_header())
-            .form(&[
-                ("csrf", credential.bili_jct.as_str()),
-                ("refresh_token", previous_refresh_token),
-            ])
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(COOKIE_CONFIRM_ENDPOINT)
+                .header(COOKIE, credential.cookie_header())
+                .form(&[
+                    ("csrf", credential.bili_jct.as_str()),
+                    ("refresh_token", previous_refresh_token),
+                ])
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili cookie confirmation response exceeded the size limit",
+                ));
+            }
+            parse_cookie_confirm_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili cookie confirmation response exceeded the size limit",
-            ));
-        }
-        parse_cookie_confirm_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "credential_refresh_confirm",
+            "passport.bilibili.com",
+            "/x/passport-login/web/confirm/refresh",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 }
 
