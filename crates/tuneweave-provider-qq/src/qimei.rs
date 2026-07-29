@@ -68,10 +68,10 @@ pub(crate) async fn request_qimei(client: &QqClient, device: &QqDevice) -> Resul
             .with_platform(Platform::Qq)
             .retryable(response.status().is_server_error()));
         }
-        let response: Value = response.json().await.map_err(|error| {
+        let response: Value = response.json().await.map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
-                format!("QQ QIMEI service returned invalid JSON: {error}"),
+                "QQ QIMEI service returned invalid JSON",
             )
             .with_platform(Platform::Qq)
         })?;

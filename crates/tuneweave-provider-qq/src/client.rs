@@ -609,10 +609,10 @@ impl QqClient {
             if !status.is_success() {
                 return Err(http_error(status));
             }
-            response.json().await.map_err(|error| {
+            response.json().await.map_err(|_| {
                 TuneWeaveError::new(
                     ErrorCode::UpstreamError,
-                    format!("QQ quick search returned invalid JSON: {error}"),
+                    "QQ quick search returned invalid JSON",
                 )
                 .with_platform(Platform::Qq)
             })
@@ -816,12 +816,9 @@ impl QqClient {
             if !status.is_success() {
                 return Err(http_error(status));
             }
-            let raw: Value = response.json().await.map_err(|error| {
-                TuneWeaveError::new(
-                    ErrorCode::UpstreamError,
-                    format!("QQ API returned invalid JSON: {error}"),
-                )
-                .with_platform(Platform::Qq)
+            let raw: Value = response.json().await.map_err(|_| {
+                TuneWeaveError::new(ErrorCode::UpstreamError, "QQ API returned invalid JSON")
+                    .with_platform(Platform::Qq)
             })?;
             parse_api_responses(&raw, requests, allow_business_errors)
         }
