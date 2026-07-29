@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::{
     ErrorCode, Extensions, Page, PageMeta, Platform, Result, TuneWeaveError, UniPlaylist,
     UniPlaylistItem, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
-    UniPlaylistItemOrderResult,
+    UniPlaylistItemOrderResult, UniPlaylistUpdateRequest,
 };
 
 const UNI_PLAYLIST_FILE_VERSION: u32 = 1;
@@ -27,6 +27,12 @@ pub trait UniPlaylistStore: Send + Sync {
     fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<UniPlaylist>>;
     fn playlists(&self, limit: u32, offset: u32) -> Result<Page<UniPlaylist>>;
+    fn update(
+        &self,
+        id: &str,
+        request: &UniPlaylistUpdateRequest,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylist>;
     fn append_items(
         &self,
         playlist_id: &str,
@@ -103,6 +109,20 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .read()
             .map_err(|_| uni_playlist_lock_error())?;
         playlist_page(&database, limit, offset)
+    }
+
+    fn update(
+        &self,
+        id: &str,
+        request: &UniPlaylistUpdateRequest,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylist> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let (playlist, _) = update_playlist_in_database(&mut database, id, request, updated_at_ms)?;
+        Ok(playlist)
     }
 
     fn append_items(
@@ -237,6 +257,26 @@ impl UniPlaylistStore for FileUniPlaylistStore {
         playlist_page(&database, limit, offset)
     }
 
+    fn update(
+        &self,
+        id: &str,
+        request: &UniPlaylistUpdateRequest,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylist> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut next = database.clone();
+        let (playlist, changed) =
+            update_playlist_in_database(&mut next, id, request, updated_at_ms)?;
+        if changed {
+            persist_database(&self.path, &next)?;
+            *database = next;
+        }
+        Ok(playlist)
+    }
+
     fn append_items(
         &self,
         playlist_id: &str,
@@ -361,6 +401,64 @@ fn playlist_page(
             extensions: Extensions::from([("sort".to_owned(), json!("created_at_desc_id_asc"))]),
         },
     })
+}
+
+fn update_playlist_in_database(
+    database: &mut UniPlaylistDatabase,
+    playlist_id: &str,
+    request: &UniPlaylistUpdateRequest,
+    updated_at_ms: u64,
+) -> Result<(UniPlaylist, bool)> {
+    validate_uni_playlist_id(playlist_id)?;
+    if request.name.is_none() && request.description.is_none() {
+        return Err(TuneWeaveError::invalid_request(
+            "at least one Uni Playlist metadata field must be provided",
+        ));
+    }
+    let name = request.name.as_deref().map(str::trim).map(str::to_owned);
+    if name
+        .as_deref()
+        .is_some_and(|name| name.is_empty() || name.len() > 200)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist name must contain at most 200 bytes",
+        ));
+    }
+    let description = request
+        .description
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_owned);
+    if description
+        .as_deref()
+        .is_some_and(|description| description.len() > 4_000)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist description cannot exceed 4000 bytes",
+        ));
+    }
+    let playlist = database
+        .playlists
+        .get_mut(playlist_id)
+        .ok_or_else(|| uni_playlist_not_found(playlist_id))?;
+    let mut changed = false;
+    if let Some(name) = name
+        && playlist.name != name
+    {
+        playlist.name = name;
+        changed = true;
+    }
+    if let Some(description) = description
+        && playlist.description != description
+    {
+        playlist.description = description;
+        changed = true;
+    }
+    if changed {
+        playlist.updated_at_ms = playlist.updated_at_ms.max(updated_at_ms);
+    }
+    validate_uni_playlist(playlist)?;
+    Ok((playlist.clone(), changed))
 }
 
 fn append_items_to_database(
@@ -1073,6 +1171,92 @@ mod tests {
     }
 
     #[test]
+    fn playlist_metadata_update_is_trimmed_validated_and_idempotent() {
+        let store = MemoryUniPlaylistStore::default();
+        let playlist = sample_playlist("pl_01abcdefghijklmnop");
+        store.create(&playlist).expect("create playlist");
+
+        let updated = store
+            .update(
+                &playlist.id,
+                &UniPlaylistUpdateRequest {
+                    name: Some("  跨平台收藏  ".to_owned()),
+                    description: Some("  来自多个平台  ".to_owned()),
+                },
+                1_753_137_600_100,
+            )
+            .expect("update playlist metadata");
+        assert_eq!(updated.name, "跨平台收藏");
+        assert_eq!(updated.description, "来自多个平台");
+        assert_eq!(updated.updated_at_ms, 1_753_137_600_100);
+        assert_eq!(updated.created_at_ms, playlist.created_at_ms);
+        assert_eq!(updated.item_count, playlist.item_count);
+
+        let unchanged = store
+            .update(
+                &playlist.id,
+                &UniPlaylistUpdateRequest {
+                    name: Some(updated.name.clone()),
+                    description: None,
+                },
+                1_753_137_600_200,
+            )
+            .expect("accept idempotent metadata update");
+        assert_eq!(unchanged.updated_at_ms, updated.updated_at_ms);
+
+        let cleared = store
+            .update(
+                &playlist.id,
+                &UniPlaylistUpdateRequest {
+                    name: None,
+                    description: Some(" \t ".to_owned()),
+                },
+                1_753_137_600_300,
+            )
+            .expect("clear description");
+        assert_eq!(cleared.description, "");
+        assert_eq!(cleared.updated_at_ms, 1_753_137_600_300);
+
+        for request in [
+            UniPlaylistUpdateRequest::default(),
+            UniPlaylistUpdateRequest {
+                name: Some(" ".to_owned()),
+                description: None,
+            },
+            UniPlaylistUpdateRequest {
+                name: None,
+                description: Some("x".repeat(4_001)),
+            },
+        ] {
+            assert_eq!(
+                store
+                    .update(&playlist.id, &request, 1_753_137_600_400)
+                    .expect_err("reject invalid metadata update")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                store.get(&playlist.id).expect("playlist remains"),
+                Some(cleared.clone())
+            );
+        }
+        assert_eq!(
+            store
+                .update(
+                    "pl_missing_abcdefghijkl",
+                    &UniPlaylistUpdateRequest {
+                        name: Some("不存在".to_owned()),
+                        description: None,
+                    },
+                    1_753_137_600_500,
+                )
+                .expect_err("reject missing playlist")
+                .code,
+            ErrorCode::ResourceNotFound
+        );
+    }
+
+    #[test]
     fn imported_playlist_and_items_are_created_as_one_validated_unit() {
         let store = MemoryUniPlaylistStore::default();
         let mut playlist = sample_playlist("pl_01abcdefghijklmnop");
@@ -1274,6 +1458,16 @@ mod tests {
         store
             .remove_item(&playlist.id, &item.id, 1_753_137_600_500)
             .expect("persist deletion");
+        store
+            .update(
+                &playlist.id,
+                &UniPlaylistUpdateRequest {
+                    name: Some("  Reloaded favorites  ".to_owned()),
+                    description: Some(String::new()),
+                },
+                1_753_137_600_600,
+            )
+            .expect("persist metadata update");
         assert!(path.is_file());
         assert_eq!(
             fs::read_dir(&directory.0)
@@ -1285,14 +1479,14 @@ mod tests {
         );
 
         let reopened = FileUniPlaylistStore::open(&path).expect("reopen file store");
-        assert_eq!(
-            reopened
-                .get(&playlist.id)
-                .expect("reload playlist")
-                .expect("stored playlist")
-                .item_count,
-            2
-        );
+        let reloaded = reopened
+            .get(&playlist.id)
+            .expect("reload playlist")
+            .expect("stored playlist");
+        assert_eq!(reloaded.item_count, 2);
+        assert_eq!(reloaded.name, "Reloaded favorites");
+        assert_eq!(reloaded.description, "");
+        assert_eq!(reloaded.updated_at_ms, 1_753_137_600_600);
         assert_eq!(
             reopened
                 .items(&playlist.id, 25, 0)

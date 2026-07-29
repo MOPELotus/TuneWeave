@@ -4269,6 +4269,12 @@ pub struct UniPlaylistCreateRequest {
     pub description: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistUpdateRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistImportSourceRequest {
     #[serde(rename = "ref")]
