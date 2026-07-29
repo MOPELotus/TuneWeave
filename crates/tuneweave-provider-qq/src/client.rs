@@ -875,8 +875,30 @@ impl QqClient {
         started: Instant,
         outcome: &Result<T>,
     ) {
+        self.log_typed_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            UpstreamBusinessClass::Success,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_typed_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        success_class: UpstreamBusinessClass,
+        outcome: &Result<T>,
+    ) {
         let (business_class, outcome) = match outcome {
-            Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+            Ok(_) => (success_class, UpstreamOutcome::Success),
             Err(error) => qq_upstream_error_classification(error),
         };
         UpstreamRequestSummary {

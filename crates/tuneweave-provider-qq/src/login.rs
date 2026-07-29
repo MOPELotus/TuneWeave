@@ -23,7 +23,7 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
-use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError, UpstreamBusinessClass};
 
 use crate::client::{QqApiRequest, QqClient, QqCredential};
 
@@ -67,6 +67,22 @@ pub(crate) enum QqQrPollOutcome {
     Confirmed(Box<QqCredential>),
     Expired,
     Failed(String),
+}
+
+enum ParsedQqQrPoll {
+    Waiting,
+    Scanned,
+    Confirmed { uin: String, sigx: String },
+    Expired,
+    Failed,
+}
+
+enum ParsedWechatQrPoll {
+    Waiting,
+    Scanned,
+    Confirmed { code: String },
+    Expired,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,7 +517,7 @@ async fn poll_qq_qr(client: &QqClient, transaction: &QqQrTransaction) -> Result<
         ("pt_3rd_aid", "100497308"),
         ("has_onekey", "1"),
     ]);
-    let response = client
+    let request = client
         .login_http()
         .get(endpoint)
         .header(header::REFERER, QQ_LOGIN_REFERER)
@@ -509,46 +525,41 @@ async fn poll_qq_qr(client: &QqClient, transaction: &QqQrTransaction) -> Result<
             header::COOKIE,
             cookie_header(&qq_qr_poll_cookies(&transaction.identifier)?)?,
         )
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_login_http_status(response.status(), "QQ QR status")?;
-    let body = response.text().await.map_err(login_network_error)?;
-    let args = parse_qq_status_arguments(&body)?;
-    let status = args[0]
-        .parse::<u16>()
-        .map_err(|_| login_data_error("QQ QR status returned an invalid state code"))?;
-    match status {
-        66 => Ok(QqQrPollOutcome::Waiting),
-        67 => Ok(QqQrPollOutcome::Scanned),
-        65 => Ok(QqQrPollOutcome::Expired),
-        68 => Ok(QqQrPollOutcome::Failed(
+        .timeout(LOGIN_REQUEST_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let poll_outcome = async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        ensure_login_http_status(response.status(), "QQ QR status")?;
+        let body = response.text().await.map_err(login_network_error)?;
+        parse_qq_qr_poll(&body)
+    }
+    .await;
+    let success_class = match &poll_outcome {
+        Ok(ParsedQqQrPoll::Confirmed { .. }) => UpstreamBusinessClass::Success,
+        Ok(_) | Err(_) => UpstreamBusinessClass::AllowedError,
+    };
+    client.log_typed_upstream_request(
+        "qq_qr_poll",
+        "ssl.ptlogin2.qq.com",
+        "/ptqrlogin",
+        http_status,
+        started,
+        success_class,
+        &poll_outcome,
+    );
+    match poll_outcome? {
+        ParsedQqQrPoll::Waiting => Ok(QqQrPollOutcome::Waiting),
+        ParsedQqQrPoll::Scanned => Ok(QqQrPollOutcome::Scanned),
+        ParsedQqQrPoll::Expired => Ok(QqQrPollOutcome::Expired),
+        ParsedQqQrPoll::Failed => Ok(QqQrPollOutcome::Failed(
             "QQ QR login was refused".to_owned(),
         )),
-        0 => {
-            let callback = args.get(2).ok_or_else(|| {
-                login_data_error("QQ QR success response is missing callback URL")
-            })?;
-            let callback = Url::parse(callback)
-                .map_err(|_| login_data_error("QQ QR success callback URL is invalid"))?;
-            let query = callback.query_pairs().collect::<BTreeMap<_, _>>();
-            let uin = query
-                .get("uin")
-                .map(|value| value.as_ref())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| login_data_error("QQ QR success callback is missing uin"))?;
-            let sigx = query
-                .get("ptsigx")
-                .map(|value| value.as_ref())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| login_data_error("QQ QR success callback is missing ptsigx"))?;
-            let credential = authorize_qq_qr(client, uin, sigx).await?;
+        ParsedQqQrPoll::Confirmed { uin, sigx } => {
+            let credential = authorize_qq_qr(client, &uin, &sigx).await?;
             Ok(QqQrPollOutcome::Confirmed(Box::new(credential)))
         }
-        _ => Err(login_data_error(format!(
-            "QQ QR status returned unsupported state code {status}"
-        ))),
     }
 }
 
@@ -561,40 +572,51 @@ async fn poll_wechat_qr(
         ("uuid", transaction.identifier.as_str()),
         ("_", &unix_millis()?.to_string()),
     ]);
-    let response = client
+    let request = client
         .login_http()
         .get(endpoint)
         .header(header::REFERER, "https://open.weixin.qq.com/")
         .header(header::COOKIE, cookie_header(&transaction.cookies)?)
-        .timeout(WECHAT_POLL_TIMEOUT)
-        .send()
-        .await;
-    let response = match response {
-        Ok(response) => response,
-        Err(error) if error.is_timeout() => return Ok(QqQrPollOutcome::Waiting),
-        Err(error) => return Err(login_network_error(error)),
+        .timeout(WECHAT_POLL_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let poll_outcome = async {
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) if error.is_timeout() => return Ok(ParsedWechatQrPoll::Waiting),
+            Err(error) => return Err(login_network_error(error)),
+        };
+        http_status = Some(response.status());
+        ensure_login_http_status(response.status(), "WeChat QR status")?;
+        merge_response_cookies(&mut transaction.cookies, &response)?;
+        let body = response.text().await.map_err(login_network_error)?;
+        parse_wechat_qr_poll(&body)
+    }
+    .await;
+    let success_class = match &poll_outcome {
+        Ok(ParsedWechatQrPoll::Confirmed { .. }) => UpstreamBusinessClass::Success,
+        Ok(_) | Err(_) => UpstreamBusinessClass::AllowedError,
     };
-    ensure_login_http_status(response.status(), "WeChat QR status")?;
-    merge_response_cookies(&mut transaction.cookies, &response)?;
-    let body = response.text().await.map_err(login_network_error)?;
-    let (status, code) = parse_wechat_status(&body)?;
-    match status {
-        408 => Ok(QqQrPollOutcome::Waiting),
-        404 => Ok(QqQrPollOutcome::Scanned),
-        402 => Ok(QqQrPollOutcome::Expired),
-        403 => Ok(QqQrPollOutcome::Failed(
+    client.log_typed_upstream_request(
+        "wechat_qr_poll",
+        "lp.open.weixin.qq.com",
+        "/connect/l/qrconnect",
+        http_status,
+        started,
+        success_class,
+        &poll_outcome,
+    );
+    match poll_outcome? {
+        ParsedWechatQrPoll::Waiting => Ok(QqQrPollOutcome::Waiting),
+        ParsedWechatQrPoll::Scanned => Ok(QqQrPollOutcome::Scanned),
+        ParsedWechatQrPoll::Expired => Ok(QqQrPollOutcome::Expired),
+        ParsedWechatQrPoll::Failed => Ok(QqQrPollOutcome::Failed(
             "WeChat QR login was refused".to_owned(),
         )),
-        405 => {
-            let code = code
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| login_data_error("WeChat QR confirmation is missing OAuth code"))?;
-            let credential = authorize_wechat_qr(client, code).await?;
+        ParsedWechatQrPoll::Confirmed { code } => {
+            let credential = authorize_wechat_qr(client, &code).await?;
             Ok(QqQrPollOutcome::Confirmed(Box::new(credential)))
         }
-        _ => Err(login_data_error(format!(
-            "WeChat QR status returned unsupported state code {status}"
-        ))),
     }
 }
 
@@ -1429,6 +1451,61 @@ fn parse_qq_status_arguments(body: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
+fn parse_qq_qr_poll(body: &str) -> Result<ParsedQqQrPoll> {
+    let args = parse_qq_status_arguments(body)?;
+    let status = args[0]
+        .parse::<u16>()
+        .map_err(|_| login_data_error("QQ QR status returned an invalid state code"))?;
+    match status {
+        66 => Ok(ParsedQqQrPoll::Waiting),
+        67 => Ok(ParsedQqQrPoll::Scanned),
+        65 => Ok(ParsedQqQrPoll::Expired),
+        68 => Ok(ParsedQqQrPoll::Failed),
+        0 => {
+            let callback = args.get(2).ok_or_else(|| {
+                login_data_error("QQ QR success response is missing callback URL")
+            })?;
+            let callback = Url::parse(callback)
+                .map_err(|_| login_data_error("QQ QR success callback URL is invalid"))?;
+            if callback.scheme() != "https"
+                || callback.host_str() != Some("graph.qq.com")
+                || !callback.username().is_empty()
+                || callback.password().is_some()
+                || callback.port().is_some()
+                || callback.fragment().is_some()
+            {
+                return Err(login_data_error(
+                    "QQ QR success callback URL is outside the allowed destination",
+                ));
+            }
+            let query = callback.query_pairs().collect::<BTreeMap<_, _>>();
+            let uin = query
+                .get("uin")
+                .map(|value| value.as_ref())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| login_data_error("QQ QR success callback is missing uin"))?;
+            if !uin.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(login_data_error(
+                    "QQ QR success callback contains an invalid uin",
+                ));
+            }
+            let sigx = query
+                .get("ptsigx")
+                .map(|value| value.as_ref())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| login_data_error("QQ QR success callback is missing ptsigx"))?;
+            validate_identifier(sigx, "QQ QR success ptsigx")?;
+            Ok(ParsedQqQrPoll::Confirmed {
+                uin: uin.to_owned(),
+                sigx: sigx.to_owned(),
+            })
+        }
+        _ => Err(login_data_error(format!(
+            "QQ QR status returned unsupported state code {status}"
+        ))),
+    }
+}
+
 fn parse_wechat_uuid(html: &str) -> Result<String> {
     let start = html
         .find("uuid=")
@@ -1463,6 +1540,28 @@ fn parse_wechat_status(body: &str) -> Result<(u16, Option<&str>)> {
             .map(|end| &body[start..start + end])
     });
     Ok((status, code))
+}
+
+fn parse_wechat_qr_poll(body: &str) -> Result<ParsedWechatQrPoll> {
+    let (status, code) = parse_wechat_status(body)?;
+    match status {
+        408 => Ok(ParsedWechatQrPoll::Waiting),
+        404 => Ok(ParsedWechatQrPoll::Scanned),
+        402 => Ok(ParsedWechatQrPoll::Expired),
+        403 => Ok(ParsedWechatQrPoll::Failed),
+        405 => {
+            let code = code
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| login_data_error("WeChat QR confirmation is missing OAuth code"))?;
+            validate_identifier(code, "WeChat OAuth code")?;
+            Ok(ParsedWechatQrPoll::Confirmed {
+                code: code.to_owned(),
+            })
+        }
+        _ => Err(login_data_error(format!(
+            "WeChat QR status returned unsupported state code {status}"
+        ))),
+    }
 }
 
 fn response_cookies(response: &Response) -> Result<BTreeMap<String, String>> {
@@ -1699,13 +1798,25 @@ mod tests {
 
     #[test]
     fn parses_qq_qr_callback_without_exposing_unquoted_text() {
-        let args = parse_qq_status_arguments(
-            "ptuiCB('0','0','https://graph.qq.com/?uin=123&service=x&ptsigx=sig&s_url=y','0','ok','nick');",
-        )
-        .expect("QQ callback");
+        let body = "ptuiCB('0','0','https://graph.qq.com/?uin=123&service=x&ptsigx=sig&s_url=y','0','ok','nick');";
+        let args = parse_qq_status_arguments(body).expect("QQ callback");
         assert_eq!(args[0], "0");
         assert!(args[2].contains("ptsigx=sig"));
         assert_eq!(args[5], "nick");
+        assert!(matches!(
+            parse_qq_qr_poll(body).expect("QQ confirmation"),
+            ParsedQqQrPoll::Confirmed { uin, sigx } if uin == "123" && sigx == "sig"
+        ));
+        assert!(matches!(
+            parse_qq_qr_poll("ptuiCB('66','0','','0','waiting','');").expect("QQ waiting state"),
+            ParsedQqQrPoll::Waiting
+        ));
+        assert!(
+            parse_qq_qr_poll(
+                "ptuiCB('0','0','https://evil.example/?uin=123&ptsigx=secret','0','ok','');"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1720,6 +1831,15 @@ mod tests {
                 .expect("status"),
             (405, Some("oauth-code"))
         );
+        assert!(matches!(
+            parse_wechat_qr_poll("window.wx_errcode=405;window.wx_code='oauth-code'")
+                .expect("confirmation"),
+            ParsedWechatQrPoll::Confirmed { code } if code == "oauth-code"
+        ));
+        assert!(matches!(
+            parse_wechat_qr_poll("window.wx_errcode=408;").expect("waiting state"),
+            ParsedWechatQrPoll::Waiting
+        ));
     }
 
     #[test]
