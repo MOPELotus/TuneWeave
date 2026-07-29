@@ -22,7 +22,10 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tuneweave_core::{AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{
+    AccountCredentialStore, ErrorCode, Platform, Result, TuneWeaveError, UpstreamBusinessClass,
+    UpstreamOutcome, UpstreamRequestSummary,
+};
 use url::Url;
 
 use crate::wbi::WbiKeys;
@@ -115,6 +118,7 @@ impl fmt::Debug for BilibiliConfig {
 pub struct BilibiliClient {
     http: Client,
     web_state: Arc<Mutex<BilibiliWebState>>,
+    proxy_configured: bool,
 }
 
 #[derive(Default)]
@@ -2039,12 +2043,13 @@ impl BilibiliClient {
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20));
-        if let Some(proxy_url) = config
+        let proxy_url = config
             .proxy_url
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+            .filter(|value| !value.is_empty());
+        let proxy_configured = proxy_url.is_some();
+        if let Some(proxy_url) = proxy_url {
             let proxy = Proxy::all(proxy_url).map_err(|_| {
                 TuneWeaveError::invalid_request("Bilibili proxy URL is invalid")
                     .with_platform(Platform::Bilibili)
@@ -2061,6 +2066,7 @@ impl BilibiliClient {
         Ok(Self {
             http,
             web_state: Arc::new(Mutex::new(BilibiliWebState::default())),
+            proxy_configured,
         })
     }
 
@@ -3045,63 +3051,97 @@ impl BilibiliClient {
         if let Some(device) = self.web_state()?.device.clone() {
             return Ok(device);
         }
-        let response = self
-            .http
-            .get(DEVICE_IDENTITY_ENDPOINT)
-            .header(REFERER, WEB_REFERER)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error(
-                "Bilibili device identity endpoint",
-                status,
-            ));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(DEVICE_IDENTITY_ENDPOINT)
+                .header(REFERER, WEB_REFERER)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error(
+                    "Bilibili device identity endpoint",
+                    status,
+                ));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili device identity response exceeded the size limit",
+                ));
+            }
+            parse_device_identity_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili device identity response exceeded the size limit",
-            ));
-        }
-        let mut device = parse_device_identity_response(&bytes)?;
+        .await;
+        self.log_upstream_request(
+            "web_device_identity",
+            "api.bilibili.com",
+            "/x/frontend/finger/spi",
+            http_status,
+            started,
+            &outcome,
+        );
+        let mut device = outcome?;
         device.b_nut = self.web_cookie_timestamp(&device).await?;
         self.web_state()?.device = Some(device.clone());
         Ok(device)
     }
 
     async fn web_cookie_timestamp(&self, device: &BilibiliWebDevice) -> Result<String> {
-        let response = self
-            .http
-            .head(WEB_HOME_ENDPOINT)
-            .header(COOKIE, device.cookie_header())
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error(
-                "Bilibili web identity endpoint",
-                status,
-            ));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .head(WEB_HOME_ENDPOINT)
+                .header(COOKIE, device.cookie_header())
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error(
+                    "Bilibili web identity endpoint",
+                    status,
+                ));
+            }
+            let value = response
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .filter_map(|header| header.to_str().ok())
+                .filter_map(|header| header.split(';').next())
+                .filter_map(|pair| pair.split_once('='))
+                .find_map(|(name, value)| (name == "b_nut").then(|| value.to_owned()))
+                .ok_or_else(|| {
+                    bilibili_upstream_error("Bilibili web identity did not return b_nut")
+                })?;
+            if value.is_empty()
+                || value.len() > 20
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(bilibili_upstream_error(
+                    "Bilibili web identity returned an invalid b_nut",
+                ));
+            }
+            Ok(value)
         }
-        let value = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .filter_map(|header| header.to_str().ok())
-            .filter_map(|header| header.split(';').next())
-            .filter_map(|pair| pair.split_once('='))
-            .find_map(|(name, value)| (name == "b_nut").then(|| value.to_owned()))
-            .ok_or_else(|| bilibili_upstream_error("Bilibili web identity did not return b_nut"))?;
-        if value.is_empty() || value.len() > 20 || !value.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(bilibili_upstream_error(
-                "Bilibili web identity returned an invalid b_nut",
-            ));
-        }
-        Ok(value)
+        .await;
+        self.log_upstream_request(
+            "web_cookie_timestamp",
+            "www.bilibili.com",
+            "/",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn web_ticket(
@@ -3135,25 +3175,40 @@ impl BilibiliClient {
         let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
             format!("{}; {device_cookie}", credential.cookie_header())
         });
-        let response = self
-            .http
-            .post(endpoint)
-            .header(COOKIE, cookie_header)
-            .header(REFERER, WEB_REFERER)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili web ticket endpoint", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(endpoint)
+                .header(COOKIE, cookie_header)
+                .header(REFERER, WEB_REFERER)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili web ticket endpoint", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili web ticket response exceeded the size limit",
+                ));
+            }
+            parse_web_ticket_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili web ticket response exceeded the size limit",
-            ));
-        }
-        let (ticket, keys) = parse_web_ticket_response(&bytes)?;
+        .await;
+        self.log_upstream_request(
+            "web_ticket",
+            "api.bilibili.com",
+            "/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket",
+            http_status,
+            started,
+            &outcome,
+        );
+        let (ticket, keys) = outcome?;
         let mut state = self.web_state()?;
         state.ticket = Some(ticket.clone());
         state.wbi = Some(CachedWbiKeys {
@@ -3177,25 +3232,40 @@ impl BilibiliClient {
         let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
             format!("{}; {device_cookie}", credential.cookie_header())
         });
-        let response = self
-            .http
-            .get(NAV_ENDPOINT)
-            .header(COOKIE, cookie_header)
-            .header(REFERER, WEB_REFERER)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili WBI key endpoint", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(NAV_ENDPOINT)
+                .header(COOKIE, cookie_header)
+                .header(REFERER, WEB_REFERER)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili WBI key endpoint", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili WBI key response exceeded the size limit",
+                ));
+            }
+            parse_wbi_keys_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili WBI key response exceeded the size limit",
-            ));
-        }
-        let keys = parse_wbi_keys_response(&bytes)?;
+        .await;
+        self.log_upstream_request(
+            "wbi_keys",
+            "api.bilibili.com",
+            "/x/web-interface/nav",
+            http_status,
+            started,
+            &outcome,
+        );
+        let keys = outcome?;
         self.web_state()?.wbi = Some(CachedWbiKeys {
             keys: keys.clone(),
             cached_at: Instant::now(),
@@ -3207,6 +3277,37 @@ impl BilibiliClient {
         self.web_state
             .lock()
             .map_err(|_| bilibili_internal_error("Bilibili web identity cache is unavailable"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, upstream_outcome) = match outcome {
+            Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+            Err(error) => bilibili_upstream_classification(error),
+        };
+        UpstreamRequestSummary {
+            provider: Platform::Bilibili,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome: upstream_outcome,
+        }
+        .emit();
     }
 
     async fn cookie_refresh_info(&self, credential: &BilibiliCredential) -> Result<CookieInfoData> {
@@ -6636,6 +6737,36 @@ fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
         )
 }
 
+fn bilibili_upstream_classification(
+    error: &TuneWeaveError,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    let business_class = if error
+        .details
+        .get("platform_code")
+        .and_then(serde_json::Value::as_i64)
+        .is_some()
+        || matches!(
+            error.code,
+            ErrorCode::AuthenticationRequired
+                | ErrorCode::PermissionDenied
+                | ErrorCode::ResourceNotFound
+                | ErrorCode::Conflict
+                | ErrorCode::RateLimited
+                | ErrorCode::MatchRejected
+        ) {
+        UpstreamBusinessClass::RejectedError
+    } else {
+        UpstreamBusinessClass::Unavailable
+    };
+    (
+        business_class,
+        UpstreamOutcome::Failure {
+            code: error.code,
+            retryable: error.retryable,
+        },
+    )
+}
+
 fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeaveError {
     let error_code = match code {
         -101 | -111 | 2202 | 86038 | 86095 => ErrorCode::AuthenticationRequired,
@@ -6679,6 +6810,35 @@ mod tests {
     use super::*;
 
     const QR_KEY: &str = "8587cf8106a0b863c46d6bab913537f6";
+
+    #[test]
+    fn upstream_summary_separates_business_and_transport_failures() {
+        let denied = platform_business_error("Bilibili test", -403, "forbidden");
+        assert_eq!(
+            bilibili_upstream_classification(&denied),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::PermissionDenied,
+                    retryable: false,
+                },
+            )
+        );
+
+        let timeout = TuneWeaveError::new(ErrorCode::UpstreamTimeout, "timeout")
+            .with_platform(Platform::Bilibili)
+            .retryable(true);
+        assert_eq!(
+            bilibili_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true,
+                },
+            )
+        );
+    }
 
     fn qr_fixture(url: &str, key: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({
