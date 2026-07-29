@@ -597,59 +597,83 @@ impl NeteaseClient {
             "{}/api/music/audio/match?sessionId=0123456789abcdef&algorithmCode=shazam_v2&duration={duration}&rawdata={fingerprint}&times=1&decrypt=1",
             self.base_url
         );
-        let response = self
-            .apply_network_identity(self.http.get(endpoint))
-            .send()
-            .await
-            .map_err(request_error)?;
-        parse_response(response).await
+        let request = self.apply_network_identity(self.http.get(endpoint));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "audio_fingerprint_match",
+            self.base_upstream_host,
+            "/api/music/audio/match",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn fetch_voice_lyric_document(&self, url: &str) -> Result<Value> {
         let url = validate_voice_lyric_url(url)?;
-        let mut response = self
-            .asset_http
-            .get(url)
-            .send()
-            .await
-            .map_err(request_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("NetEase voice lyric asset returned HTTP {status}"),
-            )
-            .with_platform(Platform::Netease)
-            .retryable(status.is_server_error())
-            .with_details(json!({ "status": status.as_u16() })));
-        }
-        if response.content_length().is_some_and(|length| {
-            length > u64::try_from(MAX_VOICE_LYRIC_DOCUMENT_BYTES).unwrap_or(u64::MAX)
-        }) {
-            return Err(voice_lyric_document_too_large());
-        }
-
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(request_error)? {
-            let next_length = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
-                TuneWeaveError::new(
+        let upstream_host = voice_lyric_upstream_host(&url);
+        let request = self.asset_http.get(url);
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let mut response = request.send().await.map_err(request_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(TuneWeaveError::new(
                     ErrorCode::UpstreamError,
-                    "NetEase voice lyric asset size overflowed",
+                    format!("NetEase voice lyric asset returned HTTP {status}"),
                 )
                 .with_platform(Platform::Netease)
-            })?;
-            if next_length > MAX_VOICE_LYRIC_DOCUMENT_BYTES {
+                .retryable(status.is_server_error())
+                .with_details(json!({ "status": status.as_u16() })));
+            }
+            if response.content_length().is_some_and(|length| {
+                length > u64::try_from(MAX_VOICE_LYRIC_DOCUMENT_BYTES).unwrap_or(u64::MAX)
+            }) {
                 return Err(voice_lyric_document_too_large());
             }
-            bytes.extend_from_slice(&chunk);
+
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+                let next_length = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::UpstreamError,
+                        "NetEase voice lyric asset size overflowed",
+                    )
+                    .with_platform(Platform::Netease)
+                })?;
+                if next_length > MAX_VOICE_LYRIC_DOCUMENT_BYTES {
+                    return Err(voice_lyric_document_too_large());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            serde_json::from_slice(&bytes).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    format!("NetEase voice lyric asset returned invalid JSON: {error}"),
+                )
+                .with_platform(Platform::Netease)
+            })
         }
-        serde_json::from_slice(&bytes).map_err(|error| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("NetEase voice lyric asset returned invalid JSON: {error}"),
-            )
-            .with_platform(Platform::Netease)
-        })
+        .await;
+        self.log_uninspected_upstream_request(
+            "voice_lyric_asset",
+            upstream_host,
+            "/{voice_lyric_asset}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn allocate_image_upload(&self, filename: &str) -> Result<NeteaseResponse> {
@@ -945,31 +969,47 @@ impl NeteaseClient {
             return Ok((token, false));
         }
 
-        let response = self.http.get(url).send().await.map_err(request_error)?;
-        let status = response.status();
-        let body = response.text().await.map_err(request_error)?;
-        if !status.is_success() {
-            return Err(TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                "NetEase anti-cheat token registration failed",
-            )
-            .with_platform(Platform::Netease)
-            .retryable(status.is_server_error())
-            .with_details(json!({ "http_status": status.as_u16() })));
+        let (operation, upstream_host, endpoint) = anti_cheat_upstream_summary(version, url);
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self.http.get(url).send().await.map_err(request_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            let body = response.text().await.map_err(request_error)?;
+            if !status.is_success() {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase anti-cheat token registration failed",
+                )
+                .with_platform(Platform::Netease)
+                .retryable(status.is_server_error())
+                .with_details(json!({ "http_status": status.as_u16() })));
+            }
+            let token = match version {
+                AntiCheatTokenVersion::V2 => parse_anti_cheat_token_v2(&body)?,
+                AntiCheatTokenVersion::V3 => parse_anti_cheat_token_v3(&body)?,
+            };
+            token.parse::<header::HeaderValue>().map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase anti-cheat service returned a token that is not safe for an HTTP header",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            *cache.write().map_err(|_| anti_cheat_state_error())? = Some(token.clone());
+            Ok((token, true))
         }
-        let token = match version {
-            AntiCheatTokenVersion::V2 => parse_anti_cheat_token_v2(&body)?,
-            AntiCheatTokenVersion::V3 => parse_anti_cheat_token_v3(&body)?,
-        };
-        token.parse::<header::HeaderValue>().map_err(|_| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                "NetEase anti-cheat service returned a token that is not safe for an HTTP header",
-            )
-            .with_platform(Platform::Netease)
-        })?;
-        *cache.write().map_err(|_| anti_cheat_state_error())? = Some(token.clone());
-        Ok((token, true))
+        .await;
+        self.log_validated_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn request_xeapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
@@ -1713,6 +1753,15 @@ fn validate_voice_lyric_url(lyric_url: &str) -> Result<Url> {
     Ok(url)
 }
 
+fn voice_lyric_upstream_host(url: &Url) -> &'static str {
+    let host = url.host_str().unwrap_or_default();
+    if host == "music.126.net" || host.ends_with(".music.126.net") {
+        "music.126.net"
+    } else {
+        "music.163.com"
+    }
+}
+
 fn voice_lyric_url_error() -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::UpstreamError,
@@ -1956,6 +2005,34 @@ fn configured_upstream_host(value: &str, official_host: &'static str) -> &'stati
         .map_or("configured", |_| official_host)
 }
 
+fn anti_cheat_upstream_summary(
+    version: AntiCheatTokenVersion,
+    value: &str,
+) -> (&'static str, &'static str, &'static str) {
+    let (operation, official_host, official_path) = match version {
+        AntiCheatTokenVersion::V2 => (
+            "anti_cheat_v2_registration",
+            "ac.dun.163.com",
+            "/v2/config/js",
+        ),
+        AntiCheatTokenVersion::V3 => ("anti_cheat_v3_registration", "ac.dun.163yun.com", "/v3/b"),
+    };
+    let official = Url::parse(value).ok().is_some_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some_and(|host| host == official_host)
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == official_path
+            && url.fragment().is_none()
+    });
+    if official {
+        (operation, official_host, official_path)
+    } else {
+        (operation, "configured", "/{configured}")
+    }
+}
+
 fn netease_upstream_classification(
     error: &TuneWeaveError,
 ) -> (UpstreamBusinessClass, UpstreamOutcome) {
@@ -2075,6 +2152,25 @@ mod tests {
             configured_upstream_host("https://example.test/private", "interface.music.163.com"),
             "configured"
         );
+        assert_eq!(
+            anti_cheat_upstream_summary(AntiCheatTokenVersion::V2, DEFAULT_ANTI_CHEAT_V2_URL),
+            (
+                "anti_cheat_v2_registration",
+                "ac.dun.163.com",
+                "/v2/config/js"
+            )
+        );
+        assert_eq!(
+            anti_cheat_upstream_summary(AntiCheatTokenVersion::V3, DEFAULT_ANTI_CHEAT_V3_URL),
+            ("anti_cheat_v3_registration", "ac.dun.163yun.com", "/v3/b")
+        );
+        assert_eq!(
+            anti_cheat_upstream_summary(
+                AntiCheatTokenVersion::V2,
+                "https://ac.dun.163.com/private?credential=secret"
+            ),
+            ("anti_cheat_v2_registration", "configured", "/{configured}")
+        );
 
         let denied = TuneWeaveError::new(ErrorCode::PermissionDenied, "denied")
             .with_platform(Platform::Netease);
@@ -2137,6 +2233,24 @@ mod tests {
         ] {
             assert!(validate_voice_lyric_url(url).is_err(), "{url}");
         }
+        assert_eq!(
+            voice_lyric_upstream_host(
+                &validate_voice_lyric_url(
+                    "http://d1.music.126.net/voice/private.json?token=secret"
+                )
+                .expect("valid 126 asset")
+            ),
+            "music.126.net"
+        );
+        assert_eq!(
+            voice_lyric_upstream_host(
+                &validate_voice_lyric_url(
+                    "https://cdn.music.163.com/voice/private.json?token=secret"
+                )
+                .expect("valid 163 asset")
+            ),
+            "music.163.com"
+        );
     }
 
     #[test]
