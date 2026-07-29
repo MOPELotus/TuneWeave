@@ -121,6 +121,47 @@ pub struct BilibiliClient {
     proxy_configured: bool,
 }
 
+#[derive(Clone, Copy)]
+enum BilibiliVideoAccountStateRequest {
+    RecentLike,
+    Coins,
+    Favorite,
+}
+
+impl BilibiliVideoAccountStateRequest {
+    const fn upstream_endpoint(self) -> &'static str {
+        match self {
+            Self::RecentLike => VIDEO_RECENT_LIKE_STATE_ENDPOINT,
+            Self::Coins => VIDEO_COIN_STATE_ENDPOINT,
+            Self::Favorite => VIDEO_FAVORITE_STATE_ENDPOINT,
+        }
+    }
+
+    const fn endpoint_template(self) -> &'static str {
+        match self {
+            Self::RecentLike => "/x/web-interface/archive/has/like",
+            Self::Coins => "/x/web-interface/archive/coins",
+            Self::Favorite => "/x/v2/fav/video/favoured",
+        }
+    }
+
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::RecentLike => "video_recent_like_state",
+            Self::Coins => "video_coin_state",
+            Self::Favorite => "video_favorite_state",
+        }
+    }
+
+    const fn error_context(self) -> &'static str {
+        match self {
+            Self::RecentLike => "Bilibili recent video like state",
+            Self::Coins => "Bilibili video coin state",
+            Self::Favorite => "Bilibili video favorite state",
+        }
+    }
+}
+
 #[derive(Default)]
 struct BilibiliWebState {
     device: Option<BilibiliWebDevice>,
@@ -2467,18 +2508,33 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili video detail", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili video detail", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili video detail response exceeded the size limit",
+                ));
+            }
+            parse_video_view_response(&bytes, identity)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili video detail response exceeded the size limit",
-            ));
-        }
-        parse_video_view_response(&bytes, identity)
+        .await;
+        self.log_upstream_request(
+            "video_detail",
+            "api.bilibili.com",
+            "/x/web-interface/view",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn video_account_state(
@@ -2500,39 +2556,33 @@ impl BilibiliClient {
                 "Bilibili video account state requires a BVID",
             ));
         }
-        let recently_liked = parse_video_recent_like_state_response(
-            &self
-                .video_account_state_response(
-                    VIDEO_RECENT_LIKE_STATE_ENDPOINT,
-                    aid,
-                    bvid,
-                    credential,
-                    "Bilibili recent video like state",
-                )
-                .await?,
-        )?;
-        let coins_contributed = parse_video_coin_state_response(
-            &self
-                .video_account_state_response(
-                    VIDEO_COIN_STATE_ENDPOINT,
-                    aid,
-                    bvid,
-                    credential,
-                    "Bilibili video coin state",
-                )
-                .await?,
-        )?;
-        let (favorited, favorite_state_count) = parse_video_favorite_state_response(
-            &self
-                .video_account_state_response(
-                    VIDEO_FAVORITE_STATE_ENDPOINT,
-                    aid,
-                    bvid,
-                    credential,
-                    "Bilibili video favorite state",
-                )
-                .await?,
-        )?;
+        let recently_liked = self
+            .video_account_state_response(
+                BilibiliVideoAccountStateRequest::RecentLike,
+                aid,
+                bvid,
+                credential,
+                parse_video_recent_like_state_response,
+            )
+            .await?;
+        let coins_contributed = self
+            .video_account_state_response(
+                BilibiliVideoAccountStateRequest::Coins,
+                aid,
+                bvid,
+                credential,
+                parse_video_coin_state_response,
+            )
+            .await?;
+        let (favorited, favorite_state_count) = self
+            .video_account_state_response(
+                BilibiliVideoAccountStateRequest::Favorite,
+                aid,
+                bvid,
+                credential,
+                parse_video_favorite_state_response,
+            )
+            .await?;
         Ok(BilibiliVideoAccountState {
             recently_liked,
             coins_contributed,
@@ -2541,39 +2591,55 @@ impl BilibiliClient {
         })
     }
 
-    async fn video_account_state_response(
+    async fn video_account_state_response<T>(
         &self,
-        endpoint: &str,
+        kind: BilibiliVideoAccountStateRequest,
         aid: u64,
         bvid: &str,
         credential: &BilibiliCredential,
-        context: &str,
-    ) -> Result<Vec<u8>> {
-        let mut endpoint = Url::parse(endpoint)
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        let context = kind.error_context();
+        let mut endpoint = Url::parse(kind.upstream_endpoint())
             .map_err(|_| bilibili_internal_error(format!("{context} endpoint is invalid")))?;
         endpoint
             .query_pairs_mut()
             .append_pair("aid", &aid.to_string());
         let referer = format!("https://www.bilibili.com/video/{bvid}");
-        let response = self
-            .http
-            .get(endpoint)
-            .header(REFERER, referer)
-            .header(COOKIE, credential.cookie_header())
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error(context, status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(REFERER, referer)
+                .header(COOKIE, credential.cookie_header())
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error(context, status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(format!(
+                    "{context} response exceeded the size limit"
+                )));
+            }
+            parse(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(format!(
-                "{context} response exceeded the size limit"
-            )));
-        }
-        Ok(bytes.to_vec())
+        .await;
+        self.log_upstream_request(
+            kind.operation(),
+            "api.bilibili.com",
+            kind.endpoint_template(),
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn video_subtitles(
@@ -6979,6 +7045,19 @@ mod tests {
 
     #[test]
     fn upstream_summary_separates_business_and_transport_failures() {
+        assert_eq!(
+            BilibiliVideoAccountStateRequest::RecentLike.operation(),
+            "video_recent_like_state"
+        );
+        assert_eq!(
+            BilibiliVideoAccountStateRequest::Coins.endpoint_template(),
+            "/x/web-interface/archive/coins"
+        );
+        assert_eq!(
+            BilibiliVideoAccountStateRequest::Favorite.endpoint_template(),
+            "/x/v2/fav/video/favoured"
+        );
+
         let denied = platform_business_error("Bilibili test", -403, "forbidden");
         assert_eq!(
             bilibili_upstream_classification(&denied),
