@@ -6,7 +6,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 - `implemented`：代码及局部测试已完成，仍缺完整 HTTP、持久化或播放链验收。
 - `verified`：核心契约、存储/路由和异常边界均已自动化验证；涉及外部 provider 时还需真实网络验证。
 
-当前统计：`pending=5`、`implemented=2`、`verified=12`。
+当前统计：`pending=5`、`implemented=1`、`verified=13`。
 
 当前已实现的是服务端托管模式：底层支持多个独立 Uni Playlist，并可通过分页目录重新发现，但仍共同保存于一个 `uni-playlists.json`。客户端托管、无状态 materialize/播放、显式迁移和服务端存储改造已完成设计并进入实施阶段；完整边界见 [Uni Playlist 客户端托管与存储设计](../uni-playlist-ownership.md)。
 
@@ -23,11 +23,11 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 | `PATCH /v1/uni/playlists/{ref}/items/order` | `verified` | 原子提交当前全部项目 ID 的显式顺序并重编号零基位置；缺项、未知项、重复 ID 和畸形 ID 会整批拒绝且不改数据，重复来源项不折叠，无变化顺序明确返回 `changed=false`，文件存储重启后保持新顺序。 |
 | `/v1/playlists` 统一读取适配 | `verified` | `GET /v1/playlists/{ref}` 已把本地元数据映射为现有 `Playlist`，`GET .../items` 以同一 `PlaylistPlayableEntry` 分页返回外部或 Uni 的歌曲、MV/视频音频、播客节目和广播电台，Uni 项保留稳定 `item_id`；`GET .../tracks` 对混合 Uni 内容仅筛选歌曲并返回筛选后的真实分页总数。外部 provider 的账户选择和分页不变，本地 `uni:` 明确拒绝无意义的 `account`；混合项目、重复歌曲、兼容视图、重启恢复与错误边界均已验证。 |
 | Uni Playlist 播放与跨平台回退 | `verified` | `GET /v1/playlists/{ref}/items/{item_id}/stream` 以稳定项目 ID 播放，所有类型统一返回 `UniPlaylistItemStream` 内的 `MediaStream`，并提供 `/redirect`。歌曲使用持久化快照作为严格来源身份；播客先解析承载音频；普通 MV/视频在原生视频流与其他平台严格匹配音频之间按 `playback_platform/fallback_platforms/fallback/unblock` 的精确顺序切换。B 站 `video` 默认先选择原生音轨，只有原音轨失败且允许回退时才严格匹配其他音乐平台；显式 `resolution` 保留原生视频轨语义。默认音乐回退列表不含 B 站，避免歌曲误配翻唱、现场或二创，但 B 站视频作为原始项目时仍排在首位。广播刷新原平台直播 URL。`accounts` 支持列表或 JSON 对象并与兼容 `account` 的首目标语义隔离，全部尝试、账户、候选、分数及失败状态均保留；原平台播放、跨平台命中、降级音质、广播、302、重复项目和重启恢复均已验证，B 站原生音轨另完成真实 Uni HTTP 验收。 |
-| `tuneweave_uni_playlist_v1` 客户端交换文档 | `implemented` | 已定义可往返的强类型 V1 文档，包含歌单稳定 ID、时间、真实项目数、有序项目、来源引用、类型、添加时间及紧凑快照；连续位置、唯一项目 ID、重复项保留、外部平台引用、时间及 10 万项上限均有校验。文档和嵌套扩展使用拒绝未知字段的用途白名单，不存在账户、Cookie、token、设备身份、临时媒体 URL、签名或任意请求头槽位，危险字段及非 HTTPS 封面测试已覆盖。待服务端导出、客户端无状态播放和跨实例验收后升级为 `verified`。JSON 只用于导入、导出、备份和交换，不规定客户端内部存储。 |
+| `tuneweave_uni_playlist_v1` 客户端交换文档 | `verified` | 已定义可往返的强类型 V1 文档，包含歌单稳定 ID、时间、真实项目数、有序项目、来源引用、类型、添加时间及紧凑快照；连续位置、唯一项目 ID、重复项保留、外部平台引用、时间及 10 万项上限均有校验。文档和嵌套扩展使用拒绝未知字段的用途白名单，不存在账户、Cookie、token、设备身份、临时媒体 URL、签名或任意请求头槽位。已自动化验证 Server 导出→默认新 ID 导入→再次导出只有歌单 ID 改变，项目身份、顺序、重复项和快照完全一致；危险字段、非 HTTPS 封面、未知字段和结构漂移均被拒绝或清除。JSON 只用于导入、导出、备份和交换，不规定客户端内部存储。 |
 | 无状态平台来源展开 | `pending` | 规划 `POST /v1/uni/materialize/imports`：完整分页展开一个或多个可播放集合，保留来源与内部顺序及重复项，把结果返回客户端但不创建 `uni:<id>`、不写服务端存储；大型结果需要受控分页、流式或压缩传输。 |
 | 无状态资源标准化 | `pending` | 规划 `POST /v1/uni/materialize/items`：批量解析歌曲、MV、视频、播客节目和广播的真实元数据并返回标准化项目；限制批量、响应大小、超时和上游分页。 |
 | 客户端托管项目播放 | `pending` | 规划 `POST /v1/uni/items/stream`：只提交当前项目和播放控制即可执行原平台播放及严格回退，服务端不要求完整歌单且不持久化项目；可选短期内存票据承接 GET/302，票据不得含可篡改目标 URL。 |
 | 服务端多歌单目录与元数据管理 | `verified` | 分页 `GET /v1/uni/playlists` 按不可变创建时间降序、同时间 ID 升序稳定列出服务端歌单，只返回元数据和项目数而不内联项目；`PATCH /v1/uni/playlists/{ref}` 原子修改名称/描述，保留身份、创建时间和项目序列，相同值幂等且不重写文件；`DELETE` 在一次发布中移除指定歌单及全部项目索引，报告真实移除数且不影响其他歌单。范围、长度、空字段、未知输入、缺失资源、重复删除及文件重启均已验证。 |
-| Server 导出与 Client 文档导入 | `implemented` | `GET /v1/uni/playlists/{ref}/export` 已在同一存储读快照中生成完整 V1 文档，保留顺序、重复项、稳定项目 ID 和安全快照；只映射强类型白名单，存储中的未知扩展、凭据形字段、临时流地址和非 HTTPS 封面不会穿透，响应禁止中间缓存。原子 `import-document`、默认生成新服务端 ID、冲突不覆盖以及大型文档受控传输仍待实现，迁移不提供 `both` 自动同步。 |
+| Server 导出与 Client 文档导入 | `implemented` | `GET /v1/uni/playlists/{ref}/export` 在同一存储读快照中生成完整 V1 文档，只映射强类型白名单并禁止中间缓存；`POST /v1/uni/playlists/import-document` 在 16 MiB 请求上限内完整验证后原子创建，默认生成不同的新服务端 ID 并保留项目 ID，显式 `preserve_id` 冲突不覆盖。成功、冲突、畸形文档、未知敏感字段、失败零写入和导入后重导出均已验证；迁移不提供 `both` 自动同步。针对超大导出的流式或压缩传输仍待收口，因此本单元暂不升级为 `verified`。 |
 | 服务端持久化分片或嵌入式数据库 | `pending` | 在按歌单拆分文件与嵌入式数据库之间按体积、可移植性、事务和维护成本选型，使单歌单修改不再克隆并重写全局数据库；不得依赖独立外部数据库服务。 |
 | 旧单文件安全迁移 | `pending` | 将现有 `<TUNEWEAVE_DATA_DIR>/uni-playlists.json` 一次性迁移到新存储，保留多歌单、顺序、重复项和项目身份；失败不得覆盖原文件，Windows 中断后必须可恢复。 |

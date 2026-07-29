@@ -4440,6 +4440,14 @@ pub struct UniPlaylistDocument {
     pub extensions: UniPlaylistDocumentExtensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistDocumentImportResult {
+    pub playlist: UniPlaylist,
+    pub source_document_id: String,
+    pub playlist_id_preserved: bool,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UniPlaylistItemKind {

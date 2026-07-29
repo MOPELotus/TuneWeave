@@ -87,19 +87,19 @@ use tuneweave_core::{
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
     TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistDeleteResult,
-    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
-    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
-    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
-    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
-    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, UniPlaylistUpdateRequest,
-    User, UserMusicGene, UserProfile, UserProfileBackend, Video, VideoAudioStream,
-    VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
-    VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
-    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest, VideoTrackQuality,
-    VideoTrackStream, VideoTrackStreamRequest,
+    UniPlaylistDocument, UniPlaylistDocumentImportResult, UniPlaylistImportRequest,
+    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
+    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
+    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
+    UniPlaylistItemStream, UniPlaylistStore, UniPlaylistUpdateRequest, User, UserMusicGene,
+    UserProfile, UserProfileBackend, Video, VideoAudioStream, VideoAudioStreamRequest,
+    VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
+    VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
+    VideoTaxonomyRequest, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -108,6 +108,7 @@ const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_UNI_PLAYLIST_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
@@ -652,6 +653,11 @@ pub fn build_router(state: AppState) -> Router {
             get(uni_playlists).post(uni_playlist_create),
         )
         .route("/uni/playlists/imports", post(uni_playlist_import))
+        .route(
+            "/uni/playlists/import-document",
+            post(uni_playlist_document_import)
+                .layer(DefaultBodyLimit::max(MAX_UNI_PLAYLIST_DOCUMENT_BYTES)),
+        )
         .route(
             "/uni/playlists/{reference}/export",
             get(uni_playlist_export),
@@ -5855,6 +5861,13 @@ struct UniPlaylistImportBody {
     sources: Option<Vec<UniPlaylistImportSourceBody>>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistDocumentImportBody {
+    document: Option<UniPlaylistDocument>,
+    preserve_id: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UniPlaylistItemBody {
@@ -5955,6 +5968,67 @@ async fn uni_playlist_create(
                 ));
             }
             Err(error) if error.code == ErrorCode::Conflict => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::InternalError,
+        "failed to allocate a unique Uni Playlist id",
+    )
+    .into())
+}
+
+async fn uni_playlist_document_import(
+    State(state): State<AppState>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+    payload: Result<Json<UniPlaylistDocumentImportBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistDocumentImportResult>>, ApiError> {
+    let _ = query_params(params)?;
+    let body = json_body(payload)?;
+    let document = body
+        .document
+        .ok_or_else(|| TuneWeaveError::invalid_request("document must be provided"))?;
+    document.validate()?;
+    let preserve_id = body.preserve_id.unwrap_or(false);
+    let source_document_id = document.id.clone();
+    let attempts = if preserve_id { 1 } else { 8 };
+    for _ in 0..attempts {
+        let target_id = if preserve_id {
+            source_document_id.clone()
+        } else {
+            let candidate = allocate_uni_playlist_id();
+            if candidate == source_document_id {
+                continue;
+            }
+            candidate
+        };
+        let (playlist, items) = document.to_server_snapshot(&target_id)?;
+        let store = Arc::clone(&state.uni_playlists);
+        let candidate = playlist.clone();
+        let result =
+            tokio::task::spawn_blocking(move || store.create_with_items(&candidate, &items))
+                .await
+                .map_err(|_| {
+                    TuneWeaveError::new(
+                        ErrorCode::InternalError,
+                        "Uni Playlist persistence task failed",
+                    )
+                })?;
+        match result {
+            Ok(()) => {
+                let result = UniPlaylistDocumentImportResult {
+                    playlist,
+                    source_document_id,
+                    playlist_id_preserved: preserve_id,
+                    extensions: Extensions::from([
+                        ("atomic".to_owned(), json!(true)),
+                        ("automatic_sync".to_owned(), json!(false)),
+                        ("item_ids_preserved".to_owned(), json!(true)),
+                    ]),
+                };
+                return Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)));
+            }
+            Err(error) if error.code == ErrorCode::Conflict && !preserve_id => continue,
             Err(error) => return Err(error.into()),
         }
     }
@@ -30105,6 +30179,176 @@ mod tests {
             json_response_from(app, "/v1/uni/playlists/uni:pl_missing_abcdefghijkl/export").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(missing["error"]["code"], "resource_not_found");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_document_import_is_atomic_and_preserves_client_item_identity() {
+        let app = test_app_with_provider();
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists",
+            Some(json!({
+                "name": "客户端迁移源",
+                "description": "保留重复项"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let source_ref = created["data"]["ref"]
+            .as_str()
+            .expect("source playlist ref");
+        let item_path = format!("/v1/uni/playlists/{source_ref}/items");
+        let (status, added) = json_request_from(
+            app.clone(),
+            Method::POST,
+            &item_path,
+            Some(json!({
+                "items": [
+                    { "ref": "netease:185809", "kind": "track" },
+                    { "ref": "netease:185809", "kind": "track" }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let source_item_ids = added["data"]["items"]
+            .as_array()
+            .expect("source items")
+            .iter()
+            .map(|item| item["id"].as_str().expect("source item id").to_owned())
+            .collect::<Vec<_>>();
+        let export_path = format!("/v1/uni/playlists/{source_ref}/export");
+        let (status, exported) = json_response_from(app.clone(), &export_path).await;
+        assert_eq!(status, StatusCode::OK);
+        let source_document = exported["data"].clone();
+        let source_document_id = source_document["id"].clone();
+
+        let (status, imported) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/import-document",
+            Some(json!({ "document": source_document })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["data"]["source_document_id"], source_document_id);
+        assert_eq!(imported["data"]["playlist_id_preserved"], false);
+        assert_eq!(imported["data"]["extensions"]["atomic"], true);
+        assert_eq!(imported["data"]["extensions"]["automatic_sync"], false);
+        assert_eq!(imported["data"]["extensions"]["item_ids_preserved"], true);
+        let imported_ref = imported["data"]["playlist"]["ref"]
+            .as_str()
+            .expect("imported playlist ref");
+        assert_ne!(imported_ref, source_ref);
+        let (status, imported_items) = json_response_from(
+            app.clone(),
+            &format!("/v1/uni/playlists/{imported_ref}/items?limit=100"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            imported_items["data"]
+                .as_array()
+                .expect("imported items")
+                .iter()
+                .map(|item| item["id"].as_str().expect("imported item id"))
+                .collect::<Vec<_>>(),
+            source_item_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            imported_items["data"][0]["source_ref"],
+            imported_items["data"][1]["source_ref"]
+        );
+        let (status, reexported) = json_response_from(
+            app.clone(),
+            &format!("/v1/uni/playlists/{imported_ref}/export"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut expected_reexport = exported["data"].clone();
+        expected_reexport["id"] = imported["data"]["playlist"]["id"].clone();
+        assert_eq!(reexported["data"], expected_reexport);
+
+        let mut preserved_document = exported["data"].clone();
+        preserved_document["id"] = json!("pl_preserved_abcdefghijkl");
+        let preserve_body = json!({
+            "document": preserved_document,
+            "preserve_id": true
+        });
+        let (status, preserved) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/import-document",
+            Some(preserve_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            preserved["data"]["playlist"]["ref"],
+            "uni:pl_preserved_abcdefghijkl"
+        );
+        assert_eq!(preserved["data"]["playlist_id_preserved"], true);
+        let (status, conflict) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/import-document",
+            Some(preserve_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(conflict["error"]["code"], "conflict");
+
+        let (status, before) = json_response_from(app.clone(), "/v1/uni/playlists?limit=100").await;
+        assert_eq!(status, StatusCode::OK);
+        let before_count = before["data"].as_array().map(Vec::len);
+        let mut invalid_document = exported["data"].clone();
+        invalid_document["items"][1]["position"] = json!(7);
+        let (status, invalid) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/import-document",
+            Some(json!({ "document": invalid_document })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"]["code"], "invalid_request");
+        let (status, after) = json_response_from(app.clone(), "/v1/uni/playlists?limit=100").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(after["data"].as_array().map(Vec::len), before_count);
+
+        for body in [
+            json!({}),
+            json!({ "document": exported["data"], "unknown": true }),
+            json!({
+                "document": {
+                    "format": "tuneweave_uni_playlist_v1",
+                    "cookie": "secret"
+                }
+            }),
+        ] {
+            let (status, response) = json_request_from(
+                app.clone(),
+                Method::POST,
+                "/v1/uni/playlists/import-document",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+        let (status, unknown_query) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/uni/playlists/import-document?unknown=true",
+            Some(json!({ "document": exported["data"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(unknown_query["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

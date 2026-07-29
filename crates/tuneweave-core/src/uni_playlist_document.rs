@@ -3,10 +3,10 @@ use std::collections::BTreeSet;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    ErrorCode, Extensions, Platform, Quality, Result, TuneWeaveError, UniPlaylist,
+    ErrorCode, Extensions, Platform, Quality, ResourceRef, Result, TuneWeaveError, UniPlaylist,
     UniPlaylistDocument, UniPlaylistDocumentExtensions, UniPlaylistDocumentFormat,
     UniPlaylistDocumentItem, UniPlaylistDocumentItemExtensions, UniPlaylistDocumentSnapshot,
-    UniPlaylistDocumentSnapshotExtensions, UniPlaylistItem,
+    UniPlaylistDocumentSnapshotExtensions, UniPlaylistItem, UniPlaylistItemSnapshot,
 };
 
 pub const UNI_PLAYLIST_DOCUMENT_FORMAT: &str = "tuneweave_uni_playlist_v1";
@@ -43,6 +43,39 @@ impl UniPlaylistDocument {
             )
         })?;
         Ok(document)
+    }
+
+    pub fn to_server_snapshot(
+        &self,
+        target_playlist_id: &str,
+    ) -> Result<(UniPlaylist, Vec<UniPlaylistItem>)> {
+        self.validate()?;
+        validate_document_id(target_playlist_id, "target Uni Playlist id")?;
+        let resource_ref =
+            ResourceRef::new(Platform::Uni, target_playlist_id).map_err(|error| {
+                TuneWeaveError::invalid_request(format!("invalid target Uni Playlist id: {error}"))
+            })?;
+        let mut playlist = UniPlaylist::new(
+            resource_ref,
+            self.name.clone(),
+            self.description.clone(),
+            self.created_at_ms,
+        );
+        playlist.item_count = self.item_count;
+        playlist.updated_at_ms = self.updated_at_ms;
+        playlist.extensions.insert(
+            "document_format".to_owned(),
+            serde_json::json!(UNI_PLAYLIST_DOCUMENT_FORMAT),
+        );
+        playlist
+            .extensions
+            .insert("source_document_id".to_owned(), serde_json::json!(&self.id));
+        let items = self
+            .items
+            .iter()
+            .map(server_item_from_document)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((playlist, items))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -87,6 +120,144 @@ impl UniPlaylistDocument {
         }
         Ok(())
     }
+}
+
+fn server_item_from_document(item: &UniPlaylistDocumentItem) -> Result<UniPlaylistItem> {
+    let mut extensions = Extensions::new();
+    insert_extension(
+        &mut extensions,
+        "import_source_index",
+        item.extensions.import_source_index.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "import_source_ref",
+        item.extensions.import_source_ref.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "import_source_type",
+        item.extensions.import_source_type.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "imported_from_item_id",
+        item.extensions.imported_from_item_id.as_ref(),
+    )?;
+    Ok(UniPlaylistItem {
+        id: item.id.clone(),
+        position: item.position,
+        kind: item.kind,
+        source_ref: item.source_ref.clone(),
+        snapshot: server_snapshot_from_document(&item.snapshot)?,
+        added_at_ms: item.added_at_ms,
+        extensions,
+    })
+}
+
+fn server_snapshot_from_document(
+    snapshot: &UniPlaylistDocumentSnapshot,
+) -> Result<UniPlaylistItemSnapshot> {
+    let mut extensions = Extensions::new();
+    insert_extension(
+        &mut extensions,
+        "canonical_ref",
+        snapshot.extensions.canonical_ref.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "playable",
+        snapshot.extensions.playable.as_ref(),
+    )?;
+    if !snapshot.extensions.available_qualities.is_empty() {
+        insert_extension(
+            &mut extensions,
+            "available_qualities",
+            Some(&snapshot.extensions.available_qualities),
+        )?;
+    }
+    insert_extension(
+        &mut extensions,
+        "mv_ref",
+        snapshot.extensions.mv_ref.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "video_kind",
+        snapshot.extensions.video_kind.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "published_at",
+        snapshot.extensions.published_at.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "podcast_ref",
+        snapshot.extensions.podcast_ref.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "audio_ref",
+        snapshot.extensions.audio_ref.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "serial_number",
+        snapshot.extensions.serial_number.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "description",
+        snapshot.extensions.description.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "category",
+        snapshot.extensions.category.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "region",
+        snapshot.extensions.region.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "current_program",
+        snapshot.extensions.current_program.as_ref(),
+    )?;
+    insert_extension(
+        &mut extensions,
+        "has_direct_stream",
+        snapshot.extensions.has_direct_stream.as_ref(),
+    )?;
+    Ok(UniPlaylistItemSnapshot {
+        title: snapshot.title.clone(),
+        artists: snapshot.artists.clone(),
+        album: snapshot.album.clone(),
+        duration_ms: snapshot.duration_ms,
+        isrc: snapshot.isrc.clone(),
+        cover_url: snapshot.cover_url.clone(),
+        version_tags: snapshot.version_tags.clone(),
+        extensions,
+    })
+}
+
+fn insert_extension<T: serde::Serialize>(
+    extensions: &mut Extensions,
+    key: &str,
+    value: Option<&T>,
+) -> Result<()> {
+    if let Some(value) = value {
+        let value = serde_json::to_value(value).map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to encode safe Uni Playlist document field {key}"),
+            )
+        })?;
+        extensions.insert(key.to_owned(), value);
+    }
+    Ok(())
 }
 
 fn document_item_from_server(item: &UniPlaylistItem) -> Result<UniPlaylistDocumentItem> {
@@ -572,6 +743,38 @@ mod tests {
                 .expect_err("reject malformed known extension")
                 .code,
             ErrorCode::InternalError
+        );
+    }
+
+    #[test]
+    fn v1_document_import_preserves_items_and_only_replaces_playlist_identity() {
+        let document = sample_document();
+        let target_id = "pl_02abcdefghijklmnop";
+        let (playlist, items) = document
+            .to_server_snapshot(target_id)
+            .expect("convert document to server snapshot");
+        assert_eq!(playlist.id, target_id);
+        assert_eq!(playlist.item_count, document.item_count);
+        assert_eq!(playlist.created_at_ms, document.created_at_ms);
+        assert_eq!(playlist.updated_at_ms, document.updated_at_ms);
+        assert_eq!(playlist.extensions["source_document_id"], document.id);
+        assert_eq!(items[0].id, document.items[0].id);
+        assert_eq!(items[0].position, document.items[0].position);
+        assert_eq!(items[0].source_ref, document.items[0].source_ref);
+        assert_eq!(items[0].extensions["import_source_type"], "playlist");
+
+        let reexported = UniPlaylistDocument::from_server_snapshot(&playlist, &items)
+            .expect("re-export imported snapshot");
+        let mut expected = document;
+        expected.id = target_id.to_owned();
+        assert_eq!(reexported, expected);
+
+        assert_eq!(
+            expected
+                .to_server_snapshot("bad")
+                .expect_err("reject malformed target id")
+                .code,
+            ErrorCode::InvalidRequest
         );
     }
 
