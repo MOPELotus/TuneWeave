@@ -2,10 +2,14 @@ use std::{
     collections::BTreeMap,
     fmt,
     fmt::Write as _,
+    io::Read,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use encoding_rs::GBK;
+use flate2::read::ZlibDecoder;
 use reqwest::{
     Client, Proxy, StatusCode,
     header::{ACCEPT, CONTENT_LENGTH, COOKIE, REFERER, SET_COOKIE},
@@ -15,26 +19,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, json};
 use tokio::sync::Mutex;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Platform, Quality, ResourceRef, Result, Track,
-    TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, Platform, Quality, ResourceRef,
+    Result, Track, TuneWeaveError,
 };
 use url::Url;
 
 const HOME_ENDPOINT: &str = "https://www.kuwo.cn/";
 const SEARCH_ENDPOINT: &str = "https://www.kuwo.cn/search/searchMusicBykeyWord";
 const TRACK_DETAIL_ENDPOINT: &str = "https://www.kuwo.cn/api/www/music/musicInfo";
+const WORD_LYRIC_ENDPOINT: &str = "https://newlyric.kuwo.cn/newlyric.lrc";
+const MOBILE_LYRIC_ENDPOINT: &str = "https://m.kuwo.cn/newh5/singles/songinfoandlrc";
 const SEARCH_REFERER: &str = "https://www.kuwo.cn/search/list";
 const WEB_REFERER: &str = "https://www.kuwo.cn/";
 const WEB_SESSION_COOKIE: &str = "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324";
 const ALBUM_IMAGE_PREFIX: &str = "https://img2.kuwo.cn/star/albumcover/";
 const ARTIST_IMAGE_PREFIX: &str = "https://img1.kuwo.cn/star/starheads/";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LYRIC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_LYRIC_DECOMPRESSED_BYTES: u64 = 8 * 1024 * 1024;
 const USER_AGENT: &str = "TuneWeave/0.1 (Kuwo public music provider)";
 const WEB_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 const SECRET_MULTIPLIER: u64 = 9_253;
 const SECRET_INCREMENT: u64 = 23;
 const SECRET_MODULUS: u64 = 2_147_483_647;
 const EIGHT_DIGIT_FOLDED_SEED: u64 = 59_910_100;
+const LYRIC_XOR_KEY: &[u8] = b"yeelion";
 
 #[derive(Clone, Default)]
 pub struct KuwoConfig {
@@ -113,6 +122,14 @@ struct KuwoTrackDetailQuery<'a> {
     request_id: String,
     plat: &'static str,
     from: &'static str,
+}
+
+#[derive(Serialize)]
+struct KuwoMobileLyricQuery<'a> {
+    #[serde(rename = "musicId")]
+    music_id: &'a str,
+    #[serde(rename = "httpsStatus")]
+    https_status: u8,
 }
 
 #[derive(Default, Deserialize)]
@@ -267,6 +284,57 @@ impl FlexibleBoolean {
 struct KuwoSignedRejection {
     success: Option<bool>,
     message: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoMobileLyricEnvelope {
+    status: FlexibleText,
+    msg: String,
+    data: Option<KuwoMobileLyricData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoMobileLyricData {
+    lrclist: Vec<KuwoMobileLyricLine>,
+    songinfo: Option<KuwoMobileLyricSong>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct KuwoMobileLyricLine {
+    line_lyric: String,
+    time: FlexibleText,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoMobileLyricSong {
+    id: FlexibleText,
+    #[serde(rename = "musicrId")]
+    music_rid: FlexibleText,
+}
+
+struct KuwoWordLyrics {
+    text: String,
+    byte_length: usize,
+    marker_count: usize,
+}
+
+struct KuwoPlainLyrics {
+    text: String,
+    byte_length: usize,
+    line_count: usize,
+}
+
+#[derive(Serialize)]
+struct KuwoLyricSourceDiagnostics {
+    available: bool,
+    byte_length: Option<usize>,
+    line_count: Option<usize>,
+    word_marker_count: Option<usize>,
+    error_code: Option<ErrorCode>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -451,6 +519,158 @@ impl KuwoClient {
         ))
     }
 
+    pub(crate) async fn lyrics(&self, music_id: &str) -> Result<Lyrics> {
+        let (word_result, plain_result) = tokio::join!(
+            self.download_word_lyrics(music_id),
+            self.download_mobile_lyrics(music_id)
+        );
+        let (word, word_diagnostics) = match word_result {
+            Ok(word) => {
+                let diagnostics = KuwoLyricSourceDiagnostics {
+                    available: true,
+                    byte_length: Some(word.byte_length),
+                    line_count: Some(word.text.lines().count()),
+                    word_marker_count: Some(word.marker_count),
+                    error_code: None,
+                };
+                (Some(word), diagnostics)
+            }
+            Err(error) => (
+                None,
+                KuwoLyricSourceDiagnostics {
+                    available: false,
+                    byte_length: None,
+                    line_count: None,
+                    word_marker_count: None,
+                    error_code: Some(error.code),
+                },
+            ),
+        };
+        let (mobile_plain, mobile_diagnostics) = match plain_result {
+            Ok(plain) => {
+                let diagnostics = KuwoLyricSourceDiagnostics {
+                    available: true,
+                    byte_length: Some(plain.byte_length),
+                    line_count: Some(plain.line_count),
+                    word_marker_count: None,
+                    error_code: None,
+                };
+                (Some(plain), diagnostics)
+            }
+            Err(error) => (
+                None,
+                KuwoLyricSourceDiagnostics {
+                    available: false,
+                    byte_length: None,
+                    line_count: None,
+                    word_marker_count: None,
+                    error_code: Some(error.code),
+                },
+            ),
+        };
+        if word.is_none() && mobile_plain.is_none() {
+            return Err(kuwo_upstream_error(
+                "Kuwo lyrics were unavailable from every public source",
+            )
+            .with_details(json!({
+                "lrcx": word_diagnostics,
+                "mobile_lrc": mobile_diagnostics,
+            })));
+        }
+
+        let derived_plain = mobile_plain.is_none() && word.is_some();
+        let plain = mobile_plain.map(|plain| plain.text).or_else(|| {
+            word.as_ref()
+                .and_then(|word| derive_plain_from_lrcx(&word.text).ok())
+        });
+        let word_synced = word.map(|word| word.text);
+        let mut extensions = Extensions::new();
+        extensions.insert(
+            "sources".to_owned(),
+            json!({
+                "lrcx": word_diagnostics,
+                "mobile_lrc": mobile_diagnostics,
+            }),
+        );
+        extensions.insert("plain_derived_from_lrcx".to_owned(), json!(derived_plain));
+        Ok(Lyrics {
+            track_ref: ResourceRef::new(Platform::Kuwo, music_id.to_owned())
+                .map_err(|_| kuwo_upstream_error("Kuwo lyrics received an invalid music ID"))?,
+            plain,
+            translated: None,
+            romanized: None,
+            word_synced,
+            singing_annotations: None,
+            singing_annotations_timestamp: None,
+            format: if word_diagnostics.available {
+                "lrcx".to_owned()
+            } else {
+                "lrc".to_owned()
+            },
+            contributors: Vec::new(),
+            extensions,
+        })
+    }
+
+    async fn download_word_lyrics(&self, music_id: &str) -> Result<KuwoWordLyrics> {
+        let url = build_word_lyric_url(music_id)?;
+        let response = self
+            .http
+            .get(url)
+            .header(ACCEPT, "application/octet-stream, */*")
+            .header(REFERER, WEB_REFERER)
+            .send()
+            .await
+            .map_err(kuwo_network_error)?;
+        let bytes = read_bounded_response_with_limit(
+            response,
+            "Kuwo word-synced lyrics",
+            MAX_LYRIC_RESPONSE_BYTES,
+        )
+        .await?;
+        let byte_length = bytes.len();
+        let text = decode_word_lyrics(&bytes)?;
+        let marker_count = count_lrcx_word_markers(&text);
+        if marker_count == 0 {
+            return Err(kuwo_upstream_error(
+                "Kuwo LRCX response omitted word timing markers",
+            ));
+        }
+        Ok(KuwoWordLyrics {
+            text,
+            byte_length,
+            marker_count,
+        })
+    }
+
+    async fn download_mobile_lyrics(&self, music_id: &str) -> Result<KuwoPlainLyrics> {
+        let response = self
+            .http
+            .get(MOBILE_LYRIC_ENDPOINT)
+            .header(ACCEPT, "application/json, text/plain")
+            .header(REFERER, WEB_REFERER)
+            .query(&KuwoMobileLyricQuery {
+                music_id,
+                https_status: 1,
+            })
+            .send()
+            .await
+            .map_err(kuwo_network_error)?;
+        let bytes = read_bounded_response_with_limit(
+            response,
+            "Kuwo mobile lyrics",
+            MAX_LYRIC_RESPONSE_BYTES,
+        )
+        .await?;
+        let byte_length = bytes.len();
+        let (text, line_count) = parse_mobile_lyrics(&bytes, music_id)?;
+        Ok(KuwoPlainLyrics {
+            text,
+            byte_length,
+            line_count,
+        })
+    }
+
     async fn signed_get_track_detail(
         &self,
         music_id: &str,
@@ -513,6 +733,226 @@ impl KuwoClient {
         *current = Some(session.clone());
         Ok(session)
     }
+}
+
+fn build_word_lyric_url(music_id: &str) -> Result<Url> {
+    let plaintext =
+        format!("user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_{music_id}&lrcx=1");
+    let encrypted = plaintext
+        .bytes()
+        .enumerate()
+        .map(|(index, byte)| byte ^ LYRIC_XOR_KEY[index % LYRIC_XOR_KEY.len()])
+        .collect::<Vec<_>>();
+    let opaque_query = BASE64_STANDARD.encode(encrypted);
+    let encoded_query =
+        url::form_urlencoded::byte_serialize(opaque_query.as_bytes()).collect::<String>();
+    let mut url = Url::parse(WORD_LYRIC_ENDPOINT)
+        .map_err(|_| kuwo_upstream_error("Kuwo LRCX endpoint configuration is invalid"))?;
+    url.set_query(Some(&encoded_query));
+    Ok(url)
+}
+
+fn decode_word_lyrics(bytes: &[u8]) -> Result<String> {
+    if !bytes.starts_with(b"tp=content") {
+        return Err(kuwo_upstream_error(
+            "Kuwo LRCX response returned an invalid content envelope",
+        ));
+    }
+    let separator = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| kuwo_upstream_error("Kuwo LRCX response omitted its content separator"))?;
+    let compressed = bytes
+        .get(separator + 4..)
+        .filter(|compressed| !compressed.is_empty())
+        .ok_or_else(|| kuwo_upstream_error("Kuwo LRCX response omitted compressed content"))?;
+    let mut inflated = Vec::new();
+    ZlibDecoder::new(compressed)
+        .take(MAX_LYRIC_DECOMPRESSED_BYTES + 1)
+        .read_to_end(&mut inflated)
+        .map_err(|_| kuwo_upstream_error("Kuwo LRCX response could not be decompressed"))?;
+    if u64::try_from(inflated.len()).unwrap_or(u64::MAX) > MAX_LYRIC_DECOMPRESSED_BYTES {
+        return Err(kuwo_upstream_error(
+            "Kuwo LRCX decompressed content exceeded the size limit",
+        ));
+    }
+    let encoded = std::str::from_utf8(&inflated)
+        .map(str::trim)
+        .map_err(|_| kuwo_upstream_error("Kuwo LRCX content was not valid base64 text"))?;
+    let mut decrypted = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| kuwo_upstream_error("Kuwo LRCX content contained invalid base64"))?;
+    for (index, byte) in decrypted.iter_mut().enumerate() {
+        *byte ^= LYRIC_XOR_KEY[index % LYRIC_XOR_KEY.len()];
+    }
+    let (decoded, had_errors) = GBK.decode_without_bom_handling(&decrypted);
+    if had_errors {
+        return Err(kuwo_upstream_error(
+            "Kuwo LRCX content was not valid GB18030 text",
+        ));
+    }
+    validate_lyric_text(&decoded)?;
+    Ok(decoded.into_owned())
+}
+
+fn parse_mobile_lyrics(bytes: &[u8], requested_music_id: &str) -> Result<(String, usize)> {
+    let envelope: KuwoMobileLyricEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kuwo_upstream_error("Kuwo mobile lyrics returned malformed JSON"))?;
+    if envelope.status.as_i64() != Some(200) {
+        return Err(
+            kuwo_upstream_error("Kuwo mobile lyrics rejected the request").with_details(json!({
+                "platform_code": envelope.status.as_text().map(|value| bounded_text(&value, 64)),
+                "platform_message": bounded_text(&envelope.msg, 256),
+            })),
+        );
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| kuwo_upstream_error("Kuwo mobile lyrics omitted data"))?;
+    let song = data
+        .songinfo
+        .ok_or_else(|| kuwo_upstream_error("Kuwo mobile lyrics omitted song identity"))?;
+    let song_id = song
+        .id
+        .as_text()
+        .filter(|id| canonical_positive_decimal(id).is_some())
+        .ok_or_else(|| kuwo_upstream_error("Kuwo mobile lyrics omitted a valid song ID"))?;
+    let music_rid = song
+        .music_rid
+        .as_text()
+        .filter(|id| canonical_positive_decimal(id).is_some())
+        .ok_or_else(|| kuwo_upstream_error("Kuwo mobile lyrics omitted a valid music ID"))?;
+    if song_id != requested_music_id || music_rid != requested_music_id {
+        return Err(kuwo_upstream_error(
+            "Kuwo mobile lyrics returned a mismatched music ID",
+        ));
+    }
+    if data.lrclist.is_empty() || data.lrclist.len() > 10_000 {
+        return Err(kuwo_upstream_error(
+            "Kuwo mobile lyrics returned an invalid line count",
+        ));
+    }
+
+    let line_count = data.lrclist.len();
+    let mut output = String::new();
+    let mut previous_time = 0_u64;
+    for (index, line) in data.lrclist.into_iter().enumerate() {
+        let time = line
+            .time
+            .as_text()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 86_400.0)
+            .map(|value| (value * 1_000.0).round() as u64)
+            .ok_or_else(|| kuwo_upstream_error("Kuwo mobile lyrics contained an invalid time"))?;
+        if index > 0 && time < previous_time {
+            return Err(kuwo_upstream_error(
+                "Kuwo mobile lyrics were not ordered by time",
+            ));
+        }
+        previous_time = time;
+        if line.line_lyric.len() > 4_096
+            || line
+                .line_lyric
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\t'))
+        {
+            return Err(kuwo_upstream_error(
+                "Kuwo mobile lyrics contained invalid line text",
+            ));
+        }
+        if index > 0 {
+            output.push('\n');
+        }
+        let minutes = time / 60_000;
+        let seconds = time % 60_000 / 1_000;
+        let millis = time % 1_000;
+        write!(
+            &mut output,
+            "[{minutes:02}:{seconds:02}.{millis:03}]{}",
+            line.line_lyric
+        )
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to format Kuwo mobile lyrics",
+            )
+            .with_platform(Platform::Kuwo)
+        })?;
+    }
+    validate_lyric_text(&output)?;
+    Ok((output, line_count))
+}
+
+fn derive_plain_from_lrcx(word_synced: &str) -> Result<String> {
+    let mut output = String::with_capacity(word_synced.len());
+    for line in word_synced.lines() {
+        if line.trim_start().starts_with("[kuwo:") {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let mut rest = line;
+        while let Some(open) = rest.find('<') {
+            output.push_str(&rest[..open]);
+            let after_open = &rest[open + 1..];
+            let Some(close) = after_open.find('>') else {
+                output.push_str(&rest[open..]);
+                rest = "";
+                break;
+            };
+            let marker = &after_open[..close];
+            if is_lrcx_word_marker(marker) {
+                rest = &after_open[close + 1..];
+            } else {
+                output.push('<');
+                output.push_str(marker);
+                output.push('>');
+                rest = &after_open[close + 1..];
+            }
+        }
+        output.push_str(rest);
+    }
+    validate_lyric_text(&output)?;
+    Ok(output)
+}
+
+fn count_lrcx_word_markers(value: &str) -> usize {
+    let mut count = 0_usize;
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find('>') else {
+            break;
+        };
+        if is_lrcx_word_marker(&after_open[..close]) {
+            count = count.saturating_add(1);
+        }
+        rest = &after_open[close + 1..];
+    }
+    count
+}
+
+fn is_lrcx_word_marker(value: &str) -> bool {
+    let parts = value.split(',').collect::<Vec<_>>();
+    (2..=3).contains(&parts.len())
+        && parts.iter().all(|part| {
+            let digits = part.strip_prefix('-').unwrap_or(part);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn validate_lyric_text(value: &str) -> Result<()> {
+    if value.trim().is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(kuwo_upstream_error(
+            "Kuwo lyric response contained invalid text",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result<Track> {
@@ -1102,6 +1542,14 @@ fn new_request_id() -> String {
 }
 
 async fn read_bounded_response(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+    read_bounded_response_with_limit(response, operation, MAX_API_RESPONSE_BYTES).await
+}
+
+async fn read_bounded_response_with_limit(
+    response: reqwest::Response,
+    operation: &str,
+    limit: u64,
+) -> Result<Vec<u8>> {
     let mut response = response;
     let status = response.status();
     if !status.is_success() {
@@ -1112,13 +1560,13 @@ async fn read_bounded_response(response: reqwest::Response, operation: &str) -> 
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > MAX_API_RESPONSE_BYTES)
+        .is_some_and(|length| length > limit)
     {
         return Err(kuwo_upstream_error(format!(
             "{operation} response exceeded the size limit"
         )));
     }
-    let max_size = usize::try_from(MAX_API_RESPONSE_BYTES).unwrap_or(usize::MAX);
+    let max_size = usize::try_from(limit).unwrap_or(usize::MAX);
     let initial_capacity = response
         .content_length()
         .and_then(|length| usize::try_from(length).ok())
@@ -1279,6 +1727,19 @@ mod tests {
         },
         "mvpayinfo":{"play":1,"vid":8132306,"down":1},
         "albuminfo":"专辑简介"
+      }
+    }"#;
+
+    const MOBILE_LYRIC_RESPONSE: &str = r#"{
+      "status":200,
+      "msg":"成功",
+      "data":{
+        "lrclist":[
+          {"lineLyric":"晴天 - 周杰伦","time":"0.0"},
+          {"lineLyric":"词：周杰伦","time":"2.25"},
+          {"lineLyric":"故事的小黄花","time":"98.880005"}
+        ],
+        "songinfo":{"id":"228908","musicrId":"228908"}
       }
     }"#;
 
@@ -1486,6 +1947,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lrcx_query_matches_the_reference_protocol_fixture() {
+        let url = build_word_lyric_url("228908").expect("build Kuwo LRCX URL");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("newlyric.kuwo.cn"));
+        assert_eq!(url.path(), "/newlyric.lrc");
+        let decoded =
+            url::form_urlencoded::parse(url.query().expect("opaque LRCX query").as_bytes())
+                .next()
+                .expect("decoded LRCX query")
+                .0;
+        assert_eq!(
+            decoded,
+            "DBYAHlReXEpRUEAeCgxVEgAORRgLG0MXCRgaCwoRAB5UAwEaBAkEBhwaXxcAHVReSAsMAVEkOj0wJjpeW1dXSV1DABsMFkRU"
+        );
+    }
+
+    #[test]
+    fn lrcx_decoder_preserves_word_timings_and_derives_plain_without_overwrite() {
+        use std::io::Write as _;
+
+        let original = "[kuwo:127]\n[ti:Fixture]\n[00:00.000]<0,100>Hello<100,100> world";
+        let mut encrypted = original.as_bytes().to_vec();
+        for (index, byte) in encrypted.iter_mut().enumerate() {
+            *byte ^= LYRIC_XOR_KEY[index % LYRIC_XOR_KEY.len()];
+        }
+        let encoded = BASE64_STANDARD.encode(encrypted);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(encoded.as_bytes())
+            .expect("compress LRCX fixture");
+        let mut envelope = b"tp=content\r\n\r\n".to_vec();
+        envelope.extend(encoder.finish().expect("finish LRCX fixture"));
+
+        let decoded = decode_word_lyrics(&envelope).expect("decode LRCX fixture");
+        assert_eq!(decoded, original);
+        assert_eq!(count_lrcx_word_markers(&decoded), 2);
+        assert_eq!(
+            derive_plain_from_lrcx(&decoded).expect("derive plain LRC"),
+            "[ti:Fixture]\n[00:00.000]Hello world"
+        );
+    }
+
+    #[test]
+    fn mobile_lyrics_round_float_artifacts_and_require_matching_identity() {
+        let (plain, count) = parse_mobile_lyrics(MOBILE_LYRIC_RESPONSE.as_bytes(), "228908")
+            .expect("parse mobile lyrics");
+        assert_eq!(count, 3);
+        assert_eq!(
+            plain,
+            "[00:00.000]晴天 - 周杰伦\n[00:02.250]词：周杰伦\n[01:38.880]故事的小黄花"
+        );
+
+        let mismatched =
+            MOBILE_LYRIC_RESPONSE.replace("\"musicrId\":\"228908\"", "\"musicrId\":\"3195905\"");
+        assert!(parse_mobile_lyrics(mismatched.as_bytes(), "228908").is_err());
+        let reversed = MOBILE_LYRIC_RESPONSE.replace("\"time\":\"98.880005\"", "\"time\":\"1\"");
+        assert!(parse_mobile_lyrics(reversed.as_bytes(), "228908").is_err());
+    }
+
+    #[test]
+    fn lrcx_marker_parser_removes_only_platform_word_timing_syntax() {
+        assert!(is_lrcx_word_marker("0,100"));
+        assert!(is_lrcx_word_marker("-10,20,30"));
+        assert!(!is_lrcx_word_marker("0"));
+        assert!(!is_lrcx_word_marker("0,word"));
+        assert_eq!(
+            derive_plain_from_lrcx("[00:00.000]<0,100>A <not,time>B")
+                .expect("derive mixed marker line"),
+            "[00:00.000]A <not,time>B"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live Kuwo network access"]
     async fn live_public_track_search_returns_stable_results() {
@@ -1517,5 +2052,26 @@ mod tests {
         assert!(!track.name.trim().is_empty());
         assert!(track.duration_ms.is_some_and(|duration| duration > 0));
         assert!(track.artists.iter().any(|artist| !artist.name.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kuwo network access"]
+    async fn live_lyrics_keep_lrcx_ahead_of_plain_lrc() {
+        let client = KuwoClient::test_client();
+        let lyrics = client.lyrics("228908").await.expect("live Kuwo lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "kuwo:228908");
+        assert_eq!(lyrics.format, "lrcx");
+        assert!(
+            lyrics
+                .word_synced
+                .as_deref()
+                .is_some_and(|text| count_lrcx_word_markers(text) > 0)
+        );
+        assert!(
+            lyrics
+                .plain
+                .as_deref()
+                .is_some_and(|text| { text.contains("[00:00.000]") && !text.contains("<0,") })
+        );
     }
 }

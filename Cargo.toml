@@ -29,6 +29,7 @@ base64 = "0.22.1"
 bytes = "1.12.1"
 cbc = "0.1.2"
 ecb = "0.1.2"
+encoding_rs = "0.8.35"
 flate2 = "1.1.9"
 futures-util = { version = "0.3.32", default-features = false, features = ["sink"] }
 hex = "0.4.3"

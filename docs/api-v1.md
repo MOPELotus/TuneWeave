@@ -1475,6 +1475,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷我歌曲详情使用 `GET /v1/tracks/kuwo:<rid>`，只接受规范正整数且公开层不接受账户。当前官网对 `/api/www/music/musicInfo` 要求当次匿名跟踪 Cookie 和由该 Cookie 动态生成的 `Secret`；Provider 固定先访问官方 HTTPS 首页取得严格限定名称、长度与字符集的 Cookie，只在当前实例内缓存最多 30 分钟，再使用官网算法生成带随机 8 位 nonce 的单次签名。Cookie、Secret 和 nonce 不持久化、不回显，也不进入普通日志、Debug、扩展或错误；只有 HTTP 401/403 或平台精确签名拒绝状态才刷新会话并重试一次。成功响应必须同时以 `MUSIC_<rid>` 和数字 `rid` 回配请求身份，随后映射歌曲、歌手、专辑、可信官方封面、时长、曲序、发行日、MV、无损目录、评分、付费/试听标志与有界专辑简介。目录中的 `online/isListenFee/payInfo` 不替代实时播放权益，只有明确离线时才设 `playable=false`。当前签名实现已用官网 JavaScript 算法固定向量做差分验证，并通过真实 Provider 与统一 HTTP。
 
+酷我歌词使用 `GET /v1/tracks/kuwo:<rid>/lyrics`，当前公开层不接受账户、`song_type` 或助唱标注参数。Provider 同时请求官方 HTTPS LRCX 二进制端点和移动端行级端点：LRCX 的单一查询先把固定协议文本按 `yeelion` 循环 XOR 并做 Base64，响应必须通过 `tp=content` 信封、4 MiB 传输上限、8 MiB zlib 解压上限、Base64/XOR 及无替换 GB18030 解码。合法 `<start,duration[,offset]>` 逐字标记原样保存在 `word_synced`，有该来源时始终返回 `format=lrcx`；移动端行时间按真实浮点秒四舍五入到毫秒并组成普通 LRC。移动端当前存在间歇性“音乐查询失败”，该低精度来源失败时从 LRCX 只移除语法有效的逐字标记派生 `plain`，不会反过来降级或覆盖 `word_synced`；每条链独立记录安全诊断，只有两者均失败才返回错误。当前公开响应未提供可验证的翻译或音译时，对应字段保持 `null`。统一 HTTP 已真实确认逐字优先、普通歌词回退和上游端点/不透明查询不泄漏。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

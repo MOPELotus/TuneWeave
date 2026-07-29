@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, MusicProvider, Page, PageMeta, Platform, Result, SearchKind,
-    SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
+    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
 };
 
 use crate::client::{KuwoClient, KuwoConfig};
@@ -48,7 +48,11 @@ impl MusicProvider for KuwoProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+        BTreeSet::from([
+            Capability::Lyrics,
+            Capability::SearchTracks,
+            Capability::TrackDetail,
+        ])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -122,6 +126,36 @@ impl MusicProvider for KuwoProvider {
         let music_id = parse_music_id(id)?;
         self.client.track_detail(music_id).await
     }
+
+    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+        if account.is_some() {
+            return Err(kuwo_invalid_request(
+                "Kuwo public lyrics do not accept an account",
+            ));
+        }
+        let music_id = parse_music_id(id)?;
+        self.client.lyrics(music_id).await
+    }
+
+    async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        validate_lyrics_request(request)?;
+        let music_id = parse_music_id(id)?;
+        self.client.lyrics(music_id).await
+    }
+}
+
+fn validate_lyrics_request(request: &LyricsRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(kuwo_invalid_request(
+            "Kuwo public lyrics do not accept an account",
+        ));
+    }
+    if request.song_type.is_some() || request.singing_annotations {
+        return Err(kuwo_invalid_request(
+            "Kuwo lyrics do not accept song_type or singing annotations",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_music_id(id: &str) -> Result<&str> {
@@ -218,8 +252,35 @@ mod tests {
         assert_eq!(provider.platform(), Platform::Kuwo);
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+            BTreeSet::from([
+                Capability::Lyrics,
+                Capability::SearchTracks,
+                Capability::TrackDetail
+            ])
         );
+    }
+
+    #[test]
+    fn lyrics_accept_display_preferences_but_reject_foreign_protocol_options() {
+        let rich = LyricsRequest {
+            word_synced: true,
+            translated: true,
+            romanized: true,
+            ..LyricsRequest::default()
+        };
+        assert!(validate_lyrics_request(&rich).is_ok());
+
+        let mut account = rich.clone();
+        account.account = Some("default".to_owned());
+        assert!(validate_lyrics_request(&account).is_err());
+
+        let mut song_type = rich.clone();
+        song_type.song_type = Some(1);
+        assert!(validate_lyrics_request(&song_type).is_err());
+
+        let mut annotations = rich;
+        annotations.singing_annotations = true;
+        assert!(validate_lyrics_request(&annotations).is_err());
     }
 
     #[test]
