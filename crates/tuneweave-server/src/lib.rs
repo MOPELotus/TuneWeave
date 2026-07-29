@@ -109,6 +109,7 @@ use tuneweave_core::{
 };
 
 pub use response::{ApiError, ApiResponse, REQUEST_ID_HEADER, ResponseMeta};
+use response::{RequestCredentialSource, record_request_provider_access};
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
@@ -317,6 +318,7 @@ impl CallerCredentialSet {
                 )
                 .with_platform(platform));
             }
+            record_request_provider_access(platform, RequestCredentialSource::Caller);
             return Ok(ProviderAccess {
                 provider: self
                     .providers
@@ -336,6 +338,14 @@ impl CallerCredentialSet {
                 .map(str::to_owned),
             AccountSelection::Default => Some(account_alias(explicit_account)?),
         };
+        record_request_provider_access(
+            platform,
+            if provider_account.is_some() {
+                RequestCredentialSource::Server
+            } else {
+                RequestCredentialSource::Anonymous
+            },
+        );
         Ok(ProviderAccess {
             provider,
             response_account: provider_account.clone(),
@@ -384,6 +394,9 @@ impl CallerCredentialSet {
         &self,
         accounts: &mut BTreeMap<Platform, String>,
     ) -> Result<(), TuneWeaveError> {
+        for platform in accounts.keys().copied().collect::<Vec<_>>() {
+            record_request_provider_access(platform, RequestCredentialSource::Server);
+        }
         for platform in self.credentials.keys() {
             if accounts.contains_key(platform) {
                 return Err(TuneWeaveError::invalid_request(
@@ -392,11 +405,10 @@ impl CallerCredentialSet {
                 .with_platform(*platform));
             }
         }
-        accounts.extend(
-            self.credentials
-                .keys()
-                .map(|platform| (*platform, "default".to_owned())),
-        );
+        accounts.extend(self.credentials.keys().map(|platform| {
+            record_request_provider_access(*platform, RequestCredentialSource::Caller);
+            (*platform, "default".to_owned())
+        }));
         Ok(())
     }
 }

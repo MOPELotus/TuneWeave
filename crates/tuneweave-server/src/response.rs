@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{cell::RefCell, time::Instant};
 
 use axum::{
     Json,
@@ -18,6 +18,106 @@ const MAX_REQUEST_ID_LENGTH: usize = 64;
 
 tokio::task_local! {
     static CURRENT_REQUEST_ID: String;
+    static CURRENT_REQUEST_SUMMARY: RefCell<RequestCompletionSummary>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestCredentialSource {
+    Anonymous,
+    Server,
+    Caller,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RequestPlatformSummary {
+    #[default]
+    None,
+    One(Platform),
+    Multiple,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RequestCredentialSummary {
+    #[default]
+    None,
+    One(RequestCredentialSource),
+    Mixed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RequestCompletionSummary {
+    platform: RequestPlatformSummary,
+    credential_source: RequestCredentialSummary,
+    pagination_has_more: Option<bool>,
+}
+
+impl RequestCompletionSummary {
+    fn observe_platform(&mut self, platform: Platform) {
+        self.platform = match self.platform {
+            RequestPlatformSummary::None => RequestPlatformSummary::One(platform),
+            RequestPlatformSummary::One(existing) if existing == platform => self.platform,
+            RequestPlatformSummary::One(_) | RequestPlatformSummary::Multiple => {
+                RequestPlatformSummary::Multiple
+            }
+        };
+    }
+
+    fn observe_credential_source(&mut self, source: RequestCredentialSource) {
+        self.credential_source = match self.credential_source {
+            RequestCredentialSummary::None => RequestCredentialSummary::One(source),
+            RequestCredentialSummary::One(existing) if existing == source => self.credential_source,
+            RequestCredentialSummary::One(_) | RequestCredentialSummary::Mixed => {
+                RequestCredentialSummary::Mixed
+            }
+        };
+    }
+
+    const fn platform_name(self) -> &'static str {
+        match self.platform {
+            RequestPlatformSummary::None => "none",
+            RequestPlatformSummary::One(platform) => platform.as_str(),
+            RequestPlatformSummary::Multiple => "multiple",
+        }
+    }
+
+    const fn credential_source_name(self) -> &'static str {
+        match self.credential_source {
+            RequestCredentialSummary::None => "none",
+            RequestCredentialSummary::One(RequestCredentialSource::Anonymous) => "anonymous",
+            RequestCredentialSummary::One(RequestCredentialSource::Server) => "server",
+            RequestCredentialSummary::One(RequestCredentialSource::Caller) => "caller",
+            RequestCredentialSummary::Mixed => "mixed",
+        }
+    }
+}
+
+pub(crate) fn record_request_provider_access(
+    platform: Platform,
+    credential_source: RequestCredentialSource,
+) {
+    let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
+        let mut summary = summary.borrow_mut();
+        summary.observe_platform(platform);
+        summary.observe_credential_source(credential_source);
+    });
+}
+
+fn record_request_platform(platform: Platform) {
+    let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
+        summary.borrow_mut().observe_platform(platform);
+    });
+}
+
+fn record_request_pagination(has_more: bool) {
+    let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
+        summary.borrow_mut().pagination_has_more = Some(has_more);
+    });
+}
+
+fn current_request_summary() -> RequestCompletionSummary {
+    CURRENT_REQUEST_SUMMARY
+        .try_with(|summary| *summary.borrow())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Serialize)]
@@ -40,17 +140,24 @@ impl<T> ApiResponse<T> {
     #[must_use]
     pub fn with_platform(mut self, platform: Platform) -> Self {
         self.meta.platform = Some(platform);
+        record_request_platform(platform);
         self
     }
 
     #[must_use]
     pub fn with_account(mut self, account: impl Into<String>) -> Self {
         self.meta.account = Some(account.into());
+        let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
+            summary
+                .borrow_mut()
+                .observe_credential_source(RequestCredentialSource::Server);
+        });
         self
     }
 
     #[must_use]
     pub fn with_pagination(mut self, pagination: PageMeta) -> Self {
+        record_request_pagination(pagination.has_more);
         self.meta.pagination = Some(pagination);
         self
     }
@@ -106,31 +213,35 @@ pub(crate) async fn request_context_middleware(request: Request, next: Next) -> 
         operation = %route,
     );
     let scoped_request_id = request_id.clone();
-    CURRENT_REQUEST_ID
+    CURRENT_REQUEST_SUMMARY
         .scope(
-            scoped_request_id,
-            async move {
-                let mut response = if let Some(message) = rejection {
-                    ApiError::from(TuneWeaveError::invalid_request(message)).into_response()
-                } else {
-                    next.run(request).await
-                };
-                response.headers_mut().insert(
-                    REQUEST_ID_HEADER,
-                    HeaderValue::from_str(&request_id)
-                        .expect("validated or generated request IDs are valid header values"),
-                );
-                log_request_completion(
-                    &request_id,
-                    &method,
-                    &route,
-                    response.status(),
-                    caller_supplied,
-                    started,
-                );
-                response
-            }
-            .instrument(span),
+            RefCell::new(RequestCompletionSummary::default()),
+            CURRENT_REQUEST_ID.scope(
+                scoped_request_id,
+                async move {
+                    let mut response = if let Some(message) = rejection {
+                        ApiError::from(TuneWeaveError::invalid_request(message)).into_response()
+                    } else {
+                        next.run(request).await
+                    };
+                    response.headers_mut().insert(
+                        REQUEST_ID_HEADER,
+                        HeaderValue::from_str(&request_id)
+                            .expect("validated or generated request IDs are valid header values"),
+                    );
+                    log_request_completion(
+                        &request_id,
+                        &method,
+                        &route,
+                        response.status(),
+                        caller_supplied,
+                        started,
+                        current_request_summary(),
+                    );
+                    response
+                }
+                .instrument(span),
+            ),
         )
         .await
 }
@@ -183,9 +294,14 @@ fn log_request_completion(
     status: StatusCode,
     caller_supplied: bool,
     started: Instant,
+    summary: RequestCompletionSummary,
 ) {
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let status_code = status.as_u16();
+    let platform = summary.platform_name();
+    let credential_source = summary.credential_source_name();
+    let pagination_present = summary.pagination_has_more.is_some();
+    let pagination_has_more = summary.pagination_has_more.unwrap_or(false);
     if status.is_server_error() {
         tracing::error!(
             request_id,
@@ -195,6 +311,10 @@ fn log_request_completion(
             status = status_code,
             duration_ms,
             caller_supplied_request_id = caller_supplied,
+            platform,
+            credential_source,
+            pagination_present,
+            pagination_has_more,
             "HTTP request completed"
         );
     } else if status.is_client_error() {
@@ -206,6 +326,10 @@ fn log_request_completion(
             status = status_code,
             duration_ms,
             caller_supplied_request_id = caller_supplied,
+            platform,
+            credential_source,
+            pagination_present,
+            pagination_has_more,
             "HTTP request completed"
         );
     } else if is_quiet_route(route) {
@@ -217,6 +341,10 @@ fn log_request_completion(
             status = status_code,
             duration_ms,
             caller_supplied_request_id = caller_supplied,
+            platform,
+            credential_source,
+            pagination_present,
+            pagination_has_more,
             "HTTP request completed"
         );
     } else {
@@ -228,6 +356,10 @@ fn log_request_completion(
             status = status_code,
             duration_ms,
             caller_supplied_request_id = caller_supplied,
+            platform,
+            credential_source,
+            pagination_present,
+            pagination_has_more,
             "HTTP request completed"
         );
     }
@@ -275,6 +407,9 @@ impl From<TuneWeaveError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let request_id = current_request_id();
+        if let Some(platform) = self.0.platform {
+            record_request_platform(platform);
+        }
         let status = match self.0.code {
             ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
             ErrorCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
@@ -340,5 +475,38 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             retryable = error.retryable,
             "TuneWeave request failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn response_summary_merges_platform_credential_and_pagination_without_identifiers() {
+        CURRENT_REQUEST_SUMMARY
+            .scope(RefCell::new(RequestCompletionSummary::default()), async {
+                record_request_provider_access(Platform::Netease, RequestCredentialSource::Caller);
+                let _response = ApiResponse::new(Vec::<String>::new())
+                    .with_platform(Platform::Netease)
+                    .with_pagination(PageMeta {
+                        limit: 20,
+                        offset: 0,
+                        total: None,
+                        next_offset: Some(20),
+                        has_more: true,
+                        extensions: Default::default(),
+                    });
+                let summary = current_request_summary();
+                assert_eq!(summary.platform_name(), "netease");
+                assert_eq!(summary.credential_source_name(), "caller");
+                assert_eq!(summary.pagination_has_more, Some(true));
+
+                record_request_provider_access(Platform::Qq, RequestCredentialSource::Server);
+                let summary = current_request_summary();
+                assert_eq!(summary.platform_name(), "multiple");
+                assert_eq!(summary.credential_source_name(), "mixed");
+            })
+            .await;
     }
 }
