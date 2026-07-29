@@ -7,14 +7,14 @@ TuneWeave 将参考项目作为协议资料，用于理解请求参数、默认�
 | 平台 | 参考项目 | 参考修订 | 许可证 |
 | --- | --- | --- | --- |
 | 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `63d89aa906f78c286a7f838258fa29220d7f41dd` | MIT |
-| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `004bbff438bc811f0f28a9ddf4181e8b77a510ba` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
+| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `e98e19711d7b97e2795f28729bcded82158769df` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
 | QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | MIT |
-| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `47d2edb7175cf2874882273ed14be0fdfe7db796` | Apache-2.0 |
+| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `1dae8297705d0eb14013cf45e4e3c7d5b4a6220c` | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | Apache-2.0；README 与根许可证优先于过时的包元数据 |
 | 酷我、汽水 | `guohuiyuan/music-lib` | `b299302e3163765d3efcc9df592700b41867c3d8` | AGPL-3.0；仅作协议研究，不复制、翻译或链接源码 |
 | 酷我 | `UnblockNeteaseMusic/server` | `39e21bfb4b7581f39785b190aeced201d23f0d41` | LGPL-3.0-only；仅研究酷我移动播放、DES 与失败分支 |
-| 酷我、汽水 | `CharlesPikachu/musicdl` | `e623653d1db0cd8f6eadb7326cea57e2b2e3d6ad` | PolyForm-Noncommercial-1.0.0；只研究官方候选链，排除第三方解析服务 |
+| 酷我、汽水 | `CharlesPikachu/musicdl` | `fddc02586c7b212f1dc705847ead43660d65a91b` | PolyForm-Noncommercial-1.0.0；只研究官方候选链，排除第三方解析服务 |
 | 酷我 | `listen1/listen1-api` | `aa4b9d34aad577a254a70b2754415adcbb17294d` | MIT；只作历史功能和数据模型基线 |
 | 汽水 | `SaKongA/PopDownloader` | `8e48fd1d01b7d3d4262149863818ae15ee7e3bc9` | `package.json` 声明 ISC，但无根许可证文本；仅作研究快照 |
 | 汽水 | `520Qiuyu/qishuiMusicAnalysis` | `b8f4e4f00be7c77ae6d12ca94d849c7f534cd3a9` | 未声明许可证；仅人工研究协议事实，不复用源码 |

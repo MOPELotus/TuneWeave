@@ -13,7 +13,7 @@
 | `520Qiuyu/qishuiMusicAnalysis` | `b8f4e4f00be7c77ae6d12ca94d849c7f534cd3a9` | 未声明许可证；只把 PC 请求结构、设备字段和响应样本作为人工研究线索，不复制、翻译或分发任何源码 |
 | `baizeyv/SodaDownloader` | `893b49c35b7e11ada029e78782092f2553904281` | MIT；用于研究分享链接、`aid/session`、媒体规格和下载/解密串联 |
 | `naiyQAQ/qishui-decrypt` | `d360c20a697f9988c6b567c924af5b9784d18390` | MIT；用于研究 `spade_a`、MP4 `senc`、AES-CTR 与容器重组的协议事实 |
-| `CharlesPikachu/musicdl` | `e623653d1db0cd8f6eadb7326cea57e2b2e3d6ad` | PolyForm-Noncommercial-1.0.0；用于发现 PC 搜索、分享页、歌词和官方播放候选链，第三方解析回退一律排除 |
+| `CharlesPikachu/musicdl` | `fddc02586c7b212f1dc705847ead43660d65a91b` | PolyForm-Noncommercial-1.0.0；用于发现 PC 搜索、分享页、歌词和官方播放候选链，第三方解析回退一律排除 |
 
 ## 公开音源补充层
 

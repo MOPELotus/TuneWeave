@@ -1,6 +1,6 @@
 # 咪咕项目范围覆盖账本
 
-协议基线为 `Domdkw/miguMusic-api-enhanced@47d2edb7175cf2874882273ed14be0fdfe7db796`，并以当前咪咕平台真实响应校正参考项目中的无效参数和过时传输方式。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
+协议基线为 `Domdkw/miguMusic-api-enhanced@1dae8297705d0eb14013cf45e4e3c7d5b4a6220c`，并以当前咪咕平台真实响应校正参考项目中的无效参数和过时传输方式。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
 
 当前公开音源补充层共 7 个验收单元：`pending=0`、`implemented=0`、`verified=7`，完成度 `7/7 = 100%`。登录、账户和写操作属于后续咪咕完整项目范围，不阻塞本层。
 

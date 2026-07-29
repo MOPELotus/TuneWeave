@@ -15,7 +15,7 @@ future ports can be audited precisely.
 ## MOPELotus/Lotus-ReFactor
 
 - Source: https://github.com/MOPELotus/Lotus-ReFactor
-- Reviewed commit: `004bbff438bc811f0f28a9ddf4181e8b77a510ba`
+- Reviewed commit: `e98e19711d7b97e2795f28729bcded82158769df`
 - License: Lotus-ReFactor Source-Available Proprietary License
 - Used for: NetEase Music Partner request logic and implementation details.
 - Authorization: MOPELotus states that they contributed 100% of
@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `47d2edb7175cf2874882273ed14be0fdfe7db796`
+- Reviewed commit: `1dae8297705d0eb14013cf45e4e3c7d5b4a6220c`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.
@@ -91,7 +91,7 @@ against current official Kuwo services.
 ## CharlesPikachu/musicdl
 
 - Source: https://github.com/CharlesPikachu/musicdl
-- Reviewed commit: `e623653d1db0cd8f6eadb7326cea57e2b2e3d6ad`
+- Reviewed commit: `fddc02586c7b212f1dc705847ead43660d65a91b`
 - License: PolyForm Noncommercial License 1.0.0
 - Used for: candidate official Kuwo and Soda Music endpoints, media fields,
   quality tiers, share-page parsing, and lyric-flow research.

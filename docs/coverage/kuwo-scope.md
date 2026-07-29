@@ -1,6 +1,6 @@
 # 酷我项目范围覆盖账本
 
-协议实现基线是当前酷我官网和官方客户端的真实请求。`guohuiyuan/music-lib@b299302e` 优先用于核对新版歌词、专辑、歌单与字段模型，`UnblockNeteaseMusic/server@39e21bfb` 用于研究移动播放、DES 和失败分支，`CharlesPikachu/musicdl@e623653d` 只用于发现官方候选链；`qyhqiu/kuwoMusicApi@e8e720b` 与 `listen1/listen1-api@aa4b9d3` 仅保留为历史功能和旧响应基线。所有端点、Cookie、签名、媒体和权益均按当前官方行为独立验证，第三方解析服务、静态 Cookie、固定 Secret 和无限重试不进入实现。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
+协议实现基线是当前酷我官网和官方客户端的真实请求。`guohuiyuan/music-lib@b299302e` 优先用于核对新版歌词、专辑、歌单与字段模型，`UnblockNeteaseMusic/server@39e21bfb` 用于研究移动播放、DES 和失败分支，`CharlesPikachu/musicdl@fddc025` 只用于发现官方候选链；`qyhqiu/kuwoMusicApi@e8e720b` 与 `listen1/listen1-api@aa4b9d3` 仅保留为历史功能和旧响应基线。所有端点、Cookie、签名、媒体和权益均按当前官方行为独立验证，第三方解析服务、静态 Cookie、固定 Secret 和无限重试不进入实现。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
 
 当前公开音源补充层共 7 个验收单元：`pending=0`、`implemented=0`、`verified=7`，完成度 `7/7 = 100%`。登录、账户和写操作属于后续酷我完整项目范围，不阻塞本层。
 
