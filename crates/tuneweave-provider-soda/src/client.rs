@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use reqwest::{
     Client, Proxy, StatusCode,
@@ -10,7 +14,8 @@ use serde_json::json;
 use tuneweave_core::{
     Album, AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor,
     Lyrics, Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
-    TrackAvailabilityRequest, TuneWeaveError,
+    TrackAvailabilityRequest, TuneWeaveError, UpstreamBusinessClass, UpstreamOutcome,
+    UpstreamRequestSummary,
 };
 use url::Url;
 
@@ -52,6 +57,7 @@ impl fmt::Debug for SodaConfig {
 #[derive(Clone)]
 pub struct SodaClient {
     http: Client,
+    proxy_configured: bool,
 }
 
 impl fmt::Debug for SodaClient {
@@ -597,7 +603,10 @@ impl SodaClient {
             TuneWeaveError::new(ErrorCode::InternalError, "failed to build Soda HTTP client")
                 .with_platform(Platform::Soda)
         })?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            proxy_configured: config.proxy_url.is_some(),
+        })
     }
 
     #[cfg(test)]
@@ -610,19 +619,34 @@ impl SodaClient {
         query: &str,
         cursor: u32,
     ) -> Result<SodaSearchPage> {
-        let response = self
-            .http
-            .get(SEARCH_ENDPOINT)
-            .query(&SodaSearchQuery {
-                q: query,
-                aid: SODA_APP_ID,
-                cursor,
-            })
-            .send()
-            .await
-            .map_err(soda_network_error)?;
-        let body = read_bounded_response(response, "Soda track search").await?;
-        parse_search_response(&body, cursor)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(SEARCH_ENDPOINT)
+                .query(&SodaSearchQuery {
+                    q: query,
+                    aid: SODA_APP_ID,
+                    cursor,
+                })
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            let body = read_bounded_response(response, "Soda track search").await?;
+            parse_search_response(&body, cursor)
+        }
+        .await;
+        self.log_upstream_request(
+            "search",
+            "api.qishui.com",
+            "/luna/pc/search/track",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn playlist_page(
@@ -631,68 +655,121 @@ impl SodaClient {
         cursor: u64,
         count: u32,
     ) -> Result<SodaPlaylistPage> {
-        let response = self
-            .http
-            .get(PLAYLIST_DETAIL_ENDPOINT)
-            .query(&SodaPlaylistDetailQuery {
-                playlist_id,
-                cursor,
-                count,
-                aid: SODA_APP_ID,
-                device_platform: "web",
-                channel: "pc_web",
-            })
-            .send()
-            .await
-            .map_err(soda_network_error)?;
-        let body = read_bounded_response(response, "Soda playlist detail").await?;
-        parse_playlist_response(&body, playlist_id, cursor, count)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(PLAYLIST_DETAIL_ENDPOINT)
+                .query(&SodaPlaylistDetailQuery {
+                    playlist_id,
+                    cursor,
+                    count,
+                    aid: SODA_APP_ID,
+                    device_platform: "web",
+                    channel: "pc_web",
+                })
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            let body = read_bounded_response(response, "Soda playlist detail").await?;
+            parse_playlist_response(&body, playlist_id, cursor, count)
+        }
+        .await;
+        self.log_upstream_request(
+            "playlist_page",
+            "api.qishui.com",
+            "/luna/pc/playlist/detail",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn album_page(&self, album_id: &str) -> Result<SodaAlbumPage> {
-        let response = self
-            .http
-            .get(ALBUM_SHARE_ENDPOINT)
-            .query(&SodaAlbumShareQuery { album_id })
-            .send()
-            .await
-            .map_err(soda_network_error)?;
-        if !response.status().is_success() {
-            return Err(soda_http_error(response.status()));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(ALBUM_SHARE_ENDPOINT)
+                .query(&SodaAlbumShareQuery { album_id })
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            if !response.status().is_success() {
+                return Err(soda_http_error(response.status()));
+            }
+            if response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| !value.to_ascii_lowercase().starts_with("text/html"))
+            {
+                return Err(soda_upstream_error(
+                    "Soda album share page returned an unexpected content type",
+                ));
+            }
+            let body = read_bounded_response(response, "Soda album share page").await?;
+            parse_album_share_page(&body, album_id)
         }
-        if response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| !value.to_ascii_lowercase().starts_with("text/html"))
-        {
-            return Err(soda_upstream_error(
-                "Soda album share page returned an unexpected content type",
-            ));
-        }
-        let body = read_bounded_response(response, "Soda album share page").await?;
-        parse_album_share_page(&body, album_id)
+        .await;
+        self.log_upstream_request(
+            "album_page",
+            "www.qishui.com",
+            "/share/album",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn fetch_track_v2_body(
         &self,
         identity: &SodaTrackIdentity,
-        operation: &str,
+        operation: &'static str,
     ) -> Result<Vec<u8>> {
-        let response = self
-            .http
-            .get("https://api.qishui.com/luna/pc/track_v2")
-            .query(&SodaTrackDetailQuery {
-                track_id: identity.id(),
-                media_type: "track",
-                aid: SODA_APP_ID,
-                device_platform: "web",
-                channel: "pc_web",
-            })
-            .send()
-            .await
-            .map_err(soda_network_error)?;
-        read_bounded_response(response, operation).await
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get("https://api.qishui.com/luna/pc/track_v2")
+                .query(&SodaTrackDetailQuery {
+                    track_id: identity.id(),
+                    media_type: "track",
+                    aid: SODA_APP_ID,
+                    device_platform: "web",
+                    channel: "pc_web",
+                })
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            read_bounded_response(response, operation).await
+        }
+        .await;
+        let (business_class, upstream_outcome) = match &outcome {
+            Ok(_) => (
+                UpstreamBusinessClass::NotInspected,
+                UpstreamOutcome::Success,
+            ),
+            Err(error) => soda_upstream_classification(error),
+        };
+        self.emit_upstream_request(
+            soda_track_v2_operation(operation),
+            "api.qishui.com",
+            "/luna/pc/track_v2",
+            http_status,
+            started,
+            business_class,
+            upstream_outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn track_detail(&self, identity: &SodaTrackIdentity) -> Result<Track> {
@@ -772,7 +849,7 @@ impl SodaClient {
         &self,
         identity: &SodaTrackIdentity,
         requested_bitrate: u64,
-        operation: &str,
+        operation: &'static str,
     ) -> Result<ValidatedSodaMedia> {
         let body = self.fetch_track_v2_body(identity, operation).await?;
         let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(&body)
@@ -859,6 +936,100 @@ impl SodaClient {
         parse_short_redirect_location(location)
             .map_err(|_| soda_upstream_error("Soda short link returned an untrusted destination"))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, upstream_outcome) = match outcome {
+            Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+            Err(error) => soda_upstream_classification(error),
+        };
+        self.emit_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            business_class,
+            upstream_outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_upstream_request(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        business_class: UpstreamBusinessClass,
+        outcome: UpstreamOutcome,
+    ) {
+        UpstreamRequestSummary {
+            provider: Platform::Soda,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome,
+        }
+        .emit();
+    }
+}
+
+fn soda_track_v2_operation(operation: &'static str) -> &'static str {
+    match operation {
+        "Soda track detail" => "track_detail",
+        "Soda lyrics" => "lyrics",
+        "Soda track availability" => "track_availability",
+        "Soda playback" => "playback_metadata",
+        "Soda audio content" => "audio_content_metadata",
+        _ => "track_v2",
+    }
+}
+
+fn soda_upstream_classification(
+    error: &TuneWeaveError,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    let business_class = if error
+        .details
+        .get("platform_code")
+        .and_then(serde_json::Value::as_i64)
+        .is_some()
+        || matches!(
+            error.code,
+            ErrorCode::AuthenticationRequired
+                | ErrorCode::PermissionDenied
+                | ErrorCode::ResourceNotFound
+                | ErrorCode::Conflict
+                | ErrorCode::RateLimited
+                | ErrorCode::MatchRejected
+        ) {
+        UpstreamBusinessClass::RejectedError
+    } else {
+        UpstreamBusinessClass::Unavailable
+    };
+    (
+        business_class,
+        UpstreamOutcome::Failure {
+            code: error.code,
+            retryable: error.retryable,
+        },
+    )
 }
 
 fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearchPage> {
@@ -2464,6 +2635,42 @@ fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_summary_keeps_track_operations_static_and_failures_classified() {
+        assert_eq!(soda_track_v2_operation("Soda track detail"), "track_detail");
+        assert_eq!(
+            soda_track_v2_operation("Soda audio content"),
+            "audio_content_metadata"
+        );
+
+        let denied = TuneWeaveError::new(ErrorCode::PermissionDenied, "sensitive platform text")
+            .with_platform(Platform::Soda);
+        assert_eq!(
+            soda_upstream_classification(&denied),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::PermissionDenied,
+                    retryable: false
+                }
+            )
+        );
+
+        let timeout = TuneWeaveError::new(ErrorCode::UpstreamTimeout, "sensitive transport text")
+            .with_platform(Platform::Soda)
+            .retryable(true);
+        assert_eq!(
+            soda_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true
+                }
+            )
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const SEARCH_RESPONSE: &str = r#"{
