@@ -49,7 +49,7 @@ impl MusicProvider for MiguProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks])
+        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -130,6 +130,25 @@ impl MusicProvider for MiguProvider {
             },
         })
     }
+
+    async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+        if account.is_some() {
+            return Err(migu_invalid_request(
+                "Migu public track detail does not accept an account",
+            ));
+        }
+        let content_id = parse_content_id(id)?;
+        self.client.track_detail(content_id).await
+    }
+}
+
+fn parse_content_id(id: &str) -> Result<&str> {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(migu_invalid_request(
+            "Migu track ID must be a canonical alphanumeric contentId",
+        ));
+    }
+    Ok(id)
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -209,13 +228,32 @@ mod tests {
     }
 
     #[test]
-    fn provider_advertises_only_public_search() {
+    fn provider_advertises_only_implemented_public_capabilities() {
         let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
         assert_eq!(provider.platform(), Platform::Migu);
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks])
+            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
         );
+    }
+
+    #[test]
+    fn track_detail_requires_a_canonical_content_identity() {
+        assert_eq!(
+            parse_content_id("600908000007288315").expect("valid content ID"),
+            "600908000007288315"
+        );
+        for id in [
+            "",
+            " 600908000007288315",
+            "600908000007288315 ",
+            "migu:600908000007288315",
+            "id/path",
+            "id?query",
+            "你好",
+        ] {
+            assert!(parse_content_id(id).is_err(), "{id:?} must fail");
+        }
     }
 
     #[test]
@@ -275,5 +313,18 @@ mod tests {
                 .iter()
                 .all(|track| track.resource_ref.platform() == Platform::Migu)
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Migu network access"]
+    async fn live_provider_returns_strict_public_track_detail() {
+        let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
+        let track = provider
+            .track("600908000007288315", None)
+            .await
+            .expect("live Migu track detail");
+        assert_eq!(track.resource_ref.to_string(), "migu:600908000007288315");
+        assert_eq!(track.extensions["backend"], "resourceinfo_v1");
+        assert!(!track.available_qualities.is_empty());
     }
 }
