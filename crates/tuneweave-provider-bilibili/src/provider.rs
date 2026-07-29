@@ -5966,7 +5966,7 @@ mod tests {
             .expect("live public season videos");
         assert_eq!(page.items.len(), 5);
         assert_eq!(page.pagination.offset, 28);
-        assert_eq!(page.pagination.total, Some(617));
+        assert!(page.pagination.total.is_some_and(|total| total > 33));
         assert_eq!(page.pagination.next_offset, Some(33));
         assert!(page.pagination.has_more);
         assert_eq!(page.pagination.extensions["upstream_pages_fetched"], 2);

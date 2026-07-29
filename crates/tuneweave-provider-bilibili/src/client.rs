@@ -3107,25 +3107,40 @@ impl BilibiliClient {
             .await?;
         let endpoint = format!("{SPACE_PLAYLISTS_ENDPOINT}?{}", context.query);
         let referer = format!("https://space.bilibili.com/{user_id}/lists");
-        let response = self
-            .http
-            .get(endpoint)
-            .header(REFERER, referer)
-            .header(COOKIE, context.cookie_header)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili space playlists", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(REFERER, referer)
+                .header(COOKIE, context.cookie_header)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili space playlists", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili space playlists response exceeded the size limit",
+                ));
+            }
+            parse_space_playlists_response(&bytes, user_id, page, SPACE_PLAYLIST_PAGE_SIZE)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili space playlists response exceeded the size limit",
-            ));
-        }
-        parse_space_playlists_response(&bytes, user_id, page, SPACE_PLAYLIST_PAGE_SIZE)
+        .await;
+        self.log_upstream_request(
+            "space_playlists",
+            "api.bilibili.com",
+            "/x/polymer/web-space/seasons_series_list",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn season_archives_page(
@@ -3156,25 +3171,40 @@ impl BilibiliClient {
             )
             .await?;
         let endpoint = format!("{SEASON_ARCHIVES_ENDPOINT}?{}", context.query);
-        let response = self
-            .http
-            .get(endpoint)
-            .header(REFERER, WEB_REFERER)
-            .header(COOKIE, context.cookie_header)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili season archives", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(REFERER, WEB_REFERER)
+                .header(COOKIE, context.cookie_header)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili season archives", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili season archives response exceeded the size limit",
+                ));
+            }
+            parse_season_archives_response(&bytes, season_id, page, SEASON_ARCHIVE_PAGE_SIZE)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili season archives response exceeded the size limit",
-            ));
-        }
-        parse_season_archives_response(&bytes, season_id, page, SEASON_ARCHIVE_PAGE_SIZE)
+        .await;
+        self.log_upstream_request(
+            "season_archives",
+            "api.bilibili.com",
+            "/x/polymer/web-space/seasons_archives_list",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn search_videos_compatibility_page(
@@ -9186,8 +9216,8 @@ mod tests {
             .expect("live season detail");
         assert_eq!(page.season.id, 3_629_748);
         assert_eq!(page.season.owner_id, 327_961_371);
-        assert_eq!(page.total, 617);
         assert_eq!(page.archives.len(), SEASON_ARCHIVE_PAGE_SIZE as usize);
+        assert!(page.total > u64::from(SEASON_ARCHIVE_PAGE_SIZE));
         assert!(page.has_more);
     }
 }
