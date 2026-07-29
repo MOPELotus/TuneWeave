@@ -122,6 +122,12 @@ impl UniPlaylistDocument {
     }
 }
 
+impl UniPlaylistDocumentItem {
+    pub fn from_server_item(item: &UniPlaylistItem) -> Result<Self> {
+        document_item_from_server(item)
+    }
+}
+
 fn server_item_from_document(item: &UniPlaylistDocumentItem) -> Result<UniPlaylistItem> {
     let mut extensions = Extensions::new();
     insert_extension(

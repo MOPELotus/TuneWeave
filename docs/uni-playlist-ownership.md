@@ -109,7 +109,7 @@ POST /v1/uni/materialize/imports
 POST /v1/uni/materialize/items
 ```
 
-接受歌曲、MV、视频、播客节目、广播等一个或一批平台引用，由对应 provider 获取真实元数据并返回标准化 `UniPlaylistItem`。请求必须限制批量数量、响应体大小、超时和上游分页范围。
+该接口已实现：一次接受 1–100 个歌曲、MV、视频、播客节目或广播引用，由对应 provider 获取真实元数据并返回 V1 安全 `UniPlaylistDocumentItem`。项目按输入顺序从零编号，重复来源各自获得稳定项目 ID；分平台账户只用于本次解析，不进入客户端数据。成功及各类输入失败均已验证不会创建 Uni Playlist 数据文件。批量上限与统一上游超时共同限制资源使用，本接口不执行上游集合分页。
 
 ### 播放客户端托管项目
 
