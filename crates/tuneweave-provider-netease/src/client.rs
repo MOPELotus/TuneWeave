@@ -287,7 +287,8 @@ impl NeteaseClient {
             Client::builder()
                 .timeout(config.timeout)
                 .connect_timeout(Duration::from_secs(8))
-                .user_agent(config.user_agent),
+                .user_agent(config.user_agent)
+                .redirect(Policy::none()),
             config.proxy_url.as_deref(),
         )?
         .build()
@@ -908,18 +909,34 @@ impl NeteaseClient {
     }
 
     pub async fn cloud_upload_servers(&self, bucket: &str) -> Result<NeteaseResponse> {
-        let mut url = Url::parse(CLOUD_UPLOAD_LBS_URL).map_err(|error| {
+        let mut url = Url::parse(CLOUD_UPLOAD_LBS_URL).map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("invalid NetEase cloud LBS URL: {error}"),
+                "failed to construct the NetEase cloud upload discovery URL",
             )
             .with_platform(Platform::Netease)
         })?;
         url.query_pairs_mut()
             .append_pair("version", "1.0")
             .append_pair("bucketname", bucket);
-        let response = self.http.get(url).send().await.map_err(request_error)?;
-        parse_response(response).await
+        let request = self.http.get(url);
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "cloud_upload_discovery",
+            "wanproxy.127.net",
+            "/lbs",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn upload_cloud_audio(
@@ -930,7 +947,7 @@ impl NeteaseClient {
         content_type: &str,
         data: &[u8],
     ) -> Result<NeteaseResponse> {
-        validate_cloud_upload_url(upload_url)?;
+        let upload_url = validate_cloud_upload_url(upload_url)?;
         let token = token.parse::<header::HeaderValue>().map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -946,7 +963,7 @@ impl NeteaseClient {
             TuneWeaveError::invalid_request("cloud audio content type is not a valid HTTP header")
                 .with_platform(Platform::Netease)
         })?;
-        let response = self
+        let request = self
             .http
             .post(upload_url)
             .timeout(Duration::from_secs(300))
@@ -954,11 +971,24 @@ impl NeteaseClient {
             .header("Content-MD5", md5)
             .header(header::CONTENT_TYPE, content_type)
             .header(header::CONTENT_LENGTH, data.len())
-            .body(data.to_vec())
-            .send()
-            .await
-            .map_err(request_error)?;
-        parse_response(response).await
+            .body(data.to_vec());
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "cloud_audio_upload",
+            "127.net",
+            "/{bucket}/{object_key}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn request_linuxapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
@@ -1699,7 +1729,7 @@ fn validate_api_path(path: &str, protocol: &str) -> Result<()> {
     )
 }
 
-fn validate_cloud_upload_url(upload_url: &str) -> Result<()> {
+fn validate_cloud_upload_url(upload_url: &str) -> Result<Url> {
     let url = Url::parse(upload_url).map_err(|_| {
         TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -1729,7 +1759,7 @@ fn validate_cloud_upload_url(upload_url: &str) -> Result<()> {
         )
         .with_platform(Platform::Netease));
     }
-    Ok(())
+    Ok(url)
 }
 
 fn voice_upload_object_url(object_key: &str) -> Result<String> {
@@ -2730,6 +2760,29 @@ mod tests {
             assert!(refreshed);
             assert!(!second.is_empty());
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live NetEase cloud upload discovery access"]
+    async fn live_cloud_upload_discovery_returns_a_nos_endpoint() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
+        let response = client
+            .cloud_upload_servers("jd-musicrep-privatecloud-audio-public")
+            .await
+            .expect("discover cloud upload servers");
+        assert!(response.status.is_success());
+        let upload = response
+            .body
+            .get("upload")
+            .and_then(Value::as_array)
+            .and_then(|servers| servers.first())
+            .and_then(Value::as_str)
+            .expect("first cloud upload server");
+        let url = Url::parse(upload).expect("valid cloud upload server URL");
+        assert!(
+            url.host_str()
+                .is_some_and(|host| host.ends_with(".127.net"))
+        );
     }
 
     #[tokio::test]
