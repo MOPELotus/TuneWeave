@@ -309,7 +309,7 @@
 
 视频详情端点返回 `VideoDetail`，以 `kind=mv|video` 明确资源类型，`video` 承载统一元数据，`resolutions` 列出平台实际公布的清晰度及可用的宽高、大小和格式。网易云数值 ID 默认推断为 MV，不透明字符串 ID 默认推断为站内视频；QQ 字母数字 VID 默认按 MV 处理。调用方也可通过 `kind`（兼容 `type`）显式指定，避免依赖推断。批量详情使用 `GET/POST /v1/videos/details`，限制 1–100 个同平台、同类型资源，保留输入顺序与重复项；provider 有原生批量协议时只发一次上游请求，否则使用统一逐项默认实现。
 
-`VideoStats` 独立返回点赞态以及点赞、评论和分享计数。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云与 QQ 接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。批量视频流使用 `GET/POST /v1/videos/streams`，保留输入顺序和重复项，但一个请求只接受同一平台，以便支持平台原生批量协议。
+`VideoStats` 将公开互动计数与所选账户状态分开：`view_count/danmaku_count/like_count/coin_count/favorite_count/comment_count/share_count` 是平台公开计数，`liked/favorited/coins_contributed` 只表示明确选择的账户。平台或资源不提供的字段保持 `null`，匿名请求不会为了填充账户态而回退到默认账户。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云与 QQ 接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。批量视频流使用 `GET/POST /v1/videos/streams`，保留输入顺序和重复项，但一个请求只接受同一平台，以便支持平台原生批量协议。
 
 已关注歌手的新视频与新曲时间线分别返回 `Video[]` 和 `Track[]`，但都属于账户资源。它们以毫秒时间戳 `before` 翻页，并在 `meta.pagination.extensions.next_before_ms` 返回下一页起点；`account` 只选择登录态，不改变内容平台。
 
@@ -347,6 +347,8 @@ B 站的公开视频合集与收藏夹共享统一 Playlist 端点，但使用�
 Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/items` 和 `GET /v1/playlists/{ref}/tracks` 访问；目录中出现的 `series:` 身份保持独立，待系列详情能力接入后才宣告可读取，不会误走 Season 协议。Season 详情只需 `bilibili:season:{season_id}`，provider 使用平台支持的零 owner 参数解析并校验真实 `mid`；收藏夹详情使用 `bilibili:favorite:{media_id}`，同时保留完整 `media_id`、原始 `fid` 和 owner mid。公开内容默认匿名，私有收藏夹由 `account` 或调用方凭证选择精确 B 站登录态，权限不足与不存在不会变成空结果。`/items` 将合集及收藏夹档案保持为强类型 `VideoDetail`，供 Uni Playlist 保存真正的视频项目；`/tracks` 是纯音乐客户端的兼容视图，并以 `normalized_from_video=true` 明示转换。两者都在 `extensions.video_ref`、`extensions.bilibili_playlist_kind`、`extensions.aid` 和可用的 `extensions.bvid` 中保留列表协议实际返回的视频身份；收藏夹额外保留失效状态、分 P 数量和收藏时间。上游分页可能为被过滤内容留下空洞，因此续页使用原始页坐标而非简单返回数累加。列表协议没有的 CID 与清晰度不会猜测，后续由 `/v1/videos/{ref}` 详情链补全。
 
 B 站 UGC 视频详情通过 `GET /v1/videos/bilibili:bvid:{bvid}` 或 `GET /v1/videos/bilibili:aid:{aid}` 读取，`kind` 只能为 `video`。两种输入都会由平台响应交叉校验并规范化为 BVID 引用；EP/SS 保持独立，待 PGC 详情链接入前不会误用 UGC 端点。详情返回标题、简介、可信封面、UP 主、时间、时长、首 CID、分 P 数、分区、公开统计、状态和下载/付费/互动等 rights。`resolutions` 在 playurl 接入前保持空，并以 `resolutions_require_playurl=true` 明示，因为投稿尺寸不是账户当前真正可用的清晰度。
+
+B 站视频统计通过 `GET /v1/videos/{ref}/stats?kind=video` 读取。公开计数来自同一份经过 AID/BVID 交叉校验的视频详情，不使用已经失效的 archive stat 接口；匿名请求的 `liked/favorited/coins_contributed` 保持 `null`。显式选择 B 站账户时才读取账户的近期点赞、投币数和收藏态，任一账户状态请求失败都返回对应错误而不拼接不完整状态。平台点赞查询只能覆盖近期记录，因此响应以 `extensions.liked_state_scope=recent` 明确限制，不能据此断言较早历史中从未点赞。
 
 B 站分 P 目录通过 `GET /v1/videos/{ref}/parts` 读取，接受同一 AID/BVID 身份、`kind/type=video`、`account` 及统一 `limit/offset`。每个 `VideoPart` 以 `bilibili:cid:{cid}` 作为稳定分段引用，同时用规范 BVID `video_ref` 指回父视频，并保留从 1 开始的 `page`、标题、毫秒时长、尺寸、旋转状态和平台来源。详情响应中的全部分 P 会先完成身份、顺序、唯一 CID 和维度校验，再应用本地分页；多 P 视频不会只保留首 P，超过目录尾部返回空页而不是重复首 P。
 

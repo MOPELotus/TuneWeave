@@ -3744,7 +3744,13 @@ pub struct VideoStats {
     pub video_ref: ResourceRef,
     pub kind: VideoResourceKind,
     pub liked: Option<bool>,
+    pub favorited: Option<bool>,
+    pub coins_contributed: Option<u64>,
+    pub view_count: Option<u64>,
+    pub danmaku_count: Option<u64>,
     pub like_count: Option<u64>,
+    pub coin_count: Option<u64>,
+    pub favorite_count: Option<u64>,
     pub comment_count: Option<u64>,
     pub share_count: Option<u64>,
     pub extensions: Extensions,
@@ -7212,13 +7218,20 @@ mod tests {
             video_ref: reference,
             kind: VideoResourceKind::Mv,
             liked: Some(false),
+            favorited: None,
+            coins_contributed: None,
+            view_count: Some(12_345),
+            danmaku_count: None,
             like_count: Some(4_662),
+            coin_count: None,
+            favorite_count: None,
             comment_count: Some(675),
             share_count: Some(1_399),
             extensions: Extensions::new(),
         };
         let value = serde_json::to_value(stats).expect("serialize video stats");
         assert_eq!(value["kind"], "mv");
+        assert_eq!(value["view_count"], 12_345);
         assert_eq!(value["like_count"], 4_662);
     }
 

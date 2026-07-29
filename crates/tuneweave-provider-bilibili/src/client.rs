@@ -49,6 +49,10 @@ const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wb
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
 const VIDEO_DETAIL_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/view";
+const VIDEO_RECENT_LIKE_STATE_ENDPOINT: &str =
+    "https://api.bilibili.com/x/web-interface/archive/has/like";
+const VIDEO_COIN_STATE_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/archive/coins";
+const VIDEO_FAVORITE_STATE_ENDPOINT: &str = "https://api.bilibili.com/x/v2/fav/video/favoured";
 const VIDEO_PLAYER_ENDPOINT: &str = "https://api.bilibili.com/x/player/wbi/v2";
 const VIDEO_PLAYBACK_ENDPOINT: &str = "https://api.bilibili.com/x/player/wbi/playurl";
 const CREATED_FAVORITE_FOLDERS_ENDPOINT: &str =
@@ -399,6 +403,14 @@ pub(crate) struct BilibiliVideoViewStats {
     pub like: u64,
     pub now_rank: u64,
     pub his_rank: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliVideoAccountState {
+    pub recently_liked: bool,
+    pub coins_contributed: u64,
+    pub favorited: bool,
+    pub favorite_state_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1227,6 +1239,17 @@ struct VideoViewDimension {
     height: u64,
     #[serde(default)]
     rotate: u64,
+}
+
+#[derive(Deserialize)]
+struct VideoCoinStateData {
+    multiply: u64,
+}
+
+#[derive(Deserialize)]
+struct VideoFavoriteStateData {
+    count: u64,
+    favoured: bool,
 }
 
 #[derive(Deserialize)]
@@ -2385,6 +2408,101 @@ impl BilibiliClient {
             ));
         }
         parse_video_view_response(&bytes, identity)
+    }
+
+    pub(crate) async fn video_account_state(
+        &self,
+        aid: u64,
+        bvid: &str,
+        credential: &BilibiliCredential,
+    ) -> Result<BilibiliVideoAccountState> {
+        if aid == 0 {
+            return Err(invalid_bilibili_request(
+                "Bilibili video account state AID must be positive",
+            ));
+        }
+        if !matches!(
+            crate::BilibiliVideoIdentity::parse(bvid)?,
+            crate::BilibiliVideoIdentity::Bvid(_)
+        ) {
+            return Err(invalid_bilibili_request(
+                "Bilibili video account state requires a BVID",
+            ));
+        }
+        let recently_liked = parse_video_recent_like_state_response(
+            &self
+                .video_account_state_response(
+                    VIDEO_RECENT_LIKE_STATE_ENDPOINT,
+                    aid,
+                    bvid,
+                    credential,
+                    "Bilibili recent video like state",
+                )
+                .await?,
+        )?;
+        let coins_contributed = parse_video_coin_state_response(
+            &self
+                .video_account_state_response(
+                    VIDEO_COIN_STATE_ENDPOINT,
+                    aid,
+                    bvid,
+                    credential,
+                    "Bilibili video coin state",
+                )
+                .await?,
+        )?;
+        let (favorited, favorite_state_count) = parse_video_favorite_state_response(
+            &self
+                .video_account_state_response(
+                    VIDEO_FAVORITE_STATE_ENDPOINT,
+                    aid,
+                    bvid,
+                    credential,
+                    "Bilibili video favorite state",
+                )
+                .await?,
+        )?;
+        Ok(BilibiliVideoAccountState {
+            recently_liked,
+            coins_contributed,
+            favorited,
+            favorite_state_count,
+        })
+    }
+
+    async fn video_account_state_response(
+        &self,
+        endpoint: &str,
+        aid: u64,
+        bvid: &str,
+        credential: &BilibiliCredential,
+        context: &str,
+    ) -> Result<Vec<u8>> {
+        let mut endpoint = Url::parse(endpoint)
+            .map_err(|_| bilibili_internal_error(format!("{context} endpoint is invalid")))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("aid", &aid.to_string());
+        let referer = format!("https://www.bilibili.com/video/{bvid}");
+        let response = self
+            .http
+            .get(endpoint)
+            .header(REFERER, referer)
+            .header(COOKIE, credential.cookie_header())
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error(context, status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(format!(
+                "{context} response exceeded the size limit"
+            )));
+        }
+        Ok(bytes.to_vec())
     }
 
     pub(crate) async fn video_subtitles(
@@ -3764,6 +3882,68 @@ fn parse_video_view_response(
         rights,
         parts,
     })
+}
+
+fn parse_video_recent_like_state_response(bytes: &[u8]) -> Result<bool> {
+    let response: PassportResponse<u64> = serde_json::from_slice(bytes).map_err(|_| {
+        bilibili_upstream_error("Bilibili recent video like state returned invalid JSON")
+    })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili recent video like state",
+            response.code,
+            &response.message,
+        ));
+    }
+    match response.data {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(bilibili_upstream_error(
+            "Bilibili recent video like state returned an invalid flag",
+        )),
+    }
+}
+
+fn parse_video_coin_state_response(bytes: &[u8]) -> Result<u64> {
+    let response: PassportResponse<VideoCoinStateData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili video coin state returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili video coin state",
+            response.code,
+            &response.message,
+        ));
+    }
+    let multiply = response
+        .data
+        .ok_or_else(|| {
+            bilibili_upstream_error("Bilibili video coin state response did not contain data")
+        })?
+        .multiply;
+    if multiply > 2 {
+        return Err(bilibili_upstream_error(
+            "Bilibili video coin state returned an invalid contribution count",
+        ));
+    }
+    Ok(multiply)
+}
+
+fn parse_video_favorite_state_response(bytes: &[u8]) -> Result<(bool, u64)> {
+    let response: PassportResponse<VideoFavoriteStateData> = serde_json::from_slice(bytes)
+        .map_err(|_| {
+            bilibili_upstream_error("Bilibili video favorite state returned invalid JSON")
+        })?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili video favorite state",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili video favorite state response did not contain data")
+    })?;
+    Ok((data.favoured, data.count))
 }
 
 fn parse_video_subtitle_catalog(
@@ -7353,6 +7533,56 @@ mod tests {
             .expect_err("video view drift");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[test]
+    fn video_account_state_parsers_keep_separate_interaction_semantics() {
+        assert!(
+            parse_video_recent_like_state_response(br#"{"code":0,"message":"0","data":1}"#)
+                .expect("recent like state")
+        );
+        assert!(
+            !parse_video_recent_like_state_response(br#"{"code":0,"message":"0","data":0}"#)
+                .expect("missing recent like state")
+        );
+        assert_eq!(
+            parse_video_coin_state_response(br#"{"code":0,"message":"0","data":{"multiply":2}}"#)
+                .expect("coin state"),
+            2
+        );
+        assert_eq!(
+            parse_video_favorite_state_response(
+                br#"{"code":0,"message":"0","data":{"count":1,"favoured":true}}"#
+            )
+            .expect("favorite state"),
+            (true, 1)
+        );
+
+        for malformed in [
+            br#"{"code":0,"message":"0","data":2}"#.as_slice(),
+            br#"{"code":0,"message":"0","data":null}"#.as_slice(),
+        ] {
+            assert_eq!(
+                parse_video_recent_like_state_response(malformed)
+                    .expect_err("invalid like flag")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+        assert_eq!(
+            parse_video_coin_state_response(br#"{"code":0,"message":"0","data":{"multiply":3}}"#)
+                .expect_err("invalid coin contribution")
+                .code,
+            ErrorCode::UpstreamError
+        );
+        assert_eq!(
+            parse_video_favorite_state_response(
+                r#"{"code":-101,"message":"账号未登录"}"#.as_bytes()
+            )
+            .expect_err("expired account")
+            .code,
+            ErrorCode::AuthenticationRequired
+        );
     }
 
     #[test]

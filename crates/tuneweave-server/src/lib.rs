@@ -18399,7 +18399,13 @@ mod tests {
                     .expect("valid test video reference"),
                 kind: request.kind,
                 liked: Some(false),
+                favorited: None,
+                coins_contributed: None,
+                view_count: None,
+                danmaku_count: None,
                 like_count: Some(4_662),
+                coin_count: None,
+                favorite_count: None,
                 comment_count: Some(675),
                 share_count: Some(1_399),
                 extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
@@ -27496,6 +27502,47 @@ mod tests {
                 .expect("trending entries")
                 .iter()
                 .any(|entry| entry["score"].is_number())
+        );
+        assert!(response["meta"]["account"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
+    async fn live_bilibili_video_statistics_flow_through_unified_http() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) = json_response_from(
+            app,
+            "/v1/videos/bilibili:bvid:BV117411r7R1/stats?kind=video",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["video_ref"], "bilibili:bvid:BV117411r7R1");
+        assert!(
+            response["data"]["view_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        for field in [
+            "like_count",
+            "coin_count",
+            "favorite_count",
+            "comment_count",
+            "share_count",
+        ] {
+            assert!(response["data"][field].is_u64(), "{field}");
+        }
+        assert!(response["data"]["liked"].is_null());
+        assert!(response["data"]["favorited"].is_null());
+        assert!(response["data"]["coins_contributed"].is_null());
+        assert_eq!(
+            response["data"]["extensions"]["account_state_included"],
+            false
         );
         assert!(response["meta"]["account"].is_null());
     }

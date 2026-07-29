@@ -19,9 +19,10 @@ use tuneweave_core::{
     VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
     VideoPlaybackProgressiveSegment, VideoPlaybackRequest, VideoPlaybackSegmentBase,
     VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoStream, VideoStreamRequest, VideoSubtitle,
-    VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest,
-    VideoSubtitleStyle, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
+    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
+    VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoSubtitleStyle, VideoTrackQuality, VideoTrackStream,
+    VideoTrackStreamRequest,
 };
 
 use crate::BilibiliVideoIdentity;
@@ -34,8 +35,9 @@ use crate::client::{
     BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchSuggestionSet,
     BilibiliSearchTrending, BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus,
     BilibiliSpacePlaylist, BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliSubtitle,
-    BilibiliSubtitleBody, BilibiliSubtitleCatalog, BilibiliVideoPart, BilibiliVideoSearchDuration,
-    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder, BilibiliVideoView,
+    BilibiliSubtitleBody, BilibiliSubtitleCatalog, BilibiliVideoAccountState, BilibiliVideoPart,
+    BilibiliVideoSearchDuration, BilibiliVideoSearchFilters, BilibiliVideoSearchOrder,
+    BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -112,6 +114,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::PlaylistRead,
             Capability::VideoDetail,
             Capability::VideoParts,
+            Capability::VideoStats,
             Capability::VideoSubtitles,
             Capability::VideoPlaybackManifest,
             Capability::VideoAudioStream,
@@ -284,6 +287,38 @@ impl MusicProvider for BilibiliProvider {
             .video_view(&identity, credential.as_ref())
             .await
             .and_then(map_bilibili_video_view)
+    }
+
+    async fn video_stats(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoStats> {
+        if request.kind != VideoResourceKind::Video {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive statistics require kind=video",
+            ));
+        }
+        let identity = BilibiliVideoIdentity::parse(id)?;
+        if matches!(
+            identity,
+            BilibiliVideoIdentity::Episode(_) | BilibiliVideoIdentity::Season(_)
+        ) {
+            return Err(bilibili_invalid_request(
+                "Bilibili archive statistics require an AID or BVID",
+            ));
+        }
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let view = self
+            .client
+            .video_view(&identity, credential.as_ref())
+            .await?;
+        let account_state = if let Some(credential) = credential.as_ref() {
+            Some(
+                self.client
+                    .video_account_state(view.aid, &view.bvid, credential)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        map_bilibili_video_stats(view, account_state)
     }
 
     async fn video_parts(
@@ -1884,6 +1919,55 @@ fn map_bilibili_video_view(view: BilibiliVideoView) -> Result<VideoDetail> {
             ("detail_source".to_owned(), json!("web_interface_view")),
             ("resolutions_require_playurl".to_owned(), json!(true)),
         ]),
+    })
+}
+
+fn map_bilibili_video_stats(
+    view: BilibiliVideoView,
+    account_state: Option<BilibiliVideoAccountState>,
+) -> Result<VideoStats> {
+    let video_ref = BilibiliVideoIdentity::Bvid(view.bvid.clone()).resource_ref()?;
+    let account_state_included = account_state.is_some();
+    let (liked, favorited, coins_contributed, favorite_state_count) =
+        account_state.map_or((None, None, None, None), |state| {
+            (
+                Some(state.recently_liked),
+                Some(state.favorited),
+                Some(state.coins_contributed),
+                Some(state.favorite_state_count),
+            )
+        });
+    let mut extensions = Extensions::from([
+        ("aid".to_owned(), json!(view.aid)),
+        ("bvid".to_owned(), json!(view.bvid)),
+        ("current_rank".to_owned(), json!(view.stats.now_rank)),
+        ("historic_rank".to_owned(), json!(view.stats.his_rank)),
+        (
+            "account_state_included".to_owned(),
+            json!(account_state_included),
+        ),
+    ]);
+    if account_state_included {
+        extensions.insert("liked_state_scope".to_owned(), json!("recent"));
+        extensions.insert(
+            "favorite_state_count".to_owned(),
+            json!(favorite_state_count),
+        );
+    }
+    Ok(VideoStats {
+        video_ref,
+        kind: VideoResourceKind::Video,
+        liked,
+        favorited,
+        coins_contributed,
+        view_count: Some(view.stats.view),
+        danmaku_count: Some(view.stats.danmaku),
+        like_count: Some(view.stats.like),
+        coin_count: Some(view.stats.coin),
+        favorite_count: Some(view.stats.favorite),
+        comment_count: Some(view.stats.reply),
+        share_count: Some(view.stats.share),
+        extensions,
     })
 }
 
@@ -4505,6 +4589,35 @@ mod tests {
         assert_eq!(missing.code, ErrorCode::AuthenticationRequired);
         assert!(provider.capabilities().contains(&Capability::VideoDetail));
 
+        let wrong_stats_kind = provider
+            .video_stats(
+                "bvid:BV117411r7R1",
+                &VideoDetailRequest::new(VideoResourceKind::Mv),
+            )
+            .await
+            .expect_err("statistics MV kind");
+        assert_eq!(wrong_stats_kind.code, ErrorCode::InvalidRequest);
+        let episode_stats = provider
+            .video_stats("ep:123", &VideoDetailRequest::new(VideoResourceKind::Video))
+            .await
+            .expect_err("episode statistics");
+        assert_eq!(episode_stats.code, ErrorCode::InvalidRequest);
+        let missing_stats_account = provider
+            .video_stats(
+                "bvid:BV117411r7R1",
+                &VideoDetailRequest {
+                    kind: VideoResourceKind::Video,
+                    account: Some("missing".to_owned()),
+                },
+            )
+            .await
+            .expect_err("missing statistics account");
+        assert_eq!(
+            missing_stats_account.code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert!(provider.capabilities().contains(&Capability::VideoStats));
+
         let wrong_part_kind = provider
             .video_parts(
                 "bvid:BV117411r7R1",
@@ -5422,6 +5535,81 @@ mod tests {
         assert!(!stream.headers.contains_key("Cookie"));
     }
 
+    #[test]
+    fn video_statistics_map_public_counts_and_selected_account_state_separately() {
+        use crate::client::{BilibiliVideoRights, BilibiliVideoViewStats};
+
+        let stats = map_bilibili_video_stats(
+            BilibiliVideoView {
+                aid: 85_440_373,
+                bvid: "BV117411r7R1".to_owned(),
+                title: "视频".to_owned(),
+                description: String::new(),
+                dynamic_text: String::new(),
+                cover_url: "https://i0.hdslb.com/bfs/archive/cover.jpg".to_owned(),
+                duration_seconds: 486,
+                published_at: 1,
+                created_at: 1,
+                state: 0,
+                category_id: 30,
+                category_id_v2: None,
+                category_name: None,
+                category_name_v2: None,
+                copyright: 1,
+                owner: crate::client::BilibiliCollectedPlaylistOwner {
+                    id: 1,
+                    name: "UP".to_owned(),
+                    avatar_url: None,
+                },
+                stats: BilibiliVideoViewStats {
+                    view: 100,
+                    danmaku: 20,
+                    reply: 10,
+                    favorite: 9,
+                    coin: 8,
+                    share: 7,
+                    like: 30,
+                    now_rank: 0,
+                    his_rank: 3,
+                },
+                rights: BilibiliVideoRights {
+                    download: false,
+                    movie: false,
+                    pay: false,
+                    high_bitrate: false,
+                    no_reprint: false,
+                    ugc_pay: false,
+                    cooperation: false,
+                    interactive: false,
+                    panoramic: false,
+                    no_share: false,
+                    free_watch: false,
+                },
+                parts: Vec::new(),
+            },
+            Some(BilibiliVideoAccountState {
+                recently_liked: true,
+                coins_contributed: 2,
+                favorited: true,
+                favorite_state_count: 1,
+            }),
+        )
+        .expect("video statistics");
+        assert_eq!(stats.video_ref.to_string(), "bilibili:bvid:BV117411r7R1");
+        assert_eq!(stats.view_count, Some(100));
+        assert_eq!(stats.danmaku_count, Some(20));
+        assert_eq!(stats.like_count, Some(30));
+        assert_eq!(stats.coin_count, Some(8));
+        assert_eq!(stats.favorite_count, Some(9));
+        assert_eq!(stats.comment_count, Some(10));
+        assert_eq!(stats.share_count, Some(7));
+        assert_eq!(stats.liked, Some(true));
+        assert_eq!(stats.favorited, Some(true));
+        assert_eq!(stats.coins_contributed, Some(2));
+        assert_eq!(stats.extensions["liked_state_scope"], "recent");
+        assert_eq!(stats.extensions["favorite_state_count"], 1);
+    }
+
     #[tokio::test]
     #[ignore = "requires live Bilibili Passport access"]
     async fn live_provider_creates_a_qr_image_without_exposing_the_poll_key() {
@@ -5706,6 +5894,30 @@ mod tests {
         );
         assert!(by_bvid.resolutions.is_empty());
         assert_eq!(by_bvid.extensions["resolutions_require_playurl"], true);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
+    async fn live_video_statistics_keep_public_counts_anonymous() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let stats = provider
+            .video_stats(
+                "bvid:BV117411r7R1",
+                &VideoDetailRequest::new(VideoResourceKind::Video),
+            )
+            .await
+            .expect("anonymous video statistics");
+        assert_eq!(stats.video_ref.to_string(), "bilibili:bvid:BV117411r7R1");
+        assert!(stats.view_count.is_some_and(|count| count > 0));
+        assert!(stats.like_count.is_some());
+        assert!(stats.coin_count.is_some());
+        assert!(stats.favorite_count.is_some());
+        assert!(stats.comment_count.is_some());
+        assert!(stats.share_count.is_some());
+        assert_eq!(stats.liked, None);
+        assert_eq!(stats.favorited, None);
+        assert_eq!(stats.coins_contributed, None);
+        assert_eq!(stats.extensions["account_state_included"], false);
     }
 
     #[tokio::test]
