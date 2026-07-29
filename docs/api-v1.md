@@ -1469,6 +1469,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 咪咕公开歌单使用 `GET /v1/playlists/migu:<musicListId>` 与 `/tracks`，只接受规范正整数 `musicListId` 且不接受账户。元数据固定访问 `resource/playlist/v2.0`，要求 `resourceType=2021` 和返回 ID 与请求完全一致；标题、简介、可信官方封面、创建者、曲数、发布时间、标签、核心统计及安全过滤后的沉浸展示分别进入稳定字段或类型化扩展。歌曲固定访问 `MIGUM3.0/resource/playlist/song/v2.0`；真实上游会把大于 50 的 `pageSize` 静默压为 50，因此 Provider 固定使用 50 首物理页，以最多 3 个连续页实现统一 `limit=1..100` 与任意 `offset`，并在跨页时复核总数和发布时间。每首歌仍使用稳定 `contentId`，保存真实音质、版权和展示元数据，额外标记全局歌单位置；顺序与重复出现均不折叠。Uni Playlist 可用 `{ "platform":"migu", "type":"playlist", "id":"<musicListId>" }` 完整导入 Server 模式，或经 `/v1/uni/materialize/imports` 在 Client 模式完整展开后只返回请求页。真实统一 HTTP 已将一份 195 首公开歌单完整导入并播放首项，同时验证 Client 模式不创建服务器歌单。
 
+咪咕公开音源协议不需要账户、设备注册或用户签名。歌曲搜索、歌单详情、歌单歌曲、资源详情、实时权益和 H5 播放六个 API 入口均固定为官方 HTTPS 域名和标准端口；H5 二进制信封使用平台公开客户端协议常量解密响应，不是用户凭据，也不能由请求覆盖。Provider 禁用重定向，连接和整次请求分别限制为 10 秒与 20 秒；普通 API 最多读取 8 MiB，歌词最多 4 MiB，声明长度与分块累计长度都会独立执行上限。429 映射为可重试 `rate_limited`，5xx 为可重试上游错误，其余 4xx 不重试；业务码、结构漂移、身份错位和权限不足保持不同失败语义。请求不能提交目标 URL、Cookie、任意头或请求级代理，部署方只有 `TUNEWEAVE_MIGU_PROXY` 可配置服务端代理。全新数据目录下的全部真实网络用例已通过，免费歌曲实际从受信 CDN 读取 1 KiB 媒体，会员歌曲保持 65–125 秒试听，非法传输覆盖与非法歌单身份均在联网或媒体跳转前返回 400。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

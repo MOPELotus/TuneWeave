@@ -2,7 +2,7 @@
 
 协议基线为 `Domdkw/miguMusic-api-enhanced@47d2edb7175cf2874882273ed14be0fdfe7db796`，并以当前咪咕平台真实响应校正参考项目中的无效参数和过时传输方式。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
 
-当前公开音源补充层共 7 个验收单元：`pending=1`、`implemented=0`、`verified=6`，完成度 `6/7 = 85.71%`。登录、账户和写操作属于后续咪咕完整项目范围，不阻塞本层。
+当前公开音源补充层共 7 个验收单元：`pending=0`、`implemented=0`、`verified=7`，完成度 `7/7 = 100%`。登录、账户和写操作属于后续咪咕完整项目范围，不阻塞本层。
 
 | ID | 验收单元 | 状态 | 实施与验收边界 |
 | --- | --- | --- | --- |
@@ -12,6 +12,6 @@
 | MG04 | 公开播放、下载与权益 | `verified` | `GET /v1/tracks/migu:<contentId>/availability` 固定调用 `can-listen/v1.0`，严格回配唯一 `contentId` 并分别返回完整可听和限时试听标志。播放与下载先刷新严格资源详情，再调用加密 H5 v2.4 链；参考项目的 v1 只返回权益数据，匿名 v2 当前成功但无 URL，均不冒充可用备用源。H5 的 `AB CD 01` 信封解密为强类型响应，`auto` 从目录最高规格起请求，`PQ/HQ/SQ/ZQ24` 分别承接标准、高品、无损和 Hi-Res 目标，平台实际降档必须通过 `actual_quality` 与原始 tone 如实返回。媒体只接受 `freetyst.nf.migu.cn` 的 HTTPS `product8th/product` 或 `product9th/product` 路径，且 `Tim/Key/playSessionId` 各恰好一次；不把 `Tim` 猜成到期时间。真实免费歌曲确认完整 PQ 流和可下载文件；真实会员歌曲确认 65–125 秒试听，下载保持 `available=false`、隐藏试听 URL，统一 HTTP 验收通过。 |
 | MG05 | 统一播放回退与 302 | `verified` | 咪咕已进入默认 resolver 与显式 `playback_platform/source/fallback_platforms` 顺序，跨平台候选仍按标题、歌手、专辑、时长和版本严格评分，不因能取得 URL 放宽阈值。真实统一 HTTP 已将网易云歌曲以 `match_score=1.0` 解析为咪咕来源，并保留匿名链实际降为 PQ 的音质及 65–125 秒试听窗口；调用方托管 Uni 项可无持久化播放同一来源。完整流和下载的 `/redirect` 只返回 provider 已校验的可信 CDN、`private, no-store` 与 `no-referrer`；受限试听的下载跳转返回 403 且不携带 `Location`。默认顺序、显式咪咕优先、Uni 无状态播放及两类 302 均有服务端回归覆盖。 |
 | MG06 | 公开歌单与 Uni 导入 | `verified` | `GET /v1/playlists/migu:<musicListId>` 与 `/tracks` 只接受规范正整数公开歌单身份，不接受账户。详情固定访问 `resource/playlist/v2.0` 并严格回配 `resourceType=2021 + musicListId`，保留创建者、标签、曲数、统计和经过安全过滤的沉浸展示；歌曲固定访问 `MIGUM3.0/resource/playlist/song/v2.0`。平台把过大的 `pageSize` 静默压为 50，因此 Provider 固定 50 首物理页并用最多 3 页实现任意统一 `offset` 和 `limit<=100`，复核跨页总数与发布时间，保持顺序、重复项和全局位置。真实统一 HTTP 已读取 195 首公开歌单、验证 `offset=49` 跨页窗口，将全部 195 项原子导入 Server Uni 后播放首项，并在 Client 模式完整展开来源后仅返回请求页且不持久化。 |
-| MG07 | 协议、安全与真实权益验收 | `pending` | 收口公开端点的签名、设备或匿名会话需求、错误码、限流、固定域名、响应大小、链接安全与权益差分测试；完成全新部署和真实媒体探测。 |
+| MG07 | 协议、安全与真实权益验收 | `verified` | 六个上游 API 入口均为编译期固定的官方 HTTPS 标准端口，客户端禁用重定向、连接超时 10 秒、总超时 20 秒；公开调用不接收账户、Cookie、目标 URL、请求头、请求级代理、设备或签名覆盖，部署代理只能来自环境配置。API 与歌词响应分别限制 8 MiB 和 4 MiB，既检查声明长度也限制分块累计读取；429 单独映射可重试限流，5xx 可重试，4xx 不重试，业务码和身份漂移不伪装成功。歌词及展示资源、播放 CDN、路径和签名查询均有独立白名单。全部 8 条真实网络用例一次通过；全新数据目录的统一 HTTP 再确认免费全曲、会员试听、非法传输覆盖与非法歌单身份均正确，并从免费 CDN 实际读取 1 KiB 媒体内容而不下载整首或记录签名 URL。 |
 
 后续完整项目范围将在公开音源层收口后扩展移动统一账号、短信登录、多业务身份、多账户、调用方凭证、账户资料与会员状态、个人歌单/喜欢、登录权益播放及仍直接增强媒体体验的目录能力；纯社交、直播互动、商城和营销活动不纳入。
