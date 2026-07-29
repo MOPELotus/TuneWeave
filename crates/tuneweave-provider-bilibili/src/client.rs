@@ -2890,21 +2890,36 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error(
-                "Bilibili created favorite folders",
-                status,
-            ));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error(
+                    "Bilibili created favorite folders",
+                    status,
+                ));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili created favorite folders response exceeded the size limit",
+                ));
+            }
+            parse_created_favorite_folders_response(&bytes, owner_id)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili created favorite folders response exceeded the size limit",
-            ));
-        }
-        parse_created_favorite_folders_response(&bytes, owner_id)
+        .await;
+        self.log_upstream_request(
+            "created_favorite_folders",
+            "api.bilibili.com",
+            "/x/v3/fav/folder/created/list-all",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn favorite_folder(
@@ -2926,18 +2941,33 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili favorite folder", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili favorite folder", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili favorite folder response exceeded the size limit",
+                ));
+            }
+            parse_favorite_folder_response(&bytes, media_id)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili favorite folder response exceeded the size limit",
-            ));
-        }
-        parse_favorite_folder_response(&bytes, media_id)
+        .await;
+        self.log_upstream_request(
+            "favorite_folder_detail",
+            "api.bilibili.com",
+            "/x/v3/fav/folder/info",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn favorite_media_page(
@@ -2967,18 +2997,33 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili favorite media", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili favorite media", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili favorite media response exceeded the size limit",
+                ));
+            }
+            parse_favorite_media_response(&bytes, media_id, page, FAVORITE_MEDIA_PAGE_SIZE)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili favorite media response exceeded the size limit",
-            ));
-        }
-        parse_favorite_media_response(&bytes, media_id, page, FAVORITE_MEDIA_PAGE_SIZE)
+        .await;
+        self.log_upstream_request(
+            "favorite_folder_media",
+            "api.bilibili.com",
+            "/x/v3/fav/resource/list",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn collected_playlists_page(
@@ -3006,18 +3051,33 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili collected playlists", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili collected playlists", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili collected playlists response exceeded the size limit",
+                ));
+            }
+            parse_collected_playlists_response(&bytes, page, COLLECTED_PLAYLIST_PAGE_SIZE)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili collected playlists response exceeded the size limit",
-            ));
-        }
-        parse_collected_playlists_response(&bytes, page, COLLECTED_PLAYLIST_PAGE_SIZE)
+        .await;
+        self.log_upstream_request(
+            "collected_playlists",
+            "api.bilibili.com",
+            "/x/v3/fav/folder/collected/list",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn space_playlists_page(
