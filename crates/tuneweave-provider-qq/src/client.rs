@@ -501,6 +501,10 @@ impl QqClient {
         &self.login_http
     }
 
+    pub(crate) fn api_http(&self) -> &Client {
+        &self.http
+    }
+
     pub(crate) async fn request_web(
         &self,
         requests: &[QqApiRequest],
@@ -634,7 +638,7 @@ impl QqClient {
             return Ok(());
         }
         let device = self.lock_device()?.device().clone();
-        let identity = request_qimei(&self.http, &device).await?;
+        let identity = request_qimei(self, &device).await?;
         let mut store = self.lock_device()?;
         let previous = store.device().clone();
         let device = store.device_mut();

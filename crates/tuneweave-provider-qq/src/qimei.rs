@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use aes::{
     Aes128,
     cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7},
@@ -5,11 +7,13 @@ use aes::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest, Md5};
 use num_bigint::BigUint;
-use reqwest::Client;
 use serde_json::{Value, json};
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
-use crate::device::{QqDevice, unix_seconds_now};
+use crate::{
+    client::QqClient,
+    device::{QqDevice, unix_seconds_now},
+};
 
 const ENDPOINT: &str = "https://api.tencentmusic.com/tme/trpc/proxy";
 const RSA_MODULUS: &str = concat!(
@@ -31,10 +35,11 @@ pub(crate) struct QimeiIdentity {
     pub q36: String,
 }
 
-pub(crate) async fn request_qimei(client: &Client, device: &QqDevice) -> Result<QimeiIdentity> {
+pub(crate) async fn request_qimei(client: &QqClient, device: &QqDevice) -> Result<QimeiIdentity> {
     let timestamp = unix_seconds_now()?;
     let request = build_qimei_request(device, timestamp)?;
-    let response = client
+    let request = client
+        .api_http()
         .post(ENDPOINT)
         .header("Host", "api.tencentmusic.com")
         .header("method", "GetQimei")
@@ -49,51 +54,64 @@ pub(crate) async fn request_qimei(client: &Client, device: &QqDevice) -> Result<
         )
         .header("user-agent", "QQMusic")
         .header("timestamp", timestamp.to_string())
-        .json(&request)
-        .send()
-        .await
-        .map_err(network_error)?;
-    if !response.status().is_success() {
-        return Err(TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            format!("QQ QIMEI service returned HTTP {}", response.status()),
-        )
-        .with_platform(Platform::Qq)
-        .retryable(response.status().is_server_error()));
+        .json(&request);
+    let started = Instant::now();
+    let mut http_status = None;
+    let outcome = async {
+        let response = request.send().await.map_err(network_error)?;
+        http_status = Some(response.status());
+        if !response.status().is_success() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("QQ QIMEI service returned HTTP {}", response.status()),
+            )
+            .with_platform(Platform::Qq)
+            .retryable(response.status().is_server_error()));
+        }
+        let response: Value = response.json().await.map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("QQ QIMEI service returned invalid JSON: {error}"),
+            )
+            .with_platform(Platform::Qq)
+        })?;
+        let inner = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| qimei_data_error("response is missing its data envelope"))?;
+        let inner: Value = serde_json::from_str(inner)
+            .map_err(|error| qimei_data_error(format!("data envelope is invalid JSON: {error}")))?;
+        let data = inner
+            .get("data")
+            .and_then(Value::as_object)
+            .ok_or_else(|| qimei_data_error("data envelope is missing its identity object"))?;
+        let q16 = data
+            .get("q16")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| qimei_data_error("identity is missing q16"))?;
+        let q36 = data
+            .get("q36")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| qimei_data_error("identity is missing q36"))?;
+        Ok(QimeiIdentity {
+            q16: q16.to_owned(),
+            q36: q36.to_owned(),
+        })
     }
-    let response: Value = response.json().await.map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            format!("QQ QIMEI service returned invalid JSON: {error}"),
-        )
-        .with_platform(Platform::Qq)
-    })?;
-    let inner = response
-        .get("data")
-        .and_then(Value::as_str)
-        .ok_or_else(|| qimei_data_error("response is missing its data envelope"))?;
-    let inner: Value = serde_json::from_str(inner)
-        .map_err(|error| qimei_data_error(format!("data envelope is invalid JSON: {error}")))?;
-    let data = inner
-        .get("data")
-        .and_then(Value::as_object)
-        .ok_or_else(|| qimei_data_error("data envelope is missing its identity object"))?;
-    let q16 = data
-        .get("q16")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| qimei_data_error("identity is missing q16"))?;
-    let q36 = data
-        .get("q36")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| qimei_data_error("identity is missing q36"))?;
-    Ok(QimeiIdentity {
-        q16: q16.to_owned(),
-        q36: q36.to_owned(),
-    })
+    .await;
+    client.log_simple_upstream_request(
+        "qimei_registration",
+        "api.tencentmusic.com",
+        "/tme/trpc/proxy",
+        http_status,
+        started,
+        &outcome,
+    );
+    outcome
 }
 
 fn build_qimei_request(device: &QqDevice, timestamp: u64) -> Result<Value> {
@@ -294,9 +312,16 @@ fn network_error(error: reqwest::Error) -> TuneWeaveError {
     } else {
         ErrorCode::UpstreamError
     };
-    TuneWeaveError::new(code, format!("QQ QIMEI request failed: {error}"))
-        .with_platform(Platform::Qq)
-        .retryable(true)
+    TuneWeaveError::new(
+        code,
+        if error.is_timeout() {
+            "QQ QIMEI request timed out"
+        } else {
+            "QQ QIMEI request failed"
+        },
+    )
+    .with_platform(Platform::Qq)
+    .retryable(true)
 }
 
 fn qimei_data_error(message: impl Into<String>) -> TuneWeaveError {
