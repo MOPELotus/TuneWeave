@@ -66,6 +66,23 @@ struct SodaSearchQuery<'a> {
     cursor: u32,
 }
 
+#[derive(Serialize)]
+struct SodaTrackDetailQuery<'a> {
+    track_id: &'a str,
+    media_type: &'static str,
+    aid: &'static str,
+    device_platform: &'static str,
+    channel: &'static str,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaTrackDetailEnvelope {
+    status_info: SodaStatusInfo,
+    track: Option<SodaTrack>,
+    risk_result: Option<i64>,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SodaSearchEnvelope {
@@ -122,6 +139,17 @@ struct SodaTrack {
     preview: Option<SodaPreview>,
     audition_info: Option<SodaAuditionInfo>,
     label_info: SodaLabelInfo,
+    state: SodaTrackState,
+    stats: SodaTrackStats,
+    song_maker_team: SodaSongMakerTeam,
+    media_type: String,
+    chorus: Option<SodaTimedSegment>,
+    first_vocal: Option<SodaTimedSegment>,
+    lang_codes: Vec<String>,
+    sharable_platforms: Vec<String>,
+    tags: Vec<SodaTrackTag>,
+    karaoke: SodaKaraoke,
+    vocal: Option<i64>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -198,6 +226,61 @@ struct SodaQualityBenefit {
     need_purchase: bool,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaTrackState {
+    offline: Option<bool>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaTrackStats {
+    count_collected: u64,
+    count_comment: u64,
+    count_shared: u64,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaSongMakerTeam {
+    composers: Vec<SodaCredit>,
+    lyricists: Vec<SodaCredit>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaCredit {
+    name: String,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaTimedSegment {
+    start: u64,
+    duration: u64,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaTrackTag {
+    category: SodaTagLevel,
+    first_level_tag: SodaTagLevel,
+    second_level_tag: SodaTagLevel,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaTagLevel {
+    tag_id: u64,
+    tag_name: String,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaKaraoke {
+    supported: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(untagged)]
 enum FlexibleText {
@@ -266,6 +349,24 @@ impl SodaClient {
         parse_search_response(&body, cursor)
     }
 
+    pub(crate) async fn track_detail(&self, identity: &SodaTrackIdentity) -> Result<Track> {
+        let response = self
+            .http
+            .get("https://api.qishui.com/luna/pc/track_v2")
+            .query(&SodaTrackDetailQuery {
+                track_id: identity.id(),
+                media_type: "track",
+                aid: SODA_APP_ID,
+                device_platform: "web",
+                channel: "pc_web",
+            })
+            .send()
+            .await
+            .map_err(soda_network_error)?;
+        let body = read_bounded_response(response, "Soda track detail").await?;
+        parse_track_detail_response(&body, identity)
+    }
+
     pub async fn resolve_track_identity(&self, input: &str) -> Result<SodaTrackIdentity> {
         let short_url = match classify_track_identity(input)? {
             SodaTrackIdentityInput::Direct(identity) => return Ok(identity),
@@ -295,13 +396,7 @@ impl SodaClient {
 fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearchPage> {
     let envelope: SodaSearchEnvelope = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda search returned malformed JSON"))?;
-    if envelope.status_info.log_id.len() > 256
-        || envelope.status_info.now_ts_ms < envelope.status_info.now.saturating_mul(1_000)
-    {
-        return Err(soda_upstream_error(
-            "Soda search returned invalid status metadata",
-        ));
-    }
+    validate_status_metadata(&envelope.status_info, "Soda search")?;
 
     let mut track_groups = envelope
         .result_groups
@@ -357,7 +452,7 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
                 soda_upstream_error("Soda track search item omitted its track payload")
             })
         })
-        .map(|track| track.and_then(map_search_track))
+        .map(|track| track.and_then(|track| map_track(track, "official_pc_track_search")))
         .collect::<Result<Vec<_>>>()?;
     Ok(SodaSearchPage {
         tracks,
@@ -366,7 +461,47 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
     })
 }
 
-fn map_search_track(source: SodaTrack) -> Result<Track> {
+fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Track> {
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda track detail returned malformed JSON"))?;
+    validate_status_metadata(&envelope.status_info, "Soda track detail")?;
+    if envelope.risk_result.is_some_and(|value| value != 0) {
+        return Err(soda_upstream_error(
+            "Soda track detail was rejected by platform risk control",
+        ));
+    }
+    let track = envelope
+        .track
+        .ok_or_else(|| soda_upstream_error("Soda track detail omitted its track payload"))?;
+    if track.id.trim() != identity.id() {
+        return Err(soda_upstream_error(
+            "Soda track detail returned a mismatched track identity",
+        ));
+    }
+    if !track.media_type.trim().is_empty() && track.media_type.trim() != "track" {
+        return Err(soda_upstream_error(
+            "Soda track detail returned a non-track media type",
+        ));
+    }
+    let mut mapped = map_track(track, "official_pc_track_v2")?;
+    mapped.extensions.insert(
+        "canonical_share_url".to_owned(),
+        json!(identity.canonical_url()),
+    );
+    Ok(mapped)
+}
+
+fn validate_status_metadata(status: &SodaStatusInfo, operation: &str) -> Result<()> {
+    if status.log_id.len() > 256 || status.now_ts_ms < status.now.saturating_mul(1_000) {
+        return Err(soda_upstream_error(format!(
+            "{operation} returned invalid status metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn map_track(source: SodaTrack, backend: &'static str) -> Result<Track> {
+    validate_track_metadata_bounds(&source)?;
     let track_id = canonical_positive_decimal(&source.id)
         .ok_or_else(|| soda_upstream_error("Soda search returned an invalid track id"))?;
     let name = source.name.trim();
@@ -396,9 +531,12 @@ fn map_search_track(source: SodaTrack) -> Result<Track> {
         });
     }
     track.available_qualities = map_qualities(&source.bit_rates);
+    if source.state.offline == Some(true) {
+        track.playable = Some(false);
+    }
 
     let mut extensions = Extensions::new();
-    extensions.insert("backend".to_owned(), json!("official_pc_track_search"));
+    extensions.insert("backend".to_owned(), json!(backend));
     extensions.insert("media_specs".to_owned(), json!(source.bit_rates));
     extensions.insert("rights".to_owned(), json!(source.label_info));
     if let Some(preview) = source.preview {
@@ -416,12 +554,79 @@ fn map_search_track(source: SodaTrack) -> Result<Track> {
             json!(source.album.release_date),
         );
     }
+    extensions.insert("stats".to_owned(), json!(source.stats));
+    extensions.insert("credits".to_owned(), json!(source.song_maker_team));
+    if let Some(chorus) = source.chorus {
+        extensions.insert("chorus".to_owned(), json!(chorus));
+    }
+    if let Some(first_vocal) = source.first_vocal {
+        extensions.insert("first_vocal".to_owned(), json!(first_vocal));
+    }
+    if !source.lang_codes.is_empty() {
+        extensions.insert("language_codes".to_owned(), json!(source.lang_codes));
+    }
+    if !source.sharable_platforms.is_empty() {
+        extensions.insert(
+            "sharable_platforms".to_owned(),
+            json!(source.sharable_platforms),
+        );
+    }
+    if !source.tags.is_empty() {
+        extensions.insert("tags".to_owned(), json!(source.tags));
+    }
+    extensions.insert("karaoke".to_owned(), json!(source.karaoke));
+    if let Some(vocal) = source.vocal {
+        extensions.insert("vocal".to_owned(), json!(vocal));
+    }
     extensions.insert(
         "catalog_rights_are_not_live_playback".to_owned(),
         json!(true),
     );
     track.extensions = extensions;
     Ok(track)
+}
+
+fn validate_track_metadata_bounds(source: &SodaTrack) -> Result<()> {
+    let bounded = source.artists.len() <= 128
+        && source.bit_rates.len() <= 32
+        && source
+            .preview
+            .as_ref()
+            .is_none_or(|value| value.bit_rates.len() <= 32)
+        && source.label_info.quality_map.len() <= 32
+        && source.label_info.quality_only_vip_can_download.len() <= 32
+        && source.label_info.quality_only_vip_can_play.len() <= 32
+        && source.song_maker_team.composers.len() <= 128
+        && source.song_maker_team.lyricists.len() <= 128
+        && source.lang_codes.len() <= 32
+        && source.sharable_platforms.len() <= 32
+        && source.tags.len() <= 128;
+    let text_bounded = source
+        .artists
+        .iter()
+        .all(|artist| artist.name.len() <= 1_000 && artist.simple_display_name.len() <= 1_000)
+        && source
+            .song_maker_team
+            .composers
+            .iter()
+            .chain(source.song_maker_team.lyricists.iter())
+            .all(|credit| credit.name.len() <= 1_000)
+        && source
+            .lang_codes
+            .iter()
+            .chain(source.sharable_platforms.iter())
+            .all(|value| value.len() <= 128)
+        && source.tags.iter().all(|tag| {
+            [&tag.category, &tag.first_level_tag, &tag.second_level_tag]
+                .into_iter()
+                .all(|level| level.tag_name.len() <= 256)
+        });
+    if !bounded || !text_bounded {
+        return Err(soda_upstream_error(
+            "Soda track metadata exceeded structural limits",
+        ));
+    }
+    Ok(())
 }
 
 fn map_artist_summary(source: &SodaArtist) -> Option<ArtistSummary> {
@@ -625,6 +830,28 @@ mod tests {
       "extra":{"log_extra":"redacted"}
     }"#;
 
+    const TRACK_DETAIL_RESPONSE: &str = r#"{
+      "status_info":{"log_id":"safe-detail","now":1785336862,"now_ts_ms":1785336862374},
+      "risk_result":0,
+      "track":{
+        "id":"7304719759323564095","name":"落了白","duration":180822,
+        "media_type":"track","vid":"v03ad6g10000cli4pgjc77u93k8r7pbg",
+        "artists":[{"id":"6795393014723250177","name":"蒋雪儿Snow.J"}],
+        "album":{"id":"7304719759323580479","name":"落了白","release_date":1606665600,"url_cover":{"uri":"tos-cn-v-2774c002/cover","urls":["https://p6-luna.douyinpic.com/img/"]}},
+        "bit_rates":[{"br":66163,"size":1495476,"quality":"medium"},{"br":260264,"size":5882690,"quality":"highest"}],
+        "state":{"offline":false},
+        "stats":{"count_collected":3548864,"count_comment":9024,"count_shared":18667},
+        "song_maker_team":{"composers":[{"name":"刘涛"}],"lyricists":[{"name":"堇临|刘涛"}]},
+        "chorus":{"start":29184,"duration":0},"first_vocal":{"start":3072,"duration":26112},
+        "lang_codes":["ZH"],"sharable_platforms":["link","wechat"],
+        "tags":[{"category":{"tag_id":1,"tag_name":"Genre"},"first_level_tag":{"tag_id":6730932201380170498,"tag_name":"Pop"}}],
+        "karaoke":{"supported":true},"vocal":1,
+        "label_info":{"only_vip_download":true,"quality_only_vip_can_play":["lossless"]}
+      },
+      "lyric":{"content":"not part of track detail"},
+      "track_player":{"url_player_info":"https://vod-luna.douyin.com/?token=private","video_model":"private-player-model"}
+    }"#;
+
     #[test]
     fn search_maps_stable_identity_metadata_catalog_quality_and_rights() {
         let page = parse_search_response(SEARCH_RESPONSE.as_bytes(), 0)
@@ -665,6 +892,49 @@ mod tests {
         assert!(parse_search_response(invalid_id.as_bytes(), 0).is_err());
         let wrong_group = SEARCH_RESPONSE.replace("\"id\":\"tracks\"", "\"id\":\"albums\"");
         assert!(parse_search_response(wrong_group.as_bytes(), 0).is_err());
+    }
+
+    #[test]
+    fn track_detail_maps_rich_metadata_without_exposing_ephemeral_playback_data() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let track = parse_track_detail_response(TRACK_DETAIL_RESPONSE.as_bytes(), &identity)
+            .expect("parse Soda track detail");
+        assert_eq!(track.resource_ref.to_string(), "soda:7304719759323564095");
+        assert_eq!(track.name, "落了白");
+        assert_eq!(track.duration_ms, Some(180_822));
+        assert_eq!(track.available_qualities, vec![Quality::Low, Quality::High]);
+        assert_eq!(track.playable, None);
+        assert_eq!(track.extensions["backend"], "official_pc_track_v2");
+        assert_eq!(track.extensions["stats"]["count_collected"], 3_548_864);
+        assert_eq!(track.extensions["credits"]["composers"][0]["name"], "刘涛");
+        assert_eq!(track.extensions["karaoke"]["supported"], true);
+        assert_eq!(
+            track.extensions["canonical_share_url"],
+            "https://www.qishui.com/track/7304719759323564095"
+        );
+        let serialized = serde_json::to_string(&track).expect("serialize Soda track detail");
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains("url_player_info"));
+        assert!(!serialized.contains("video_model"));
+    }
+
+    #[test]
+    fn track_detail_rejects_identity_media_risk_and_structure_drift() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let wrong_id = TRACK_DETAIL_RESPONSE.replace("7304719759323564095", "7304719759323564096");
+        assert!(parse_track_detail_response(wrong_id.as_bytes(), &identity).is_err());
+        let wrong_media =
+            TRACK_DETAIL_RESPONSE.replace("\"media_type\":\"track\"", "\"media_type\":\"podcast\"");
+        assert!(parse_track_detail_response(wrong_media.as_bytes(), &identity).is_err());
+        let risk = TRACK_DETAIL_RESPONSE.replace("\"risk_result\":0", "\"risk_result\":1");
+        assert!(parse_track_detail_response(risk.as_bytes(), &identity).is_err());
+        let oversized = TRACK_DETAIL_RESPONSE.replace(
+            "\"lang_codes\":[\"ZH\"]",
+            &format!("\"lang_codes\":{}", json!(vec!["ZH"; 33])),
+        );
+        assert!(parse_track_detail_response(oversized.as_bytes(), &identity).is_err());
     }
 
     #[test]
@@ -827,5 +1097,24 @@ mod tests {
             identity.resource_ref().expect("Soda reference").to_string(),
             "soda:7304719759323564095"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_anonymous_track_detail_preserves_identity_and_hides_player_tokens() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let track = SodaClient::test_client()
+            .track_detail(&identity)
+            .await
+            .expect("live Soda track detail");
+        assert_eq!(track.resource_ref.to_string(), "soda:7304719759323564095");
+        assert_eq!(track.name, "落了白");
+        assert_eq!(track.duration_ms, Some(180_822));
+        assert_eq!(track.extensions["backend"], "official_pc_track_v2");
+        let serialized = serde_json::to_string(&track).expect("serialize live Soda track");
+        assert!(!serialized.contains("url_player_info"));
+        assert!(!serialized.contains("video_model"));
+        assert!(!serialized.contains("vod-luna.douyin.com"));
     }
 }

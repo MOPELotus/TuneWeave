@@ -48,7 +48,7 @@ impl MusicProvider for SodaProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks])
+        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -120,6 +120,16 @@ impl MusicProvider for SodaProvider {
             },
         })
     }
+
+    async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+        if account.is_some() {
+            return Err(soda_invalid_request(
+                "Soda public track detail does not accept an account",
+            ));
+        }
+        let identity = self.client.resolve_track_identity(id).await?;
+        self.client.track_detail(&identity).await
+    }
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -176,15 +186,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_advertises_only_verified_public_search() {
+    fn provider_advertises_only_verified_public_capabilities() {
         let provider = SodaProvider::new(SodaConfig::default()).expect("Soda provider");
         assert_eq!(provider.platform(), Platform::Soda);
         assert_eq!(provider.name(), "Soda Music");
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks])
+            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
         );
-        assert!(!provider.supports(Capability::TrackDetail));
+        assert!(provider.supports(Capability::TrackDetail));
         assert!(!provider.supports(Capability::AudioStream));
     }
 
@@ -206,5 +216,16 @@ mod tests {
 
         assert!(validate_search_query(&SearchQuery::tracks("", 20, 0)).is_err());
         assert!(validate_search_query(&SearchQuery::tracks("落了白", 101, 0)).is_err());
+    }
+
+    #[tokio::test]
+    async fn public_track_detail_rejects_accounts_before_network_access() {
+        let provider = SodaProvider::new(SodaConfig::default()).expect("Soda provider");
+        let error = provider
+            .track("7304719759323564095", Some("default"))
+            .await
+            .expect_err("Soda public detail must reject accounts");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+        assert_eq!(error.platform, Some(Platform::Soda));
     }
 }

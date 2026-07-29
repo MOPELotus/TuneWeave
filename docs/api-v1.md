@@ -1489,6 +1489,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 汽水音乐公开歌曲搜索使用 `GET /v1/search?platform=soda&kind=track&q=...`。Provider 固定访问官方 HTTPS PC 歌曲搜索入口并只发送查询词、20 首物理页游标和平台固定 `aid=386088`；真实消融确认该链不需要 Cookie、匿名设备、`x-helios` 或 `x-medusa`，因此不会虚构或持久化无效设备状态。统一歌曲引用使用规范正整数 ID 形成 `soda:<track_id>`，并强类型返回歌手、专辑、可信官方封面、时长以及 `medium/higher/highest/lossless/hires/spatial` 目录规格；搜索权益、试听目录和媒体规格只作为有界诊断保留，`playable` 在实时播放链接入前保持 `null`。上游实际页宽固定为 20，统一任意 `offset` 与 `limit=1..100` 最多连续读取 6 页；分页不猜测总数，并返回实际物理页宽、抓取页数和后续游标。当前公开搜索不接受账户、非默认 variant、平台搜索状态、Cookie、目标 URL、请求头或请求级代理；部署方只有 `TUNEWEAVE_SODA_PROXY` 可配置服务端代理。客户端禁用重定向，连接和整次请求分别限制为 10 秒与 20 秒，声明长度和分块累计长度分别受 8 MiB 上限约束，429 与 5xx 保持可重试分类。真实官方搜索已验证目标歌曲身份和连续分页。
 
+汽水歌曲详情使用 `GET /v1/tracks/soda:<track_id>`，公开层不接受账户。Provider 固定调用官方 HTTPS 匿名 `track_v2`，只提交规范歌曲 ID、`media_type=track`、固定 `aid=386088`、`device_platform=web` 和 `channel=pc_web`；真实消融确认无需 Cookie、设备或签名。响应必须回配同一歌曲 ID 和媒体类型，并以强类型映射歌曲、歌手、专辑、可信封面、时长、目录音质、统计、词曲作者、高潮及首唱时间片、语言、标签、分享平台和卡拉 OK 状态；结构数量和文本长度均受限。`canonical_share_url` 只由已验证 ID 构造，详情只在平台明确离线时设置 `playable=false`，目录权益仍不能冒充实时播放授权。上游同一响应携带的歌词留给独立歌词能力处理，`url_player_info`、`video_model`、临时媒体主机和令牌不会进入详情、扩展或日志，播放链接入后也必须按请求实时刷新。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。
