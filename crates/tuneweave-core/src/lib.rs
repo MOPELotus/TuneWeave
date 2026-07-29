@@ -11,6 +11,7 @@ mod platform;
 mod provider;
 mod registry;
 mod resolver;
+mod uni_playlist_document;
 mod uni_playlist_store;
 
 pub use auth::{
@@ -106,25 +107,29 @@ pub use model::{
     TrackAvailability, TrackAvailabilityRequest, TrackCredit, TrackCreditGroup, TrackCredits,
     TrackDetailBatchRequest, TrackDetailRequestItem, TrackEntitlement, TrackFavoriteCount,
     TrackIdentifierKind, TrackLabel, TrackLabelList, TrackVersionList, TrialWindow, UniPlaylist,
-    UniPlaylistCreateRequest, UniPlaylistDeleteResult, UniPlaylistImportRequest,
-    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
-    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
-    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
-    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
-    UniPlaylistItemStream, UniPlaylistUpdateRequest, User, UserMusicGene, UserProfile,
-    UserProfileBackend, Video, VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier,
-    VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest, VideoDynamicRange,
-    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackFormat, VideoPlaybackLanguage,
-    VideoPlaybackLanguageCatalog, VideoPlaybackManifest, VideoPlaybackProgressiveSegment,
-    VideoPlaybackRequest, VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
-    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
-    VideoStream, VideoStreamRequest, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoSubtitleStyle, VideoTaxonomyKind,
-    VideoTaxonomyRequest, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
+    UniPlaylistCreateRequest, UniPlaylistDeleteResult, UniPlaylistDocument,
+    UniPlaylistDocumentExtensions, UniPlaylistDocumentFormat, UniPlaylistDocumentItem,
+    UniPlaylistDocumentItemExtensions, UniPlaylistDocumentSnapshot,
+    UniPlaylistDocumentSnapshotExtensions, UniPlaylistImportRequest, UniPlaylistImportResult,
+    UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
+    UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
+    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
+    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream,
+    UniPlaylistUpdateRequest, User, UserMusicGene, UserProfile, UserProfileBackend, Video,
+    VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoCatalogOption,
+    VideoCodecFamily, VideoDetail, VideoDetailRequest, VideoDynamicRange, VideoKind, VideoPart,
+    VideoPartListRequest, VideoPlaybackFormat, VideoPlaybackLanguage, VideoPlaybackLanguageCatalog,
+    VideoPlaybackManifest, VideoPlaybackProgressiveSegment, VideoPlaybackRequest,
+    VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind, VideoRecommendationKind,
+    VideoRecommendationRequest, VideoRecommendationView, VideoResolution, VideoResourceKind,
+    VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream,
+    VideoStreamRequest, VideoSubtitle, VideoSubtitleCue, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoSubtitleStyle, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, ResourceRef};
 pub use provider::MusicProvider;
 pub use registry::ProviderRegistry;
 pub use resolver::StreamResolver;
+pub use uni_playlist_document::UNI_PLAYLIST_DOCUMENT_FORMAT;
 pub use uni_playlist_store::{FileUniPlaylistStore, MemoryUniPlaylistStore, UniPlaylistStore};

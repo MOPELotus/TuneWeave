@@ -4360,6 +4360,86 @@ impl UniPlaylist {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UniPlaylistDocumentFormat {
+    #[default]
+    #[serde(rename = "tuneweave_uni_playlist_v1")]
+    V1,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocumentExtensions {
+    pub duplicates_preserved: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocumentItemExtensions {
+    pub import_source_index: Option<u64>,
+    pub import_source_ref: Option<ResourceRef>,
+    pub import_source_type: Option<String>,
+    pub imported_from_item_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocumentSnapshotExtensions {
+    pub canonical_ref: Option<ResourceRef>,
+    pub playable: Option<bool>,
+    pub available_qualities: Vec<Quality>,
+    pub mv_ref: Option<ResourceRef>,
+    pub video_kind: Option<VideoResourceKind>,
+    pub published_at: Option<String>,
+    pub podcast_ref: Option<ResourceRef>,
+    pub audio_ref: Option<ResourceRef>,
+    pub serial_number: Option<u64>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub region: Option<String>,
+    pub current_program: Option<String>,
+    pub has_direct_stream: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocumentSnapshot {
+    pub title: String,
+    pub artists: Vec<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub isrc: Option<String>,
+    pub cover_url: Option<String>,
+    pub version_tags: Vec<String>,
+    pub extensions: UniPlaylistDocumentSnapshotExtensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocumentItem {
+    pub id: String,
+    pub position: u64,
+    pub kind: UniPlaylistItemKind,
+    pub source_ref: ResourceRef,
+    pub snapshot: UniPlaylistDocumentSnapshot,
+    pub added_at_ms: u64,
+    pub extensions: UniPlaylistDocumentItemExtensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniPlaylistDocument {
+    pub format: UniPlaylistDocumentFormat,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub item_count: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub items: Vec<UniPlaylistDocumentItem>,
+    pub extensions: UniPlaylistDocumentExtensions,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UniPlaylistItemKind {

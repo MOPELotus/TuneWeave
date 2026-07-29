@@ -43,15 +43,15 @@ TuneWeave 为六个媒体平台提供统一、可扩展的 Rust HTTP API。“�
 
 ## 阶段 2：Uni Playlist 客户端托管与存储改造
 
-当前 Uni Playlist 已支持多个独立歌单，但所有服务端歌单和项目共同保存在 `<TUNEWEAVE_DATA_DIR>/uni-playlists.json`，调用方还需自行保存已经创建的 `uni:<id>`。本阶段在 B 站当前项目范围主线收口后实施，不阻塞阶段 1：
+当前 Uni Playlist 已支持多个独立歌单及分页目录，但所有服务端歌单和项目仍共同保存在 `<TUNEWEAVE_DATA_DIR>/uni-playlists.json`。本阶段在 B 站当前项目范围主线收口后实施，不阻塞阶段 1：
 
-- 保留现有 `server` 模式，并补充分页目录、元数据修改和明确删除；
-- 新增不持久化歌单或项目的 `client` 模式，由调用方持有版本化 `tuneweave_uni_playlist_v1` 文档；
+- 保留现有 `server` 模式；分页目录、元数据修改和明确删除已经完成；
+- 新增不持久化歌单或项目的 `client` 模式；版本化 `tuneweave_uni_playlist_v1` 强类型文档契约已经完成，继续接入无状态处理链；
 - 提供无状态来源展开、批量项目标准化和单项目播放/跨平台回退能力，日常请求不上传完整歌单；
 - 提供 Server 导出与 Client 文档原子导入，迁移是显式复制，不提供 `both` 自动同步；
 - 把全局单文件整体重写改造为按歌单拆分文件或嵌入式数据库，并安全迁移旧数据。
 
-完整所有权、接口候选、文档安全边界、存储方案与验收标准见 [Uni Playlist 客户端托管与存储设计](uni-playlist-ownership.md)。新增能力均保持 `pending`，等待阶段 1 收口后再实施。
+完整所有权、接口候选、文档安全边界、存储方案与验收标准见 [Uni Playlist 客户端托管与存储设计](uni-playlist-ownership.md)。完成状态以 [Uni Playlist 实施账本](coverage/uni-playlist.md) 为准。
 
 ## 阶段 3：酷狗、咪咕、酷我公开音源补充层
 
