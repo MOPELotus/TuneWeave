@@ -25,6 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tuneweave-core.workspace = true
 tuneweave-provider-bilibili.workspace = true
+tuneweave-provider-kugou.workspace = true
 tuneweave-provider-netease.workspace = true
 tuneweave-provider-qq.workspace = true
 

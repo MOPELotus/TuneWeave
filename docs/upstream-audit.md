@@ -35,6 +35,7 @@ TuneWeave 采用 `MIT OR Apache-2.0`。项目不复制、翻译、链接、打�
 - [QQ 音乐](coverage/qq-scope.md)
 - [B 站](coverage/bilibili-scope.md)
 - [Uni Playlist](coverage/uni-playlist.md)
+- [酷狗](coverage/kugou-scope.md)
 
 扩展候选池：
 

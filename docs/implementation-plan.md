@@ -27,8 +27,9 @@ TuneWeave 为六个媒体平台提供统一、可扩展的 Rust HTTP API。“�
 - [QQ 音乐](coverage/qq-scope.md)
 - [B 站](coverage/bilibili-scope.md)
 - [Uni Playlist](coverage/uni-playlist.md)
+- [酷狗](coverage/kugou-scope.md)
 
-后续接入时建立 `kugou-scope.md`、`migu-scope.md` 与 `kuwo-scope.md`。
+后续接入时建立 `migu-scope.md` 与 `kuwo-scope.md`。
 
 ## 阶段 1：前三个平台项目范围收口
 

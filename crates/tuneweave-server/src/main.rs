@@ -15,6 +15,7 @@ use tuneweave_core::{
     ProviderRegistry, UniPlaylistStore,
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+use tuneweave_provider_kugou::{KugouConfig, KugouProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_server::{AppState, build_router};
@@ -68,6 +69,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
         credential_store: Some(credential_store),
+    })?)?;
+    registry.register(KugouProvider::new(KugouConfig {
+        proxy_url: env::var("TUNEWEAVE_KUGOU_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
     })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);

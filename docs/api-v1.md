@@ -1442,6 +1442,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/videos/{ref}/subtitles` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleList`；稳定字幕身份、登录要求和不含临时资源 URL 的语言目录 |
 | GET | `/v1/videos/{ref}/subtitles/{subtitle_ref}` | 必填 `part`，`kind/type=video`、`account?` | `VideoSubtitleDocument`；强类型样式和毫秒字幕段，不公开临时正文 URL |
 
+酷狗公开歌曲搜索使用 `GET /v1/search?platform=kugou&kind=track&q=...`。当前实现固定访问官方 HTTPS Web 搜索端点，不接受账户、Cookie、URL、请求头或代理覆盖；部署方如需代理只能在启动时设置 `TUNEWEAVE_KUGOU_PROXY`。统一歌曲引用优先使用平台 `album_audio_id`，基础媒体 `hash`、各音质哈希、原始权益码与搜索后端保存在有界扩展中；`playable` 在接入真实播放权益检查前保持 `null`，不会根据搜索列表猜测会员歌曲可播。任意 `offset` 由最多两个固定 100 项上游页精确切片，分页扩展会声明实际后端和上游页宽。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

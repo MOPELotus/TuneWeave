@@ -2,6 +2,7 @@
 members = [
     "crates/tuneweave-core",
     "crates/tuneweave-provider-bilibili",
+    "crates/tuneweave-provider-kugou",
     "crates/tuneweave-provider-netease",
     "crates/tuneweave-provider-qq",
     "crates/tuneweave-server",
@@ -35,7 +36,7 @@ num-bigint = "0.4.6"
 percent-encoding = "2.3.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["brotli", "deflate", "form", "gzip", "json", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["brotli", "deflate", "form", "gzip", "json", "query", "rustls"] }
 rumqttc = { version = "0.25.1", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -48,6 +49,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tuneweave-core = { path = "crates/tuneweave-core" }
 tuneweave-provider-bilibili = { path = "crates/tuneweave-provider-bilibili" }
+tuneweave-provider-kugou = { path = "crates/tuneweave-provider-kugou" }
 tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
 tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
 url = "2.5.8"
