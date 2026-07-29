@@ -7,7 +7,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tuneweave_core::{
     AccountCredentialStore, AntiCheatTokenVersion, ErrorCode, Platform, Result, TuneWeaveError,
+    UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
@@ -113,6 +114,9 @@ pub struct NeteaseClient {
     xeapi_state: Arc<RwLock<XeapiState>>,
     anti_cheat_v2_token: Arc<RwLock<Option<String>>>,
     anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
+    base_upstream_host: &'static str,
+    web_upstream_host: &'static str,
+    proxy_configured: bool,
 }
 
 #[derive(Clone, Default)]
@@ -268,6 +272,14 @@ impl NeteaseClient {
             )
             .with_platform(Platform::Netease));
         }
+        let proxy_configured = config
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        let base_upstream_host =
+            configured_upstream_host(&config.base_url, "interface.music.163.com");
+        let web_upstream_host = configured_upstream_host(&config.web_base_url, "music.163.com");
         let http = configure_proxy(
             Client::builder()
                 .timeout(config.timeout)
@@ -337,6 +349,9 @@ impl NeteaseClient {
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
             anti_cheat_v2_token: Arc::new(RwLock::new(None)),
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
+            base_upstream_host,
+            web_upstream_host,
+            proxy_configured,
         })
     }
 
@@ -430,12 +445,27 @@ impl NeteaseClient {
             })?;
             request = request.header("x-nos-token", token);
         }
-        let response = request
-            .form(&[("params", params)])
-            .send()
-            .await
-            .map_err(request_error)?;
-        parse_response_with_encryption(response, encrypted_response).await
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request
+                .form(&[("params", params)])
+                .send()
+                .await
+                .map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response_with_encryption(response, encrypted_response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "eapi_request",
+            self.base_upstream_host,
+            "/eapi/{path}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn request_weapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
@@ -482,8 +512,23 @@ impl NeteaseClient {
                     ("encSecKey", encrypted.enc_sec_key),
                 ]),
         );
-        let response = request.send().await.map_err(request_error)?;
-        parse_response_with_encryption(response, encrypted_response).await
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response_with_encryption(response, encrypted_response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "weapi_request",
+            self.web_upstream_host,
+            "/weapi/{path}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn request_api(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
@@ -518,8 +563,23 @@ impl NeteaseClient {
                 )
                 .body(encode_form(&payload, false)),
         );
-        let response = request.send().await.map_err(request_error)?;
-        parse_response(response).await
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "api_request",
+            self.base_upstream_host,
+            "/api/{path}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn match_audio(
@@ -848,8 +908,23 @@ impl NeteaseClient {
                 )
                 .form(&[("eparams", encrypt_linuxapi(&plaintext))]),
         );
-        let response = request.send().await.map_err(request_error)?;
-        parse_response(response).await
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "linuxapi_request",
+            self.web_upstream_host,
+            "/api/linux/forward",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn anti_cheat_token(
@@ -1221,6 +1296,40 @@ impl NeteaseClient {
         client.cookie = None;
         client
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_uninspected_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, upstream_outcome) = match outcome {
+            Ok(_) => (
+                UpstreamBusinessClass::NotInspected,
+                UpstreamOutcome::Success,
+            ),
+            Err(error) => netease_upstream_classification(error),
+        };
+        UpstreamRequestSummary {
+            provider: Platform::Netease,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome: upstream_outcome,
+        }
+        .emit();
+    }
 }
 
 async fn parse_response(response: reqwest::Response) -> Result<NeteaseResponse> {
@@ -1264,9 +1373,7 @@ async fn parse_response_with_encryption(
             format!("NetEase returned invalid JSON: {error}"),
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({
-            "response_preview": String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
-        }))
+        .with_details(json!({ "response_bytes": bytes.len() }))
     })?;
     Ok(NeteaseResponse {
         status,
@@ -1745,9 +1852,53 @@ fn request_error(error: reqwest::Error) -> TuneWeaveError {
     } else {
         ErrorCode::UpstreamError
     };
-    TuneWeaveError::new(code, format!("NetEase request failed: {error}"))
+    let message = if error.is_timeout() {
+        "NetEase upstream request timed out"
+    } else if error.is_connect() {
+        "NetEase upstream connection failed"
+    } else if error.is_body() || error.is_decode() {
+        "NetEase upstream response body failed"
+    } else if error.is_request() {
+        "NetEase upstream request could not be sent"
+    } else {
+        "NetEase upstream request failed"
+    };
+    TuneWeaveError::new(code, message)
         .with_platform(Platform::Netease)
         .retryable(true)
+}
+
+fn configured_upstream_host(value: &str, official_host: &'static str) -> &'static str {
+    Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .filter(|host| host.eq_ignore_ascii_case(official_host))
+        .map_or("configured", |_| official_host)
+}
+
+fn netease_upstream_classification(
+    error: &TuneWeaveError,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    let business_class = if matches!(
+        error.code,
+        ErrorCode::AuthenticationRequired
+            | ErrorCode::PermissionDenied
+            | ErrorCode::ResourceNotFound
+            | ErrorCode::Conflict
+            | ErrorCode::RateLimited
+            | ErrorCode::MatchRejected
+    ) {
+        UpstreamBusinessClass::RejectedError
+    } else {
+        UpstreamBusinessClass::Unavailable
+    };
+    (
+        business_class,
+        UpstreamOutcome::Failure {
+            code: error.code,
+            retryable: error.retryable,
+        },
+    )
 }
 
 fn configure_proxy(builder: ClientBuilder, proxy_url: Option<&str>) -> Result<ClientBuilder> {
@@ -1833,6 +1984,44 @@ fn unix_time_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_summary_uses_stable_hosts_and_failure_classes() {
+        assert_eq!(
+            configured_upstream_host(DEFAULT_BASE_URL, "interface.music.163.com"),
+            "interface.music.163.com"
+        );
+        assert_eq!(
+            configured_upstream_host("https://example.test/private", "interface.music.163.com"),
+            "configured"
+        );
+
+        let denied = TuneWeaveError::new(ErrorCode::PermissionDenied, "denied")
+            .with_platform(Platform::Netease);
+        assert_eq!(
+            netease_upstream_classification(&denied),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::PermissionDenied,
+                    retryable: false,
+                },
+            )
+        );
+        let timeout = TuneWeaveError::new(ErrorCode::UpstreamTimeout, "timeout")
+            .with_platform(Platform::Netease)
+            .retryable(true);
+        assert_eq!(
+            netease_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true,
+                },
+            )
+        );
+    }
 
     #[test]
     fn voice_lyric_assets_only_allow_netease_media_hosts() {
