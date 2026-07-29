@@ -85,6 +85,11 @@ enum ParsedWechatQrPoll {
     Failed,
 }
 
+enum QqSignatureStep {
+    Complete,
+    Redirect(Url),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QqLogoutOutcome {
     LoggedOut,
@@ -1116,7 +1121,7 @@ async fn authorize_qq_qr(client: &QqClient, uin: &str, sigx: &str) -> Result<QqC
         .cloned()
         .ok_or_else(|| login_data_error("QQ login signature exchange is missing p_skey"))?;
 
-    let response = client
+    let request = client
         .login_http()
         .post(QQ_OAUTH_ENDPOINT)
         .header(header::COOKIE, cookie_header(&oauth_cookies)?)
@@ -1139,23 +1144,32 @@ async fn authorize_qq_qr(client: &QqClient, uin: &str, sigx: &str) -> Result<QqC
             ("auth_time", unix_millis()?.to_string()),
             ("ui", random_uuid_v4()),
         ])
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_redirect_or_success(response.status(), "QQ OAuth authorization")?;
-    let location = response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| login_data_error("QQ OAuth authorization is missing redirect location"))?;
-    let location = Url::parse(location)
-        .map_err(|_| login_data_error("QQ OAuth redirect location is invalid"))?;
-    let code = location
-        .query_pairs()
-        .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| login_data_error("QQ OAuth redirect location is missing code"))?;
+        .timeout(LOGIN_REQUEST_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let oauth_outcome = async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        ensure_redirect_or_success(response.status(), "QQ OAuth authorization")?;
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                login_data_error("QQ OAuth authorization is missing redirect location")
+            })?;
+        parse_qq_oauth_code(location)
+    }
+    .await;
+    client.log_simple_upstream_request(
+        "qq_oauth_authorize",
+        "graph.qq.com",
+        "/oauth2.0/authorize",
+        http_status,
+        started,
+        &oauth_outcome,
+    );
+    let code = oauth_outcome?;
 
     let response = client
         .request_android_login(
@@ -1178,6 +1192,7 @@ async fn collect_qq_signature_cookies(
     validate_qq_signature_redirect(&endpoint)?;
     let mut cookies = BTreeMap::new();
     for redirect_count in 0..=QQ_SIGNATURE_MAX_REDIRECTS {
+        let upstream_host = qq_signature_upstream_host(&endpoint);
         let mut request = client
             .login_http()
             .get(endpoint.clone())
@@ -1186,28 +1201,60 @@ async fn collect_qq_signature_cookies(
         if !cookies.is_empty() {
             request = request.header(header::COOKIE, cookie_header(&cookies)?);
         }
-        let response = request.send().await.map_err(login_network_error)?;
-        ensure_redirect_or_success(response.status(), "QQ login signature exchange")?;
-        merge_nonempty_response_cookies(&mut cookies, &response)?;
-        if !response.status().is_redirection() {
-            return Ok(cookies);
-        }
-        if redirect_count == QQ_SIGNATURE_MAX_REDIRECTS {
-            return Err(login_data_error(
-                "QQ login signature exchange exceeded its redirect limit",
-            ));
-        }
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                login_data_error("QQ login signature exchange redirect is missing location")
+        let started = Instant::now();
+        let mut http_status = None;
+        let step_outcome = async {
+            let response = request.send().await.map_err(login_network_error)?;
+            http_status = Some(response.status());
+            ensure_redirect_or_success(response.status(), "QQ login signature exchange")?;
+            merge_nonempty_response_cookies(&mut cookies, &response)?;
+            if !response.status().is_redirection() {
+                if !cookies
+                    .get("p_skey")
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(login_data_error(
+                        "QQ login signature exchange is missing p_skey",
+                    ));
+                }
+                return Ok(QqSignatureStep::Complete);
+            }
+            if redirect_count == QQ_SIGNATURE_MAX_REDIRECTS {
+                return Err(login_data_error(
+                    "QQ login signature exchange exceeded its redirect limit",
+                ));
+            }
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    login_data_error("QQ login signature exchange redirect is missing location")
+                })?;
+            let next = endpoint.join(location).map_err(|_| {
+                login_data_error("QQ login signature exchange redirect is malformed")
             })?;
-        endpoint = endpoint
-            .join(location)
-            .map_err(|_| login_data_error("QQ login signature exchange redirect is malformed"))?;
-        validate_qq_signature_redirect(&endpoint)?;
+            validate_qq_signature_redirect(&next)?;
+            Ok(QqSignatureStep::Redirect(next))
+        }
+        .await;
+        let success_class = match &step_outcome {
+            Ok(QqSignatureStep::Redirect(_)) => UpstreamBusinessClass::AllowedError,
+            Ok(QqSignatureStep::Complete) | Err(_) => UpstreamBusinessClass::Success,
+        };
+        client.log_typed_upstream_request(
+            "qq_signature_exchange",
+            upstream_host,
+            "/{signature_exchange}",
+            http_status,
+            started,
+            success_class,
+            &step_outcome,
+        );
+        match step_outcome? {
+            QqSignatureStep::Complete => return Ok(cookies),
+            QqSignatureStep::Redirect(next) => endpoint = next,
+        }
     }
     Err(login_data_error(
         "QQ login signature exchange exceeded its redirect limit",
@@ -1220,6 +1267,7 @@ fn validate_qq_signature_redirect(endpoint: &Url) -> Result<()> {
         || endpoint.port_or_known_default() != Some(443)
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
+        || endpoint.fragment().is_some()
         || !matches!(
             host,
             "ssl.ptlogin2.graph.qq.com" | "ptlogin2.graph.qq.com" | "graph.qq.com"
@@ -1230,6 +1278,38 @@ fn validate_qq_signature_redirect(endpoint: &Url) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn qq_signature_upstream_host(endpoint: &Url) -> &'static str {
+    match endpoint.host_str() {
+        Some("ssl.ptlogin2.graph.qq.com") => "ssl.ptlogin2.graph.qq.com",
+        Some("ptlogin2.graph.qq.com") => "ptlogin2.graph.qq.com",
+        _ => "graph.qq.com",
+    }
+}
+
+fn parse_qq_oauth_code(location: &str) -> Result<String> {
+    let location = Url::parse(location)
+        .map_err(|_| login_data_error("QQ OAuth redirect location is invalid"))?;
+    if location.scheme() != "https"
+        || location.host_str() != Some("y.qq.com")
+        || location.port_or_known_default() != Some(443)
+        || !location.username().is_empty()
+        || location.password().is_some()
+        || location.path() != "/portal/wx_redirect.html"
+        || location.fragment().is_some()
+    {
+        return Err(login_data_error(
+            "QQ OAuth redirect location is outside the allowed destination",
+        ));
+    }
+    let code = location
+        .query_pairs()
+        .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| login_data_error("QQ OAuth redirect location is missing code"))?;
+    validate_identifier(&code, "QQ OAuth code")?;
+    Ok(code)
 }
 
 fn qq_qr_poll_cookies(qrsig: &str) -> Result<BTreeMap<String, String>> {
@@ -1892,18 +1972,43 @@ mod tests {
             "https://ptlogin2.graph.qq.com/check_sig",
             "https://graph.qq.com/oauth2.0/login_jump",
         ] {
-            validate_qq_signature_redirect(&Url::parse(endpoint).expect("QQ Graph URL"))
-                .expect("allowed QQ Graph redirect");
+            let endpoint = Url::parse(endpoint).expect("QQ Graph URL");
+            validate_qq_signature_redirect(&endpoint).expect("allowed QQ Graph redirect");
+            assert_ne!(qq_signature_upstream_host(&endpoint), "");
         }
         for endpoint in [
             "http://graph.qq.com/oauth2.0/login_jump",
             "https://graph.qq.com.evil.test/oauth2.0/login_jump",
             "https://user@graph.qq.com/oauth2.0/login_jump",
             "https://graph.qq.com:444/oauth2.0/login_jump",
+            "https://graph.qq.com/oauth2.0/login_jump#secret",
         ] {
             assert!(
                 validate_qq_signature_redirect(&Url::parse(endpoint).expect("test URL")).is_err(),
                 "unsafe QQ Graph redirect was accepted: {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn qq_oauth_code_only_accepts_the_fixed_music_redirect() {
+        assert_eq!(
+            parse_qq_oauth_code(
+                "https://y.qq.com/portal/wx_redirect.html?login_type=1&code=oauth-code"
+            )
+            .expect("valid QQ OAuth redirect"),
+            "oauth-code"
+        );
+        for location in [
+            "https://evil.example/portal/wx_redirect.html?code=secret",
+            "http://y.qq.com/portal/wx_redirect.html?code=secret",
+            "https://y.qq.com/other?code=secret",
+            "https://y.qq.com/portal/wx_redirect.html",
+            "https://y.qq.com/portal/wx_redirect.html?code=secret#fragment",
+        ] {
+            assert!(
+                parse_qq_oauth_code(location).is_err(),
+                "unsafe QQ OAuth redirect was accepted: {location}"
             );
         }
     }
