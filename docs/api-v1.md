@@ -1289,6 +1289,8 @@ QQ 推荐歌单固定使用 Android `music.playlist.PlaylistSquare/GetRecommendF
 
 QQ 热词固定使用 Android `music.musicsearch.HotkeyService/GetHotkeyForQQMusicMobile` 并提交按参考算法生成的搜索会话 ID。上游只有一份富目录，因此 full/brief 复用同一真实快照：full 映射说明、分值、趋势类型、图标和跳转，brief 隐去这些可选字段；展示活动标题不会覆盖可重新搜索的 `query`。封面、热词/直达/歌曲 ID、置顶态、排序与趋势对象、来源及完整原项始终保留在扩展。统一 HTTP 的 full/brief 均真实返回同序 30 项，首项为“周杰伦”，上游 `ret_code=0`。
 
+B 站热搜固定使用现行 WBI `x/web-interface/wbi/search/square`，提交 `limit=50/platform=web`。未传 `account` 时保持匿名，显式账户或调用方凭证才附带相应身份。统一排行按上游列表顺序从 1 连续编号，真实查询词与展示文案分开；`heat_score`、词条类型、可信 HTTPS 图标、动作种类及受限的 B 站 HTTPS/`bilibili:` 跳转 URI 分别映射，服务端不会请求或跟随返回的跳转地址。full 返回这些富字段，brief 仅隐藏稳定模型中的富展示字段而不删除扩展里的平台原始语义。标题、track ID、top list 及未来字段有界保留；Provider 与统一 HTTP 已匿名真实返回 50 项及有效热度分数。
+
 搜索建议的 `client` 缺省为 `web`。统一条目始终给出可直接重新搜索的 `keyword`，可选 `kind/display_text/icon_url`；web 建议中的歌曲、专辑、歌手、歌单等实际资源同时以统一 `SearchItem` 放入 `resource`，mobile/PC 纯关键词不会伪造资源。PC 的 `recs` 与普通 `suggests` 分别位于 `recommendations/suggestions`。网易云 web/mobile 分别固定使用 WeAPI `/api/search/suggest/web`、`/api/search/suggest/keyword`，PC 固定使用 EAPI `/api/search/pc/suggest/keyword/get`；未知或零 `type` 不会遮住可映射的 `resourceType`，为兼容参考输入，`type=mobile` 等同 `client=mobile`。
 
 B 站搜索建议只支持 `client=web`，固定调用 `https://s.search.bilibili.com/main/suggest`，不会把 mobile/PC 偷换为 Web。省略 `account` 时使用持久匿名设备；显式服务器账户或 `X-TuneWeave-Credential` 才附带对应用户身份，不存在的精确别名不会回退 `default`。上游固定高亮标签会被解析为纯 `display_text` 和条目扩展中的 Unicode 字符区间 `highlight_ranges[{start,end}]`，不会向客户端透传可执行 HTML；未知、嵌套或未闭合标签按上游协议漂移拒绝。平台的 `code=3 + 空 tag` 是合法无匹配响应，统一返回空 `suggestions`；最多 10 项建议、实验标识、搜索 token、报告数量和未来字段均保持分离。Provider 与统一 HTTP 已匿名真实搜索“周杰伦”成功。

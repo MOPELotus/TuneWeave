@@ -1178,18 +1178,13 @@ async fn search_trending(
         &state,
         platform,
         params.account.as_deref(),
-        AccountSelection::Default,
+        AccountSelection::Optional,
     )?;
     let provider = access.provider;
-    let account = access
-        .provider_account
-        .expect("default account selection always yields an account");
+    let account = access.provider_account;
     let detail = parse_search_trending_detail(params.detail.as_deref())?;
     let list = provider
-        .trending_searches(&SearchTrendingRequest {
-            detail,
-            account: Some(account.clone()),
-        })
+        .trending_searches(&SearchTrendingRequest { detail, account })
         .await?;
     let mut response = ApiResponse::new(list).with_platform(platform);
     if let Some(account) = access.response_account {
@@ -22790,7 +22785,7 @@ mod tests {
             json_response_from(test_app_with_provider(), "/v1/search/trending").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(defaulted["data"]["detail"], "full");
-        assert_eq!(defaulted["meta"]["account"], "default");
+        assert!(defaulted["meta"]["account"].is_null());
 
         let (status, aliased) =
             json_response_from(test_app_with_provider(), "/v1/search/trending?mode=brief").await;
@@ -27473,6 +27468,36 @@ mod tests {
                     .unwrap_or_default()
                     .contains('<'))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili trending search access"]
+    async fn live_bilibili_trending_searches_flow_through_unified_http() {
+        use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(BilibiliProvider::new(BilibiliConfig::default()).expect("Bilibili provider"))
+            .expect("register Bilibili provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, response) =
+            json_response_from(app, "/v1/search/trending?platform=bilibili&detail=full").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["detail"], "full");
+        assert!(
+            response["data"]["entries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty() && entries.len() <= 50)
+        );
+        assert_eq!(response["data"]["entries"][0]["rank"], 1);
+        assert!(
+            response["data"]["entries"]
+                .as_array()
+                .expect("trending entries")
+                .iter()
+                .any(|entry| entry["score"].is_number())
+        );
+        assert!(response["meta"]["account"].is_null());
     }
 
     #[tokio::test]

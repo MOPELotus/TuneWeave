@@ -44,6 +44,7 @@ const WEB_HOME_ENDPOINT: &str = "https://www.bilibili.com/";
 const WEB_TICKET_ENDPOINT: &str =
     "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket";
 const SEARCH_SUGGESTION_ENDPOINT: &str = "https://s.search.bilibili.com/main/suggest";
+const SEARCH_TRENDING_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/square";
 const VIDEO_SEARCH_ENDPOINT: &str = "https://api.bilibili.com/x/web-interface/wbi/search/type";
 const VIDEO_SEARCH_COMPATIBILITY_ENDPOINT: &str =
     "https://api.bilibili.com/x/web-interface/search/type";
@@ -245,6 +246,28 @@ pub(crate) struct BilibiliSearchSuggestion {
     pub spid: u64,
     pub suggestion_type: Option<String>,
     pub item_feature: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSearchTrending {
+    pub title: String,
+    pub track_id: Option<String>,
+    pub entries: Vec<BilibiliSearchTrendingEntry>,
+    pub top_list: Vec<Value>,
+    pub extensions: BTreeMap<String, Value>,
+    pub trending_extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BilibiliSearchTrendingEntry {
+    pub keyword: String,
+    pub display_text: String,
+    pub icon_url: Option<String>,
+    pub action_uri: Option<String>,
+    pub action_kind: Option<String>,
+    pub heat_score: Option<u64>,
+    pub word_type: Option<i64>,
     pub extensions: BTreeMap<String, Value>,
 }
 
@@ -1061,6 +1084,44 @@ struct SearchSuggestionItem {
     r#type: String,
     #[serde(default)]
     item_feature: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SearchTrendingData {
+    trending: SearchTrendingCatalog,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SearchTrendingCatalog {
+    title: String,
+    #[serde(default)]
+    trackid: String,
+    list: Vec<SearchTrendingItem>,
+    #[serde(default)]
+    top_list: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SearchTrendingItem {
+    keyword: String,
+    #[serde(default)]
+    show_name: String,
+    #[serde(default)]
+    icon: String,
+    #[serde(default)]
+    uri: String,
+    #[serde(default)]
+    goto: String,
+    #[serde(default)]
+    heat_score: Option<FlexibleU64>,
+    #[serde(default)]
+    word_type: Option<i64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -2182,6 +2243,41 @@ impl BilibiliClient {
         parse_search_suggestion_response(&bytes)
     }
 
+    pub(crate) async fn trending_searches(
+        &self,
+        credential: Option<&BilibiliCredential>,
+    ) -> Result<BilibiliSearchTrending> {
+        let context = self
+            .signed_web_context(
+                &[
+                    ("limit".to_owned(), "50".to_owned()),
+                    ("platform".to_owned(), "web".to_owned()),
+                ],
+                credential,
+            )
+            .await?;
+        let endpoint = format!("{SEARCH_TRENDING_ENDPOINT}?{}", context.query);
+        let response = self
+            .http
+            .get(endpoint)
+            .header(COOKIE, context.cookie_header)
+            .header(REFERER, VIDEO_SEARCH_REFERER)
+            .send()
+            .await
+            .map_err(bilibili_network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(bilibili_http_error("Bilibili trending search", status));
+        }
+        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+            return Err(bilibili_upstream_error(
+                "Bilibili trending search response exceeded the size limit",
+            ));
+        }
+        parse_search_trending_response(&bytes)
+    }
+
     pub(crate) async fn search_videos_page(
         &self,
         keyword: &str,
@@ -3231,6 +3327,109 @@ fn parse_search_suggestion_response(bytes: &[u8]) -> Result<BilibiliSearchSugges
         extensions: response.extra,
         result_extensions,
     })
+}
+
+fn parse_search_trending_response(bytes: &[u8]) -> Result<BilibiliSearchTrending> {
+    let response: PassportResponse<SearchTrendingData> = serde_json::from_slice(bytes)
+        .map_err(|_| bilibili_upstream_error("Bilibili trending search returned invalid JSON"))?;
+    if response.code != 0 {
+        return Err(platform_business_error(
+            "Bilibili trending search",
+            response.code,
+            &response.message,
+        ));
+    }
+    let data = response.data.ok_or_else(|| {
+        bilibili_upstream_error("Bilibili trending search response did not contain data")
+    })?;
+    if data.trending.list.len() > 50 || data.trending.top_list.len() > 50 {
+        return Err(bilibili_upstream_error(
+            "Bilibili trending search exceeded the requested limit",
+        ));
+    }
+    let title =
+        validated_bilibili_text(&data.trending.title, "trending search catalog title", 1024)?;
+    let track_id = optional_bounded_text(&data.trending.trackid, "trending search track ID", 512)?;
+    let entries = data
+        .trending
+        .list
+        .into_iter()
+        .map(map_search_trending_item)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BilibiliSearchTrending {
+        title,
+        track_id,
+        entries,
+        top_list: data.trending.top_list,
+        extensions: data.extra,
+        trending_extensions: data.trending.extra,
+    })
+}
+
+fn map_search_trending_item(item: SearchTrendingItem) -> Result<BilibiliSearchTrendingEntry> {
+    let keyword = validated_bilibili_text(&item.keyword, "trending search keyword", 1024)?;
+    let display_text = if item.show_name.trim().is_empty() {
+        keyword.clone()
+    } else {
+        validated_bilibili_text(&item.show_name, "trending search display text", 2048)?
+    };
+    let heat_score = item
+        .heat_score
+        .map(|score| {
+            score.get().ok_or_else(|| {
+                bilibili_upstream_error("Bilibili trending search returned an invalid heat score")
+            })
+        })
+        .transpose()?;
+    if item.word_type.is_some_and(|word_type| word_type < 0) {
+        return Err(bilibili_upstream_error(
+            "Bilibili trending search returned an invalid word type",
+        ));
+    }
+    Ok(BilibiliSearchTrendingEntry {
+        keyword,
+        display_text,
+        icon_url: normalize_bilibili_image_url(&item.icon, "trending search icon")?,
+        action_uri: normalize_bilibili_action_uri(&item.uri)?,
+        action_kind: optional_bounded_text(&item.goto, "trending search action kind", 256)?,
+        heat_score,
+        word_type: item.word_type,
+        extensions: item.extra,
+    })
+}
+
+fn normalize_bilibili_action_uri(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 4096 || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(
+            "Bilibili trending search returned an invalid action URI",
+        ));
+    }
+    let value = value
+        .strip_prefix("http://")
+        .map_or_else(|| value.to_owned(), |rest| format!("https://{rest}"));
+    let uri = Url::parse(&value).map_err(|_| {
+        bilibili_upstream_error("Bilibili trending search returned an invalid action URI")
+    })?;
+    let safe = match uri.scheme() {
+        "https" => uri.host_str().is_some_and(|host| {
+            host == "bilibili.com"
+                || host.ends_with(".bilibili.com")
+                || host == "b23.tv"
+                || host.ends_with(".b23.tv")
+        }),
+        "bilibili" => uri.host_str().is_some(),
+        _ => false,
+    };
+    if !safe || uri.port().is_some() || !uri.username().is_empty() || uri.password().is_some() {
+        return Err(bilibili_upstream_error(
+            "Bilibili trending search returned an unsafe action URI",
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn map_search_suggestion_item(item: SearchSuggestionItem) -> Result<BilibiliSearchSuggestion> {
@@ -6879,6 +7078,78 @@ mod tests {
                 ErrorCode::UpstreamError
             );
         }
+    }
+
+    #[test]
+    fn trending_search_preserves_rank_metadata_and_normalizes_safe_urls() {
+        let response = serde_json::to_vec(&json!({
+            "code": 0,
+            "message": "OK",
+            "ttl": 1,
+            "data": {
+                "trending": {
+                    "title": "bilibili热搜",
+                    "trackid": "16377692631482314192",
+                    "list": [{
+                        "keyword": "KSG 重庆狼队",
+                        "show_name": "重庆狼队战胜KSG",
+                        "icon": "http://i0.hdslb.com/bfs/activity-plat/hot.png",
+                        "uri": "bilibili://search?keyword=KSG",
+                        "goto": "search",
+                        "heat_score": "648274",
+                        "word_type": 5,
+                        "future_entry": true
+                    }],
+                    "top_list": [{"future": "kept"}],
+                    "future_catalog": 1
+                },
+                "future_data": "kept"
+            }
+        }))
+        .expect("trending fixture");
+        let result = parse_search_trending_response(&response).expect("trending search");
+        assert_eq!(result.title, "bilibili热搜");
+        assert_eq!(result.track_id.as_deref(), Some("16377692631482314192"));
+        assert_eq!(result.entries[0].keyword, "KSG 重庆狼队");
+        assert_eq!(result.entries[0].display_text, "重庆狼队战胜KSG");
+        assert_eq!(result.entries[0].heat_score, Some(648_274));
+        assert_eq!(result.entries[0].word_type, Some(5));
+        assert_eq!(
+            result.entries[0].icon_url.as_deref(),
+            Some("https://i0.hdslb.com/bfs/activity-plat/hot.png")
+        );
+        assert_eq!(
+            result.entries[0].action_uri.as_deref(),
+            Some("bilibili://search?keyword=KSG")
+        );
+        assert_eq!(result.entries[0].extensions["future_entry"], true);
+        assert_eq!(result.top_list[0]["future"], "kept");
+        assert_eq!(result.extensions["future_data"], "kept");
+        assert_eq!(result.trending_extensions["future_catalog"], 1);
+    }
+
+    #[test]
+    fn trending_search_rejects_business_errors_and_unsafe_actions() {
+        for malformed in [
+            br#"{"code":-400,"message":"bad request","data":null}"#.as_slice(),
+            br#"{"code":0,"message":"OK","data":{"trending":{"title":"hot","trackid":"1","list":[{"keyword":"safe","show_name":"safe","icon":"","uri":"https://evil.example/redirect","goto":"","heat_score":1}],"top_list":[]}}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"trending":{"title":"hot","trackid":"1","list":[{"keyword":"safe","show_name":"safe","icon":"","uri":"","goto":"","heat_score":"invalid"}],"top_list":[]}}}"#
+                .as_slice(),
+            br#"{"code":0,"message":"OK","data":{"trending":{"title":"hot","trackid":"1","list":[{"keyword":"safe","show_name":"safe","icon":"","uri":"","goto":"","word_type":-1}],"top_list":[]}}}"#
+                .as_slice(),
+        ] {
+            assert!(
+                parse_search_trending_response(malformed).is_err(),
+                "malformed trending response must fail"
+            );
+        }
+        assert_eq!(
+            normalize_bilibili_action_uri("http://www.bilibili.com/video/BV1xx411c7mD")
+                .expect("trusted HTTP action")
+                .as_deref(),
+            Some("https://www.bilibili.com/video/BV1xx411c7mD")
+        );
     }
 
     #[test]

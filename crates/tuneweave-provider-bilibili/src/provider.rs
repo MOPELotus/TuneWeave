@@ -12,7 +12,8 @@ use tuneweave_core::{
     Playlist, PlaylistPlayableItem, ProviderAuthResult, ProviderCredential, ProviderLogoutResult,
     ProviderQrPoll, ProviderQrStart, Quality, ResourceRef, Result, SearchItem, SearchKind,
     SearchQuery, SearchSuggestion, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
+    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, StoredAccountCredential, Track, TuneWeaveError, Video,
     VideoAudioStream, VideoAudioStreamRequest, VideoAudioTier, VideoCodecFamily, VideoDetail,
     VideoDetailRequest, VideoDynamicRange, VideoPart, VideoPartListRequest, VideoPlaybackFormat,
     VideoPlaybackLanguage, VideoPlaybackLanguageCatalog, VideoPlaybackManifest,
@@ -30,11 +31,11 @@ use crate::client::{
     BilibiliCreatedFavoriteFolders, BilibiliCredential, BilibiliCredentialRefresh,
     BilibiliFavoriteFolder, BilibiliFavoriteMedia, BilibiliLogoutOutcome,
     BilibiliPlaybackLanguageCatalog, BilibiliPlaybackManifest, BilibiliPlaybackTrack,
-    BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchSuggestionSet, BilibiliSearchVideo,
-    BilibiliSeasonArchive, BilibiliSessionStatus, BilibiliSpacePlaylist, BilibiliSpacePlaylistKind,
-    BilibiliSpacePlaylistPage, BilibiliSubtitle, BilibiliSubtitleBody, BilibiliSubtitleCatalog,
-    BilibiliVideoPart, BilibiliVideoSearchDuration, BilibiliVideoSearchFilters,
-    BilibiliVideoSearchOrder, BilibiliVideoView,
+    BilibiliProgressiveSegment, BilibiliQrPoll, BilibiliSearchSuggestionSet,
+    BilibiliSearchTrending, BilibiliSearchVideo, BilibiliSeasonArchive, BilibiliSessionStatus,
+    BilibiliSpacePlaylist, BilibiliSpacePlaylistKind, BilibiliSpacePlaylistPage, BilibiliSubtitle,
+    BilibiliSubtitleBody, BilibiliSubtitleCatalog, BilibiliVideoPart, BilibiliVideoSearchDuration,
+    BilibiliVideoSearchFilters, BilibiliVideoSearchOrder, BilibiliVideoView,
 };
 
 const BILIBILI_CREDENTIAL_KIND: &str = "bilibili_cookie_v1";
@@ -107,6 +108,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::SessionManagement,
             Capability::SearchVideos,
             Capability::SearchSuggestions,
+            Capability::SearchTrending,
             Capability::PlaylistRead,
             Capability::VideoDetail,
             Capability::VideoParts,
@@ -251,6 +253,15 @@ impl MusicProvider for BilibiliProvider {
             .search_suggestions(query, credential.as_ref())
             .await?;
         map_bilibili_search_suggestions(query, response)
+    }
+
+    async fn trending_searches(
+        &self,
+        request: &SearchTrendingRequest,
+    ) -> Result<SearchTrendingList> {
+        let credential = self.optional_request_credential(request.account.as_deref())?;
+        let response = self.client.trending_searches(credential.as_ref()).await?;
+        map_bilibili_trending_searches(request.detail, response)
     }
 
     async fn video(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoDetail> {
@@ -1724,6 +1735,60 @@ fn map_bilibili_search_suggestions(
         client: SearchSuggestionClient::Web,
         suggestions,
         recommendations: Vec::new(),
+        extensions,
+    })
+}
+
+fn map_bilibili_trending_searches(
+    detail: SearchTrendingDetail,
+    response: BilibiliSearchTrending,
+) -> Result<SearchTrendingList> {
+    let full = detail == SearchTrendingDetail::Full;
+    let entries = response
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let rank = u32::try_from(index.saturating_add(1))
+                .map_err(|_| bilibili_data_error("Bilibili trending rank overflowed"))?;
+            let crate::client::BilibiliSearchTrendingEntry {
+                keyword,
+                display_text,
+                icon_url,
+                action_uri,
+                action_kind,
+                heat_score,
+                word_type,
+                mut extensions,
+            } = entry;
+            extensions.insert("display_text".to_owned(), json!(&display_text));
+            extensions.insert("heat_score".to_owned(), json!(heat_score));
+            extensions.insert("word_type".to_owned(), json!(word_type));
+            extensions.insert("action_uri".to_owned(), json!(&action_uri));
+            extensions.insert("action_kind".to_owned(), json!(&action_kind));
+            Ok(SearchTrendingEntry {
+                rank,
+                keyword: keyword.clone(),
+                description: (full && display_text != keyword).then_some(display_text),
+                score: full.then_some(heat_score).flatten(),
+                icon_type: full.then_some(word_type).flatten(),
+                icon_url: full.then_some(icon_url).flatten(),
+                target_url: full.then_some(action_uri).flatten(),
+                extensions,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut extensions = response.extensions;
+    extensions.insert("title".to_owned(), json!(response.title));
+    extensions.insert("track_id".to_owned(), json!(response.track_id));
+    extensions.insert("top_list".to_owned(), json!(response.top_list));
+    extensions.insert(
+        "trending_extensions".to_owned(),
+        json!(response.trending_extensions),
+    );
+    Ok(SearchTrendingList {
+        detail,
+        entries,
         extensions,
     })
 }
@@ -3768,6 +3833,54 @@ mod tests {
     }
 
     #[test]
+    fn trending_search_mapping_keeps_full_and_brief_views_distinct() {
+        let response = || BilibiliSearchTrending {
+            title: "bilibili热搜".to_owned(),
+            track_id: Some("track-1".to_owned()),
+            entries: vec![crate::client::BilibiliSearchTrendingEntry {
+                keyword: "KSG 重庆狼队".to_owned(),
+                display_text: "重庆狼队战胜KSG".to_owned(),
+                icon_url: Some("https://i0.hdslb.com/bfs/activity-plat/hot.png".to_owned()),
+                action_uri: Some("bilibili://search?keyword=KSG".to_owned()),
+                action_kind: Some("search".to_owned()),
+                heat_score: Some(648_274),
+                word_type: Some(5),
+                extensions: BTreeMap::from([("future_entry".to_owned(), json!(true))]),
+            }],
+            top_list: vec![json!({"future": "kept"})],
+            extensions: BTreeMap::from([("future_data".to_owned(), json!(true))]),
+            trending_extensions: BTreeMap::from([("future_catalog".to_owned(), json!(true))]),
+        };
+        let full = map_bilibili_trending_searches(SearchTrendingDetail::Full, response())
+            .expect("full trending");
+        assert_eq!(full.entries[0].rank, 1);
+        assert_eq!(full.entries[0].keyword, "KSG 重庆狼队");
+        assert_eq!(
+            full.entries[0].description.as_deref(),
+            Some("重庆狼队战胜KSG")
+        );
+        assert_eq!(full.entries[0].score, Some(648_274));
+        assert_eq!(full.entries[0].icon_type, Some(5));
+        assert_eq!(
+            full.entries[0].target_url.as_deref(),
+            Some("bilibili://search?keyword=KSG")
+        );
+        assert_eq!(full.entries[0].extensions["future_entry"], true);
+        assert_eq!(full.extensions["title"], "bilibili热搜");
+        assert_eq!(full.extensions["track_id"], "track-1");
+        assert_eq!(full.extensions["top_list"][0]["future"], "kept");
+
+        let brief = map_bilibili_trending_searches(SearchTrendingDetail::Brief, response())
+            .expect("brief trending");
+        assert_eq!(brief.entries[0].description, None);
+        assert_eq!(brief.entries[0].score, None);
+        assert_eq!(brief.entries[0].icon_type, None);
+        assert_eq!(brief.entries[0].icon_url, None);
+        assert_eq!(brief.entries[0].target_url, None);
+        assert_eq!(brief.entries[0].extensions["heat_score"], json!(648_274));
+    }
+
+    #[test]
     fn video_search_mapping_uses_stable_video_and_creator_references() {
         let video = map_bilibili_search_video(BilibiliSearchVideo {
             aid: 78_977_417,
@@ -4342,6 +4455,24 @@ mod tests {
             provider
                 .capabilities()
                 .contains(&Capability::SearchSuggestions)
+        );
+    }
+
+    #[tokio::test]
+    async fn trending_searches_reject_missing_accounts_before_network() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let error = provider
+            .trending_searches(&SearchTrendingRequest {
+                detail: SearchTrendingDetail::Full,
+                account: Some("missing".to_owned()),
+            })
+            .await
+            .expect_err("missing selected account");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::SearchTrending)
         );
     }
 
@@ -5331,6 +5462,29 @@ mod tests {
                 .unwrap_or_default()
                 .contains('<')
         }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili trending search access"]
+    async fn live_provider_returns_ranked_trending_searches() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let result = provider
+            .trending_searches(&SearchTrendingRequest {
+                detail: SearchTrendingDetail::Full,
+                account: None,
+            })
+            .await
+            .expect("live trending searches");
+        assert!(!result.entries.is_empty());
+        assert!(result.entries.len() <= 50);
+        assert!(
+            result
+                .entries
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| entry.rank as usize == index + 1)
+        );
+        assert!(result.entries.iter().any(|entry| entry.score.is_some()));
     }
 
     #[tokio::test]
