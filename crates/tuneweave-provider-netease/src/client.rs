@@ -720,16 +720,29 @@ impl NeteaseClient {
         })?;
         let endpoint =
             format!("{IMAGE_UPLOAD_BASE_URL}/{object_key}?offset=0&complete=true&version=1.0");
-        let response = self
+        let request = self
             .http
             .post(endpoint)
             .header("x-nos-token", token)
             .header(header::CONTENT_TYPE, content_type)
-            .body(data.to_vec())
-            .send()
-            .await
-            .map_err(request_error)?;
-        parse_response(response).await
+            .body(data.to_vec());
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            parse_response(response).await
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "image_upload",
+            "nosup-hz1.127.net",
+            "/yyimgs/{object_key}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn upload_voice_audio(
