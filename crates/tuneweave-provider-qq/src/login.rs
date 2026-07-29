@@ -724,6 +724,11 @@ struct MobileMqttSocket {
     buffered: BytesMut,
 }
 
+enum MobileMqttConnectStep {
+    Connected(Box<MobileMqttSocket>),
+    Redirect(String),
+}
+
 impl MobileMqttSocket {
     async fn send_packet(&mut self, packet: Packet) -> Result<()> {
         let mut encoded = BytesMut::with_capacity(packet.size());
@@ -773,39 +778,56 @@ impl MobileMqttSocket {
 }
 
 async fn start_mobile_listener(client: &QqClient, identifier: &str) -> Result<MobileQrListener> {
-    let mut socket = connect_mobile_mqtt(client, identifier).await?;
+    let (mut socket, redirect_count) = connect_mobile_mqtt(client, identifier).await?;
     let topic = format!("management.qrcode_login/{identifier}");
-    socket
-        .send_packet(Packet::Subscribe(Subscribe {
-            pkid: 1,
-            filters: vec![Filter::new(&topic, QoS::AtMostOnce)],
-            properties: Some(SubscribeProperties {
-                id: None,
-                user_properties: vec![
-                    ("authorization".to_owned(), "tmelogin".to_owned()),
-                    ("pubsub".to_owned(), "unicast".to_owned()),
-                ],
-            }),
-        }))
-        .await?;
-    let suback = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
-        .await
-        .map_err(|_| mobile_mqtt_timeout("MQTT subscribe timed out"))??;
-    let Packet::SubAck(suback) = suback else {
-        return Err(mobile_mqtt_error(
-            "QQ mobile QR MQTT did not acknowledge the subscription",
-        ));
-    };
-    if suback.pkid != 1
-        || suback
-            .return_codes
-            .iter()
-            .any(|code| !matches!(code, SubscribeReasonCode::Success(_)))
-    {
-        return Err(mobile_mqtt_error(
-            "QQ mobile QR MQTT rejected the subscription",
-        ));
+    let started = Instant::now();
+    let subscribe_outcome = async {
+        socket
+            .send_packet(Packet::Subscribe(Subscribe {
+                pkid: 1,
+                filters: vec![Filter::new(&topic, QoS::AtMostOnce)],
+                properties: Some(SubscribeProperties {
+                    id: None,
+                    user_properties: vec![
+                        ("authorization".to_owned(), "tmelogin".to_owned()),
+                        ("pubsub".to_owned(), "unicast".to_owned()),
+                    ],
+                }),
+            }))
+            .await?;
+        let suback = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
+            .await
+            .map_err(|_| mobile_mqtt_timeout("MQTT subscribe timed out"))??;
+        let Packet::SubAck(suback) = suback else {
+            return Err(mobile_mqtt_error(
+                "QQ mobile QR MQTT did not acknowledge the subscription",
+            ));
+        };
+        if suback.pkid != 1
+            || suback
+                .return_codes
+                .iter()
+                .any(|code| !matches!(code, SubscribeReasonCode::Success(_)))
+        {
+            return Err(mobile_mqtt_error(
+                "QQ mobile QR MQTT rejected the subscription",
+            ));
+        }
+        Ok(())
     }
+    .await;
+    client.log_runtime_upstream_request(
+        "mobile_mqtt_subscribe",
+        "mu.y.qq.com",
+        "/ws/{mqtt_node}",
+        None,
+        started,
+        UpstreamBusinessClass::Success,
+        redirect_count,
+        redirect_count > 0,
+        &subscribe_outcome,
+    );
+    subscribe_outcome?;
 
     let (sender, receiver) = mpsc::channel(8);
     let task = tokio::spawn(async move {
@@ -862,78 +884,110 @@ async fn start_mobile_listener(client: &QqClient, identifier: &str) -> Result<Mo
     Ok(MobileQrListener { receiver, task })
 }
 
-async fn connect_mobile_mqtt(client: &QqClient, identifier: &str) -> Result<MobileMqttSocket> {
+async fn connect_mobile_mqtt(
+    client: &QqClient,
+    identifier: &str,
+) -> Result<(MobileMqttSocket, u8)> {
     let mut path = MOBILE_MQTT_INITIAL_PATH.to_owned();
     for redirect_count in 0..=MOBILE_MQTT_MAX_REDIRECTS {
-        let mut socket = timeout(
-            MOBILE_MQTT_CONNECT_TIMEOUT,
-            open_mobile_mqtt_websocket(client, &path),
-        )
-        .await
-        .map_err(|_| mobile_mqtt_timeout("WebSocket handshake timed out"))??;
-        socket
-            .send_packet(Packet::Connect(
-                Connect {
-                    keep_alive: 45,
-                    client_id: format!("{}{}", unix_millis()?, rand::random_range(1000_u16..=9999)),
-                    clean_start: true,
-                    properties: Some(ConnectProperties {
-                        session_expiry_interval: None,
-                        receive_maximum: None,
-                        max_packet_size: None,
-                        topic_alias_max: None,
-                        request_response_info: None,
-                        request_problem_info: None,
-                        user_properties: vec![
-                            ("tmeAppID".to_owned(), "qqmusic".to_owned()),
-                            ("business".to_owned(), "management".to_owned()),
-                            ("hashTag".to_owned(), identifier.to_owned()),
-                            ("clientTag".to_owned(), "management.user".to_owned()),
-                            ("userID".to_owned(), identifier.to_owned()),
-                        ],
-                        authentication_method: Some("pass".to_owned()),
-                        authentication_data: None,
-                    }),
-                },
-                None,
-                None,
-            ))
-            .await?;
-        let connack = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
-            .await
-            .map_err(|_| mobile_mqtt_timeout("MQTT connect acknowledgement timed out"))??;
-        let Packet::ConnAck(connack) = connack else {
-            return Err(mobile_mqtt_error(
-                "QQ mobile QR MQTT did not return CONNACK",
-            ));
-        };
-        match connack.code {
-            ConnectReturnCode::Success => return Ok(socket),
-            ConnectReturnCode::UseAnotherServer | ConnectReturnCode::ServerMoved => {
-                let reference = connack
-                    .properties
-                    .as_ref()
-                    .and_then(|properties| properties.server_reference.as_deref())
-                    .ok_or_else(|| {
-                        mobile_mqtt_error("MQTT redirect is missing server reference")
-                    })?;
-                if redirect_count == MOBILE_MQTT_MAX_REDIRECTS {
-                    return Err(mobile_mqtt_error("MQTT redirect limit was exceeded"));
+        let attempt = u8::try_from(redirect_count).unwrap_or(u8::MAX);
+        let mut socket = open_mobile_mqtt_websocket(client, &path, attempt).await?;
+        let started = Instant::now();
+        let connect_outcome = async {
+            socket
+                .send_packet(Packet::Connect(
+                    Connect {
+                        keep_alive: 45,
+                        client_id: format!(
+                            "{}{}",
+                            unix_millis()?,
+                            rand::random_range(1000_u16..=9999)
+                        ),
+                        clean_start: true,
+                        properties: Some(ConnectProperties {
+                            session_expiry_interval: None,
+                            receive_maximum: None,
+                            max_packet_size: None,
+                            topic_alias_max: None,
+                            request_response_info: None,
+                            request_problem_info: None,
+                            user_properties: vec![
+                                ("tmeAppID".to_owned(), "qqmusic".to_owned()),
+                                ("business".to_owned(), "management".to_owned()),
+                                ("hashTag".to_owned(), identifier.to_owned()),
+                                ("clientTag".to_owned(), "management.user".to_owned()),
+                                ("userID".to_owned(), identifier.to_owned()),
+                            ],
+                            authentication_method: Some("pass".to_owned()),
+                            authentication_data: None,
+                        }),
+                    },
+                    None,
+                    None,
+                ))
+                .await?;
+            let connack = timeout(MOBILE_MQTT_CONNECT_TIMEOUT, socket.next_packet())
+                .await
+                .map_err(|_| mobile_mqtt_timeout("MQTT connect acknowledgement timed out"))??;
+            let Packet::ConnAck(connack) = connack else {
+                return Err(mobile_mqtt_error(
+                    "QQ mobile QR MQTT did not return CONNACK",
+                ));
+            };
+            match connack.code {
+                ConnectReturnCode::Success => {
+                    Ok(MobileMqttConnectStep::Connected(Box::new(socket)))
                 }
-                path = mobile_redirect_path(&path, reference)?;
-            }
-            _ => {
-                return Err(mobile_mqtt_error(format!(
+                ConnectReturnCode::UseAnotherServer | ConnectReturnCode::ServerMoved => {
+                    let reference = connack
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.server_reference.as_deref())
+                        .ok_or_else(|| {
+                            mobile_mqtt_error("MQTT redirect is missing server reference")
+                        })?;
+                    if redirect_count == MOBILE_MQTT_MAX_REDIRECTS {
+                        return Err(mobile_mqtt_error("MQTT redirect limit was exceeded"));
+                    }
+                    Ok(MobileMqttConnectStep::Redirect(mobile_redirect_path(
+                        &path, reference,
+                    )?))
+                }
+                _ => Err(mobile_mqtt_error(format!(
                     "QQ mobile QR MQTT rejected CONNECT with {:?}",
                     connack.code
-                )));
+                ))),
             }
+        }
+        .await;
+        let success_class = match &connect_outcome {
+            Ok(MobileMqttConnectStep::Redirect(_)) => UpstreamBusinessClass::AllowedError,
+            Ok(MobileMqttConnectStep::Connected(_)) | Err(_) => UpstreamBusinessClass::Success,
+        };
+        client.log_runtime_upstream_request(
+            "mobile_mqtt_connect",
+            "mu.y.qq.com",
+            "/ws/{mqtt_node}",
+            None,
+            started,
+            success_class,
+            attempt,
+            redirect_count > 0,
+            &connect_outcome,
+        );
+        match connect_outcome? {
+            MobileMqttConnectStep::Connected(socket) => return Ok((*socket, attempt)),
+            MobileMqttConnectStep::Redirect(next) => path = next,
         }
     }
     Err(mobile_mqtt_error("MQTT redirect limit was exceeded"))
 }
 
-async fn open_mobile_mqtt_websocket(client: &QqClient, path: &str) -> Result<MobileMqttSocket> {
+async fn open_mobile_mqtt_websocket(
+    client: &QqClient,
+    path: &str,
+    redirect_count: u8,
+) -> Result<MobileMqttSocket> {
     if !path.starts_with('/') || path.contains(['?', '#']) {
         return Err(TuneWeaveError::new(
             ErrorCode::InternalError,
@@ -943,7 +997,7 @@ async fn open_mobile_mqtt_websocket(client: &QqClient, path: &str) -> Result<Mob
     }
     let endpoint = fixed_url(&format!("{MOBILE_MQTT_ROOT}{path}"))?;
     let key = BASE64.encode(rand::random::<[u8; 16]>());
-    let response = client
+    let request = client
         .login_http()
         .get(endpoint)
         .version(reqwest::Version::HTTP_11)
@@ -958,43 +1012,63 @@ async fn open_mobile_mqtt_websocket(client: &QqClient, path: &str) -> Result<Mob
             header::USER_AGENT,
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         )
-        .timeout(MOBILE_MQTT_CONNECT_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS
-        || !header_contains_token(response.headers(), header::UPGRADE, "websocket")
-        || !header_contains_token(response.headers(), header::CONNECTION, "upgrade")
-        || !header_contains_token(
-            response.headers(),
-            header::HeaderName::from_static("sec-websocket-protocol"),
-            "mqtt",
-        )
-    {
-        return Err(mobile_mqtt_error(
-            "QQ mobile MQTT WebSocket handshake was rejected",
-        ));
-    }
-    let expected_accept = derive_accept_key(key.as_bytes());
-    let actual_accept = response
-        .headers()
-        .get("sec-websocket-accept")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim);
-    if actual_accept != Some(expected_accept.as_str()) {
-        return Err(mobile_mqtt_error(
-            "QQ mobile MQTT WebSocket accept key is invalid",
-        ));
-    }
-    let upgraded = response
-        .upgrade()
-        .await
-        .map_err(|_| mobile_mqtt_error("QQ mobile MQTT WebSocket upgrade failed"))?;
-    let websocket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
-    Ok(MobileMqttSocket {
-        websocket,
-        buffered: BytesMut::new(),
+        .timeout(MOBILE_MQTT_CONNECT_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let outcome = match timeout(MOBILE_MQTT_CONNECT_TIMEOUT, async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS
+            || !header_contains_token(response.headers(), header::UPGRADE, "websocket")
+            || !header_contains_token(response.headers(), header::CONNECTION, "upgrade")
+            || !header_contains_token(
+                response.headers(),
+                header::HeaderName::from_static("sec-websocket-protocol"),
+                "mqtt",
+            )
+        {
+            return Err(mobile_mqtt_error(
+                "QQ mobile MQTT WebSocket handshake was rejected",
+            ));
+        }
+        let expected_accept = derive_accept_key(key.as_bytes());
+        let actual_accept = response
+            .headers()
+            .get("sec-websocket-accept")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim);
+        if actual_accept != Some(expected_accept.as_str()) {
+            return Err(mobile_mqtt_error(
+                "QQ mobile MQTT WebSocket accept key is invalid",
+            ));
+        }
+        let upgraded = response
+            .upgrade()
+            .await
+            .map_err(|_| mobile_mqtt_error("QQ mobile MQTT WebSocket upgrade failed"))?;
+        let websocket = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
+        Ok(MobileMqttSocket {
+            websocket,
+            buffered: BytesMut::new(),
+        })
     })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(mobile_mqtt_timeout("WebSocket handshake timed out")),
+    };
+    client.log_runtime_upstream_request(
+        "mobile_websocket_handshake",
+        "mu.y.qq.com",
+        "/ws/{mqtt_node}",
+        http_status,
+        started,
+        UpstreamBusinessClass::Success,
+        redirect_count,
+        redirect_count > 0,
+        &outcome,
+    );
+    outcome
 }
 
 fn parse_mobile_publish(topic: &str, publish: &Publish) -> Result<Option<MobileQrEvent>> {

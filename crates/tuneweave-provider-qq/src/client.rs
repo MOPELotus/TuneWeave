@@ -897,6 +897,32 @@ impl QqClient {
         success_class: UpstreamBusinessClass,
         outcome: &Result<T>,
     ) {
+        self.log_runtime_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            success_class,
+            0,
+            false,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_runtime_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        success_class: UpstreamBusinessClass,
+        retry_count: u8,
+        fallback: bool,
+        outcome: &Result<T>,
+    ) {
         let (business_class, outcome) = match outcome {
             Ok(_) => (success_class, UpstreamOutcome::Success),
             Err(error) => qq_upstream_error_classification(error),
@@ -910,9 +936,9 @@ impl QqClient {
             business_class,
             duration: started.elapsed(),
             batch_size: None,
-            retry_count: 0,
+            retry_count,
             proxy: self.proxy_configured,
-            fallback: false,
+            fallback,
             outcome,
         }
         .emit();
