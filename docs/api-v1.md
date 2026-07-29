@@ -1477,6 +1477,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷我歌词使用 `GET /v1/tracks/kuwo:<rid>/lyrics`，当前公开层不接受账户、`song_type` 或助唱标注参数。Provider 同时请求官方 HTTPS LRCX 二进制端点和移动端行级端点：LRCX 的单一查询先把固定协议文本按 `yeelion` 循环 XOR 并做 Base64，响应必须通过 `tp=content` 信封、4 MiB 传输上限、8 MiB zlib 解压上限、Base64/XOR 及无替换 GB18030 解码。合法 `<start,duration[,offset]>` 逐字标记原样保存在 `word_synced`，有该来源时始终返回 `format=lrcx`；移动端行时间按真实浮点秒四舍五入到毫秒并组成普通 LRC。移动端当前存在间歇性“音乐查询失败”，该低精度来源失败时从 LRCX 只移除语法有效的逐字标记派生 `plain`，不会反过来降级或覆盖 `word_synced`；每条链独立记录安全诊断，只有两者均失败才返回错误。当前公开响应未提供可验证的翻译或音译时，对应字段保持 `null`。统一 HTTP 已真实确认逐字优先、普通歌词回退和上游端点/不透明查询不泄漏。
 
+酷我实时权益、公开播放和下载分别使用统一 `/v1/tracks/kuwo:<rid>/availability`、`/stream` 与 `/download`。三者固定调用当前官网签名后的 HTTPS `/api/v1/www/music/playUrl`，只提交平台实际签发匿名全曲的 `128kmp3` 档；真实对照确认 `br=320kmp3`、`2000kflac` 和省略 `br` 都返回同一 128 kbps MP3，因此目录中即使存在高品或无损规格，匿名响应仍如实返回 `actual_quality=standard`、`bitrate=128000`，并保留调用方的 `requested_quality`。`code=200` 且 URL 通过校验才表示完整全曲；`code=-1` 映射匿名权限拒绝，stream 返回 403，download 返回可检查的 `available=false/url=null`；`code=-1001` 表示资源不可用。当前匿名链未返回试听地址或窗口，不能虚构 `TrialWindow`。媒体 URL 只接受 HTTPS 标准端口、单标签 `*-sycdn.kuwo.cn` 主机、无凭据/查询/片段且以 `.mp3` 结尾的路径，服务端签名 Cookie、`Secret`、请求 ID 和播放端点均不回显。公开层不接受账户、非默认 variant、沉浸式参数或超出 `1..10000000` 的 bitrate；高于公开档位的合法音质或码率请求允许透明降级，实际结果始终单独报告。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

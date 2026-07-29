@@ -19,14 +19,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, json};
 use tokio::sync::Mutex;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, Platform, Quality, ResourceRef,
-    Result, Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
+    Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track, TrackAvailability,
+    TrackAvailabilityRequest, TuneWeaveError,
 };
 use url::Url;
 
 const HOME_ENDPOINT: &str = "https://www.kuwo.cn/";
 const SEARCH_ENDPOINT: &str = "https://www.kuwo.cn/search/searchMusicBykeyWord";
 const TRACK_DETAIL_ENDPOINT: &str = "https://www.kuwo.cn/api/www/music/musicInfo";
+const PLAYBACK_ENDPOINT: &str = "https://www.kuwo.cn/api/v1/www/music/playUrl";
 const WORD_LYRIC_ENDPOINT: &str = "https://newlyric.kuwo.cn/newlyric.lrc";
 const MOBILE_LYRIC_ENDPOINT: &str = "https://m.kuwo.cn/newh5/singles/songinfoandlrc";
 const SEARCH_REFERER: &str = "https://www.kuwo.cn/search/list";
@@ -44,6 +46,8 @@ const SECRET_INCREMENT: u64 = 23;
 const SECRET_MODULUS: u64 = 2_147_483_647;
 const EIGHT_DIGIT_FOLDED_SEED: u64 = 59_910_100;
 const LYRIC_XOR_KEY: &[u8] = b"yeelion";
+const PUBLIC_AUDIO_BITRATE: u64 = 128_000;
+const PUBLIC_AUDIO_BR: &str = "128kmp3";
 
 #[derive(Clone, Default)]
 pub struct KuwoConfig {
@@ -122,6 +126,20 @@ struct KuwoTrackDetailQuery<'a> {
     request_id: String,
     plat: &'static str,
     from: &'static str,
+}
+
+#[derive(Serialize)]
+struct KuwoPlaybackQuery<'a> {
+    mid: &'a str,
+    #[serde(rename = "type")]
+    media_type: &'static str,
+    #[serde(rename = "httpsStatus")]
+    https_status: u8,
+    plat: &'static str,
+    from: &'static str,
+    br: &'static str,
+    #[serde(rename = "reqId")]
+    request_id: String,
 }
 
 #[derive(Serialize)]
@@ -248,6 +266,31 @@ struct KuwoTrackDetail {
     pay_info: Option<KuwoPayInfo>,
     mvpayinfo: Option<KuwoMvPayInfo>,
     albuminfo: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoPlaybackEnvelope {
+    code: FlexibleText,
+    msg: String,
+    data: Option<KuwoPlaybackData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoPlaybackData {
+    url: String,
+}
+
+struct KuwoPublicMedia {
+    url: String,
+    platform_code: i64,
+}
+
+enum KuwoPublicMediaOutcome {
+    Authorized(KuwoPublicMedia),
+    PermissionDenied { platform_code: i64, message: String },
+    Unavailable { platform_code: i64, message: String },
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -519,6 +562,182 @@ impl KuwoClient {
         ))
     }
 
+    pub(crate) async fn track_availability(
+        &self,
+        music_id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let outcome = self.public_media(music_id).await?;
+        let track_ref = kuwo_track_ref(music_id)?;
+        let mut extensions = public_media_extensions();
+        match outcome {
+            KuwoPublicMediaOutcome::Authorized(media) => Ok(TrackAvailability {
+                track_ref,
+                playable: true,
+                requested_bitrate: request.bitrate,
+                actual_bitrate: Some(PUBLIC_AUDIO_BITRATE),
+                platform_code: Some(media.platform_code),
+                message: "ok".to_owned(),
+                extensions,
+            }),
+            KuwoPublicMediaOutcome::PermissionDenied {
+                platform_code,
+                message,
+            } => {
+                extensions.insert("platform_message".to_owned(), json!(message));
+                Ok(TrackAvailability {
+                    track_ref,
+                    playable: false,
+                    requested_bitrate: request.bitrate,
+                    actual_bitrate: None,
+                    platform_code: Some(platform_code),
+                    message: "Kuwo did not authorize full anonymous playback".to_owned(),
+                    extensions,
+                })
+            }
+            KuwoPublicMediaOutcome::Unavailable {
+                platform_code,
+                message,
+            } => {
+                extensions.insert("platform_message".to_owned(), json!(message));
+                Ok(TrackAvailability {
+                    track_ref,
+                    playable: false,
+                    requested_bitrate: request.bitrate,
+                    actual_bitrate: None,
+                    platform_code: Some(platform_code),
+                    message: "Kuwo reported that this track is unavailable".to_owned(),
+                    extensions,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn stream(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaStream> {
+        let music_id = canonical_media_track_id(track)?;
+        validate_media_request(request)?;
+        match self.public_media(music_id).await? {
+            KuwoPublicMediaOutcome::Authorized(media) => Ok(MediaStream {
+                url: media.url,
+                backup_urls: Vec::new(),
+                headers: BTreeMap::new(),
+                expires_at: None,
+                format: Some("mp3".to_owned()),
+                codec: Some("mp3".to_owned()),
+                bitrate: Some(PUBLIC_AUDIO_BITRATE),
+                size: None,
+                duration_ms: track.duration_ms,
+                requested_quality: request.quality,
+                actual_quality: Quality::Standard,
+                trial: None,
+                origin_track: Some(track.resource_ref.clone()),
+                resolved_track: track.resource_ref.clone(),
+                resolved_platform: Platform::Kuwo,
+                match_score: Some(1.0),
+                attempts: Vec::new(),
+            }),
+            KuwoPublicMediaOutcome::PermissionDenied {
+                platform_code,
+                message,
+            } => Err(public_media_permission_error(
+                request,
+                platform_code,
+                &message,
+            )),
+            KuwoPublicMediaOutcome::Unavailable {
+                platform_code,
+                message,
+            } => Err(public_media_unavailable_error(platform_code, &message)),
+        }
+    }
+
+    pub(crate) async fn download(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaDownload> {
+        let music_id = canonical_media_track_id(track)?;
+        validate_media_request(request)?;
+        let outcome = self.public_media(music_id).await?;
+        let mut extensions = public_media_extensions();
+        let (available, url, platform_code, message) = match outcome {
+            KuwoPublicMediaOutcome::Authorized(media) => {
+                (true, Some(media.url), media.platform_code, None)
+            }
+            KuwoPublicMediaOutcome::PermissionDenied {
+                platform_code,
+                message,
+            } => {
+                extensions.insert("platform_message".to_owned(), json!(message));
+                (
+                    false,
+                    None,
+                    platform_code,
+                    Some("Kuwo did not authorize a full anonymous download".to_owned()),
+                )
+            }
+            KuwoPublicMediaOutcome::Unavailable {
+                platform_code,
+                message,
+            } => {
+                extensions.insert("platform_message".to_owned(), json!(message));
+                (
+                    false,
+                    None,
+                    platform_code,
+                    Some("Kuwo reported that this track is unavailable".to_owned()),
+                )
+            }
+        };
+        extensions.insert("full_track".to_owned(), json!(available));
+        Ok(MediaDownload {
+            track_ref: track.resource_ref.clone(),
+            platform: Platform::Kuwo,
+            available,
+            url,
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: Some("mp3".to_owned()),
+            codec: Some("mp3".to_owned()),
+            bitrate: available.then_some(PUBLIC_AUDIO_BITRATE),
+            size: None,
+            duration_ms: track.duration_ms,
+            requested_quality: request.quality,
+            actual_quality: Quality::Standard,
+            platform_code: Some(platform_code),
+            fee: None,
+            message,
+            extensions,
+        })
+    }
+
+    async fn public_media(&self, music_id: &str) -> Result<KuwoPublicMediaOutcome> {
+        for force_refresh in [false, true] {
+            let response = self.signed_get_playback(music_id, force_refresh).await?;
+            let bytes = match response {
+                KuwoSignedResponse::Body(bytes) => bytes,
+                KuwoSignedResponse::SessionRejected if !force_refresh => continue,
+                KuwoSignedResponse::SessionRejected => {
+                    return Err(kuwo_upstream_error(
+                        "Kuwo rejected a freshly established web session",
+                    ));
+                }
+            };
+            match parse_playback_response(&bytes) {
+                Ok(outcome) => return Ok(outcome),
+                Err(_) if !force_refresh && is_signed_session_rejection(&bytes) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(kuwo_upstream_error(
+            "Kuwo public playback exhausted its bounded session refresh",
+        ))
+    }
+
     pub(crate) async fn lyrics(&self, music_id: &str) -> Result<Lyrics> {
         let (word_result, plain_result) = tokio::join!(
             self.download_word_lyrics(music_id),
@@ -676,11 +895,58 @@ impl KuwoClient {
         music_id: &str,
         force_refresh: bool,
     ) -> Result<KuwoSignedResponse> {
+        self.signed_get(
+            TRACK_DETAIL_ENDPOINT,
+            &KuwoTrackDetailQuery {
+                mid: music_id,
+                https_status: 1,
+                request_id: new_request_id(),
+                plat: "web_www",
+                from: "",
+            },
+            "Kuwo track detail",
+            force_refresh,
+        )
+        .await
+    }
+
+    async fn signed_get_playback(
+        &self,
+        music_id: &str,
+        force_refresh: bool,
+    ) -> Result<KuwoSignedResponse> {
+        self.signed_get(
+            PLAYBACK_ENDPOINT,
+            &KuwoPlaybackQuery {
+                mid: music_id,
+                media_type: "music",
+                https_status: 1,
+                plat: "web_www",
+                from: "",
+                br: PUBLIC_AUDIO_BR,
+                request_id: new_request_id(),
+            },
+            "Kuwo public playback",
+            force_refresh,
+        )
+        .await
+    }
+
+    async fn signed_get<Q>(
+        &self,
+        endpoint: &'static str,
+        query: &Q,
+        operation: &'static str,
+        force_refresh: bool,
+    ) -> Result<KuwoSignedResponse>
+    where
+        Q: Serialize + ?Sized,
+    {
         let session = self.web_session(force_refresh).await?;
         let secret = new_web_secret(&session.cookie_value)?;
         let response = self
             .http
-            .get(TRACK_DETAIL_ENDPOINT)
+            .get(endpoint)
             .header(ACCEPT, "application/json")
             .header(REFERER, WEB_REFERER)
             .header(
@@ -688,13 +954,7 @@ impl KuwoClient {
                 format!("{WEB_SESSION_COOKIE}={}", session.cookie_value),
             )
             .header("Secret", secret)
-            .query(&KuwoTrackDetailQuery {
-                mid: music_id,
-                https_status: 1,
-                request_id: new_request_id(),
-                plat: "web_www",
-                from: "",
-            })
+            .query(query)
             .send()
             .await
             .map_err(kuwo_network_error)?;
@@ -704,7 +964,7 @@ impl KuwoClient {
         ) {
             return Ok(KuwoSignedResponse::SessionRejected);
         }
-        let bytes = read_bounded_response(response, "Kuwo track detail").await?;
+        let bytes = read_bounded_response(response, operation).await?;
         Ok(KuwoSignedResponse::Body(bytes))
     }
 
@@ -953,6 +1213,84 @@ fn validate_lyric_text(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn parse_playback_response(bytes: &[u8]) -> Result<KuwoPublicMediaOutcome> {
+    let envelope: KuwoPlaybackEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kuwo_upstream_error("Kuwo public playback returned malformed JSON"))?;
+    let platform_code = envelope
+        .code
+        .as_i64()
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted a platform code"))?;
+    let message = bounded_text(&envelope.msg, 256);
+    match platform_code {
+        200 => {
+            let data = envelope
+                .data
+                .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted media data"))?;
+            let url = validate_public_audio_url(&data.url)?;
+            Ok(KuwoPublicMediaOutcome::Authorized(KuwoPublicMedia {
+                url,
+                platform_code,
+            }))
+        }
+        -1 if envelope.data.is_none() => Ok(KuwoPublicMediaOutcome::PermissionDenied {
+            platform_code,
+            message,
+        }),
+        -1001 if envelope.data.is_none() => Ok(KuwoPublicMediaOutcome::Unavailable {
+            platform_code,
+            message,
+        }),
+        _ => Err(
+            kuwo_upstream_error("Kuwo public playback rejected the request").with_details(json!({
+                "platform_code": platform_code,
+                "platform_message": message,
+            })),
+        ),
+    }
+}
+
+fn validate_public_audio_url(value: &str) -> Result<String> {
+    if value.len() > 4_096 || value.chars().any(char::is_control) {
+        return Err(kuwo_upstream_error(
+            "Kuwo public playback returned an invalid media URL",
+        ));
+    }
+    let url = Url::parse(value)
+        .map_err(|_| kuwo_upstream_error("Kuwo public playback returned an invalid media URL"))?;
+    let host = url
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted a media host"))?;
+    let host_prefix = host
+        .strip_suffix(".kuwo.cn")
+        .filter(|prefix| {
+            !prefix.is_empty()
+                && !prefix.contains('.')
+                && prefix.ends_with("-sycdn")
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .ok_or_else(|| {
+            kuwo_upstream_error("Kuwo public playback returned an untrusted media host")
+        })?;
+    if host_prefix.len() > 63
+        || url.scheme() != "https"
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some()
+        || !url.path().starts_with('/')
+        || !url.path().to_ascii_lowercase().ends_with(".mp3")
+    {
+        return Err(kuwo_upstream_error(
+            "Kuwo public playback returned an untrusted media URL",
+        ));
+    }
+    Ok(url.to_string())
 }
 
 fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result<Track> {
@@ -1474,6 +1812,95 @@ fn bounded_parts(value: &str, separator: char, limit: usize) -> Vec<String> {
         .collect()
 }
 
+fn canonical_media_track_id(track: &Track) -> Result<&str> {
+    if track.platform != Platform::Kuwo || track.resource_ref.platform() != Platform::Kuwo {
+        return Err(kuwo_invalid_request(
+            "Kuwo media resolution requires a Kuwo track",
+        ));
+    }
+    let music_id = track.resource_ref.id();
+    if music_id != track.id || canonical_positive_decimal(music_id) != Some(music_id) {
+        return Err(kuwo_invalid_request(
+            "Kuwo media resolution requires a canonical positive music ID",
+        ));
+    }
+    Ok(music_id)
+}
+
+fn validate_media_request(request: &StreamRequest) -> Result<()> {
+    if request.variant != StreamVariant::Default {
+        return Err(kuwo_invalid_request(
+            "Kuwo public media only supports the default stream variant",
+        ));
+    }
+    if request.account.is_some() {
+        return Err(kuwo_invalid_request(
+            "Kuwo public media does not accept an account",
+        ));
+    }
+    if request.immersive_type.is_some() {
+        return Err(kuwo_invalid_request(
+            "Kuwo public media does not accept immersive_type",
+        ));
+    }
+    if request
+        .bitrate
+        .is_some_and(|bitrate| bitrate == 0 || bitrate > 10_000_000)
+    {
+        return Err(kuwo_invalid_request(
+            "Kuwo public media bitrate must be between 1 and 10000000",
+        ));
+    }
+    Ok(())
+}
+
+fn kuwo_track_ref(music_id: &str) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Kuwo, music_id.to_owned())
+        .map_err(|_| kuwo_upstream_error("Kuwo returned an invalid track identity"))
+}
+
+fn public_media_extensions() -> Extensions {
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("current_web_play_url"));
+    extensions.insert("requested_br".to_owned(), json!(PUBLIC_AUDIO_BR));
+    extensions.insert(
+        "anonymous_profile_bitrate".to_owned(),
+        json!(PUBLIC_AUDIO_BITRATE),
+    );
+    extensions
+}
+
+fn public_media_permission_error(
+    request: &StreamRequest,
+    platform_code: i64,
+    platform_message: &str,
+) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::PermissionDenied,
+        "Kuwo did not authorize full anonymous playback",
+    )
+    .with_platform(Platform::Kuwo)
+    .with_details(json!({
+        "requested_quality": request.quality,
+        "requested_bitrate": request.bitrate,
+        "platform_code": platform_code,
+        "platform_message": bounded_text(platform_message, 256),
+        "trial_available": false,
+    }))
+}
+
+fn public_media_unavailable_error(platform_code: i64, platform_message: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::ResourceNotFound,
+        "Kuwo reported that this track is unavailable",
+    )
+    .with_platform(Platform::Kuwo)
+    .with_details(json!({
+        "platform_code": platform_code,
+        "platform_message": bounded_text(platform_message, 256),
+    }))
+}
+
 fn canonical_positive_decimal(value: &str) -> Option<&str> {
     let value = value.trim();
     value
@@ -1948,6 +2375,97 @@ mod tests {
     }
 
     #[test]
+    fn playback_classifies_full_media_paid_denial_and_offline_status() {
+        let success = br#"{
+          "code":200,
+          "msg":"success",
+          "data":{"url":"https://er-sycdn.kuwo.cn/token/time/resource/trackmedia/file.mp3"}
+        }"#;
+        let KuwoPublicMediaOutcome::Authorized(media) =
+            parse_playback_response(success).expect("parse public Kuwo media")
+        else {
+            panic!("expected authorized Kuwo media");
+        };
+        assert_eq!(media.platform_code, 200);
+        assert!(media.url.starts_with("https://er-sycdn.kuwo.cn/"));
+
+        let paid = br#"{"code":-1,"msg":"paid media","data":null}"#;
+        assert!(matches!(
+            parse_playback_response(paid).expect("parse paid denial"),
+            KuwoPublicMediaOutcome::PermissionDenied {
+                platform_code: -1,
+                ..
+            }
+        ));
+
+        let offline = br#"{"code":-1001,"msg":"offline","data":null}"#;
+        assert!(matches!(
+            parse_playback_response(offline).expect("parse offline status"),
+            KuwoPublicMediaOutcome::Unavailable {
+                platform_code: -1001,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn playback_urls_accept_only_the_current_https_mp3_cdn_shape() {
+        assert!(
+            validate_public_audio_url(
+                "https://er-sycdn.kuwo.cn/token/time/resource/trackmedia/file.mp3"
+            )
+            .is_ok()
+        );
+        for invalid in [
+            "http://er-sycdn.kuwo.cn/token/file.mp3",
+            "https://user@er-sycdn.kuwo.cn/token/file.mp3",
+            "https://er-sycdn.kuwo.cn:444/token/file.mp3",
+            "https://er-sycdn.kuwo.cn.evil.example/token/file.mp3",
+            "https://nested.er-sycdn.kuwo.cn/token/file.mp3",
+            "https://er-sycdn.kuwo.cn/token/file.flac",
+            "https://er-sycdn.kuwo.cn/token/file.mp3?secret=value",
+            "https://er-sycdn.kuwo.cn/token/file.mp3#fragment",
+        ] {
+            assert!(validate_public_audio_url(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn media_requests_require_canonical_tracks_and_bounded_public_options() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Kuwo, "41378936").expect("Kuwo track ref"),
+            "好运来",
+        );
+        assert_eq!(
+            canonical_media_track_id(&track).expect("canonical Kuwo track"),
+            "41378936"
+        );
+        assert!(validate_media_request(&StreamRequest::default()).is_ok());
+
+        let account = StreamRequest {
+            account: Some("default".to_owned()),
+            ..StreamRequest::default()
+        };
+        assert!(validate_media_request(&account).is_err());
+
+        let legacy = StreamRequest {
+            variant: StreamVariant::Legacy,
+            ..StreamRequest::default()
+        };
+        assert!(validate_media_request(&legacy).is_err());
+
+        let oversized = StreamRequest {
+            bitrate: Some(10_000_001),
+            ..StreamRequest::default()
+        };
+        assert!(validate_media_request(&oversized).is_err());
+
+        let mut wrong_platform = track;
+        wrong_platform.platform = Platform::Migu;
+        assert!(canonical_media_track_id(&wrong_platform).is_err());
+    }
+
+    #[test]
     fn lrcx_query_matches_the_reference_protocol_fixture() {
         let url = build_word_lyric_url("228908").expect("build Kuwo LRCX URL");
         assert_eq!(url.scheme(), "https");
@@ -2073,5 +2591,49 @@ mod tests {
                 .as_deref()
                 .is_some_and(|text| { text.contains("[00:00.000]") && !text.contains("<0,") })
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kuwo network access"]
+    async fn live_public_media_distinguishes_free_full_tracks_from_paid_denials() {
+        let client = KuwoClient::test_client();
+        let free = client
+            .track_detail("41378936")
+            .await
+            .expect("live free Kuwo track detail");
+        let stream = client
+            .stream(&free, &StreamRequest::default())
+            .await
+            .expect("live free Kuwo stream");
+        assert_eq!(stream.actual_quality, Quality::Standard);
+        assert_eq!(stream.bitrate, Some(PUBLIC_AUDIO_BITRATE));
+        assert_eq!(stream.format.as_deref(), Some("mp3"));
+        assert!(stream.trial.is_none());
+        assert!(validate_public_audio_url(&stream.url).is_ok());
+
+        let download = client
+            .download(&free, &StreamRequest::default())
+            .await
+            .expect("live free Kuwo download");
+        assert!(download.available);
+        assert!(download.url.is_some());
+        assert_eq!(download.platform_code, Some(200));
+
+        let paid = client
+            .track_detail("228908")
+            .await
+            .expect("live paid Kuwo track detail");
+        let error = client
+            .stream(&paid, &StreamRequest::default())
+            .await
+            .expect_err("paid Kuwo media must not become a public stream");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let paid_download = client
+            .download(&paid, &StreamRequest::default())
+            .await
+            .expect("paid Kuwo download status");
+        assert!(!paid_download.available);
+        assert!(paid_download.url.is_none());
+        assert_eq!(paid_download.platform_code, Some(-1));
     }
 }

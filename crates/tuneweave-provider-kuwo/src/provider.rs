@@ -3,8 +3,9 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
-    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
+    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
+    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
 };
 
 use crate::client::{KuwoClient, KuwoConfig};
@@ -49,8 +50,11 @@ impl MusicProvider for KuwoProvider {
 
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::AudioDownload,
+            Capability::AudioStream,
             Capability::Lyrics,
             Capability::SearchTracks,
+            Capability::TrackAvailability,
             Capability::TrackDetail,
         ])
     }
@@ -127,6 +131,16 @@ impl MusicProvider for KuwoProvider {
         self.client.track_detail(music_id).await
     }
 
+    async fn track_availability(
+        &self,
+        id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        validate_availability_request(request)?;
+        let music_id = parse_music_id(id)?;
+        self.client.track_availability(music_id, request).await
+    }
+
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
         if account.is_some() {
             return Err(kuwo_invalid_request(
@@ -142,6 +156,28 @@ impl MusicProvider for KuwoProvider {
         let music_id = parse_music_id(id)?;
         self.client.lyrics(music_id).await
     }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        self.client.stream(track, request).await
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        self.client.download(track, request).await
+    }
+}
+
+fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(kuwo_invalid_request(
+            "Kuwo public listening rights do not accept an account",
+        ));
+    }
+    if request.bitrate == 0 || request.bitrate > 10_000_000 {
+        return Err(kuwo_invalid_request(
+            "Kuwo availability bitrate must be between 1 and 10000000",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_lyrics_request(request: &LyricsRequest) -> Result<()> {
@@ -253,8 +289,11 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::AudioDownload,
+                Capability::AudioStream,
                 Capability::Lyrics,
                 Capability::SearchTracks,
+                Capability::TrackAvailability,
                 Capability::TrackDetail
             ])
         );
@@ -289,6 +328,21 @@ mod tests {
         for invalid in ["", "0", "01", "-1", "MUSIC_228908", "abc"] {
             assert!(parse_music_id(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn availability_requires_a_bounded_bitrate_without_an_account() {
+        assert!(validate_availability_request(&TrackAvailabilityRequest::default()).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(1)).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(10_000_000)).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(0)).is_err());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(10_000_001)).is_err());
+
+        let account = TrackAvailabilityRequest {
+            bitrate: 128_000,
+            account: Some("default".to_owned()),
+        };
+        assert!(validate_availability_request(&account).is_err());
     }
 
     #[test]
