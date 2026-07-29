@@ -4,7 +4,7 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aes::{
@@ -26,7 +26,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, MediaDownload,
     MediaStream, Page, PageMeta, PageRequest, Platform, Playlist, Quality, ResourceRef, Result,
-    StreamRequest, StreamVariant, Track, TrialWindow, TuneWeaveError,
+    StreamRequest, StreamVariant, Track, TrialWindow, TuneWeaveError, UpstreamBusinessClass,
+    UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
@@ -79,6 +80,7 @@ impl fmt::Debug for KugouConfig {
 #[derive(Clone)]
 pub struct KugouClient {
     http: Client,
+    proxy_configured: bool,
     device: Arc<Mutex<DeviceStore>>,
     registration_refresh: Arc<AsyncMutex<()>>,
 }
@@ -268,12 +270,12 @@ impl AndroidEndpoint {
         }
     }
 
-    const fn operation(self) -> &'static str {
+    const fn log_operation(self) -> &'static str {
         match self {
-            Self::TrackMetadata => "KuGou track detail",
-            Self::AudioMetadata => "KuGou audio metadata",
-            Self::Privilege => "KuGou media privilege",
-            Self::PlaylistDetail => "KuGou playlist detail",
+            Self::TrackMetadata => "track_metadata",
+            Self::AudioMetadata => "audio_metadata",
+            Self::Privilege => "media_privilege",
+            Self::PlaylistDetail => "playlist_detail",
         }
     }
 }
@@ -554,6 +556,13 @@ impl RequestedLyricFormat {
         match self {
             Self::Krc => "krc",
             Self::Lrc => "lrc",
+        }
+    }
+
+    const fn log_operation(self) -> &'static str {
+        match self {
+            Self::Krc => "lyric_download_krc",
+            Self::Lrc => "lyric_download_lrc",
         }
     }
 }
@@ -1084,12 +1093,12 @@ impl KugouClient {
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20));
-        if let Some(proxy_url) = config
+        let proxy_url = config
             .proxy_url
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+            .filter(|value| !value.is_empty());
+        if let Some(proxy_url) = proxy_url {
             let proxy = Proxy::all(proxy_url).map_err(|_| {
                 TuneWeaveError::invalid_request("KuGou proxy URL is invalid")
                     .with_platform(Platform::Kugou)
@@ -1105,6 +1114,7 @@ impl KugouClient {
         })?;
         Ok(Self {
             http,
+            proxy_configured: proxy_url.is_some(),
             device: Arc::new(Mutex::new(DeviceStore::open(config.device_path.clone())?)),
             registration_refresh: Arc::new(AsyncMutex::new(())),
         })
@@ -1141,13 +1151,13 @@ impl KugouClient {
             store.device().identity()
         };
         let registered_at = unix_seconds_now();
-        let outcome = self.register_anonymous_device(&pending).await?;
+        let outcome = self.register_anonymous_device(&pending, 0).await?;
         let (identity, dfid) = match outcome {
             DeviceRegistrationOutcome::Registered(dfid) => (pending, dfid),
             DeviceRegistrationOutcome::ExistingIdentityWithoutDfid => {
                 let rotated = self.lock_device()?.rotate()?;
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                match self.register_anonymous_device(&rotated).await? {
+                match self.register_anonymous_device(&rotated, 1).await? {
                     DeviceRegistrationOutcome::Registered(dfid) => (rotated, dfid),
                     DeviceRegistrationOutcome::ExistingIdentityWithoutDfid => {
                         return Err(kugou_upstream_error(
@@ -1172,6 +1182,7 @@ impl KugouClient {
     async fn register_anonymous_device(
         &self,
         identity: &KugouDeviceIdentity,
+        retry_count: u8,
     ) -> Result<DeviceRegistrationOutcome> {
         let profile = DeviceRegistrationProfile::anonymous(&identity.guid);
         let profile = serde_json::to_vec(&profile).map_err(|_| {
@@ -1220,25 +1231,42 @@ impl KugouClient {
             p: encrypted_secret,
             signature: android_signature_for_parameters(&parameters, encrypted_profile.as_bytes()),
         };
-        let response = self
-            .http
-            .post(DEVICE_REGISTRATION_ENDPOINT)
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .header("dfid", "-")
-            .header("clienttime", clienttime)
-            .header("mid", &identity.mid)
-            .header("kg-rc", "1")
-            .header("kg-thash", "5d816a0")
-            .header("kg-rec", "1")
-            .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
-            .header("user-agent", ANDROID_USER_AGENT)
-            .query(&query)
-            .body(encrypted_profile)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        let bytes = read_bounded_response(response, "KuGou device registration").await?;
-        parse_device_registration_response(&bytes, &aes_seed)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(DEVICE_REGISTRATION_ENDPOINT)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("dfid", "-")
+                .header("clienttime", clienttime)
+                .header("mid", &identity.mid)
+                .header("kg-rc", "1")
+                .header("kg-thash", "5d816a0")
+                .header("kg-rec", "1")
+                .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
+                .header("user-agent", ANDROID_USER_AGENT)
+                .query(&query)
+                .body(encrypted_profile)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou device registration").await?;
+            parse_device_registration_response(&bytes, &aes_seed)
+        }
+        .await;
+        self.log_upstream_request(
+            "device_registration",
+            "userservice.kugou.com",
+            "/risk/v2/r_register_dev",
+            http_status,
+            started,
+            retry_count,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn search_tracks_page(
@@ -1264,16 +1292,33 @@ impl KugouClient {
             uuid: &identity.mid,
             dfid: "-",
         };
-        let response = self
-            .http
-            .get(SEARCH_ENDPOINT)
-            .header(REFERER, WEB_REFERER)
-            .query(&request)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        let bytes = read_bounded_response(response, "KuGou search").await?;
-        parse_search_response(&bytes)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(SEARCH_ENDPOINT)
+                .header(REFERER, WEB_REFERER)
+                .query(&request)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou search").await?;
+            parse_search_response(&bytes)
+        }
+        .await;
+        self.log_upstream_request(
+            "search",
+            "songsearch.kugou.com",
+            "/song_search_v2",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn track_detail(&self, album_audio_id: u64) -> Result<Track> {
@@ -1284,10 +1329,24 @@ impl KugouClient {
             }],
             fields: "base,album_info,authors.base,class",
         };
-        let metadata_bytes = self
-            .post_android(AndroidEndpoint::TrackMetadata, &metadata_request, &identity)
-            .await?;
-        let metadata = parse_track_metadata(&metadata_bytes, album_audio_id)?;
+        let metadata_started = Instant::now();
+        let mut metadata_status = None;
+        let metadata_outcome = async {
+            let response = self
+                .post_android(AndroidEndpoint::TrackMetadata, &metadata_request, &identity)
+                .await?;
+            metadata_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou track detail").await?;
+            parse_track_metadata(&bytes, album_audio_id)
+        }
+        .await;
+        self.log_android_request(
+            AndroidEndpoint::TrackMetadata,
+            metadata_status,
+            metadata_started,
+            &metadata_outcome,
+        );
+        let metadata = metadata_outcome?;
         let audio_id = metadata
             .base
             .as_ref()
@@ -1310,10 +1369,24 @@ impl KugouClient {
             )),
             mid: &identity.mid,
         };
-        let audio_bytes = self
-            .post_android(AndroidEndpoint::AudioMetadata, &audio_request, &identity)
-            .await?;
-        let audio = parse_audio_metadata(&audio_bytes, &audio_id)?;
+        let audio_started = Instant::now();
+        let mut audio_status = None;
+        let audio_outcome = async {
+            let response = self
+                .post_android(AndroidEndpoint::AudioMetadata, &audio_request, &identity)
+                .await?;
+            audio_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou audio metadata").await?;
+            parse_audio_metadata(&bytes, &audio_id)
+        }
+        .await;
+        self.log_android_request(
+            AndroidEndpoint::AudioMetadata,
+            audio_status,
+            audio_started,
+            &audio_outcome,
+        );
+        let audio = audio_outcome?;
         map_track_detail(album_audio_id, metadata, audio)
     }
 
@@ -1327,10 +1400,24 @@ impl KugouClient {
             userid: 0,
             token: "",
         };
-        let bytes = self
-            .post_android(AndroidEndpoint::PlaylistDetail, &request, &identity)
-            .await?;
-        parse_playlist_detail_response(&bytes, collection_id)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .post_android(AndroidEndpoint::PlaylistDetail, &request, &identity)
+                .await?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou playlist detail").await?;
+            parse_playlist_detail_response(&bytes, collection_id)
+        }
+        .await;
+        self.log_android_request(
+            AndroidEndpoint::PlaylistDetail,
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn playlist_tracks(
@@ -1377,14 +1464,31 @@ impl KugouClient {
             pagesize: request.limit,
             global_collection_id: collection_id,
         };
-        let response = self
-            .android_get(PLAYLIST_TRACKS_ENDPOINT, clienttime, &identity)
-            .query(&query)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        let bytes = read_bounded_response(response, "KuGou playlist tracks").await?;
-        parse_playlist_tracks_response(&bytes, collection_id, request.offset, request.limit)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .android_get(PLAYLIST_TRACKS_ENDPOINT, clienttime, &identity)
+                .query(&query)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou playlist tracks").await?;
+            parse_playlist_tracks_response(&bytes, collection_id, request.offset, request.limit)
+        }
+        .await;
+        self.log_upstream_request(
+            "playlist_tracks",
+            "gateway.kugou.com",
+            "/pubsongs/v2/get_other_list_file_nofilt",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn lyrics(&self, album_audio_id: u64) -> Result<Lyrics> {
@@ -1614,10 +1718,19 @@ impl KugouClient {
                 "multitrack",
             ],
         };
-        let bytes = self
-            .post_android(AndroidEndpoint::Privilege, &request, &identity)
-            .await?;
-        parse_privilege_response(&bytes, album_audio_id, album_id, hash)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .post_android(AndroidEndpoint::Privilege, &request, &identity)
+                .await?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou media privilege").await?;
+            parse_privilege_response(&bytes, album_audio_id, album_id, hash)
+        }
+        .await;
+        self.log_android_request(AndroidEndpoint::Privilege, http_status, started, &outcome);
+        outcome
     }
 
     async fn tracker(
@@ -1685,23 +1798,44 @@ impl KugouClient {
             version: 11430,
             signature: android_signature_for_parameters(&parameters, &[]),
         };
-        let response = self
-            .android_get(TRACKER_ENDPOINT, clienttime, &identity)
-            .header("x-router", "trackercdn.kugou.com")
-            .query(&query)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        if response.headers().contains_key("ssa-code") {
-            return Err(TuneWeaveError::new(
-                ErrorCode::PermissionDenied,
-                "KuGou tracker requires additional verification",
-            )
-            .with_platform(Platform::Kugou)
-            .with_details(json!({ "verification_required": true })));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .android_get(TRACKER_ENDPOINT, clienttime, &identity)
+                .header("x-router", "trackercdn.kugou.com")
+                .query(&query)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            if response.headers().contains_key("ssa-code") {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::PermissionDenied,
+                    "KuGou tracker requires additional verification",
+                )
+                .with_platform(Platform::Kugou)
+                .with_details(json!({ "verification_required": true })));
+            }
+            let bytes = read_bounded_response(response, "KuGou media tracker").await?;
+            parse_tracker_response(&bytes, &spec.hash)
         }
-        let bytes = read_bounded_response(response, "KuGou media tracker").await?;
-        parse_tracker_response(&bytes, &spec.hash)
+        .await;
+        self.log_upstream_request(
+            if free_part {
+                "media_tracker_trial"
+            } else {
+                "media_tracker"
+            },
+            "gateway.kugou.com",
+            "/v5/url",
+            http_status,
+            started,
+            u8::from(free_part),
+            free_part,
+            &outcome,
+        );
+        outcome
     }
 
     async fn search_lyric_candidate(
@@ -1733,14 +1867,31 @@ impl KugouClient {
             man: "no",
             signature: android_signature_for_parameters(&parameters, &[]),
         };
-        let response = self
-            .android_get(LYRIC_SEARCH_ENDPOINT, unix_seconds_now(), &identity)
-            .query(&query)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        let bytes = read_bounded_response(response, "KuGou lyric search").await?;
-        parse_lyric_search_response(&bytes)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .android_get(LYRIC_SEARCH_ENDPOINT, unix_seconds_now(), &identity)
+                .query(&query)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou lyric search").await?;
+            parse_lyric_search_response(&bytes)
+        }
+        .await;
+        self.log_upstream_request(
+            "lyric_search",
+            "lyrics.kugou.com",
+            "/v1/search",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
     }
 
     async fn download_lyric(
@@ -1779,14 +1930,80 @@ impl KugouClient {
             ver: 1,
             signature: android_signature_for_parameters(&parameters, &[]),
         };
-        let response = self
-            .android_get(LYRIC_DOWNLOAD_ENDPOINT, clienttime, &identity)
-            .query(&query)
-            .send()
-            .await
-            .map_err(kugou_network_error)?;
-        let bytes = read_bounded_response(response, "KuGou lyric download").await?;
-        parse_lyric_download_response(&bytes, candidate, format)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .android_get(LYRIC_DOWNLOAD_ENDPOINT, clienttime, &identity)
+                .query(&query)
+                .send()
+                .await
+                .map_err(kugou_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "KuGou lyric download").await?;
+            parse_lyric_download_response(&bytes, candidate, format)
+        }
+        .await;
+        self.log_upstream_request(
+            format.log_operation(),
+            "lyrics.kugou.com",
+            "/download",
+            http_status,
+            started,
+            0,
+            false,
+            &outcome,
+        );
+        outcome
+    }
+
+    fn log_android_request<T>(
+        &self,
+        endpoint: AndroidEndpoint,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        self.log_upstream_request(
+            endpoint.log_operation(),
+            "gateway.kugou.com",
+            endpoint.path(),
+            http_status,
+            started,
+            0,
+            false,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        retry_count: u8,
+        fallback: bool,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, outcome) = kugou_upstream_classification(outcome);
+        UpstreamRequestSummary {
+            provider: Platform::Kugou,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count,
+            proxy: self.proxy_configured,
+            fallback,
+            outcome,
+        }
+        .emit();
     }
 
     fn android_get(
@@ -1812,7 +2029,7 @@ impl KugouClient {
         endpoint: AndroidEndpoint,
         body: &T,
         identity: &KugouDeviceIdentity,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<reqwest::Response> {
         let body = serde_json::to_vec(body).map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
@@ -1850,8 +2067,42 @@ impl KugouClient {
         if let Some(kg_tid) = endpoint.kg_tid() {
             request = request.header("kg-tid", kg_tid);
         }
-        let response = request.send().await.map_err(kugou_network_error)?;
-        read_bounded_response(response, endpoint.operation()).await
+        request.send().await.map_err(kugou_network_error)
+    }
+}
+
+fn kugou_upstream_classification<T>(
+    outcome: &Result<T>,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    match outcome {
+        Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+        Err(error) => {
+            let business_class = if error
+                .details
+                .get("platform_code")
+                .and_then(Value::as_i64)
+                .is_some()
+                || matches!(
+                    error.code,
+                    ErrorCode::AuthenticationRequired
+                        | ErrorCode::PermissionDenied
+                        | ErrorCode::ResourceNotFound
+                        | ErrorCode::Conflict
+                        | ErrorCode::RateLimited
+                        | ErrorCode::MatchRejected
+                ) {
+                UpstreamBusinessClass::RejectedError
+            } else {
+                UpstreamBusinessClass::Unavailable
+            };
+            (
+                business_class,
+                UpstreamOutcome::Failure {
+                    code: error.code,
+                    retryable: error.retryable,
+                },
+            )
+        }
     }
 }
 
@@ -4277,6 +4528,45 @@ fn kugou_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_summary_separates_business_and_transport_failures() {
+        assert_eq!(
+            kugou_upstream_classification(&Ok::<_, TuneWeaveError>(())),
+            (UpstreamBusinessClass::Success, UpstreamOutcome::Success)
+        );
+
+        let denied = Err::<(), _>(
+            TuneWeaveError::new(ErrorCode::PermissionDenied, "sensitive verification text")
+                .with_platform(Platform::Kugou),
+        );
+        assert_eq!(
+            kugou_upstream_classification(&denied),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::PermissionDenied,
+                    retryable: false
+                }
+            )
+        );
+
+        let timeout = Err::<(), _>(
+            TuneWeaveError::new(ErrorCode::UpstreamTimeout, "sensitive transport text")
+                .with_platform(Platform::Kugou)
+                .retryable(true),
+        );
+        assert_eq!(
+            kugou_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true
+                }
+            )
+        );
+    }
 
     fn lyric_candidate() -> LyricCandidate {
         LyricCandidate {
