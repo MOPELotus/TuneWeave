@@ -258,6 +258,10 @@ impl ProviderAccess {
         }
         response
     }
+
+    fn list_response<T>(&self, data: Vec<T>, platform: Platform) -> ApiResponse<Vec<T>> {
+        self.response(data, platform).with_result_count()
+    }
 }
 
 impl CallerCredentialSet {
@@ -1044,7 +1048,7 @@ async fn platforms(State(state): State<AppState>) -> Json<ApiResponse<Vec<Platfo
         .into_iter()
         .map(|platform| platform_status(&state, platform))
         .collect();
-    Json(ApiResponse::new(data))
+    Json(ApiResponse::new(data).with_result_count())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1068,7 +1072,7 @@ async fn capabilities(
             .collect()
     };
 
-    Ok(Json(ApiResponse::new(data)))
+    Ok(Json(ApiResponse::new(data).with_result_count()))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1570,7 +1574,7 @@ async fn banners(
     request.catalog = parse_banner_catalog(params.catalog.as_deref())?;
     request.account.clone_from(&access.provider_account);
     let banners = access.provider.banners(&request).await?;
-    Ok(Json(access.response(banners, platform)))
+    Ok(Json(access.list_response(banners, platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2689,7 +2693,7 @@ async fn tracks_response(
             account: access.provider_account.clone(),
         })
         .await?;
-    Ok(Json(access.response(tracks, selected_platform)))
+    Ok(Json(access.list_response(tracks, selected_platform)))
 }
 
 async fn track_favorite_count(
@@ -2825,7 +2829,7 @@ async fn track_favorite_counts_response(
         .with_platform(selected_platform)
         .into());
     }
-    Ok(Json(access.response(counts, selected_platform)))
+    Ok(Json(access.list_response(counts, selected_platform)))
 }
 
 fn parse_track_detail_request_items(
@@ -3598,7 +3602,7 @@ async fn set_album_subscriptions(
         .provider
         .set_album_subscriptions(&ids, subscribed, Some(&account))
         .await?;
-    Ok(Json(access.response(results, platform)))
+    Ok(Json(access.list_response(results, platform)))
 }
 
 async fn album_subscribe(
@@ -9226,7 +9230,7 @@ async fn artist_details_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    Ok(Json(access.response(artists, selected_platform)))
+    Ok(Json(access.list_response(artists, selected_platform)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10547,7 +10551,7 @@ async fn video_details_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    Ok(Json(access.response(details, selected_platform)))
+    Ok(Json(access.list_response(details, selected_platform)))
 }
 
 async fn video_stats(
@@ -10731,7 +10735,7 @@ async fn video_streams_response(
         .with_details(json!({ "index": index }))
         .into());
     }
-    Ok(Json(access.response(streams, selected_platform)))
+    Ok(Json(access.list_response(streams, selected_platform)))
 }
 
 async fn video_stream_redirect(
@@ -12219,7 +12223,8 @@ async fn auth_country_calling_codes(
     Ok(Json(
         ApiResponse::new(groups)
             .with_platform(platform)
-            .with_account(account),
+            .with_account(account)
+            .with_result_count(),
     ))
 }
 
@@ -12926,7 +12931,7 @@ async fn cloud_track_details_response(
             account: Some(account.clone()),
         })
         .await?;
-    Ok(Json(access.response(tracks, platform)))
+    Ok(Json(access.list_response(tracks, platform)))
 }
 
 async fn cloud_track_details_get(

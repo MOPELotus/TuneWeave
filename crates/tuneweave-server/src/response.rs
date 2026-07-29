@@ -174,12 +174,21 @@ impl<T> ApiResponse<T> {
     }
 
     #[must_use]
+    pub(crate) fn with_result_count(self) -> Self
+    where
+        T: ResponseResultCount,
+    {
+        record_request_result_count(self.data.response_result_count());
+        self
+    }
+
+    #[must_use]
     pub(crate) fn with_pagination(mut self, pagination: PageMeta) -> Self
     where
         T: ResponseResultCount,
     {
         record_request_pagination(pagination.has_more);
-        record_request_result_count(self.data.response_result_count());
+        self = self.with_result_count();
         self.meta.pagination = Some(pagination);
         self
     }
@@ -539,6 +548,18 @@ mod tests {
                 let summary = current_request_summary();
                 assert_eq!(summary.platform_name(), "multiple");
                 assert_eq!(summary.credential_source_name(), "mixed");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn response_summary_counts_non_paginated_typed_lists() {
+        CURRENT_REQUEST_SUMMARY
+            .scope(RefCell::new(RequestCompletionSummary::default()), async {
+                let _response = ApiResponse::new(vec!["first", "second"]).with_result_count();
+                let summary = current_request_summary();
+                assert_eq!(summary.pagination_has_more, None);
+                assert_eq!(summary.result_count, Some(2));
             })
             .await;
     }
