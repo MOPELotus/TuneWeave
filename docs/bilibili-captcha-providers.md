@@ -1,6 +1,6 @@
 # B 站验证码 Provider 契约
 
-本链路用于 B 站 GeeTest 人机验证、密码登录和短信验证码登录，实施阶段位于酷狗、咪咕、酷我公开音源补充层之后。实现时直接审查 `MOPELotus/Lotus-ReFactor` 已实际使用的完整流程，并按 TuneWeave 的强类型 provider、多账户、调用方凭证和短期事务模型重新设计；不得机械翻译参考代码。
+本链路用于 B 站 GeeTest 人机验证、密码登录和短信验证码登录，实施阶段位于汽水、咪咕、酷狗、酷我四个平台完整项目范围之后。该顺序调整不改变 BA03–BA07 属于 B 站最终项目范围或当前 `deferred` 状态。实现时直接审查 `MOPELotus/Lotus-ReFactor` 已实际使用的完整流程，并按 TuneWeave 的强类型 provider、多账户、调用方凭证和短期事务模型重新设计；不得机械翻译参考代码。
 
 ## Provider 与顺序
 

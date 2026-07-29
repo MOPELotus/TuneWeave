@@ -15,7 +15,7 @@
 | BF05 | 平台基础 | 强类型凭证、多账户与调用方托管 | `verified` | `bilibili_cookie_v1` 强类型保存并校验 `DedeUserID/DedeUserID__ckMd5/SESSDATA/bili_jct/sid/refresh_token`，Debug 与错误不回显秘密；二维码确认从首个账户功能起支持 `(bilibili, account)` 及 `server/client/both`，调用方凭证平台、类型、到期语义和内部字段均在发网前验证。三种归属模式和账户隔离已离线验收；普通账户以 `server` 模式真实扫码后写入独立数据目录，刷新及服务重启后仍从同一 `(bilibili, account)` 代际恢复有效会话，凭据未进入响应、日志或仓库 |
 | BA01 | 登录账户 | Web 二维码创建 | `verified` | 固定调用 `x/passport-login/web/qrcode/generate?source=main-fe-header`，同时兼容并严格校验当前 `account.bilibili.com/.../scan-web` 与旧版 Passport 扫码地址；二维码由进程内生成自包含 SVG，平台 key 只进入有期限的服务端事务。已真实创建并验证可轮询的二维码 |
 | BA02 | 登录账户 | Web 二维码轮询与状态机 | `verified` | 按 BBDown 链路固定调用 `x/passport-login/web/qrcode/poll`，完整区分 `86101` 未扫码、`86090` 已扫码待确认、`86038` 过期、`0` 成功及其他失败码；确认时优先从重复 `Set-Cookie` 提取凭据，仅在必需字段缺失时从固定 `crossDomain` 地址回填，成功凭证只按事务固定归属模式交付一次。未扫码真实网络态、全部离线响应分支和普通账户扫码确认成功态均已通过；外层事务确认后返回脱敏资料，内部二维码 key 与 Cookie 未回显 |
-| BA03 | 登录账户 | 登录 captcha 挑战 | `deferred` | 排到酷狗/咪咕/酷我公开音源补充层之后；按 `test_nine → ttocr → gtmanual` 默认链和显式 `vision_ai` 实现，完整契约见 `docs/bilibili-captcha-providers.md` |
+| BA03 | 登录账户 | 登录 captcha 挑战 | `deferred` | 排到汽水、咪咕、酷狗、酷我四个平台完整项目范围之后；按 `test_nine → ttocr → gtmanual` 默认链和显式 `vision_ai` 实现，完整契约见 `docs/bilibili-captcha-providers.md` |
 | BA04 | 登录账户 | Web 密码登录 | `deferred` | 与 BA03 同阶段；获取 RSA 公钥与 salt、加密密码并保留风控二次验证分支，密码与验证码不得持久化或进入日志 |
 | BA05 | 登录账户 | 国家/地区电话区号 | `deferred` | 与密码/短信登录链一并实施，对接 Web country list 并映射统一国家区号模型 |
 | BA06 | 登录账户 | Web 短信验证码发送 | `deferred` | 与 BA03 共用受限验证码事务、设备和网络身份；手机号不持久化，发送与登录不得切换身份 |
@@ -50,4 +50,4 @@
 3. BP01–BP08：完成个人目录、公开合集、收藏夹和 Uni Playlist 双来源导入。
 4. BV01、BV02、BV04 与 BM01–BM05：完成封面、分 P、字幕、仅音频播放/下载及视频播放链。
 5. BV03：统计等非播放阻塞展示在上述链路稳定后补齐。
-6. 酷狗、咪咕、酷我公开音源补充层完成后，再实施 BA03–BA07；该延期不改变最终范围。
+6. 汽水、咪咕、酷狗、酷我四个平台完整项目范围完成后，再实施 BA03–BA07；该延期不改变最终范围或状态含义。
