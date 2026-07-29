@@ -1493,6 +1493,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 汽水歌词使用 `GET /v1/tracks/soda:<track_id>/lyrics`，公开层不接受账户、`song_type` 或助唱标注参数。Provider 刷新同一匿名 `track_v2` 并严格回配歌曲 ID 与媒体类型，把平台 `[行起点,行时长]<相对字偏移,字时长,保留字段>` 毫秒格式保存在 `word_synced`，同时从相同已验证行派生带三位毫秒时间戳的 `plain`；`format=krc` 始终由逐字轨决定，普通歌词不能覆盖或截断高级轨。每一行、每个字标签、顺序和相对时间范围都会验证，正文限制 4 MiB、最多 20,000 行且每行最多 2,000 个时序单元；任一逐字结构损坏会返回明确上游错误，不会静默降级为普通文本。与官方分享页 `lyrics.sentences` 的真实差分确认 26 行正文和 214 个字的文本、绝对起止时间完全一致；页面额外两行前置信息不混进演唱正文，词作者通过独立 contributor 表达，页面末句的 `Number.MAX_SAFE_INTEGER` 展示哨兵也不会污染真实末字结束时间。当前公开响应没有独立翻译或音译，因此对应字段保持 `null`；扩展只记录计数和时间单位，不含歌词请求中的临时 player 数据。真实统一 HTTP 已确认普通与逐字轨同时存在，非法账户和平台外参数均在联网前返回 400。
 
+汽水实时权益使用 `GET /v1/tracks/soda:<track_id>/availability`，接受 `bitrate=1..10000000` 且公开层不接受账户。Provider 每次刷新匿名 `track_v2`，严格解析内嵌 player 模型并校验平台成功码、歌曲媒体 ID、音频类型、SSL 标志、实际时长、媒体规格、单次有效期及固定 `*-luna.douyinvod.com` HTTPS 主机；`backup_url` 当前既可能是单字符串也可能是数组，两种官方形态由强类型联合字段兼容。player 媒体 ID 与歌曲 `vid` 一致且时长回配时表示完整授权；与 `preview/audition_info` 的 VID、起点和时长一致时表示试听，不能仅凭目录 `only_vip_playable` 猜测。真实免费样本返回完整 115.357 秒加密媒体并按请求码率选择实际档位；会员样本只返回从 107904 ms 开始的 60001 ms 试听。两者当前均为 `cenc-aes-ctr`，响应只公开安全媒体规格、音质、试听窗口、有效期及 `requires_local_decryption=true`，不会回显主备 URL、`kid`、`spade_a`、文件 ID、哈希、player 模型或临时令牌。完整流与试听流要在下一阶段完成受限本地解密后才声明音频流能力。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

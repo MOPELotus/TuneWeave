@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
-    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
+    SearchKind, SearchQuery, SearchVariant, Track, TrackAvailability, TrackAvailabilityRequest,
+    TuneWeaveError,
 };
 
 use crate::client::{SodaClient, SodaConfig, UPSTREAM_SEARCH_PAGE_SIZE};
@@ -52,6 +53,7 @@ impl MusicProvider for SodaProvider {
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::Lyrics,
+            Capability::TrackAvailability,
         ])
     }
 
@@ -150,6 +152,16 @@ impl MusicProvider for SodaProvider {
         let identity = self.client.resolve_track_identity(id).await?;
         self.client.lyrics(&identity).await
     }
+
+    async fn track_availability(
+        &self,
+        id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        validate_availability_request(request)?;
+        let identity = self.client.resolve_track_identity(id).await?;
+        self.client.track_availability(&identity, request).await
+    }
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -210,6 +222,20 @@ fn validate_lyrics_request(
     Ok(())
 }
 
+fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public availability does not accept an account",
+        ));
+    }
+    if request.bitrate == 0 || request.bitrate > 10_000_000 {
+        return Err(soda_invalid_request(
+            "Soda availability bitrate must be between 1 and 10000000",
+        ));
+    }
+    Ok(())
+}
+
 fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Soda)
 }
@@ -234,10 +260,12 @@ mod tests {
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::Lyrics,
+                Capability::TrackAvailability,
             ])
         );
         assert!(provider.supports(Capability::TrackDetail));
         assert!(provider.supports(Capability::Lyrics));
+        assert!(provider.supports(Capability::TrackAvailability));
         assert!(!provider.supports(Capability::AudioStream));
     }
 
@@ -285,6 +313,21 @@ mod tests {
             .lyrics_with_options("7304719759323564095", &request)
             .await
             .expect_err("Soda lyrics must reject foreign lyric controls");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+
+        let availability = TrackAvailabilityRequest {
+            bitrate: 200_000,
+            account: Some("default".to_owned()),
+        };
+        let error = provider
+            .track_availability("7304719759323564095", &availability)
+            .await
+            .expect_err("Soda availability must reject accounts");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+        let error = provider
+            .track_availability("7304719759323564095", &TrackAvailabilityRequest::new(0))
+            .await
+            .expect_err("Soda availability must reject zero bitrate");
         assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
     }
 }

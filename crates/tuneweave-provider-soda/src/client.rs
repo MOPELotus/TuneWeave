@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, Platform,
-    Quality, ResourceRef, Result, Track, TuneWeaveError,
+    Quality, ResourceRef, Result, Track, TrackAvailability, TrackAvailabilityRequest,
+    TuneWeaveError,
 };
 use url::Url;
 
@@ -85,12 +86,96 @@ struct SodaTrackDetailEnvelope {
     track: Option<SodaTrack>,
     risk_result: Option<i64>,
     lyric: SodaLyricPayload,
+    track_player: Option<SodaTrackPlayer>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SodaLyricPayload {
     content: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaTrackPlayer {
+    expire_at: u64,
+    media_id: String,
+    video_model: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaVideoModel {
+    status: i64,
+    message: String,
+    video_id: String,
+    enable_ssl: bool,
+    video_duration: f64,
+    media_type: String,
+    url_expire: u64,
+    video_list: Vec<SodaVideoVariant>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaVideoVariant {
+    main_url: String,
+    backup_url: FlexibleStringList,
+    video_meta: SodaVideoMeta,
+    encrypt_info: SodaMediaEncryption,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(untagged)]
+enum FlexibleStringList {
+    One(String),
+    Many(Vec<String>),
+    #[default]
+    Null,
+}
+
+impl FlexibleStringList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+            Self::Null => Vec::new(),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaVideoMeta {
+    quality: String,
+    vtype: String,
+    bitrate: u64,
+    size: u64,
+    codec_type: String,
+    real_bitrate: u64,
+    audio_sample_rate: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaMediaEncryption {
+    encrypt: bool,
+    kid: String,
+    spade_a: String,
+    encryption_method: String,
+}
+
+#[derive(Serialize)]
+struct SodaPublicMediaSpec {
+    quality: String,
+    format: String,
+    codec: String,
+    bitrate: u64,
+    real_bitrate: u64,
+    size: u64,
+    sample_rate_hz: Option<u64>,
+    encrypted: bool,
+    encryption_method: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -214,8 +299,8 @@ struct SodaAuditionInfo {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct SodaLabelInfo {
-    only_vip_download: bool,
-    only_vip_playable: bool,
+    only_vip_download: Option<bool>,
+    only_vip_playable: Option<bool>,
     quality_only_vip_can_download: Vec<String>,
     quality_only_vip_can_play: Vec<String>,
     quality_map: BTreeMap<String, SodaQualityPolicy>,
@@ -390,6 +475,17 @@ impl SodaClient {
     pub(crate) async fn lyrics(&self, identity: &SodaTrackIdentity) -> Result<Lyrics> {
         let body = self.fetch_track_v2_body(identity, "Soda lyrics").await?;
         parse_lyrics_response(&body, identity)
+    }
+
+    pub(crate) async fn track_availability(
+        &self,
+        identity: &SodaTrackIdentity,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let body = self
+            .fetch_track_v2_body(identity, "Soda track availability")
+            .await?;
+        parse_track_availability_response(&body, identity, request)
     }
 
     pub async fn resolve_track_identity(&self, input: &str) -> Result<SodaTrackIdentity> {
@@ -573,6 +669,355 @@ fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Ly
         contributors,
         extensions,
     })
+}
+
+fn parse_track_availability_response(
+    body: &[u8],
+    identity: &SodaTrackIdentity,
+    request: &TrackAvailabilityRequest,
+) -> Result<TrackAvailability> {
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda availability returned malformed JSON"))?;
+    validate_status_metadata(&envelope.status_info, "Soda availability")?;
+    if envelope.risk_result.is_some_and(|value| value != 0) {
+        return Err(soda_upstream_error(
+            "Soda availability was rejected by platform risk control",
+        ));
+    }
+    let track = envelope
+        .track
+        .ok_or_else(|| soda_upstream_error("Soda availability omitted the track payload"))?;
+    if track.id.trim() != identity.id() {
+        return Err(soda_upstream_error(
+            "Soda availability returned a mismatched track identity",
+        ));
+    }
+    if !track.media_type.trim().is_empty() && track.media_type.trim() != "track" {
+        return Err(soda_upstream_error(
+            "Soda availability returned a non-track media type",
+        ));
+    }
+
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_pc_track_v2"));
+    extensions.insert(
+        "catalog_only_vip_playable".to_owned(),
+        json!(track.label_info.only_vip_playable),
+    );
+    if track.state.offline == Some(true) {
+        extensions.insert("unavailable_reason".to_owned(), json!("offline"));
+        return Ok(TrackAvailability {
+            track_ref: identity.resource_ref()?,
+            playable: false,
+            requested_bitrate: request.bitrate,
+            actual_bitrate: None,
+            platform_code: None,
+            message: "Soda reported that this track is offline".to_owned(),
+            extensions,
+        });
+    }
+
+    let Some(player) = envelope.track_player else {
+        extensions.insert("preview_available".to_owned(), json!(false));
+        return Ok(TrackAvailability {
+            track_ref: identity.resource_ref()?,
+            playable: false,
+            requested_bitrate: request.bitrate,
+            actual_bitrate: None,
+            platform_code: None,
+            message: "Soda did not authorize anonymous media".to_owned(),
+            extensions,
+        });
+    };
+    let media = validate_player_model(&track, &player, request.bitrate, envelope.status_info.now)?;
+    extensions.insert("preview_available".to_owned(), json!(media.preview));
+    extensions.insert("encrypted".to_owned(), json!(media.encrypted));
+    extensions.insert(
+        "requires_local_decryption".to_owned(),
+        json!(media.encrypted),
+    );
+    extensions.insert("media_duration_ms".to_owned(), json!(media.duration_ms));
+    extensions.insert("available_qualities".to_owned(), json!(media.qualities));
+    extensions.insert("media_specs".to_owned(), json!(media.specs));
+    extensions.insert(
+        "media_expires_at_epoch_seconds".to_owned(),
+        json!(media.expires_at),
+    );
+    if media.preview {
+        let (start_ms, duration_ms) = validated_preview_window(&track, media.duration_ms)?;
+        extensions.insert("preview_start_ms".to_owned(), json!(start_ms));
+        extensions.insert("preview_duration_ms".to_owned(), json!(duration_ms));
+        extensions.insert(
+            "preview_actual_bitrate".to_owned(),
+            json!(media.selected_bitrate),
+        );
+    }
+    Ok(TrackAvailability {
+        track_ref: identity.resource_ref()?,
+        playable: !media.preview,
+        requested_bitrate: request.bitrate,
+        actual_bitrate: (!media.preview).then_some(media.selected_bitrate),
+        platform_code: Some(media.platform_code),
+        message: if media.preview {
+            "Soda only permits an anonymous preview".to_owned()
+        } else {
+            "ok".to_owned()
+        },
+        extensions,
+    })
+}
+
+struct ValidatedSodaMedia {
+    preview: bool,
+    encrypted: bool,
+    duration_ms: u64,
+    selected_bitrate: u64,
+    platform_code: i64,
+    expires_at: u64,
+    qualities: Vec<Quality>,
+    specs: Vec<SodaPublicMediaSpec>,
+}
+
+fn validate_player_model(
+    track: &SodaTrack,
+    player: &SodaTrackPlayer,
+    requested_bitrate: u64,
+    upstream_now: u64,
+) -> Result<ValidatedSodaMedia> {
+    if player.video_model.is_empty() || player.video_model.len() > MAX_API_RESPONSE_BYTES as usize {
+        return Err(soda_upstream_error(
+            "Soda availability omitted a bounded player model",
+        ));
+    }
+    let model: SodaVideoModel = serde_json::from_str(&player.video_model)
+        .map_err(|_| soda_upstream_error("Soda availability returned a malformed player model"))?;
+    let duration_ms = seconds_to_milliseconds(model.video_duration).ok_or_else(|| {
+        soda_upstream_error("Soda availability returned an invalid media duration")
+    })?;
+    if model.status != 10
+        || model.message.trim() != "success"
+        || model.media_type.trim() != "audio"
+        || !model.enable_ssl
+        || model.video_id.trim().is_empty()
+        || model.video_id.trim() != player.media_id.trim()
+        || model.video_list.is_empty()
+        || model.video_list.len() > 16
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned inconsistent player metadata",
+        ));
+    }
+    let full = !track.vid.trim().is_empty()
+        && player.media_id.trim() == track.vid.trim()
+        && duration_ms.abs_diff(track.duration) <= 2_000;
+    let preview_id = track
+        .audition_info
+        .as_ref()
+        .map(|info| info.vid.trim())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            track
+                .preview
+                .as_ref()
+                .map(|preview| preview.vid.trim())
+                .filter(|value| !value.is_empty())
+        });
+    let preview = !full
+        && preview_id.is_some_and(|value| value == player.media_id.trim())
+        && track
+            .audition_info
+            .as_ref()
+            .map(|info| info.duration_ms)
+            .or_else(|| track.preview.as_ref().map(|preview| preview.duration))
+            .is_some_and(|expected| duration_ms.abs_diff(expected) <= 2_000);
+    if !full && !preview {
+        return Err(soda_upstream_error(
+            "Soda availability could not classify full or preview media",
+        ));
+    }
+
+    let mut specs = Vec::with_capacity(model.video_list.len());
+    let mut qualities = Vec::new();
+    let mut encrypted = false;
+    let mut selectable_bitrates = Vec::new();
+    for variant in model.video_list {
+        let spec = validate_video_variant(variant)?;
+        if let Some(quality) = map_quality(&spec.quality)
+            && !qualities.contains(&quality)
+        {
+            qualities.push(quality);
+        }
+        encrypted |= spec.encrypted;
+        selectable_bitrates.push(spec.bitrate);
+        specs.push(spec);
+    }
+    qualities = [
+        Quality::Low,
+        Quality::Standard,
+        Quality::High,
+        Quality::Lossless,
+        Quality::Hires,
+        Quality::Spatial,
+    ]
+    .into_iter()
+    .filter(|quality| qualities.contains(quality))
+    .collect();
+    let selected_bitrate = select_bitrate(&selectable_bitrates, requested_bitrate)
+        .ok_or_else(|| soda_upstream_error("Soda availability omitted a usable bitrate"))?;
+    let expires_at = [player.expire_at, model.url_expire]
+        .into_iter()
+        .filter(|value| *value > 0)
+        .min()
+        .ok_or_else(|| soda_upstream_error("Soda availability omitted media expiry"))?;
+    if upstream_now == 0
+        || expires_at <= upstream_now
+        || expires_at > upstream_now.saturating_add(2 * 24 * 60 * 60)
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned an invalid media expiry",
+        ));
+    }
+    Ok(ValidatedSodaMedia {
+        preview,
+        encrypted,
+        duration_ms,
+        selected_bitrate,
+        platform_code: model.status,
+        expires_at,
+        qualities,
+        specs,
+    })
+}
+
+fn validate_video_variant(variant: SodaVideoVariant) -> Result<SodaPublicMediaSpec> {
+    let meta = variant.video_meta;
+    let backup_urls = variant.backup_url.into_vec();
+    if meta.quality.is_empty()
+        || meta.quality.len() > 64
+        || meta.vtype.is_empty()
+        || meta.vtype.len() > 32
+        || meta.codec_type.is_empty()
+        || meta.codec_type.len() > 32
+        || meta.bitrate == 0
+        || meta.bitrate > 10_000_000
+        || meta.real_bitrate == 0
+        || meta.real_bitrate > 10_000_000
+        || meta.size == 0
+        || meta.size > 10 * 1024 * 1024 * 1024
+        || backup_urls.len() > 4
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned an invalid media specification",
+        ));
+    }
+    validate_media_url(&variant.main_url)?;
+    for url in &backup_urls {
+        validate_media_url(url)?;
+    }
+    let encryption_method = if variant.encrypt_info.encrypt {
+        if variant.encrypt_info.encryption_method != "cenc-aes-ctr"
+            || variant.encrypt_info.kid.is_empty()
+            || variant.encrypt_info.kid.len() > 512
+            || variant.encrypt_info.spade_a.is_empty()
+            || variant.encrypt_info.spade_a.len() > 16 * 1024
+        {
+            return Err(soda_upstream_error(
+                "Soda availability returned unsupported media encryption",
+            ));
+        }
+        Some(variant.encrypt_info.encryption_method)
+    } else {
+        None
+    };
+    let sample_rate_hz = canonical_positive_decimal(&meta.audio_sample_rate)
+        .and_then(|value| value.parse::<u64>().ok());
+    Ok(SodaPublicMediaSpec {
+        quality: meta.quality,
+        format: meta.vtype,
+        codec: meta.codec_type,
+        bitrate: meta.bitrate,
+        real_bitrate: meta.real_bitrate,
+        size: meta.size,
+        sample_rate_hz,
+        encrypted: variant.encrypt_info.encrypt,
+        encryption_method,
+    })
+}
+
+fn validate_media_url(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 8_192 {
+        return Err(soda_upstream_error(
+            "Soda availability returned an invalid media URL",
+        ));
+    }
+    let url = Url::parse(value)
+        .map_err(|_| soda_upstream_error("Soda availability returned an invalid media URL"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| soda_upstream_error("Soda availability returned an invalid media URL"))?;
+    let prefix = host
+        .strip_suffix("-luna.douyinvod.com")
+        .ok_or_else(|| soda_upstream_error("Soda availability returned an untrusted media host"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !matches!(url.port(), None | Some(443))
+        || url.fragment().is_some()
+        || url.path().is_empty()
+        || prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned an untrusted media URL",
+        ));
+    }
+    Ok(())
+}
+
+fn validated_preview_window(track: &SodaTrack, media_duration_ms: u64) -> Result<(u64, u64)> {
+    let audition = track.audition_info.as_ref();
+    let preview = track.preview.as_ref();
+    if let (Some(audition), Some(preview)) = (audition, preview)
+        && (audition.vid.trim() != preview.vid.trim()
+            || audition.start_time_ms != preview.start
+            || audition.duration_ms.abs_diff(preview.duration) > 100)
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned conflicting preview windows",
+        ));
+    }
+    let (start, duration) = audition
+        .map(|value| (value.start_time_ms, value.duration_ms))
+        .or_else(|| preview.map(|value| (value.start, value.duration)))
+        .ok_or_else(|| soda_upstream_error("Soda availability omitted its preview window"))?;
+    if duration == 0
+        || duration.abs_diff(media_duration_ms) > 2_000
+        || start.saturating_add(duration) > track.duration.saturating_add(2_000)
+    {
+        return Err(soda_upstream_error(
+            "Soda availability returned an invalid preview window",
+        ));
+    }
+    Ok((start, duration))
+}
+
+fn seconds_to_milliseconds(value: f64) -> Option<u64> {
+    if !value.is_finite() || value <= 0.0 || value > 24.0 * 60.0 * 60.0 {
+        return None;
+    }
+    let milliseconds = (value * 1_000.0).round();
+    (milliseconds > 0.0 && milliseconds <= u64::MAX as f64).then_some(milliseconds as u64)
+}
+
+fn select_bitrate(values: &[u64], requested: u64) -> Option<u64> {
+    values
+        .iter()
+        .copied()
+        .filter(|value| *value <= requested)
+        .max()
+        .or_else(|| values.iter().copied().min())
 }
 
 struct ParsedSodaLyrics {
@@ -1237,6 +1682,147 @@ mod tests {
         assert!(parse_word_synced_lyrics("[0,1000]<0,500,0>好\0").is_err());
     }
 
+    fn availability_fixture(preview: bool) -> Vec<u8> {
+        let mut response: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        let full_vid = "v03ad6g10000cli4pgjc77u93k8r7pbg";
+        let preview_vid = "v10ad6g50000d6po467og65ocf8m2mcg";
+        response["track"]["vid"] = json!(full_vid);
+        response["track"]["preview"] = json!({
+            "vid": preview_vid,
+            "start": 107_904,
+            "duration": 60_001,
+            "bit_rates": []
+        });
+        response["track"]["audition_info"] = json!({
+            "vid": preview_vid,
+            "start_time_ms": 107_904,
+            "duration_ms": 60_001
+        });
+        let media_id = if preview { preview_vid } else { full_vid };
+        let duration = if preview { 60.001 } else { 180.822 };
+        let variants = [
+            ("highest", 260_477_u64, 1_953_579_u64),
+            ("higher", 132_424_u64, 993_185_u64),
+            ("medium", 68_413_u64, 513_101_u64),
+        ]
+        .into_iter()
+        .map(|(quality, bitrate, size)| {
+            json!({
+                "main_url": format!("https://v1-test-luna.douyinvod.com/media/{quality}?a=1"),
+                "backup_url": [format!("https://v2-test-luna.douyinvod.com/media/{quality}?a=1")],
+                "video_meta": {
+                    "quality": quality,
+                    "vtype": "m4a",
+                    "bitrate": bitrate,
+                    "real_bitrate": bitrate,
+                    "size": size,
+                    "codec_type": "aac",
+                    "audio_sample_rate": "44100",
+                    "file_id": "not-exported",
+                    "file_hash": "not-exported"
+                },
+                "encrypt_info": {
+                    "encrypt": true,
+                    "kid": "private-kid",
+                    "spade_a": "private-spade",
+                    "encryption_method": "cenc-aes-ctr"
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+        let model = json!({
+            "status": 10,
+            "message": "success",
+            "video_id": media_id,
+            "enable_ssl": true,
+            "video_duration": duration,
+            "media_type": "audio",
+            "url_expire": 1_785_423_262_u64,
+            "video_list": variants
+        });
+        response["track_player"] = json!({
+            "expire_at": 1_785_423_262_u64,
+            "media_id": media_id,
+            "video_model": serde_json::to_string(&model).expect("serialize video model"),
+            "url_player_info": "https://vod-luna.douyin.com/?token=private"
+        });
+        serde_json::to_vec(&response).expect("serialize availability fixture")
+    }
+
+    fn mutate_availability_fixture(mutator: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&availability_fixture(false)).expect("availability JSON");
+        let model_text = response["track_player"]["video_model"]
+            .as_str()
+            .expect("video model");
+        let mut model: serde_json::Value =
+            serde_json::from_str(model_text).expect("video model JSON");
+        mutator(&mut model);
+        response["track_player"]["video_model"] =
+            json!(serde_json::to_string(&model).expect("serialize changed model"));
+        serde_json::to_vec(&response).expect("serialize changed availability")
+    }
+
+    #[test]
+    fn availability_distinguishes_full_media_from_preview_and_hides_crypto_material() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let request = TrackAvailabilityRequest::new(200_000);
+        let full =
+            parse_track_availability_response(&availability_fixture(false), &identity, &request)
+                .expect("parse full Soda media");
+        assert!(full.playable);
+        assert_eq!(full.actual_bitrate, Some(132_424));
+        assert_eq!(full.extensions["preview_available"], false);
+        assert_eq!(full.extensions["encrypted"], true);
+        assert_eq!(full.extensions["requires_local_decryption"], true);
+
+        let preview =
+            parse_track_availability_response(&availability_fixture(true), &identity, &request)
+                .expect("parse Soda preview media");
+        assert!(!preview.playable);
+        assert_eq!(preview.actual_bitrate, None);
+        assert_eq!(preview.extensions["preview_available"], true);
+        assert_eq!(preview.extensions["preview_start_ms"], 107_904);
+        assert_eq!(preview.extensions["preview_duration_ms"], 60_001);
+        assert_eq!(preview.extensions["preview_actual_bitrate"], 132_424);
+        let serialized = serde_json::to_string(&preview).expect("serialize Soda availability");
+        for secret in [
+            "private-kid",
+            "private-spade",
+            "url_player_info",
+            "token=private",
+            "file_id",
+            "file_hash",
+        ] {
+            assert!(!serialized.contains(secret), "must hide {secret}");
+        }
+    }
+
+    #[test]
+    fn availability_rejects_untrusted_media_identity_encryption_and_expiry() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let request = TrackAvailabilityRequest::default();
+        let evil = mutate_availability_fixture(|model| {
+            model["video_list"][0]["main_url"] = json!("https://evil.example/media");
+        });
+        assert!(parse_track_availability_response(&evil, &identity, &request).is_err());
+        let wrong_id = mutate_availability_fixture(|model| {
+            model["video_id"] = json!("unexpected-media");
+        });
+        assert!(parse_track_availability_response(&wrong_id, &identity, &request).is_err());
+        let method = mutate_availability_fixture(|model| {
+            model["video_list"][0]["encrypt_info"]["encryption_method"] = json!("unknown");
+        });
+        assert!(parse_track_availability_response(&method, &identity, &request).is_err());
+        let expiry = mutate_availability_fixture(|model| {
+            model["url_expire"] = json!(1_785_336_000_u64);
+        });
+        assert!(parse_track_availability_response(&expiry, &identity, &request).is_err());
+    }
+
     #[test]
     fn explicit_empty_search_is_a_stable_empty_page() {
         let page = parse_search_response(
@@ -1446,5 +2032,34 @@ mod tests {
         );
         assert_eq!(lyrics.translated, None);
         assert_eq!(lyrics.romanized, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_anonymous_availability_distinguishes_full_and_preview_media() {
+        let client = SodaClient::test_client();
+        let request = TrackAvailabilityRequest::new(200_000);
+        let free =
+            SodaTrackIdentity::parse("6911353635137914887").expect("valid free Soda identity");
+        let free = client
+            .track_availability(&free, &request)
+            .await
+            .expect("live free Soda availability");
+        assert!(free.playable);
+        assert!(free.actual_bitrate.is_some());
+        assert_eq!(free.extensions["preview_available"], false);
+        assert_eq!(free.extensions["encrypted"], true);
+
+        let paid =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid paid Soda identity");
+        let paid = client
+            .track_availability(&paid, &request)
+            .await
+            .expect("live preview Soda availability");
+        assert!(!paid.playable);
+        assert_eq!(paid.actual_bitrate, None);
+        assert_eq!(paid.extensions["preview_available"], true);
+        assert_eq!(paid.extensions["preview_start_ms"], 107_904);
+        assert_eq!(paid.extensions["preview_duration_ms"], 60_001);
     }
 }
