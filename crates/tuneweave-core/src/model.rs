@@ -4446,6 +4446,13 @@ pub struct UniPlaylistItemDeleteResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistDeleteResult {
+    pub playlist: UniPlaylist,
+    pub removed_item_count: u64,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistItemOrderRequest {
     pub item_ids: Vec<String>,

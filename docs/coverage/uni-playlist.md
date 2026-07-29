@@ -6,7 +6,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 - `implemented`：代码及局部测试已完成，仍缺完整 HTTP、持久化或播放链验收。
 - `verified`：核心契约、存储/路由和异常边界均已自动化验证；涉及外部 provider 时还需真实网络验证。
 
-当前统计：`pending=7`、`implemented=1`、`verified=11`。
+当前统计：`pending=7`、`implemented=0`、`verified=12`。
 
 当前已实现的是服务端托管模式：底层支持多个独立 Uni Playlist，并可通过分页目录重新发现，但仍共同保存于一个 `uni-playlists.json`。客户端托管、无状态 materialize/播放、显式迁移和服务端存储改造已完成设计并进入实施阶段；完整边界见 [Uni Playlist 客户端托管与存储设计](../uni-playlist-ownership.md)。
 
@@ -27,7 +27,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 | 无状态平台来源展开 | `pending` | 规划 `POST /v1/uni/materialize/imports`：完整分页展开一个或多个可播放集合，保留来源与内部顺序及重复项，把结果返回客户端但不创建 `uni:<id>`、不写服务端存储；大型结果需要受控分页、流式或压缩传输。 |
 | 无状态资源标准化 | `pending` | 规划 `POST /v1/uni/materialize/items`：批量解析歌曲、MV、视频、播客节目和广播的真实元数据并返回标准化项目；限制批量、响应大小、超时和上游分页。 |
 | 客户端托管项目播放 | `pending` | 规划 `POST /v1/uni/items/stream`：只提交当前项目和播放控制即可执行原平台播放及严格回退，服务端不要求完整歌单且不持久化项目；可选短期内存票据承接 GET/302，票据不得含可篡改目标 URL。 |
-| 服务端多歌单目录与元数据管理 | `implemented` | 分页 `GET /v1/uni/playlists` 已按不可变创建时间降序、同时间 ID 升序稳定列出服务端歌单，只返回元数据和项目数而不内联项目；`PATCH /v1/uni/playlists/{ref}` 已原子修改名称/描述，保留身份、创建时间和项目序列，相同值幂等且不重写文件。范围、长度、空字段、未知输入、缺失资源及文件重启均已验证。整歌单 `DELETE` 尚待实现，完成前本单元不升级为 `verified`。 |
+| 服务端多歌单目录与元数据管理 | `verified` | 分页 `GET /v1/uni/playlists` 按不可变创建时间降序、同时间 ID 升序稳定列出服务端歌单，只返回元数据和项目数而不内联项目；`PATCH /v1/uni/playlists/{ref}` 原子修改名称/描述，保留身份、创建时间和项目序列，相同值幂等且不重写文件；`DELETE` 在一次发布中移除指定歌单及全部项目索引，报告真实移除数且不影响其他歌单。范围、长度、空字段、未知输入、缺失资源、重复删除及文件重启均已验证。 |
 | Server 导出与 Client 文档导入 | `pending` | 规划完整导出和原子 `import-document`；保留顺序、重复项、稳定项目 ID 和快照，默认生成新服务端 ID，冲突不覆盖。迁移只做显式复制，不提供 `both` 自动同步。 |
 | 服务端持久化分片或嵌入式数据库 | `pending` | 在按歌单拆分文件与嵌入式数据库之间按体积、可移植性、事务和维护成本选型，使单歌单修改不再克隆并重写全局数据库；不得依赖独立外部数据库服务。 |
 | 旧单文件安全迁移 | `pending` | 将现有 `<TUNEWEAVE_DATA_DIR>/uni-playlists.json` 一次性迁移到新存储，保留多歌单、顺序、重复项和项目身份；失败不得覆盖原文件，Windows 中断后必须可恢复。 |

@@ -15,8 +15,8 @@ use serde_json::json;
 
 use crate::{
     ErrorCode, Extensions, Page, PageMeta, Platform, Result, TuneWeaveError, UniPlaylist,
-    UniPlaylistItem, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
-    UniPlaylistItemOrderResult, UniPlaylistUpdateRequest,
+    UniPlaylistDeleteResult, UniPlaylistItem, UniPlaylistItemAddResult,
+    UniPlaylistItemDeleteResult, UniPlaylistItemOrderResult, UniPlaylistUpdateRequest,
 };
 
 const UNI_PLAYLIST_FILE_VERSION: u32 = 1;
@@ -33,6 +33,7 @@ pub trait UniPlaylistStore: Send + Sync {
         request: &UniPlaylistUpdateRequest,
         updated_at_ms: u64,
     ) -> Result<UniPlaylist>;
+    fn delete(&self, id: &str) -> Result<UniPlaylistDeleteResult>;
     fn append_items(
         &self,
         playlist_id: &str,
@@ -123,6 +124,14 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .map_err(|_| uni_playlist_lock_error())?;
         let (playlist, _) = update_playlist_in_database(&mut database, id, request, updated_at_ms)?;
         Ok(playlist)
+    }
+
+    fn delete(&self, id: &str) -> Result<UniPlaylistDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        delete_playlist_from_database(&mut database, id)
     }
 
     fn append_items(
@@ -275,6 +284,18 @@ impl UniPlaylistStore for FileUniPlaylistStore {
             *database = next;
         }
         Ok(playlist)
+    }
+
+    fn delete(&self, id: &str) -> Result<UniPlaylistDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut next = database.clone();
+        let result = delete_playlist_from_database(&mut next, id)?;
+        persist_database(&self.path, &next)?;
+        *database = next;
+        Ok(result)
     }
 
     fn append_items(
@@ -459,6 +480,40 @@ fn update_playlist_in_database(
     }
     validate_uni_playlist(playlist)?;
     Ok((playlist.clone(), changed))
+}
+
+fn delete_playlist_from_database(
+    database: &mut UniPlaylistDatabase,
+    playlist_id: &str,
+) -> Result<UniPlaylistDeleteResult> {
+    validate_uni_playlist_id(playlist_id)?;
+    let playlist = database
+        .playlists
+        .get(playlist_id)
+        .cloned()
+        .ok_or_else(|| uni_playlist_not_found(playlist_id))?;
+    let removed_item_count = database
+        .items
+        .get(playlist_id)
+        .map(Vec::len)
+        .map(|count| u64::try_from(count).unwrap_or(u64::MAX))
+        .unwrap_or_default();
+    if removed_item_count != playlist.item_count {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Uni Playlist item index does not match its metadata",
+        ));
+    }
+    database.playlists.remove(playlist_id);
+    database.items.remove(playlist_id);
+    Ok(UniPlaylistDeleteResult {
+        playlist,
+        removed_item_count,
+        extensions: Extensions::from([
+            ("atomic".to_owned(), json!(true)),
+            ("items_returned".to_owned(), json!(false)),
+        ]),
+    })
 }
 
 fn append_items_to_database(
@@ -1257,6 +1312,61 @@ mod tests {
     }
 
     #[test]
+    fn playlist_delete_removes_its_items_without_touching_other_playlists() {
+        let store = MemoryUniPlaylistStore::default();
+        let mut deleted_playlist = sample_playlist("pl_01abcdefghijklmnop");
+        deleted_playlist.item_count = 2;
+        deleted_playlist.updated_at_ms = 1_753_137_600_200;
+        let deleted_items = [
+            UniPlaylistItem {
+                position: 0,
+                ..sample_item("item_01abcdefghijklmnop", "185809", 1_753_137_600_100)
+            },
+            UniPlaylistItem {
+                position: 1,
+                ..sample_item("item_02abcdefghijklmnop", "200001", 1_753_137_600_200)
+            },
+        ];
+        let retained_playlist = sample_playlist("pl_02abcdefghijklmnop");
+        store
+            .create_with_items(&deleted_playlist, &deleted_items)
+            .expect("create playlist to delete");
+        store
+            .create(&retained_playlist)
+            .expect("create retained playlist");
+
+        let result = store
+            .delete(&deleted_playlist.id)
+            .expect("delete playlist atomically");
+        assert_eq!(result.playlist, deleted_playlist);
+        assert_eq!(result.removed_item_count, 2);
+        assert_eq!(result.extensions["atomic"], true);
+        assert_eq!(result.extensions["items_returned"], false);
+        assert_eq!(
+            store.get(&result.playlist.id).expect("deleted lookup"),
+            None
+        );
+        assert_eq!(
+            store
+                .items(&result.playlist.id, 100, 0)
+                .expect_err("deleted item index is inaccessible")
+                .code,
+            ErrorCode::ResourceNotFound
+        );
+        assert_eq!(
+            store.get(&retained_playlist.id).expect("retained lookup"),
+            Some(retained_playlist)
+        );
+        assert_eq!(
+            store
+                .delete(&result.playlist.id)
+                .expect_err("reject repeated deletion")
+                .code,
+            ErrorCode::ResourceNotFound
+        );
+    }
+
+    #[test]
     fn imported_playlist_and_items_are_created_as_one_validated_unit() {
         let store = MemoryUniPlaylistStore::default();
         let mut playlist = sample_playlist("pl_01abcdefghijklmnop");
@@ -1514,6 +1624,49 @@ mod tests {
                     .expect("read reloaded playlist")
                     .expect("stored playlist")
             ]
+        );
+    }
+
+    #[test]
+    fn file_store_persists_whole_playlist_deletion_across_restart() {
+        let directory = TempDirectory::new();
+        let path = directory.0.join("uni-playlists.json");
+        let store = FileUniPlaylistStore::open(&path).expect("open file store");
+        let deleted_playlist = sample_playlist("pl_01abcdefghijklmnop");
+        let retained_playlist = sample_playlist("pl_02abcdefghijklmnop");
+        store
+            .create(&deleted_playlist)
+            .expect("persist playlist to delete");
+        store
+            .append_items(
+                &deleted_playlist.id,
+                &[sample_item(
+                    "item_01abcdefghijklmnop",
+                    "185809",
+                    1_753_137_600_100,
+                )],
+            )
+            .expect("persist deleted item");
+        store
+            .create(&retained_playlist)
+            .expect("persist retained playlist");
+
+        let result = store
+            .delete(&deleted_playlist.id)
+            .expect("persist whole playlist deletion");
+        assert_eq!(result.removed_item_count, 1);
+
+        let reopened = FileUniPlaylistStore::open(&path).expect("reopen file store");
+        assert_eq!(
+            reopened.get(&deleted_playlist.id).expect("deleted lookup"),
+            None
+        );
+        assert_eq!(
+            reopened
+                .playlists(100, 0)
+                .expect("retained directory")
+                .items,
+            vec![retained_playlist]
         );
     }
 

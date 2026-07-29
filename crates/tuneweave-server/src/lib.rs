@@ -86,19 +86,20 @@ use tuneweave_core::{
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
-    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistImportRequest,
-    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
-    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
-    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
-    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
-    UniPlaylistItemStream, UniPlaylistStore, UniPlaylistUpdateRequest, User, UserMusicGene,
-    UserProfile, UserProfileBackend, Video, VideoAudioStream, VideoAudioStreamRequest,
-    VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest, VideoKind, VideoPart,
-    VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest, VideoRecommendationKind,
-    VideoRecommendationRequest, VideoRecommendationView, VideoResourceKind, VideoSearchDuration,
-    VideoSearchFilters, VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest,
-    VideoSubtitleDocument, VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind,
-    VideoTaxonomyRequest, VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
+    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistDeleteResult,
+    UniPlaylistImportRequest, UniPlaylistImportResult, UniPlaylistImportSourceRequest,
+    UniPlaylistImportSourceResult, UniPlaylistItem, UniPlaylistItemAddRequest,
+    UniPlaylistItemAddResult, UniPlaylistItemDeleteResult, UniPlaylistItemInput,
+    UniPlaylistItemKind, UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult,
+    UniPlaylistItemSnapshot, UniPlaylistItemStream, UniPlaylistStore, UniPlaylistUpdateRequest,
+    User, UserMusicGene, UserProfile, UserProfileBackend, Video, VideoAudioStream,
+    VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
+    VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest, VideoTrackQuality,
+    VideoTrackStream, VideoTrackStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -665,7 +666,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/uni/playlists/{reference}",
-            get(uni_playlist).patch(uni_playlist_update),
+            get(uni_playlist)
+                .patch(uni_playlist_update)
+                .delete(uni_playlist_delete),
         )
         .route("/playlists", post(playlist_create).delete(playlists_delete))
         .route(
@@ -6443,6 +6446,26 @@ async fn uni_playlist_update(
     Ok(Json(
         ApiResponse::new(playlist).with_platform(Platform::Uni),
     ))
+}
+
+async fn uni_playlist_delete(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistDeleteResult>>, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_uni_playlist_reference(reference)?;
+    let store = Arc::clone(&state.uni_playlists);
+    let playlist_id = reference.id().to_owned();
+    let result = tokio::task::spawn_blocking(move || store.delete(&playlist_id))
+        .await
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist persistence task failed",
+            )
+        })??;
+    Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
 }
 
 async fn uni_playlists(
@@ -29864,6 +29887,89 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(missing["error"]["code"], "resource_not_found");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_delete_atomically_removes_metadata_and_items() {
+        let store = Arc::new(MemoryUniPlaylistStore::default());
+        let mut deleted_playlist = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_01abcdefghijklmnop").expect("deleted playlist ref"),
+            "待删除",
+            "连同项目原子删除",
+            1_753_137_600_000,
+        );
+        deleted_playlist.item_count = 1;
+        deleted_playlist.updated_at_ms = 1_753_137_600_100;
+        let deleted_item = UniPlaylistItem {
+            id: "item_01abcdefghijklmnop".to_owned(),
+            position: 0,
+            kind: UniPlaylistItemKind::Track,
+            source_ref: ResourceRef::new(Platform::Netease, "185809").expect("source track ref"),
+            snapshot: UniPlaylistItemSnapshot::new("反方向的钟"),
+            added_at_ms: 1_753_137_600_100,
+            extensions: Extensions::new(),
+        };
+        let retained_playlist = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_02abcdefghijklmnop")
+                .expect("retained playlist ref"),
+            "保留",
+            "不能受其他歌单删除影响",
+            1_753_137_600_200,
+        );
+        store
+            .create_with_items(&deleted_playlist, &[deleted_item])
+            .expect("create playlist with item");
+        store
+            .create(&retained_playlist)
+            .expect("create retained playlist");
+        let mut registry = ProviderRegistry::new();
+        registry.register(TestProvider).expect("register provider");
+        let app =
+            build_router(AppState::new(registry, Platform::Netease).with_uni_playlist_store(store));
+        let path = format!("/v1/uni/playlists/{}", deleted_playlist.resource_ref);
+
+        let (status, unknown_query) = json_request_from(
+            app.clone(),
+            Method::DELETE,
+            &format!("{path}?force=true"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(unknown_query["error"]["code"], "invalid_request");
+        let (status, still_present) = json_response_from(app.clone(), &path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(still_present["data"]["item_count"], 1);
+
+        let (status, deleted) = json_request_from(app.clone(), Method::DELETE, &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            deleted["data"]["playlist"]["ref"],
+            deleted_playlist.resource_ref.to_string()
+        );
+        assert_eq!(deleted["data"]["playlist"]["item_count"], 1);
+        assert_eq!(deleted["data"]["removed_item_count"], 1);
+        assert_eq!(deleted["data"]["extensions"]["atomic"], true);
+        assert_eq!(deleted["data"]["extensions"]["items_returned"], false);
+        assert_eq!(deleted["meta"]["platform"], "uni");
+
+        let items_path = format!("{path}/items");
+        for deleted_path in [&path, &items_path] {
+            let (status, missing) = json_response_from(app.clone(), deleted_path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(missing["error"]["code"], "resource_not_found");
+        }
+        let (status, directory) = json_response_from(app.clone(), "/v1/uni/playlists").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(directory["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            directory["data"][0]["ref"],
+            retained_playlist.resource_ref.to_string()
+        );
+
+        let (status, repeated) = json_request_from(app, Method::DELETE, &path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(repeated["error"]["code"], "resource_not_found");
     }
 
     #[tokio::test]
