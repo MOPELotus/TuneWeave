@@ -181,7 +181,89 @@ fn nonempty_env(name: &str) -> Option<String> {
 }
 
 async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::warn!(%error, "failed to install Ctrl+C handler");
+    let reason = wait_for_shutdown_reason().await;
+    info!(
+        shutdown_reason = reason.as_str(),
+        "TuneWeave shutdown requested"
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownReason {
+    CtrlC,
+    #[cfg(unix)]
+    Terminate,
+    SignalHandlerFailed,
+}
+
+impl ShutdownReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CtrlC => "ctrl_c",
+            #[cfg(unix)]
+            Self::Terminate => "terminate",
+            Self::SignalHandlerFailed => "signal_handler_failed",
+        }
+    }
+}
+
+async fn wait_for_ctrl_c() -> ShutdownReason {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => ShutdownReason::CtrlC,
+        Err(error) => {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "failed to receive the Ctrl+C shutdown signal"
+            );
+            ShutdownReason::SignalHandlerFailed
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_reason() -> ShutdownReason {
+    wait_for_ctrl_c().await
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_reason() -> ShutdownReason {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(signal) => signal,
+        Err(error) => {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "failed to install the terminate shutdown signal"
+            );
+            return wait_for_ctrl_c().await;
+        }
+    };
+    tokio::select! {
+        reason = wait_for_ctrl_c() => reason,
+        received = terminate.recv() => {
+            if received.is_some() {
+                ShutdownReason::Terminate
+            } else {
+                tracing::warn!("terminate shutdown signal stream ended unexpectedly");
+                wait_for_ctrl_c().await
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShutdownReason;
+
+    #[test]
+    fn shutdown_reasons_use_stable_safe_names() {
+        assert_eq!(ShutdownReason::CtrlC.as_str(), "ctrl_c");
+        #[cfg(unix)]
+        assert_eq!(ShutdownReason::Terminate.as_str(), "terminate");
+        assert_eq!(
+            ShutdownReason::SignalHandlerFailed.as_str(),
+            "signal_handler_failed"
+        );
     }
 }
