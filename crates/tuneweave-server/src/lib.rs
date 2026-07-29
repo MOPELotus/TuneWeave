@@ -655,6 +655,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
+        .route(
+            "/tracks/{reference}/stream/redirect",
+            get(track_stream_redirect),
+        )
         .route("/uni/materialize/items", post(uni_materialize_items))
         .route("/uni/materialize/imports", post(uni_materialize_imports))
         .route("/uni/items/stream", post(uni_client_item_stream))
@@ -4379,7 +4383,35 @@ async fn track_stream(
     params: Result<Query<StreamParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<MediaStream>>, ApiError> {
     let params = query_params(params)?;
-    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let (stream, account) =
+        resolve_track_stream_request(&state, &headers, reference, params).await?;
+    let resolved_platform = stream.resolved_platform;
+    let mut response = ApiResponse::new(stream).with_platform(resolved_platform);
+    if let Some(account) = account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
+async fn track_stream_redirect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    params: Result<Query<StreamParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let (stream, _) = resolve_track_stream_request(&state, &headers, reference, params).await?;
+    Ok(download_redirect_response(&stream.url))
+}
+
+async fn resolve_track_stream_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    reference: String,
+    params: StreamParams,
+) -> Result<(MediaStream, Option<String>), TuneWeaveError> {
+    let credentials = CallerCredentialSet::from_headers(headers, state)?;
     let reference = parse_reference(reference)?;
     let controls = parse_stream_controls(StreamControlInput {
         quality: params.quality.as_deref(),
@@ -4395,7 +4427,7 @@ async fn track_stream(
     })?;
     let mut request = controls.resolve_request(reference.platform());
     credentials.apply_stream_accounts(&mut request.accounts)?;
-    let state = credentials.scoped_state(&state)?;
+    let state = credentials.scoped_state(state)?;
 
     let origin_provider = state.registry.require(reference.platform())?;
     let origin_account = request.accounts.get(&reference.platform());
@@ -4403,13 +4435,7 @@ async fn track_stream(
         .track(reference.id(), origin_account.map(String::as_str))
         .await?;
     let stream = state.resolver.resolve(&origin, &request).await?;
-    let resolved_platform = stream.resolved_platform;
-    let mut response = ApiResponse::new(stream).with_platform(resolved_platform);
-    if let Some(account) = controls.account {
-        response = response.with_account(account);
-    }
-
-    Ok(Json(response))
+    Ok((stream, controls.account))
 }
 
 async fn uni_playlist_item_stream(
@@ -5301,7 +5327,20 @@ async fn track_download_redirect(
         return Ok(download_redirect_response(url));
     }
     match provider.stream(&track, &request).await {
-        Ok(stream) => Ok(download_redirect_response(&stream.url)),
+        Ok(stream) if stream.trial.is_none() => Ok(download_redirect_response(&stream.url)),
+        Ok(stream) => Err(TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "full download is unavailable; the provider only authorized a trial stream",
+        )
+        .with_platform(reference.platform())
+        .with_details(json!({
+            "download": download,
+            "trial": stream.trial,
+            "actual_quality": stream.actual_quality,
+            "resolved_track": stream.resolved_track,
+            "resolved_platform": stream.resolved_platform
+        }))
+        .into()),
         Err(mut error) => {
             let stream_details = std::mem::take(&mut error.details);
             error.details = json!({
@@ -20172,7 +20211,10 @@ mod tests {
                 duration_ms: track.duration_ms,
                 requested_quality: request.quality,
                 actual_quality: Quality::High,
-                trial: None,
+                trial: (track.id == "trial").then_some(tuneweave_core::TrialWindow {
+                    start_ms: 0,
+                    end_ms: 60_000,
+                }),
                 origin_track: Some(track.resource_ref.clone()),
                 resolved_track: track.resource_ref.clone(),
                 resolved_platform: Platform::Netease,
@@ -20182,7 +20224,7 @@ mod tests {
         }
 
         async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
-            let available = track.id != "fallback";
+            let available = !matches!(track.id.as_str(), "fallback" | "trial");
             Ok(MediaDownload {
                 track_ref: track.resource_ref.clone(),
                 platform: Platform::Netease,
@@ -32985,6 +33027,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_stream_redirect_reuses_resolution_and_disables_response_caching() {
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/v1/tracks/netease:2709812973/stream/redirect?quality=high&fallback=false",
+                    )
+                    .body(Body::empty())
+                    .expect("build stream redirect request"),
+            )
+            .await
+            .expect("stream redirect request succeeds");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://example.test/audio.mp3")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer")
+        );
+    }
+
+    #[tokio::test]
     async fn track_stream_scopes_caller_credentials_across_playback_platforms() {
         let netease = CallerCredential::issue(
             &ProviderCredential::new(
@@ -33645,6 +33724,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_download_redirect_never_exposes_a_trial_as_a_full_download() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/tracks/netease:trial/download/redirect",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"]["code"], "permission_denied");
+        assert_eq!(json["error"]["details"]["download"]["available"], false);
+        assert_eq!(json["error"]["details"]["trial"]["start_ms"], 0);
+        assert_eq!(json["error"]["details"]["trial"]["end_ms"], 60_000);
+        assert!(json["error"]["details"].get("url").is_none());
+    }
+
+    #[tokio::test]
     async fn track_download_rejects_invalid_or_unknown_parameters() {
         for path in [
             "/v1/tracks/netease:1/download?quality=future",
@@ -33669,6 +33763,7 @@ mod tests {
             "/v1/tracks/netease:2709812973/stream?unblock=true&fallback_platforms=qq",
             "/v1/tracks/netease:2709812973/stream?immersive_type=atmos",
             "/v1/tracks/netease:2709812973/stream?unknown=true",
+            "/v1/tracks/netease:2709812973/stream/redirect?unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");

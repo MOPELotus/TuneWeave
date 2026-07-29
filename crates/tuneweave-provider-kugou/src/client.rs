@@ -1033,8 +1033,19 @@ impl KugouClient {
         allow_trial: bool,
     ) -> Result<MediaResolution> {
         let album_audio_id = canonical_track_id(track)?;
-        let album_id = canonical_album_id(track)?;
-        let spec = select_media_spec(track, request)?;
+        let hydrated_track = if track
+            .extensions
+            .get("qualities")
+            .and_then(Value::as_object)
+            .is_none()
+        {
+            Some(self.track_detail(album_audio_id).await?)
+        } else {
+            None
+        };
+        let media_track = hydrated_track.as_ref().unwrap_or(track);
+        let album_id = canonical_album_id(media_track)?;
+        let spec = select_media_spec(media_track, request)?;
         let privilege = self
             .media_privilege(album_audio_id, album_id, &spec.hash)
             .await?;
