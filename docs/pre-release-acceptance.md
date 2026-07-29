@@ -30,7 +30,7 @@ B 站延期登录、后三个平台完整账户能力、验证码服务本地 Ru
 - 歌词、字幕和元数据验证不是占位值或空壳；
 - Server Uni Playlist 验证多歌单目录、创建、读取、元数据修改、删除、导入、重复项、顺序、播放回退和重启恢复；
 - Client Uni Playlist 验证来源展开、项目标准化和单项播放均无持久化写入，且无需上传完整歌单；
-- `tuneweave_uni_playlist_v1` 验证跨实例交换、Server 导出、Client 文档原子导入、重复项与稳定身份不丢失；
+- `tuneweave_uni_playlist_v1` 验证跨实例交换、Server identity/gzip 导出等价、Client 文档原子导入、重复项与稳定身份不丢失；
 - Uni Playlist 验证按歌单独立持久化、失败不覆盖、Windows 中断恢复，且大型歌单修改不再重写全局数据库；
 - 账户资料验证 UID、昵称、头像、会员状态和精确账户选择；
 - 会话状态、刷新和退出使用现有凭据或专用测试账户；

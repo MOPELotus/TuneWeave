@@ -1625,7 +1625,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 | GET | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | 持久化的 `UniPlaylist` 元数据 |
 | PATCH | `/v1/uni/playlists/{ref}` | JSON `{name?, description?}`，至少一个字段 | 修改后的 `UniPlaylist` 元数据 |
 | DELETE | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | `UniPlaylistDeleteResult`，原子删除元数据与全部项目 |
-| GET | `/v1/uni/playlists/{ref}/export` | 完整 `uni:<opaque-id>` 引用 | 完整安全的 `UniPlaylistDocument` V1 副本 |
+| GET | `/v1/uni/playlists/{ref}/export` | 完整 `uni:<opaque-id>` 引用；可选 `Accept-Encoding: gzip` | 完整安全的 `UniPlaylistDocument` V1 副本 |
 | POST | `/v1/uni/playlists/import-document` | JSON `{document, preserve_id?=false}` | `UniPlaylistDocumentImportResult`，完整验证后原子创建服务端副本 |
 | POST | `/v1/uni/materialize/imports` | 查询 `limit?=200`、`offset?=0`；JSON `{name?, description?, sources:[{ref?, platform?, type?, id?, account?}]}` | 分页 `UniPlaylistMaterializeImportsResult`，完整展开来源但不持久化 |
 | POST | `/v1/uni/materialize/items` | JSON `{items:[{ref,kind}], accounts?}` | `UniPlaylistMaterializeItemsResult`，不持久化的 V1 客户端项目 |
@@ -1641,7 +1641,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 
 V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目只允许成组的 `import_source_index/import_source_ref/import_source_type` 和可选 `imported_from_item_id`，快照只允许规范引用、可播放性、音质档位、视频/播客/电台静态展示摘要。所有层级拒绝未知字段，因此不存在 Cookie、token、密码、验证码、设备身份、临时媒体 URL、签名、账户别名或任意请求头的合法槽位。快照 `cover_url` 只接受受限 HTTPS 展示地址，服务端不得根据它发起媒体或资源请求；真正播放仍按 `source_ref` 重新进入 provider、账户权益检查和统一回退链。
 
-服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store`；它是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。当前 JSON 文档受 V1 的 100,000 项结构上限约束；针对超大响应的流式或压缩传输仍属于本单元的收口条件。
+服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store` 和 `Vary: Accept-Encoding`；请求接受 `gzip` 且质量值大于零时返回 `Content-Encoding: gzip`，显式 `gzip;q=0` 优先于通配符并保持 identity。导出快照、JSON 序列化和压缩均在受控阻塞任务中完成，gzip 直接接收序列化输出，不额外保留完整未压缩响应缓冲。压缩与 identity 解码后具有相同安全文档，仍受 V1 的 100,000 项结构上限约束。导出是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。
 
 文档导入请求体上限为 16 MiB，并在任何写入前完成格式、身份、数量、时间、连续顺序、唯一项目 ID、来源引用、快照及扩展白名单校验。默认生成与文档 ID 不同的新服务端 `uni:<id>`，但保留全部项目稳定 ID；`preserve_id=true` 才尝试把文档 ID 用作服务端 ID，已有资源会返回 `conflict`，绝不覆盖。验证、转换或持久化任一阶段失败都不会产生目标记录。成功结果明确返回源文档 ID、是否保留歌单 ID，以及 `atomic=true/item_ids_preserved=true/automatic_sync=false`；导入仅复制一次，不建立后续同步。
 

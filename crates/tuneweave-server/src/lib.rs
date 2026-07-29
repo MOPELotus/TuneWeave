@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{BytesRejection, JsonRejection, QueryRejection},
@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
+use flate2::{Compression, write::GzEncoder};
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -6673,24 +6674,120 @@ async fn uni_playlist_delete(
 async fn uni_playlist_export(
     State(state): State<AppState>,
     Path(reference): Path<String>,
+    headers: HeaderMap,
     params: Result<Query<NoQueryParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let _ = query_params(params)?;
     let reference = parse_uni_playlist_reference(reference)?;
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
-    let document = tokio::task::spawn_blocking(move || store.export_document(&playlist_id))
-        .await
-        .map_err(|_| {
-            TuneWeaveError::new(ErrorCode::InternalError, "Uni Playlist export task failed")
-        })??;
-    let mut response =
-        Json(ApiResponse::new(document).with_platform(Platform::Uni)).into_response();
+    let gzip = accepts_gzip_encoding(&headers);
+    let encoded = tokio::task::spawn_blocking(move || {
+        let document = store.export_document(&playlist_id)?;
+        let response = ApiResponse::new(document).with_platform(Platform::Uni);
+        encode_uni_playlist_export(&response, gzip)
+    })
+    .await
+    .map_err(|_| {
+        TuneWeaveError::new(ErrorCode::InternalError, "Uni Playlist export task failed")
+    })??;
+    let mut response = Response::new(Body::from(encoded));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
     );
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    if gzip {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
     Ok(response)
+}
+
+fn accepts_gzip_encoding(headers: &HeaderMap) -> bool {
+    let mut gzip_quality = None::<f32>;
+    let mut wildcard_quality = None::<f32>;
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for entry in value.split(',') {
+            let mut parts = entry.trim().split(';');
+            let encoding = parts.next().unwrap_or_default().trim();
+            if encoding.is_empty() {
+                continue;
+            }
+            let mut quality = 1.0_f32;
+            let mut valid = true;
+            for parameter in parts {
+                let Some((name, value)) = parameter.trim().split_once('=') else {
+                    valid = false;
+                    break;
+                };
+                if !name.trim().eq_ignore_ascii_case("q") {
+                    valid = false;
+                    break;
+                }
+                let Ok(parsed) = value.trim().parse::<f32>() else {
+                    valid = false;
+                    break;
+                };
+                if !(0.0..=1.0).contains(&parsed) {
+                    valid = false;
+                    break;
+                }
+                quality = parsed;
+            }
+            if !valid {
+                continue;
+            }
+            let target = if encoding.eq_ignore_ascii_case("gzip") {
+                &mut gzip_quality
+            } else if encoding == "*" {
+                &mut wildcard_quality
+            } else {
+                continue;
+            };
+            *target = Some(target.map_or(quality, |current| current.max(quality)));
+        }
+    }
+    gzip_quality
+        .or(wildcard_quality)
+        .is_some_and(|quality| quality > 0.0)
+}
+
+fn encode_uni_playlist_export(
+    response: &ApiResponse<UniPlaylistDocument>,
+    gzip: bool,
+) -> Result<Vec<u8>, TuneWeaveError> {
+    if !gzip {
+        return serde_json::to_vec(response).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to encode Uni Playlist export: {error}"),
+            )
+        });
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    serde_json::to_writer(&mut encoder, response).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to encode compressed Uni Playlist export: {error}"),
+        )
+    })?;
+    encoder.finish().map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to finish compressed Uni Playlist export: {error}"),
+        )
+    })
 }
 
 async fn uni_playlists(
@@ -16694,13 +16791,17 @@ fn parse_optional_u16_parameter(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        io::Read,
+    };
 
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header},
     };
+    use flate2::read::GzDecoder;
     use serde_json::Value;
     use tower::ServiceExt;
     use tuneweave_core::{
@@ -30557,6 +30658,8 @@ mod tests {
             json_request_with_headers(app.clone(), Method::GET, &path, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+        assert_eq!(headers[header::VARY], "accept-encoding");
+        assert!(!headers.contains_key(header::CONTENT_ENCODING));
         assert_eq!(exported["data"]["format"], "tuneweave_uni_playlist_v1");
         assert_eq!(exported["data"]["id"], playlist.id);
         assert_eq!(exported["data"]["item_count"], 2);
@@ -30584,6 +30687,58 @@ mod tests {
         ] {
             assert!(!encoded.to_ascii_lowercase().contains(forbidden));
         }
+
+        let compressed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&path)
+                    .header(header::ACCEPT_ENCODING, "br, gzip; q=1")
+                    .body(Body::empty())
+                    .expect("build compressed export request"),
+            )
+            .await
+            .expect("compressed export request succeeds");
+        assert_eq!(compressed.status(), StatusCode::OK);
+        assert_eq!(compressed.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(compressed.headers()[header::VARY], "accept-encoding");
+        let compressed_body = to_bytes(compressed.into_body(), usize::MAX)
+            .await
+            .expect("read compressed export");
+        let mut decoder = GzDecoder::new(compressed_body.as_ref());
+        let mut decoded = Vec::new();
+        decoder
+            .read_to_end(&mut decoded)
+            .expect("decode compressed export");
+        let compressed_json =
+            serde_json::from_slice::<Value>(&decoded).expect("valid compressed export JSON");
+        assert_eq!(compressed_json["ok"], true);
+        assert_eq!(compressed_json["meta"]["platform"], "uni");
+        assert_eq!(compressed_json["data"], exported["data"]);
+
+        let identity = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&path)
+                    .header(header::ACCEPT_ENCODING, "gzip;q=0, *;q=1")
+                    .body(Body::empty())
+                    .expect("build identity export request"),
+            )
+            .await
+            .expect("identity export request succeeds");
+        assert_eq!(identity.status(), StatusCode::OK);
+        assert!(!identity.headers().contains_key(header::CONTENT_ENCODING));
+        let identity_body = to_bytes(identity.into_body(), usize::MAX)
+            .await
+            .expect("read identity export");
+        let identity_json =
+            serde_json::from_slice::<Value>(&identity_body).expect("valid identity export JSON");
+        assert_eq!(identity_json["ok"], true);
+        assert_eq!(identity_json["meta"]["platform"], "uni");
+        assert_eq!(identity_json["data"], exported["data"]);
 
         let (status, unknown_query) =
             json_response_from(app.clone(), &format!("{path}?unknown=true")).await;
