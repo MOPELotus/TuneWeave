@@ -21,6 +21,7 @@ use crate::{
 
 const UNI_PLAYLIST_FILE_VERSION: u32 = 1;
 const UNI_PLAYLIST_RECORD_VERSION: u32 = 1;
+const UNI_PLAYLIST_STORE_MANIFEST: &str = "store.json";
 static UNI_PLAYLIST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub trait UniPlaylistStore: Send + Sync {
@@ -443,6 +444,7 @@ impl UniPlaylistStore for DirectoryUniPlaylistStore {
         if database.playlists.contains_key(&playlist.id) {
             return Err(uni_playlist_conflict(&playlist.id));
         }
+        ensure_store_manifest(&self.directory)?;
         let mut record = UniPlaylistDatabase::default();
         record
             .playlists
@@ -502,6 +504,7 @@ impl UniPlaylistStore for DirectoryUniPlaylistStore {
             .map_err(|_| uni_playlist_lock_error())?;
         let mut record = record_database(&database, id)?;
         let result = delete_playlist_from_database(&mut record, id)?;
+        ensure_store_manifest(&self.directory)?;
         remove_playlist_record(&self.record_path(id)?)?;
         database.playlists.remove(id);
         database.items.remove(id);
@@ -599,6 +602,12 @@ struct UniPlaylistRecord {
     version: u32,
     playlist: UniPlaylist,
     items: Vec<UniPlaylistItem>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistStoreManifest {
+    version: u32,
 }
 
 impl Default for UniPlaylistDatabase {
@@ -1126,6 +1135,10 @@ fn load_record_directory(directory: &Path) -> Result<UniPlaylistDatabase> {
                 "Uni Playlist record filename is not valid UTF-8",
             )
         })?;
+        if file_name == UNI_PLAYLIST_STORE_MANIFEST {
+            load_store_manifest(&entry.path())?;
+            continue;
+        }
         let playlist_id = file_name.strip_suffix(".json").ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
@@ -1164,6 +1177,28 @@ fn load_record_directory(directory: &Path) -> Result<UniPlaylistDatabase> {
         database.items.insert(playlist_id.to_owned(), record.items);
     }
     Ok(database)
+}
+
+fn load_store_manifest(path: &Path) -> Result<UniPlaylistStoreManifest> {
+    let encoded = fs::read(path)
+        .map_err(|error| store_io_error("read Uni Playlist store manifest", error))?;
+    let manifest =
+        serde_json::from_slice::<UniPlaylistStoreManifest>(&encoded).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to decode Uni Playlist store manifest: {error}"),
+            )
+        })?;
+    if manifest.version != UNI_PLAYLIST_RECORD_VERSION {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!(
+                "unsupported Uni Playlist store manifest version: {}",
+                manifest.version
+            ),
+        ));
+    }
+    Ok(manifest)
 }
 
 fn load_playlist_record(path: &Path) -> Result<UniPlaylistRecord> {
@@ -1239,6 +1274,24 @@ fn persist_playlist_record(path: &Path, record: &UniPlaylistRecord) -> Result<()
         )
     })?;
     persist_encoded_file(path, &encoded)
+}
+
+fn ensure_store_manifest(directory: &Path) -> Result<()> {
+    let path = directory.join(UNI_PLAYLIST_STORE_MANIFEST);
+    if path.exists() {
+        load_store_manifest(&path)?;
+        return Ok(());
+    }
+    let encoded = serde_json::to_vec(&UniPlaylistStoreManifest {
+        version: UNI_PLAYLIST_RECORD_VERSION,
+    })
+    .map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize Uni Playlist store manifest: {error}"),
+        )
+    })?;
+    persist_encoded_file(&path, &encoded)
 }
 
 fn persist_encoded_file(path: &Path, encoded: &[u8]) -> Result<()> {
@@ -1983,6 +2036,7 @@ mod tests {
         store.create(&second).expect("persist second playlist");
         let first_path = records.join(format!("{}.json", first.id));
         let second_path = records.join(format!("{}.json", second.id));
+        assert!(records.join(UNI_PLAYLIST_STORE_MANIFEST).is_file());
         assert!(first_path.is_file());
         assert!(second_path.is_file());
         assert_eq!(
@@ -1990,7 +2044,7 @@ mod tests {
                 .expect("read record directory")
                 .filter_map(std::result::Result::ok)
                 .count(),
-            2
+            3
         );
 
         let untouched_second = fs::read(&second_path).expect("read second record");
@@ -2086,6 +2140,17 @@ mod tests {
             DirectoryUniPlaylistStore::open(&records).expect_err("reject future record version");
         assert_eq!(error.code, ErrorCode::InternalError);
         assert_eq!(fs::read(path).expect("future record remains"), encoded);
+
+        let directory = TempDirectory::new();
+        let records = directory.0.join("uni-playlists");
+        fs::create_dir_all(&records).expect("create manifest directory");
+        let path = records.join(UNI_PLAYLIST_STORE_MANIFEST);
+        let encoded = br#"{"version":2}"#;
+        fs::write(&path, encoded).expect("write future manifest");
+        let error =
+            DirectoryUniPlaylistStore::open(&records).expect_err("reject future manifest version");
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert_eq!(fs::read(path).expect("future manifest remains"), encoded);
     }
 
     #[test]

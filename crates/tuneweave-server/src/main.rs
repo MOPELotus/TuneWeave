@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tuneweave_core::{
-    AccountCredentialStore, FileAccountCredentialStore, FileUniPlaylistStore, Platform,
+    AccountCredentialStore, DirectoryUniPlaylistStore, FileAccountCredentialStore, Platform,
     ProviderRegistry, UniPlaylistStore,
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -35,8 +35,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or_else(|| PathBuf::from(".local").join("data"));
     let credential_store: Arc<dyn AccountCredentialStore> =
         Arc::new(FileAccountCredentialStore::new(data_dir.join("accounts")));
-    let uni_playlist_store: Arc<dyn UniPlaylistStore> = Arc::new(FileUniPlaylistStore::open(
-        data_dir.join("uni-playlists.json"),
+    let uni_playlist_store: Arc<dyn UniPlaylistStore> = Arc::new(DirectoryUniPlaylistStore::open(
+        data_dir.join("uni-playlists"),
     )?);
     let mut registry = ProviderRegistry::new();
     let netease_config = NeteaseConfig {

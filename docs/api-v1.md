@@ -1637,11 +1637,11 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 
 `UniPlaylist` 使用独立 `uni:` 命名空间，不归属于网易云等外部 provider。稳定字段包含同值的 `ref/platform/id` 身份、名称、描述、`item_count` 以及毫秒级 `created_at_ms/updated_at_ms`；新建歌单的项目数为 0。名称去除首尾空白后必须为 1–200 字节，描述去除首尾空白后最多 4000 字节，未知 JSON 或查询字段会被拒绝。`PATCH` 只修改明确提交的名称或描述，空字符串可以清除描述但不能清除名称；未提供任何字段会被拒绝，相同值是幂等成功且不会刷新更新时间或重写文件。身份、创建时间、项目数、项目顺序及项目快照不会随元数据修改而变化。`DELETE` 在一次发布中移除指定歌单及全部项目索引，返回删除前元数据和 `removed_item_count`，但不复制完整项目数组；不存在的资源不会被当作幂等成功，也不会影响其他歌单。目录默认 `limit=50/offset=0`，限制 1–100 项，按不可变 `created_at_ms` 降序并以 ID 升序打破同时间并列；响应包含真实 `total/next_offset/has_more`，不为目录项复制完整项目列表。单项 `GET/PATCH/DELETE` 必须提交完整引用，错误平台、畸形 ID 和不存在的歌单分别返回统一错误包络。
 
-客户端托管和显式迁移共用固定格式 `tuneweave_uni_playlist_v1`。`UniPlaylistDocument` 顶层包含 `format/id/name/description/item_count/created_at_ms/updated_at_ms/items/extensions`；每个项目包含稳定 `id`、零基 `position`、`kind`、外部平台 `source_ref`、紧凑 `snapshot`、`added_at_ms` 和用途受限的导入来源扩展。文档必须保留同一来源的重复出现，项目 ID 唯一且位置连续，声明数量与数组一致，项目时间不得晚于文档更新时间；结构上限为 100,000 项，具体 HTTP 端点仍可采用更低的请求和响应限制。
+客户端托管和 Server/Client 显式复制共用固定格式 `tuneweave_uni_playlist_v1`。`UniPlaylistDocument` 顶层包含 `format/id/name/description/item_count/created_at_ms/updated_at_ms/items/extensions`；每个项目包含稳定 `id`、零基 `position`、`kind`、外部平台 `source_ref`、紧凑 `snapshot`、`added_at_ms` 和用途受限的导入来源扩展。文档必须保留同一来源的重复出现，项目 ID 唯一且位置连续，声明数量与数组一致，项目时间不得晚于文档更新时间；结构上限为 100,000 项，具体 HTTP 端点仍可采用更低的请求和响应限制。
 
 V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目只允许成组的 `import_source_index/import_source_ref/import_source_type` 和可选 `imported_from_item_id`，快照只允许规范引用、可播放性、音质档位、视频/播客/电台静态展示摘要。所有层级拒绝未知字段，因此不存在 Cookie、token、密码、验证码、设备身份、临时媒体 URL、签名、账户别名或任意请求头的合法槽位。快照 `cover_url` 只接受受限 HTTPS 展示地址，服务端不得根据它发起媒体或资源请求；真正播放仍按 `source_ref` 重新进入 provider、账户权益检查和统一回退链。
 
-服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store`；它是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。当前 JSON 文档受 V1 的 100,000 项结构上限约束；针对超大响应的流式或压缩传输仍属于迁移单元的收口条件。
+服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store`；它是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。当前 JSON 文档受 V1 的 100,000 项结构上限约束；针对超大响应的流式或压缩传输仍属于本单元的收口条件。
 
 文档导入请求体上限为 16 MiB，并在任何写入前完成格式、身份、数量、时间、连续顺序、唯一项目 ID、来源引用、快照及扩展白名单校验。默认生成与文档 ID 不同的新服务端 `uni:<id>`，但保留全部项目稳定 ID；`preserve_id=true` 才尝试把文档 ID 用作服务端 ID，已有资源会返回 `conflict`，绝不覆盖。验证、转换或持久化任一阶段失败都不会产生目标记录。成功结果明确返回源文档 ID、是否保留歌单 ID，以及 `atomic=true/item_ids_preserved=true/automatic_sync=false`；导入仅复制一次，不建立后续同步。
 
@@ -1651,7 +1651,7 @@ V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目
 
 客户端托管项目播放只接受一个完整 V1 `item`，不会接收完整歌单、任意媒体 URL、请求头或 provider 原文。服务端先验证项目身份、外部来源、快照和用途受限扩展，再与 Server 模式项目共用同一条歌曲、MV/视频、播客和广播解析链；`playback_platform/fallback_platforms/fallback/unblock`、音质、码率、沉浸音频、视频清晰度、分平台账户别名和 `X-TuneWeave-Credential` 调用方凭据语义保持一致。`accounts` 在 JSON 中使用按平台键控的对象，`fallback_platforms` 使用逗号分隔的平台顺序；`resolution` 只允许 MV 或视频。响应不虚构 `playlist_ref`，而是返回项目 ID、来源、类型和统一 `MediaStream`，并声明 `client_hosted=true/persisted=false`。该端点不会读取或写入 Uni Playlist 存储；需要 GET/302 的客户端后续可使用独立的短期内存票据，而不能提交可篡改的目标 URL。
 
-生产服务把数据保存到 `TUNEWEAVE_DATA_DIR/uni-playlists.json`，与 `accounts` 凭据目录分离。文件后端在内存维护已验证快照，创建时在同目录写入并同步临时文件后发布；Unix 使用原子替换，Windows 使用可在下次启动恢复的同目录备份切换。未知数据库版本或畸形记录会阻止启动而不会被静默覆盖。该文件只保存歌单结构与后续的必要元数据快照，不保存媒体字节或平台凭据。
+生产服务把每份歌单保存到 `TUNEWEAVE_DATA_DIR/uni-playlists/<playlist-id>.json`，与 `accounts` 凭据目录分离；`store.json` 只保存目录格式版本，内存目录索引在启动时由记录重建，单歌单写入不克隆或重写其他歌单。记录先写入并同步同目录私有临时文件后发布；Unix 使用原子替换，Windows 使用可在下次启动恢复的单记录备份切换。未知版本、文件名与身份不一致、畸形记录、未授权的目录内容都会阻止启动而不会被静默覆盖。首个正式 Release 前只保证全新部署使用当前目录格式，不提供开发快照之间的旧文件转换。记录只保存歌单结构与必要元数据快照，不保存媒体字节或平台凭据。
 
 混合项目 `kind` 当前完整区分 `track`、`mv`、`video`、`podcast_episode` 和 `radio_station`。添加端点逐项按 `ref` 的来源平台调用已注册 provider 获取真实元数据，而不是信任调用方伪造标题：歌曲快照包含标题、艺人、专辑、时长、ISRC、封面、版本标签和播放能力摘要；MV/视频包含创作者、时长、封面、平台视频类型与发布时间；播客节目包含主播、时长、封面、所属播客、独立音频引用、发布时间和期号；广播电台包含名称、封面、分类、地区、当前节目及是否具有直接流。只保存这些播放匹配所需的紧凑字段，不复制整份上游原文或易过期的流地址。
 
