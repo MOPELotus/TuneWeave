@@ -23579,7 +23579,10 @@ mod tests {
     async fn platform_discovery_exposes_uni_without_claiming_provider_capabilities() {
         let (status, json) = json_response("/v1/platforms").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"].as_array().map(Vec::len), Some(7));
+        assert_eq!(
+            json["data"].as_array().map(Vec::len),
+            Some(Platform::ALL.len())
+        );
         assert_eq!(json["data"][0]["platform"], "uni");
         assert_eq!(json["data"][0]["registered"], true);
         assert_eq!(json["data"][0]["default"], false);

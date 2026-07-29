@@ -2046,6 +2046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuneweave-provider-soda"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tuneweave-core",
+ "url",
+]
+
+[[package]]
 name = "tuneweave-server"
 version = "0.1.0"
 dependencies = [
@@ -2068,6 +2081,7 @@ dependencies = [
  "tuneweave-provider-migu",
  "tuneweave-provider-netease",
  "tuneweave-provider-qq",
+ "tuneweave-provider-soda",
 ]
 
 [[package]]

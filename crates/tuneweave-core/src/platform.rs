@@ -14,10 +14,11 @@ pub enum Platform {
     Kugou,
     Migu,
     Kuwo,
+    Soda,
 }
 
 impl Platform {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Uni,
         Self::Netease,
         Self::Qq,
@@ -25,6 +26,7 @@ impl Platform {
         Self::Kugou,
         Self::Migu,
         Self::Kuwo,
+        Self::Soda,
     ];
 
     #[must_use]
@@ -37,6 +39,7 @@ impl Platform {
             Self::Kugou => "kugou",
             Self::Migu => "migu",
             Self::Kuwo => "kuwo",
+            Self::Soda => "soda",
         }
     }
 }
@@ -59,6 +62,7 @@ impl FromStr for Platform {
             "kugou" => Ok(Self::Kugou),
             "migu" => Ok(Self::Migu),
             "kuwo" => Ok(Self::Kuwo),
+            "soda" => Ok(Self::Soda),
             _ => Err(ParsePlatformError(value.to_owned())),
         }
     }
@@ -173,6 +177,17 @@ mod tests {
     fn resource_ref_keeps_colons_inside_provider_ids() {
         let resource: ResourceRef = "bilibili:ep:123".parse().expect("valid reference");
         assert_eq!(resource.id(), "ep:123");
+    }
+
+    #[test]
+    fn soda_references_round_trip_with_the_canonical_platform_name() {
+        let resource: ResourceRef = "soda:7304719759323564095"
+            .parse()
+            .expect("valid Soda reference");
+        assert_eq!(resource.platform(), Platform::Soda);
+        assert_eq!(resource.id(), "7304719759323564095");
+        assert_eq!(resource.to_string(), "soda:7304719759323564095");
+        assert!(Platform::ALL.contains(&Platform::Soda));
     }
 
     #[test]

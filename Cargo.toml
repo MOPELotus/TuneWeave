@@ -7,6 +7,7 @@ members = [
     "crates/tuneweave-provider-migu",
     "crates/tuneweave-provider-netease",
     "crates/tuneweave-provider-qq",
+    "crates/tuneweave-provider-soda",
     "crates/tuneweave-server",
 ]
 default-members = ["crates/tuneweave-server"]
@@ -57,6 +58,7 @@ tuneweave-provider-kuwo = { path = "crates/tuneweave-provider-kuwo" }
 tuneweave-provider-migu = { path = "crates/tuneweave-provider-migu" }
 tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
 tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
+tuneweave-provider-soda = { path = "crates/tuneweave-provider-soda" }
 url = "2.5.8"
 
 [workspace.lints.rust]

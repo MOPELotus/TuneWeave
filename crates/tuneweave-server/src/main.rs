@@ -20,6 +20,7 @@ use tuneweave_provider_kuwo::{KuwoConfig, KuwoProvider};
 use tuneweave_provider_migu::{MiguConfig, MiguProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
+use tuneweave_provider_soda::{SodaConfig, SodaProvider};
 use tuneweave_server::{AppState, build_router};
 
 #[tokio::main]
@@ -85,6 +86,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     })?)?;
     registry.register(KuwoProvider::new(KuwoConfig {
         proxy_url: env::var("TUNEWEAVE_KUWO_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
+    })?)?;
+    registry.register(SodaProvider::new(SodaConfig {
+        proxy_url: env::var("TUNEWEAVE_SODA_PROXY")
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
     })?)?;

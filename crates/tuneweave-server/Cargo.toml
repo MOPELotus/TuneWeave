@@ -30,6 +30,7 @@ tuneweave-provider-kuwo.workspace = true
 tuneweave-provider-migu.workspace = true
 tuneweave-provider-netease.workspace = true
 tuneweave-provider-qq.workspace = true
+tuneweave-provider-soda.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

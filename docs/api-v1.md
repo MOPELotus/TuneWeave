@@ -1487,6 +1487,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷我公开音源协议的首页、搜索、详情、播放、歌单、LRCX 和移动歌词入口均是编译期固定的官方 HTTPS 标准端口，客户端禁止重定向，连接和整次请求分别限制为 10 秒与 20 秒。普通 API 最多读取 8 MiB，歌词传输最多 4 MiB，LRCX 解压最多 8 MiB；声明长度、分块累计长度和解压累计长度分别执行上限。429 映射为可重试限流，5xx 映射为可重试上游错误，其余 4xx 不重试；业务拒绝、身份漂移和结构错误不会伪装成传输失败。请求不能覆盖目标 URL、Cookie、任意头、账户或请求级代理，部署方只有 `TUNEWEAVE_KUWO_PROXY` 可配置服务端代理；配置及客户端 Debug 不输出代理、匿名 Cookie、动态签名或会话状态。全新数据目录下的统一 HTTP 已覆盖搜索、详情、逐字歌词、免费与付费权益、播放、跨页歌单、Client Uni 和非法输入，并从受信 CDN 通过 HTTP 206 读取 1 KiB `audio/mpeg` 验证真实媒体，不下载整首或记录签名 URL。
 
+汽水音乐公开歌曲搜索使用 `GET /v1/search?platform=soda&kind=track&q=...`。Provider 固定访问官方 HTTPS PC 歌曲搜索入口并只发送查询词、20 首物理页游标和平台固定 `aid=386088`；真实消融确认该链不需要 Cookie、匿名设备、`x-helios` 或 `x-medusa`，因此不会虚构或持久化无效设备状态。统一歌曲引用使用规范正整数 ID 形成 `soda:<track_id>`，并强类型返回歌手、专辑、可信官方封面、时长以及 `medium/higher/highest/lossless/hires/spatial` 目录规格；搜索权益、试听目录和媒体规格只作为有界诊断保留，`playable` 在实时播放链接入前保持 `null`。上游实际页宽固定为 20，统一任意 `offset` 与 `limit=1..100` 最多连续读取 6 页；分页不猜测总数，并返回实际物理页宽、抓取页数和后续游标。当前公开搜索不接受账户、非默认 variant、平台搜索状态、Cookie、目标 URL、请求头或请求级代理；部署方只有 `TUNEWEAVE_SODA_PROXY` 可配置服务端代理。客户端禁用重定向，连接和整次请求分别限制为 10 秒与 20 秒，声明长度和分块累计长度分别受 8 MiB 上限约束，429 与 5xx 保持可重试分类。真实官方搜索已验证目标歌曲身份和连续分页。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。
