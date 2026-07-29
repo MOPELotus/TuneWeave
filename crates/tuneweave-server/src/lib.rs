@@ -1,3 +1,4 @@
+pub mod logging;
 mod response;
 
 use std::{

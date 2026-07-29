@@ -8,8 +8,7 @@ use std::{
 };
 
 use tokio::net::TcpListener;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info};
 use tuneweave_core::{
     AccountCredentialStore, DirectoryUniPlaylistStore, FileAccountCredentialStore, Platform,
     ProviderRegistry, UniPlaylistStore,
@@ -21,22 +20,27 @@ use tuneweave_provider_migu::{MiguConfig, MiguProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_provider_soda::{SodaConfig, SodaProvider};
-use tuneweave_server::{AppState, build_router};
+use tuneweave_server::{
+    AppState, build_router,
+    logging::{LoggingConfig, init_logging},
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("tuneweave=info")),
-        )
-        .init();
-
     let bind = env::var("TUNEWEAVE_BIND").unwrap_or_else(|_| "127.0.0.1:7832".to_owned());
     let address: SocketAddr = bind.parse()?;
     let data_dir = env::var_os("TUNEWEAVE_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".local").join("data"));
+    let logging_config = LoggingConfig::from_env(&data_dir)?;
+    let logging = init_logging(&logging_config)?;
+    for warning in &logging.retention_warnings {
+        error!(
+            error_kind = ?warning.error_kind,
+            "failed to remove an expired log file"
+        );
+    }
     let credential_store: Arc<dyn AccountCredentialStore> =
         Arc::new(FileAccountCredentialStore::new(data_dir.join("accounts")));
     let uni_playlist_store: Arc<dyn UniPlaylistStore> = Arc::new(DirectoryUniPlaylistStore::open(
@@ -99,10 +103,31 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let app = build_router(state);
     let listener = TcpListener::bind(address).await?;
 
-    info!(address = %listener.local_addr()?, "TuneWeave is listening");
-    axum::serve(listener, app)
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        address = %listener.local_addr()?,
+        data_dir = ?data_dir,
+        log_format = logging_config.format.as_str(),
+        log_filter_source = logging_config.filter_source.as_str(),
+        log_to_stderr = logging_config.to_stderr,
+        log_to_file = logging.file_output_active(),
+        log_dir = ?logging_config.directory,
+        enabled_platforms = 7,
+        "TuneWeave startup completed"
+    );
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    if let Err(error) = &serve_result {
+        error!(%error, "TuneWeave server exited with an error");
+    }
+    let dropped_lines = logging.dropped_lines();
+    if dropped_lines > 0 {
+        error!(dropped_lines, "non-blocking file logger dropped events");
+    }
+    info!(dropped_lines, "TuneWeave shutdown completed");
+    drop(logging);
+    serve_result?;
     Ok(())
 }
 

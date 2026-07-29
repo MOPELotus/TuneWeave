@@ -36,6 +36,11 @@ cargo run -p tuneweave-server --bin tuneweave
 
 - `TUNEWEAVE_BIND`：监听地址，默认 `127.0.0.1:7832`。
 - `TUNEWEAVE_DATA_DIR`：私有数据目录，默认 `.local/data`；成功登录的平台凭据按 `platform/account` 隔离保存并在重启时恢复。
+- `TUNEWEAVE_LOG_LEVEL`：日志级别 `trace|debug|info|warn|error|off`，默认 `info`；显式设置时优先于 `RUST_LOG`。
+- `TUNEWEAVE_LOG_FORMAT`：日志格式 `human|json`，默认 `human`，控制台和文件使用同一格式。
+- `TUNEWEAVE_LOG_DIR` / `TUNEWEAVE_LOG_FILE`：日志目录与可移植文件名前缀，默认 `<TUNEWEAVE_DATA_DIR>/logs/` 和 `tuneweave.log`；目录不能指向账户或 Uni Playlist 数据目录。
+- `TUNEWEAVE_LOG_RETENTION_DAYS` / `TUNEWEAVE_LOG_MAX_FILES`：按日文件的保留天数与最大文件数，默认 `14` 和 `30`。
+- `TUNEWEAVE_LOG_TO_STDERR` / `TUNEWEAVE_LOG_TO_FILE`：分别控制控制台和非阻塞文件输出，默认均开启，不能同时关闭。
 - `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云 `default` 账户启动 Cookie；不会写入响应或日志。服务器托管模式通过登录端点取得的账户凭据进入上述私有数据目录；调用方自管凭证只在支持的请求作用域内使用，不会写入该目录。
 - `TUNEWEAVE_NETEASE_PROXY`：可选的服务端 HTTP(S) 正向代理 URL；仅在启动配置中读取，API 调用方不能覆盖。
 - `TUNEWEAVE_NETEASE_REAL_IP`：可选的服务端固定 IPv4 请求身份，同时写入网易云协议请求的 `X-Real-IP` 与 `X-Forwarded-For`。
@@ -47,7 +52,7 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_MIGU_PROXY`：可选的咪咕音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 - `TUNEWEAVE_SODA_PROXY`：可选的汽水音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 
-默认数据目录已由 Git 忽略。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
+默认数据目录已由 Git 忽略。日志位于独立 `logs/` 目录，以专用后台线程写入并在正常关闭时刷新，不与账户、设备或 Uni Playlist 文件混写。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
 
 Uni Playlist 的 Server 模式在私有数据目录 `uni-playlists/` 中按歌单保存版本化记录；修改一个歌单只原子发布对应文件，进程重启后由记录重建目录和类型化项目。当前尚未发布稳定版本，存储只保证全新部署使用这一目录格式，不提供开发期旧文件兼容。导入可用 `ref+type` 或 `platform+type+id` 合并多个公开/账户可见平台集合，账户别名按来源可选且彼此隔离。客户端可通过统一 `/v1/playlists/{ref}`、`/items` 和 `/tracks` 读取平台或 Uni 歌单，并通过稳定 `item_id` 的 `/stream` 以分平台账户执行原平台播放、指定平台播放及严格跨平台回退。
 
