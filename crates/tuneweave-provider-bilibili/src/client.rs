@@ -206,8 +206,35 @@ pub(crate) struct BilibiliVideoSearchPage {
     pub videos: Vec<BilibiliSearchVideo>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BilibiliVideoSearchResultType {
+    Video,
+    SponsoredVideo(u32),
+}
+
+impl BilibiliVideoSearchResultType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::SponsoredVideo(_) => "video_ad",
+        }
+    }
+
+    pub(crate) const fn sponsored(self) -> bool {
+        matches!(self, Self::SponsoredVideo(_))
+    }
+
+    pub(crate) const fn sponsored_type(self) -> Option<u32> {
+        match self {
+            Self::Video => None,
+            Self::SponsoredVideo(value) => Some(value),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BilibiliSearchVideo {
+    pub result_type: BilibiliVideoSearchResultType,
     pub aid: u64,
     pub bvid: Option<String>,
     pub title: String,
@@ -2251,25 +2278,40 @@ impl BilibiliClient {
         let cookie_header = credential.map_or(device_cookie.clone(), |credential| {
             format!("{}; {device_cookie}", credential.cookie_header())
         });
-        let response = self
-            .http
-            .get(endpoint)
-            .header(COOKIE, cookie_header)
-            .header(REFERER, VIDEO_SEARCH_REFERER)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili search suggestion", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(COOKIE, cookie_header)
+                .header(REFERER, VIDEO_SEARCH_REFERER)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili search suggestion", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili search suggestion response exceeded the size limit",
+                ));
+            }
+            parse_search_suggestion_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili search suggestion response exceeded the size limit",
-            ));
-        }
-        parse_search_suggestion_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "search_suggestions",
+            "s.search.bilibili.com",
+            "/main/suggest",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn trending_searches(
@@ -2286,25 +2328,40 @@ impl BilibiliClient {
             )
             .await?;
         let endpoint = format!("{SEARCH_TRENDING_ENDPOINT}?{}", context.query);
-        let response = self
-            .http
-            .get(endpoint)
-            .header(COOKIE, context.cookie_header)
-            .header(REFERER, VIDEO_SEARCH_REFERER)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili trending search", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(COOKIE, context.cookie_header)
+                .header(REFERER, VIDEO_SEARCH_REFERER)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili trending search", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili trending search response exceeded the size limit",
+                ));
+            }
+            parse_search_trending_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili trending search response exceeded the size limit",
-            ));
-        }
-        parse_search_trending_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "trending_searches",
+            "api.bilibili.com",
+            "/x/web-interface/wbi/search/square",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn search_videos_page(
@@ -2322,7 +2379,7 @@ impl BilibiliClient {
         }
         if self.video_search_compatibility_active()? {
             return self
-                .search_videos_compatibility_page(keyword, page, filters, credential)
+                .search_videos_compatibility_page(keyword, page, filters, credential, 0)
                 .await;
         }
         let query_visit_id = self.web_query_visit_id()?;
@@ -2366,14 +2423,22 @@ impl BilibiliClient {
             )
             .await?;
         let endpoint = format!("{VIDEO_SEARCH_ENDPOINT}?{}", context.query);
-        let bytes = self
-            .video_search_response(endpoint, Some(&context.cookie_header))
-            .await?;
-        match parse_video_search_response(&bytes, page) {
+        let outcome = self
+            .video_search_response(
+                "video_search",
+                "/x/web-interface/wbi/search/type",
+                endpoint,
+                Some(&context.cookie_header),
+                page,
+                0,
+                false,
+            )
+            .await;
+        match outcome {
             Ok(result) => Ok(result),
             Err(error) if is_video_search_risk_challenge(&error) => {
                 self.mark_video_search_challenged()?;
-                self.search_videos_compatibility_page(keyword, page, filters, credential)
+                self.search_videos_compatibility_page(keyword, page, filters, credential, 1)
                     .await
             }
             Err(error) => Err(error),
@@ -2946,6 +3011,7 @@ impl BilibiliClient {
         page: u32,
         filters: BilibiliVideoSearchFilters,
         credential: Option<&BilibiliCredential>,
+        retry_count: u8,
     ) -> Result<BilibiliVideoSearchPage> {
         let mut endpoint = Url::parse(VIDEO_SEARCH_COMPATIBILITY_ENDPOINT).map_err(|_| {
             bilibili_internal_error("Bilibili video search compatibility endpoint is invalid")
@@ -2960,36 +3026,70 @@ impl BilibiliClient {
             .append_pair("tids", &category_id)
             .append_pair("page", &page.to_string());
         let cookie_header = credential.map(BilibiliCredential::cookie_header);
-        let bytes = self
-            .video_search_response(endpoint.to_string(), cookie_header.as_deref())
-            .await?;
-        parse_video_search_response(&bytes, page)
+        self.video_search_response(
+            "video_search_compatibility",
+            "/x/web-interface/search/type",
+            endpoint.to_string(),
+            cookie_header.as_deref(),
+            page,
+            retry_count,
+            true,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn video_search_response(
         &self,
+        operation: &'static str,
+        endpoint_template: &'static str,
         endpoint: String,
         cookie_header: Option<&str>,
-    ) -> Result<Vec<u8>> {
-        let mut request = self
-            .http
-            .get(endpoint)
-            .header(REFERER, VIDEO_SEARCH_REFERER);
-        if let Some(cookie_header) = cookie_header {
-            request = request.header(COOKIE, cookie_header);
+        page: u32,
+        retry_count: u8,
+        fallback: bool,
+    ) -> Result<BilibiliVideoSearchPage> {
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let mut request = self
+                .http
+                .get(endpoint)
+                .header(REFERER, VIDEO_SEARCH_REFERER);
+            if let Some(cookie_header) = cookie_header {
+                request = request.header(COOKIE, cookie_header);
+            }
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                let error = bilibili_http_error("Bilibili video search", status);
+                return Err(if status == StatusCode::PRECONDITION_FAILED {
+                    error.with_details(json!({ "risk_challenge": true }))
+                } else {
+                    error
+                });
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili video search response exceeded the size limit",
+                ));
+            }
+            parse_video_search_response(&bytes, page)
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili video search", status));
-        }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili video search response exceeded the size limit",
-            ));
-        }
-        Ok(bytes.to_vec())
+        .await;
+        self.log_upstream_request_with_retry(
+            operation,
+            "api.bilibili.com",
+            endpoint_template,
+            http_status,
+            started,
+            retry_count,
+            fallback,
+            &outcome,
+        );
+        outcome
     }
 
     fn video_search_compatibility_active(&self) -> Result<bool> {
@@ -3289,6 +3389,30 @@ impl BilibiliClient {
         started: Instant,
         outcome: &Result<T>,
     ) {
+        self.log_upstream_request_with_retry(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            0,
+            false,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request_with_retry<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        retry_count: u8,
+        fallback: bool,
+        outcome: &Result<T>,
+    ) {
         let (business_class, upstream_outcome) = match outcome {
             Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
             Err(error) => bilibili_upstream_classification(error),
@@ -3302,9 +3426,9 @@ impl BilibiliClient {
             business_class,
             duration: started.elapsed(),
             batch_size: None,
-            retry_count: 0,
+            retry_count,
             proxy: self.proxy_configured,
-            fallback: false,
+            fallback,
             outcome: upstream_outcome,
         }
         .emit();
@@ -5680,15 +5804,12 @@ fn map_season_archive(item: SeasonArchiveItem) -> Result<BilibiliSeasonArchive> 
 
 fn is_video_search_risk_challenge(error: &TuneWeaveError) -> bool {
     error.code == ErrorCode::RateLimited
-        && error.details.get("risk_challenge").and_then(Value::as_bool) == Some(true)
+        && (error.details.get("risk_challenge").and_then(Value::as_bool) == Some(true)
+            || error.details.get("platform_code").and_then(Value::as_i64) == Some(-412))
 }
 
 fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
-    if !item.r#type.is_empty() && item.r#type != "video" {
-        return Err(bilibili_upstream_error(
-            "Bilibili video search returned a non-video item",
-        ));
-    }
+    let result_type = parse_video_search_result_type(&item.r#type)?;
     let aid =
         item.aid.get().filter(|value| *value > 0).ok_or_else(|| {
             bilibili_upstream_error("Bilibili video search returned an invalid AID")
@@ -5704,9 +5825,9 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
     let author_id = item.mid.get().filter(|value| *value > 0).ok_or_else(|| {
         bilibili_upstream_error("Bilibili video search returned an invalid creator ID")
     })?;
-    let title = clean_search_text(&item.title, "title", 1024)?;
+    let title = clean_search_title(&item.title)?;
     let author = clean_search_text(&item.author, "creator name", 512)?;
-    let description = clean_search_text(&item.description, "description", 16 * 1024)?;
+    let description = clean_search_multiline_text(&item.description, "description", 16 * 1024)?;
     let cover_url = normalize_search_image_url(&item.pic)?;
     let duration_seconds = parse_duration_seconds(&item.duration)?;
     let tags = item
@@ -5724,6 +5845,7 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
         .map(|value| validated_search_text(&value, "hit column", 64))
         .collect::<Result<Vec<_>>>()?;
     Ok(BilibiliSearchVideo {
+        result_type,
         aid,
         bvid,
         title,
@@ -5754,6 +5876,23 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
         collaborative: optional_binary_flag(item.is_union_video, "collaboration flag")?,
         rank_score: optional_flexible_u64(item.rank_score, "rank score")?,
     })
+}
+
+fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResultType> {
+    match value {
+        "" | "video" => Ok(BilibiliVideoSearchResultType::Video),
+        _ => {
+            let code = value
+                .strip_prefix("video_ad_")
+                .filter(|code| !code.is_empty() && code.len() <= 10)
+                .filter(|code| code.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|code| code.parse::<u32>().ok())
+                .ok_or_else(|| {
+                    bilibili_upstream_error("Bilibili video search returned an unknown item type")
+                })?;
+            Ok(BilibiliVideoSearchResultType::SponsoredVideo(code))
+        }
+    }
 }
 
 fn optional_flexible_u64(value: Option<FlexibleU64>, context: &str) -> Result<Option<u64>> {
@@ -5791,7 +5930,21 @@ fn validate_search_keyword(value: &str) -> Result<()> {
 }
 
 fn clean_search_text(value: &str, context: &str, limit: usize) -> Result<String> {
-    let value = value
+    validated_search_text(&decode_search_text(value), context, limit)
+}
+
+fn clean_search_title(value: &str) -> Result<String> {
+    let decoded = decode_search_text(value);
+    let normalized = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    validated_search_text(&normalized, "title", 1024)
+}
+
+fn clean_search_multiline_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    validated_search_multiline_text(&decode_search_text(value), context, limit)
+}
+
+fn decode_search_text(value: &str) -> String {
+    value
         .replace("<em class=\"keyword\">", "")
         .replace("<em class='keyword'>", "")
         .replace("</em>", "")
@@ -5799,13 +5952,26 @@ fn clean_search_text(value: &str, context: &str, limit: usize) -> Result<String>
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;", "'");
-    validated_search_text(&value, context, limit)
+        .replace("&#39;", "'")
 }
 
 fn validated_search_text(value: &str, context: &str, limit: usize) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili video search returned an invalid {context}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn validated_search_multiline_text(value: &str, context: &str, limit: usize) -> Result<String> {
+    let value = value.trim();
+    if value.len() > limit
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+    {
         return Err(bilibili_upstream_error(format!(
             "Bilibili video search returned an invalid {context}"
         )));
@@ -7516,10 +7682,10 @@ mod tests {
                     "type": "video",
                     "aid": 78977417,
                     "bvid": "BV1KJ411C7Un",
-                    "title": "初音<em class=\"keyword\">未来</em>",
+                    "title": "初音\r\n<em class=\"keyword\">未来</em>\t",
                     "author": "MitchieM",
                     "mid": 5669526,
-                    "description": "音乐 &amp; 视频",
+                    "description": "音乐 &amp; 视频\r\n第二行\t说明",
                     "pic": "//i1.hdslb.com/bfs/archive/cover.jpg",
                     "duration": "4:02",
                     "play": "2915520",
@@ -7544,15 +7710,19 @@ mod tests {
         assert_eq!(page.page_count, 3);
         assert_eq!(page.search_id, "8850295244740510044");
         assert_eq!(page.videos[0].bvid.as_deref(), Some("BV1KJ411C7Un"));
-        assert_eq!(page.videos[0].title, "初音未来");
-        assert_eq!(page.videos[0].description, "音乐 & 视频");
+        assert_eq!(
+            page.videos[0].result_type,
+            BilibiliVideoSearchResultType::Video
+        );
+        assert_eq!(page.videos[0].title, "初音 未来");
+        assert_eq!(page.videos[0].description, "音乐 & 视频\r\n第二行\t说明");
         assert_eq!(page.videos[0].duration_seconds, 242);
         assert_eq!(page.videos[0].play_count, Some(2_915_520));
         assert_eq!(page.videos[0].collaborative, Some(true));
         assert_eq!(page.videos[0].hit_columns, ["title", "tag"]);
 
         let nullable_hit_columns: VideoSearchItem = serde_json::from_value(json!({
-            "type": "video",
+            "type": "video_ad_82",
             "aid": 1,
             "bvid": "BV1xx411c7mD",
             "title": "title",
@@ -7565,6 +7735,19 @@ mod tests {
         }))
         .expect("nullable hit columns");
         assert!(nullable_hit_columns.hit_columns.is_none());
+        let sponsored =
+            map_video_search_item(nullable_hit_columns).expect("sponsored video is valid");
+        assert_eq!(
+            sponsored.result_type,
+            BilibiliVideoSearchResultType::SponsoredVideo(82)
+        );
+        assert!(sponsored.description.is_empty());
+        for invalid in ["activity", "video_ad_", "video_ad_x", "video_ad_4294967296"] {
+            assert!(
+                parse_video_search_result_type(invalid).is_err(),
+                "{invalid} must not be treated as a video"
+            );
+        }
     }
 
     #[test]
@@ -7576,11 +7759,14 @@ mod tests {
         .expect_err("blocked search");
         assert_eq!(blocked.code, ErrorCode::RateLimited);
         assert!(blocked.retryable);
-        assert!(!is_video_search_risk_challenge(&blocked));
+        assert!(is_video_search_risk_challenge(&blocked));
         let blocked_http =
             bilibili_http_error("Bilibili video search", StatusCode::PRECONDITION_FAILED);
         assert_eq!(blocked_http.code, ErrorCode::RateLimited);
         assert!(blocked_http.retryable);
+        assert!(!is_video_search_risk_challenge(&blocked_http));
+        let challenged_http = blocked_http.with_details(json!({ "risk_challenge": true }));
+        assert!(is_video_search_risk_challenge(&challenged_http));
 
         let voucher = parse_video_search_response(
             br#"{"code":0,"message":"0","data":{"v_voucher":"private-voucher"}}"#,

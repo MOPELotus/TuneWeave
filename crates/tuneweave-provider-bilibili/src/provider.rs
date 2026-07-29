@@ -1690,10 +1690,20 @@ fn map_bilibili_search_video(item: BilibiliSearchVideo) -> Result<Video> {
         .map_err(|_| bilibili_data_error("Bilibili search creator identity was invalid"))?;
     let mut extensions = Extensions::from([
         ("aid".to_owned(), json!(item.aid)),
+        (
+            "search_result_type".to_owned(),
+            json!(item.result_type.as_str()),
+        ),
+        ("sponsored".to_owned(), json!(item.result_type.sponsored())),
         ("duration_text".to_owned(), json!(item.duration_text)),
         ("tags".to_owned(), json!(item.tags)),
         ("hit_columns".to_owned(), json!(item.hit_columns)),
     ]);
+    insert_optional(
+        &mut extensions,
+        "sponsored_type",
+        item.result_type.sponsored_type(),
+    );
     insert_optional(&mut extensions, "bvid", item.bvid);
     insert_optional(&mut extensions, "danmaku_count", item.danmaku_count);
     insert_optional(&mut extensions, "favorite_count", item.favorite_count);
@@ -3967,6 +3977,7 @@ mod tests {
     #[test]
     fn video_search_mapping_uses_stable_video_and_creator_references() {
         let video = map_bilibili_search_video(BilibiliSearchVideo {
+            result_type: crate::client::BilibiliVideoSearchResultType::SponsoredVideo(82),
             aid: 78_977_417,
             bvid: Some("BV1KJ411C7Un".to_owned()),
             title: "初音未来".to_owned(),
@@ -4004,6 +4015,9 @@ mod tests {
             Some("bilibili:user:5669526")
         );
         assert_eq!(video.extensions["collaborative"], true);
+        assert_eq!(video.extensions["search_result_type"], "video_ad");
+        assert_eq!(video.extensions["sponsored"], true);
+        assert_eq!(video.extensions["sponsored_type"], 82);
     }
 
     #[test]
