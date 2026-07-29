@@ -1,9 +1,12 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    io::Read,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use flate2::read::ZlibDecoder;
 use md5::{Digest, Md5};
 use reqwest::{
     Client, Proxy, StatusCode,
@@ -13,13 +16,15 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Platform, Quality, ResourceRef, Result,
-    Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, Platform,
+    Quality, ResourceRef, Result, Track, TuneWeaveError,
 };
 use url::Url;
 
 const SEARCH_ENDPOINT: &str = "https://songsearch.kugou.com/song_search_v2";
 const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
+const LYRIC_SEARCH_ENDPOINT: &str = "https://lyrics.kugou.com/v1/search";
+const LYRIC_DOWNLOAD_ENDPOINT: &str = "https://lyrics.kugou.com/download";
 const WEB_REFERER: &str = "https://www.kugou.com/";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -28,6 +33,10 @@ const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
 const ANDROID_APP_ID: u16 = 1005;
 const ANDROID_CLIENT_VERSION: u32 = 20489;
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LYRIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const KRC_XOR_KEY: [u8; 16] = [
+    64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105,
+];
 
 #[derive(Clone, Default)]
 pub struct KugouConfig {
@@ -288,6 +297,141 @@ struct AudioMetadata {
     filesize_super: Option<FlexibleInteger>,
     bitrate_super: Option<FlexibleInteger>,
     timelength_super: Option<FlexibleInteger>,
+}
+
+#[derive(Serialize)]
+struct LyricSearchQuery<'a> {
+    album_audio_id: u64,
+    appid: u16,
+    clientver: u32,
+    duration: u64,
+    hash: &'a str,
+    keyword: &'a str,
+    lrctxt: u8,
+    man: &'static str,
+    signature: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricSearchEnvelope {
+    status: i64,
+    info: String,
+    errcode: i64,
+    errmsg: String,
+    keyword: String,
+    proposal: String,
+    has_complete_right: Option<FlexibleInteger>,
+    expire: Option<FlexibleInteger>,
+    candidates: Vec<LyricCandidate>,
+    ugccandidates: Vec<Value>,
+    ai_candidates: Vec<Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricCandidate {
+    id: String,
+    product_from: String,
+    accesskey: String,
+    can_score: bool,
+    singer: String,
+    song: String,
+    duration: Option<FlexibleInteger>,
+    uid: String,
+    nickname: String,
+    origiuid: String,
+    transuid: String,
+    sounduid: String,
+    originame: String,
+    transname: String,
+    soundname: String,
+    language: String,
+    krctype: Option<FlexibleInteger>,
+    hitlayer: Option<FlexibleInteger>,
+    hitcasemask: Option<FlexibleInteger>,
+    adjust: Option<FlexibleInteger>,
+    score: Option<FlexibleInteger>,
+    contenttype: Option<FlexibleInteger>,
+    content_format: Option<FlexibleInteger>,
+    download_id: String,
+}
+
+#[derive(Serialize)]
+struct LyricDownloadQuery<'a> {
+    accesskey: &'a str,
+    appid: u16,
+    charset: &'static str,
+    client: &'static str,
+    clienttime: u64,
+    clientver: u32,
+    dfid: &'static str,
+    fmt: &'static str,
+    id: &'a str,
+    mid: &'a str,
+    uuid: &'static str,
+    ver: u8,
+    signature: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricDownloadEnvelope {
+    status: i64,
+    info: String,
+    error_code: i64,
+    fmt: String,
+    contenttype: Option<FlexibleInteger>,
+    #[serde(rename = "_source")]
+    source: String,
+    charset: String,
+    content: String,
+    id: String,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RequestedLyricFormat {
+    Krc,
+    Lrc,
+}
+
+impl RequestedLyricFormat {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Krc => "krc",
+            Self::Lrc => "lrc",
+        }
+    }
+}
+
+struct DecodedLyric {
+    text: String,
+    format: &'static str,
+    content_type: Option<u64>,
+    source: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KrcLanguagePayload {
+    version: Option<FlexibleInteger>,
+    content: Vec<KrcLanguageSection>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KrcLanguageSection {
+    #[serde(rename = "type")]
+    section_type: Option<FlexibleInteger>,
+    #[serde(rename = "lyricContent")]
+    lyric_content: Vec<Vec<String>>,
+}
+
+struct EmbeddedLyricLanguages {
+    translated: Option<String>,
+    romanized: Option<String>,
+    extensions: Vec<Value>,
+    version: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -562,6 +706,126 @@ impl KugouClient {
             .await?;
         let audio = parse_audio_metadata(&audio_bytes, &audio_id)?;
         map_track_detail(album_audio_id, metadata, audio)
+    }
+
+    pub(crate) async fn lyrics(&self, album_audio_id: u64) -> Result<Lyrics> {
+        let track = self.track_detail(album_audio_id).await?;
+        let hash = track
+            .extensions
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| kugou_upstream_error("KuGou track detail omitted the lyric hash"))?;
+        let duration = track
+            .duration_ms
+            .ok_or_else(|| kugou_upstream_error("KuGou track detail omitted lyric duration"))?;
+        let keyword = lyric_search_keyword(&track);
+        let (candidate, search_diagnostics) = self
+            .search_lyric_candidate(album_audio_id, hash, duration, &keyword)
+            .await?;
+
+        let krc = self
+            .download_lyric(&candidate, RequestedLyricFormat::Krc)
+            .await;
+        let lrc = self
+            .download_lyric(&candidate, RequestedLyricFormat::Lrc)
+            .await;
+        map_lyrics(album_audio_id, candidate, search_diagnostics, krc, lrc)
+    }
+
+    async fn search_lyric_candidate(
+        &self,
+        album_audio_id: u64,
+        hash: &str,
+        duration: u64,
+        keyword: &str,
+    ) -> Result<(LyricCandidate, Value)> {
+        let parameters = BTreeMap::from([
+            ("album_audio_id", album_audio_id.to_string()),
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+            ("duration", duration.to_string()),
+            ("hash", hash.to_owned()),
+            ("keyword", keyword.to_owned()),
+            ("lrctxt", "1".to_owned()),
+            ("man", "no".to_owned()),
+        ]);
+        let query = LyricSearchQuery {
+            album_audio_id,
+            appid: ANDROID_APP_ID,
+            clientver: ANDROID_CLIENT_VERSION,
+            duration,
+            hash,
+            keyword,
+            lrctxt: 1,
+            man: "no",
+            signature: android_signature_for_parameters(&parameters, &[]),
+        };
+        let response = self
+            .android_get(LYRIC_SEARCH_ENDPOINT, unix_seconds_now())
+            .query(&query)
+            .send()
+            .await
+            .map_err(kugou_network_error)?;
+        let bytes = read_bounded_response(response, "KuGou lyric search").await?;
+        parse_lyric_search_response(&bytes)
+    }
+
+    async fn download_lyric(
+        &self,
+        candidate: &LyricCandidate,
+        format: RequestedLyricFormat,
+    ) -> Result<DecodedLyric> {
+        let clienttime = unix_seconds_now();
+        let parameters = BTreeMap::from([
+            ("accesskey", candidate.accesskey.clone()),
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("charset", "utf8".to_owned()),
+            ("client", "android".to_owned()),
+            ("clienttime", clienttime.to_string()),
+            ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+            ("dfid", "-".to_owned()),
+            ("fmt", format.as_str().to_owned()),
+            ("id", candidate.id.clone()),
+            ("mid", self.mid.clone()),
+            ("uuid", "-".to_owned()),
+            ("ver", "1".to_owned()),
+        ]);
+        let query = LyricDownloadQuery {
+            accesskey: &candidate.accesskey,
+            appid: ANDROID_APP_ID,
+            charset: "utf8",
+            client: "android",
+            clienttime,
+            clientver: ANDROID_CLIENT_VERSION,
+            dfid: "-",
+            fmt: format.as_str(),
+            id: &candidate.id,
+            mid: &self.mid,
+            uuid: "-",
+            ver: 1,
+            signature: android_signature_for_parameters(&parameters, &[]),
+        };
+        let response = self
+            .android_get(LYRIC_DOWNLOAD_ENDPOINT, clienttime)
+            .query(&query)
+            .send()
+            .await
+            .map_err(kugou_network_error)?;
+        let bytes = read_bounded_response(response, "KuGou lyric download").await?;
+        parse_lyric_download_response(&bytes, candidate, format)
+    }
+
+    fn android_get(&self, endpoint: &'static str, clienttime: u64) -> reqwest::RequestBuilder {
+        self.http
+            .get(endpoint)
+            .header("dfid", "-")
+            .header("clienttime", clienttime)
+            .header("mid", &self.mid)
+            .header("kg-rc", "1")
+            .header("kg-thash", "5d816a0")
+            .header("kg-rec", "1")
+            .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
+            .header("user-agent", ANDROID_USER_AGENT)
     }
 
     async fn post_android<T: Serialize>(
@@ -1099,6 +1363,488 @@ fn detail_quality_asset(
     }))
 }
 
+fn parse_lyric_search_response(bytes: &[u8]) -> Result<(LyricCandidate, Value)> {
+    let envelope: LyricSearchEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou lyric search returned malformed JSON"))?;
+    if envelope.status != 200 || envelope.errcode != 200 {
+        return Err(
+            kugou_upstream_error("KuGou lyric search rejected the request").with_details(json!({
+                "platform_code": envelope.errcode,
+                "platform_message": safe_upstream_message(
+                    nonempty(&envelope.errmsg).unwrap_or(&envelope.info)
+                ),
+            })),
+        );
+    }
+    if envelope.candidates.len() > 1_000 {
+        return Err(kugou_upstream_error(
+            "KuGou lyric search returned too many candidates",
+        ));
+    }
+    let candidate_count = envelope.candidates.len();
+    let proposal = nonempty(&envelope.proposal);
+    let selected_index = envelope
+        .candidates
+        .iter()
+        .position(|candidate| {
+            proposal == Some(candidate.id.trim()) && valid_lyric_candidate(candidate)
+        })
+        .or_else(|| envelope.candidates.iter().position(valid_lyric_candidate))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "KuGou did not return a usable lyric candidate",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+    let selected_by_proposal = proposal == Some(envelope.candidates[selected_index].id.trim());
+    let candidate = envelope
+        .candidates
+        .into_iter()
+        .nth(selected_index)
+        .expect("selected lyric candidate index must exist");
+    let diagnostics = json!({
+        "keyword": nonempty(&envelope.keyword),
+        "proposal": proposal,
+        "candidate_count": candidate_count,
+        "ugc_candidate_count": envelope.ugccandidates.len(),
+        "ai_candidate_count": envelope.ai_candidates.len(),
+        "selected_by_proposal": selected_by_proposal,
+        "has_complete_right": envelope
+            .has_complete_right
+            .as_ref()
+            .and_then(FlexibleInteger::as_u64),
+        "expires_in_seconds": envelope.expire.as_ref().and_then(FlexibleInteger::as_u64),
+    });
+    Ok((candidate, diagnostics))
+}
+
+fn valid_lyric_candidate(candidate: &LyricCandidate) -> bool {
+    canonical_positive_decimal(&candidate.id)
+        && candidate.accesskey.len() == 32
+        && candidate
+            .accesskey
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        && [&candidate.singer, &candidate.song, &candidate.nickname]
+            .into_iter()
+            .all(|value| !value.chars().any(disallowed_text_control))
+}
+
+fn parse_lyric_download_response(
+    bytes: &[u8],
+    candidate: &LyricCandidate,
+    requested: RequestedLyricFormat,
+) -> Result<DecodedLyric> {
+    let envelope: LyricDownloadEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou lyric download returned malformed JSON"))?;
+    if envelope.status != 200 || envelope.error_code != 0 {
+        return Err(
+            kugou_upstream_error("KuGou lyric download rejected the request").with_details(json!({
+                "platform_code": envelope.error_code,
+                "platform_message": safe_upstream_message(&envelope.info),
+                "requested_format": requested.as_str(),
+            })),
+        );
+    }
+    if envelope.id.trim() != candidate.id {
+        return Err(kugou_upstream_error(
+            "KuGou lyric download returned a mismatched candidate identity",
+        ));
+    }
+    if !matches!(envelope.fmt.trim(), "krc" | "lrc") {
+        return Err(kugou_upstream_error(
+            "KuGou lyric download returned an unknown format",
+        ));
+    }
+    let decoded = BASE64.decode(envelope.content.as_bytes()).map_err(|_| {
+        kugou_upstream_error("KuGou lyric download returned invalid base64 content")
+    })?;
+    if decoded.len() > MAX_API_RESPONSE_BYTES as usize {
+        return Err(kugou_upstream_error(
+            "KuGou lyric content exceeded the compressed size limit",
+        ));
+    }
+    let (text, format) = if decoded.starts_with(b"krc1") {
+        (decode_krc(&decoded)?, "krc")
+    } else {
+        let text = String::from_utf8(decoded).map_err(|_| {
+            kugou_upstream_error("KuGou lyric download returned invalid UTF-8 text")
+        })?;
+        validate_lyric_text(&text)?;
+        (text, "lrc")
+    };
+    Ok(DecodedLyric {
+        text,
+        format,
+        content_type: envelope
+            .contenttype
+            .as_ref()
+            .and_then(FlexibleInteger::as_u64),
+        source: nonempty(&envelope.source).map(str::to_owned),
+    })
+}
+
+fn decode_krc(bytes: &[u8]) -> Result<String> {
+    if bytes.len() <= 4 || !bytes.starts_with(b"krc1") {
+        return Err(kugou_upstream_error(
+            "KuGou KRC content omitted its file header",
+        ));
+    }
+    let mut compressed = bytes[4..].to_vec();
+    for (index, byte) in compressed.iter_mut().enumerate() {
+        *byte ^= KRC_XOR_KEY[index % KRC_XOR_KEY.len()];
+    }
+    let mut decoder = ZlibDecoder::new(compressed.as_slice())
+        .take(u64::try_from(MAX_LYRIC_TEXT_BYTES + 1).unwrap_or(u64::MAX));
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|_| kugou_upstream_error("KuGou KRC content could not be decompressed"))?;
+    if decoded.len() > MAX_LYRIC_TEXT_BYTES {
+        return Err(kugou_upstream_error(
+            "KuGou KRC text exceeded the size limit",
+        ));
+    }
+    let text = String::from_utf8(decoded)
+        .map_err(|_| kugou_upstream_error("KuGou KRC content was not valid UTF-8"))?;
+    validate_lyric_text(&text)?;
+    Ok(text)
+}
+
+fn validate_lyric_text(text: &str) -> Result<()> {
+    if text.is_empty()
+        || text.len() > MAX_LYRIC_TEXT_BYTES
+        || text.chars().any(disallowed_text_control)
+    {
+        return Err(kugou_upstream_error(
+            "KuGou lyric content was empty or malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn disallowed_text_control(character: char) -> bool {
+    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+}
+
+fn map_lyrics(
+    album_audio_id: u64,
+    candidate: LyricCandidate,
+    search_diagnostics: Value,
+    krc: Result<DecodedLyric>,
+    lrc: Result<DecodedLyric>,
+) -> Result<Lyrics> {
+    let krc_failed = krc.is_err();
+    let lrc_failed = lrc.is_err();
+    if krc_failed && lrc_failed {
+        return match krc {
+            Err(error) => Err(error),
+            Ok(_) => unreachable!("both lyric downloads were already checked as failed"),
+        };
+    }
+
+    let mut word_synced = None;
+    let mut plain = None;
+    let mut download_diagnostics = Vec::new();
+    for (requested, result) in [
+        (RequestedLyricFormat::Krc, krc),
+        (RequestedLyricFormat::Lrc, lrc),
+    ] {
+        let Ok(download) = result else {
+            download_diagnostics.push(json!({
+                "requested_format": requested.as_str(),
+                "available": false,
+            }));
+            continue;
+        };
+        download_diagnostics.push(json!({
+            "requested_format": requested.as_str(),
+            "available": true,
+            "actual_format": download.format,
+            "content_type": download.content_type,
+            "source": download.source,
+        }));
+        if download.format == "krc" {
+            if word_synced.is_none() {
+                word_synced = Some(download.text);
+            }
+        } else if plain.is_none() {
+            plain = Some(download.text);
+        }
+    }
+    if plain.is_none() {
+        plain = word_synced.as_deref().and_then(krc_to_lrc);
+    }
+    if plain.is_none() && word_synced.is_none() {
+        return Err(kugou_upstream_error(
+            "KuGou lyric downloads did not contain a supported format",
+        ));
+    }
+
+    let embedded = word_synced
+        .as_deref()
+        .map(parse_krc_languages)
+        .transpose()?
+        .unwrap_or_else(|| EmbeddedLyricLanguages {
+            translated: None,
+            romanized: None,
+            extensions: Vec::new(),
+            version: None,
+        });
+    let track_ref = ResourceRef::new(Platform::Kugou, album_audio_id.to_string())
+        .map_err(|_| kugou_upstream_error("KuGou lyric identity was invalid"))?;
+    let contributors = lyric_contributors(&candidate);
+    let format = if word_synced.is_some() { "krc" } else { "lrc" }.to_owned();
+    let mut extensions = Extensions::new();
+    extensions.insert("search".to_owned(), search_diagnostics);
+    extensions.insert(
+        "candidate".to_owned(),
+        json!({
+            "id": candidate.id,
+            "download_id": nonempty(&candidate.download_id),
+            "product_from": nonempty(&candidate.product_from),
+            "can_score": candidate.can_score,
+            "singer": nonempty(&candidate.singer),
+            "song": nonempty(&candidate.song),
+            "duration_ms": candidate.duration.as_ref().and_then(FlexibleInteger::as_u64),
+            "language": nonempty(&candidate.language),
+            "krc_type": candidate.krctype.as_ref().and_then(FlexibleInteger::as_u64),
+            "hit_layer": candidate.hitlayer.as_ref().and_then(FlexibleInteger::as_u64),
+            "hit_case_mask": candidate.hitcasemask.as_ref().and_then(FlexibleInteger::as_u64),
+            "adjust": candidate.adjust.as_ref().and_then(FlexibleInteger::as_u64),
+            "score": candidate.score.as_ref().and_then(FlexibleInteger::as_u64),
+            "content_type": candidate.contenttype.as_ref().and_then(FlexibleInteger::as_u64),
+            "content_format": candidate
+                .content_format
+                .as_ref()
+                .and_then(FlexibleInteger::as_u64),
+        }),
+    );
+    extensions.insert("downloads".to_owned(), json!(download_diagnostics));
+    if !embedded.extensions.is_empty() {
+        extensions.insert(
+            "embedded_languages".to_owned(),
+            json!({
+                "version": embedded.version,
+                "sections": embedded.extensions,
+            }),
+        );
+    }
+    Ok(Lyrics {
+        track_ref,
+        plain,
+        translated: embedded.translated,
+        romanized: embedded.romanized,
+        word_synced,
+        singing_annotations: None,
+        singing_annotations_timestamp: None,
+        format,
+        contributors,
+        extensions,
+    })
+}
+
+fn parse_krc_languages(text: &str) -> Result<EmbeddedLyricLanguages> {
+    let Some(encoded) = text.lines().find_map(|line| {
+        line.strip_prefix("[language:")
+            .and_then(|value| value.strip_suffix(']'))
+    }) else {
+        return Ok(EmbeddedLyricLanguages {
+            translated: None,
+            romanized: None,
+            extensions: Vec::new(),
+            version: None,
+        });
+    };
+    if encoded.len() > MAX_LYRIC_TEXT_BYTES {
+        return Err(kugou_upstream_error(
+            "KuGou embedded lyric languages exceeded the size limit",
+        ));
+    }
+    let bytes = BASE64.decode(encoded).map_err(|_| {
+        kugou_upstream_error("KuGou embedded lyric languages were not valid base64")
+    })?;
+    let payload: KrcLanguagePayload = serde_json::from_slice(&bytes)
+        .map_err(|_| kugou_upstream_error("KuGou embedded lyric languages were malformed"))?;
+    if payload.content.len() > 16 {
+        return Err(kugou_upstream_error(
+            "KuGou embedded lyric languages returned too many sections",
+        ));
+    }
+    let mut translated = None;
+    let mut romanized = None;
+    let mut extensions = Vec::new();
+    for section in payload.content {
+        if section.lyric_content.len() > 20_000
+            || section.lyric_content.iter().any(|line| line.len() > 256)
+        {
+            return Err(kugou_upstream_error(
+                "KuGou embedded lyric language section was too large",
+            ));
+        }
+        let section_type = section
+            .section_type
+            .as_ref()
+            .and_then(FlexibleInteger::as_u64);
+        let lines = section
+            .lyric_content
+            .into_iter()
+            .map(|line| line.concat())
+            .collect::<Vec<_>>();
+        let joined = lines.join("\n");
+        if joined.len() > MAX_LYRIC_TEXT_BYTES || joined.chars().any(disallowed_text_control) {
+            return Err(kugou_upstream_error(
+                "KuGou embedded lyric language section was malformed",
+            ));
+        }
+        match section_type {
+            Some(1) if translated.is_none() && !joined.is_empty() => {
+                translated = Some(joined.clone());
+            }
+            Some(0) if romanized.is_none() && !joined.is_empty() => {
+                romanized = Some(joined.clone());
+            }
+            _ => {}
+        }
+        extensions.push(json!({
+            "type": section_type,
+            "lines": lines,
+        }));
+    }
+    Ok(EmbeddedLyricLanguages {
+        translated,
+        romanized,
+        extensions,
+        version: payload.version.as_ref().and_then(FlexibleInteger::as_u64),
+    })
+}
+
+fn krc_to_lrc(text: &str) -> Option<String> {
+    let mut output = String::new();
+    for line in text.lines() {
+        if let Some((timing, content)) =
+            line.strip_prefix('[').and_then(|line| line.split_once(']'))
+            && let Some((start, _duration)) = timing.split_once(',')
+            && let Ok(start_ms) = start.parse::<u64>()
+        {
+            let minutes = start_ms / 60_000;
+            let seconds = (start_ms % 60_000) / 1_000;
+            let centiseconds = (start_ms % 1_000) / 10;
+            let content = strip_krc_word_timings(content);
+            output.push_str(&format!(
+                "[{minutes:02}:{seconds:02}.{centiseconds:02}]{content}\n"
+            ));
+        } else if line.starts_with('[')
+            && !line.starts_with("[language:")
+            && !line.chars().any(disallowed_text_control)
+        {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+fn strip_krc_word_timings(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find('<') {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start + 1..].find('>') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        rest = &rest[start + end + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn lyric_search_keyword(track: &Track) -> String {
+    let artists = track
+        .artists
+        .iter()
+        .map(|artist| artist.name.trim())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
+    let keyword = if artists.is_empty() {
+        track.name.clone()
+    } else {
+        format!("{artists} - {}", track.name)
+    };
+    truncate_utf8(&keyword, 512)
+}
+
+fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let boundary = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= maximum_bytes)
+        .last()
+        .unwrap_or_default();
+    value[..boundary].to_owned()
+}
+
+fn lyric_contributors(candidate: &LyricCandidate) -> Vec<LyricContributor> {
+    let mut contributors = Vec::new();
+    push_lyric_contributor(
+        &mut contributors,
+        "uploader",
+        &candidate.uid,
+        &candidate.nickname,
+    );
+    push_lyric_contributor(
+        &mut contributors,
+        "original",
+        &candidate.origiuid,
+        &candidate.originame,
+    );
+    push_lyric_contributor(
+        &mut contributors,
+        "translation",
+        &candidate.transuid,
+        &candidate.transname,
+    );
+    push_lyric_contributor(
+        &mut contributors,
+        "romanization",
+        &candidate.sounduid,
+        &candidate.soundname,
+    );
+    contributors
+}
+
+fn push_lyric_contributor(
+    contributors: &mut Vec<LyricContributor>,
+    role: &str,
+    id: &str,
+    name: &str,
+) {
+    let name = nonempty(name);
+    let resource_ref = canonical_positive_decimal(id)
+        .then(|| ResourceRef::new(Platform::Kugou, id.trim().to_owned()).ok())
+        .flatten();
+    if name.is_some() || resource_ref.is_some() {
+        contributors.push(LyricContributor {
+            role: role.to_owned(),
+            resource_ref,
+            name: name.unwrap_or("").to_owned(),
+        });
+    }
+}
+
+fn canonical_positive_decimal(value: &str) -> bool {
+    let value = value.trim();
+    value
+        .parse::<u64>()
+        .is_ok_and(|parsed| parsed > 0 && parsed.to_string() == value)
+}
+
 fn map_search_track(item: KugouSearchTrack) -> Result<Track> {
     let album_audio_id = item
         .mix_song_id
@@ -1415,11 +2161,25 @@ fn unix_milliseconds_now() -> u64 {
 }
 
 fn android_signature(mid: &str, clienttime: u64, body: &[u8]) -> String {
+    let parameters = BTreeMap::from([
+        ("appid", ANDROID_APP_ID.to_string()),
+        ("clienttime", clienttime.to_string()),
+        ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+        ("dfid", "-".to_owned()),
+        ("mid", mid.to_owned()),
+        ("uuid", "-".to_owned()),
+    ]);
+    android_signature_for_parameters(&parameters, body)
+}
+
+fn android_signature_for_parameters(parameters: &BTreeMap<&str, String>, body: &[u8]) -> String {
     let mut digest = Md5::new();
     digest.update(ANDROID_SIGNATURE_SALT);
-    digest.update(format!(
-        "appid={ANDROID_APP_ID}clienttime={clienttime}clientver={ANDROID_CLIENT_VERSION}dfid=-mid={mid}uuid=-"
-    ));
+    for (key, value) in parameters {
+        digest.update(key.as_bytes());
+        digest.update(b"=");
+        digest.update(value.as_bytes());
+    }
     digest.update(body);
     digest.update(ANDROID_SIGNATURE_SALT);
     hex::encode(digest.finalize())
@@ -1495,6 +2255,38 @@ fn kugou_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lyric_candidate() -> LyricCandidate {
+        LyricCandidate {
+            id: "274944371".to_owned(),
+            product_from: "official".to_owned(),
+            accesskey: "2A7B35884B3C20E9D3281686BA59A3F8".to_owned(),
+            singer: "artist".to_owned(),
+            song: "song".to_owned(),
+            duration: Some(FlexibleInteger::Unsigned(269_000)),
+            ..LyricCandidate::default()
+        }
+    }
+
+    fn encode_krc_fixture(text: &str) -> Vec<u8> {
+        use std::io::Write as _;
+
+        use flate2::{Compression, write::ZlibEncoder};
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(text.as_bytes())
+            .expect("compress KRC text");
+        let compressed = encoder.finish().expect("finish KRC compression");
+        let mut bytes = b"krc1".to_vec();
+        bytes.extend(
+            compressed
+                .into_iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ KRC_XOR_KEY[index % KRC_XOR_KEY.len()]),
+        );
+        bytes
+    }
 
     #[test]
     fn configuration_debug_does_not_expose_proxy_credentials() {
@@ -1639,6 +2431,127 @@ mod tests {
     }
 
     #[test]
+    fn lyric_search_prefers_the_platform_proposal_without_exposing_access_key() {
+        let response = r#"{
+          "status":200,"info":"OK","errcode":200,"errmsg":"OK",
+          "keyword":"artist - song","proposal":"20","expire":7200,
+          "candidates":[
+            {"id":"10","accesskey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","song":"other"},
+            {
+              "id":"20","accesskey":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+              "product_from":"official","singer":"artist","song":"song",
+              "duration":269000,"contenttype":0,"content_format":1
+            }
+          ]
+        }"#;
+        let (candidate, diagnostics) =
+            parse_lyric_search_response(response.as_bytes()).expect("parse lyric candidates");
+        assert_eq!(candidate.id, "20");
+        assert_eq!(diagnostics["selected_by_proposal"], true);
+        assert_eq!(diagnostics["candidate_count"], 2);
+        assert!(!diagnostics.to_string().contains("BBBB"));
+    }
+
+    #[test]
+    fn krc_decoder_enforces_header_xor_zlib_and_utf8() {
+        let text = "[0,1000]<0,500,0>逐<500,500,0>字\n";
+        let encoded = encode_krc_fixture(text);
+        assert_eq!(decode_krc(&encoded).expect("decode KRC"), text);
+        assert!(decode_krc(b"not-krc").is_err());
+
+        let mut corrupt = encoded;
+        corrupt[4] ^= 0xff;
+        assert!(decode_krc(&corrupt).is_err());
+    }
+
+    #[test]
+    fn lyric_download_detects_actual_content_instead_of_trusting_requested_format() {
+        let candidate = lyric_candidate();
+        let krc = encode_krc_fixture("[0,1000]<0,1000,0>word\n");
+        let response = json!({
+            "status": 200,
+            "info": "OK",
+            "error_code": 0,
+            "fmt": "krc",
+            "contenttype": 0,
+            "_source": "bss",
+            "content": BASE64.encode(krc),
+            "id": candidate.id,
+        });
+        let decoded = parse_lyric_download_response(
+            response.to_string().as_bytes(),
+            &candidate,
+            RequestedLyricFormat::Krc,
+        )
+        .expect("decode lyric response");
+        assert_eq!(decoded.format, "krc");
+        assert!(decoded.text.contains("<0,1000,0>"));
+
+        let fallback = json!({
+            "status": 200,
+            "info": "OK",
+            "error_code": 0,
+            "fmt": "krc",
+            "contenttype": 1,
+            "_source": "bss",
+            "content": BASE64.encode("[00:00.00]line"),
+            "id": candidate.id,
+        });
+        let decoded = parse_lyric_download_response(
+            fallback.to_string().as_bytes(),
+            &candidate,
+            RequestedLyricFormat::Krc,
+        )
+        .expect("decode LRC fallback");
+        assert_eq!(decoded.format, "lrc");
+    }
+
+    #[test]
+    fn rich_krc_remains_primary_when_plain_lrc_is_also_available() {
+        let languages = BASE64.encode(
+            br#"{"version":1,"content":[{"type":1,"lyricContent":[["translated"]]},{"type":0,"lyricContent":[["romanized"]]}]}"#,
+        );
+        let krc = format!("[language:{languages}]\n[1000,1000]<0,500,0>逐<500,500,0>字\n");
+        let lyrics = map_lyrics(
+            32_100_650,
+            lyric_candidate(),
+            json!({"candidate_count": 1}),
+            Ok(DecodedLyric {
+                text: krc,
+                format: "krc",
+                content_type: Some(0),
+                source: Some("bss".to_owned()),
+            }),
+            Ok(DecodedLyric {
+                text: "[00:01.00]逐字\n".to_owned(),
+                format: "lrc",
+                content_type: Some(1),
+                source: Some("bss".to_owned()),
+            }),
+        )
+        .expect("map lyrics");
+        assert_eq!(lyrics.format, "krc");
+        assert_eq!(lyrics.plain.as_deref(), Some("[00:01.00]逐字\n"));
+        assert!(
+            lyrics
+                .word_synced
+                .as_deref()
+                .is_some_and(|text| text.contains("<0,500,0>"))
+        );
+        assert_eq!(lyrics.translated.as_deref(), Some("translated"));
+        assert_eq!(lyrics.romanized.as_deref(), Some("romanized"));
+    }
+
+    #[test]
+    fn krc_can_produce_a_plain_lrc_fallback_without_losing_word_timing() {
+        let krc = "[ti:song]\n[1000,1200]<0,500,0>逐<500,700,0>字\n";
+        assert_eq!(
+            krc_to_lrc(krc).as_deref(),
+            Some("[ti:song]\n[00:01.00]逐字\n")
+        );
+    }
+
+    #[test]
     fn detail_resolves_separate_identities_and_preserves_every_quality_tier() {
         let metadata = r#"{
           "msg":"","status":1,"error_code":0,
@@ -1761,5 +2674,25 @@ mod tests {
         assert_eq!(track.resource_ref.to_string(), "kugou:32100650");
         assert_eq!(track.extensions["audio_id"], "20505418");
         assert!(track.available_qualities.contains(&Quality::Standard));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live KuGou network access"]
+    async fn live_public_lyrics_preserve_krc_over_lrc() {
+        let client = KugouClient::new(&KugouConfig::default()).expect("create client");
+        let lyrics = client.lyrics(32_100_650).await.expect("live KuGou lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "kugou:32100650");
+        assert_eq!(lyrics.format, "krc");
+        assert!(
+            lyrics.word_synced.as_deref().is_some_and(|text| {
+                text.contains("[249072,3848]") && text.contains("<0,200,0>")
+            })
+        );
+        assert!(
+            lyrics
+                .plain
+                .as_deref()
+                .is_some_and(|text| text.contains("[04:09.07]"))
+        );
     }
 }
