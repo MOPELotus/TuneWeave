@@ -226,8 +226,13 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
+    let already_exists = path.exists();
     fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    if already_exists {
+        Ok(())
+    } else {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    }
 }
 
 #[cfg(not(unix))]
