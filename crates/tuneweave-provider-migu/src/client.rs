@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use reqwest::{
     Client, Proxy, StatusCode,
@@ -11,6 +15,7 @@ use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
     Platform, Playlist, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
     TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
+    UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
@@ -56,6 +61,7 @@ impl fmt::Debug for MiguConfig {
 #[derive(Clone)]
 pub struct MiguClient {
     http: Client,
+    proxy_configured: bool,
 }
 
 impl fmt::Debug for MiguClient {
@@ -699,6 +705,14 @@ impl MiguLyricKind {
             Self::Translated => "trc",
         }
     }
+
+    const fn log_operation(self) -> &'static str {
+        match self {
+            Self::Plain => "lyric_download_lrc",
+            Self::WordSynced => "lyric_download_mrc",
+            Self::Translated => "lyric_download_trc",
+        }
+    }
 }
 
 impl MiguClient {
@@ -718,7 +732,10 @@ impl MiguClient {
             TuneWeaveError::new(ErrorCode::InternalError, "failed to build Migu HTTP client")
                 .with_platform(Platform::Migu)
         })?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            proxy_configured: config.proxy_url.is_some(),
+        })
     }
 
     #[cfg(test)]
@@ -731,32 +748,62 @@ impl MiguClient {
         keyword: &str,
         page: u32,
     ) -> Result<MiguSearchPage> {
-        let response = self
-            .http
-            .get(SEARCH_ENDPOINT)
-            .header(ACCEPT, "application/json")
-            .query(&MiguSearchRequest {
-                page_no: page,
-                text: keyword,
-            })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu search").await?;
-        parse_search_response(&bytes)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(SEARCH_ENDPOINT)
+                .header(ACCEPT, "application/json")
+                .query(&MiguSearchRequest {
+                    page_no: page,
+                    text: keyword,
+                })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu search").await?;
+            parse_search_response(&bytes)
+        }
+        .await;
+        self.log_upstream_request(
+            "search",
+            "app.c.nf.migu.cn",
+            "/bmw/search/song/v1.0",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn playlist_detail(&self, playlist_id: &str) -> Result<Playlist> {
-        let response = self
-            .http
-            .get(PLAYLIST_DETAIL_ENDPOINT)
-            .header(ACCEPT, "application/json")
-            .query(&MiguPlaylistDetailQuery { playlist_id })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu playlist detail").await?;
-        parse_playlist_detail_response(&bytes, playlist_id)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(PLAYLIST_DETAIL_ENDPOINT)
+                .header(ACCEPT, "application/json")
+                .query(&MiguPlaylistDetailQuery { playlist_id })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu playlist detail").await?;
+            parse_playlist_detail_response(&bytes, playlist_id)
+        }
+        .await;
+        self.log_upstream_request(
+            "playlist_detail",
+            "app.c.nf.migu.cn",
+            "/resource/playlist/v2.0",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn playlist_tracks_page(
@@ -765,20 +812,35 @@ impl MiguClient {
         page_no: u32,
         page_size: u32,
     ) -> Result<MiguPlaylistTrackPage> {
-        let response = self
-            .http
-            .get(PLAYLIST_TRACKS_ENDPOINT)
-            .header(ACCEPT, "application/json")
-            .query(&MiguPlaylistTracksQuery {
-                page_no,
-                page_size,
-                playlist_id,
-            })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu playlist tracks").await?;
-        parse_playlist_tracks_response(&bytes, page_no, page_size)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(PLAYLIST_TRACKS_ENDPOINT)
+                .header(ACCEPT, "application/json")
+                .query(&MiguPlaylistTracksQuery {
+                    page_no,
+                    page_size,
+                    playlist_id,
+                })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu playlist tracks").await?;
+            parse_playlist_tracks_response(&bytes, page_no, page_size)
+        }
+        .await;
+        self.log_upstream_request(
+            "playlist_tracks",
+            "app.c.nf.migu.cn",
+            "/MIGUM3.0/resource/playlist/song/v2.0",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn track_detail(&self, content_id: &str) -> Result<Track> {
@@ -963,19 +1025,34 @@ impl MiguClient {
     }
 
     async fn listening_rights(&self, content_id: &str) -> Result<MiguListeningRights> {
-        let response = self
-            .http
-            .post(LISTENING_RIGHTS_ENDPOINT)
-            .header(ACCEPT, "application/json")
-            .header("channel", "014X031")
-            .json(&MiguListeningRightsRequest {
-                content_ids: content_id,
-            })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu listening rights").await?;
-        parse_listening_rights_response(&bytes, content_id)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .post(LISTENING_RIGHTS_ENDPOINT)
+                .header(ACCEPT, "application/json")
+                .header("channel", "014X031")
+                .json(&MiguListeningRightsRequest {
+                    content_ids: content_id,
+                })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu listening rights").await?;
+            parse_listening_rights_response(&bytes, content_id)
+        }
+        .await;
+        self.log_upstream_request(
+            "listening_rights",
+            "app.c.nf.migu.cn",
+            "/strategy/pc/can-listen/v1.0",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn public_stream(
@@ -984,46 +1061,76 @@ impl MiguClient {
         copyright_id: &str,
         tone_flag: &'static str,
     ) -> Result<MiguPlaybackData> {
-        let response = self
-            .http
-            .get(PUBLIC_STREAM_ENDPOINT)
-            .header(ACCEPT, "application/octet-stream, application/json")
-            .header("birth", "h5page")
-            .header("channel", "014X031")
-            .header("referer", "https://y.migu.cn/")
-            .header("location-data", "30.6698676660,104.1229614820")
-            .header("location-info", "")
-            .query(&MiguPublicStreamRequest {
-                content_id,
-                copyright_id,
-                resource_type: 2,
-                net_type: "01",
-                tone_flag,
-                scene: "",
-                lower_quality_content_id: content_id,
-            })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu public stream").await?;
-        parse_public_stream_response(&bytes)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(PUBLIC_STREAM_ENDPOINT)
+                .header(ACCEPT, "application/octet-stream, application/json")
+                .header("birth", "h5page")
+                .header("channel", "014X031")
+                .header("referer", "https://y.migu.cn/")
+                .header("location-data", "30.6698676660,104.1229614820")
+                .header("location-info", "")
+                .query(&MiguPublicStreamRequest {
+                    content_id,
+                    copyright_id,
+                    resource_type: 2,
+                    net_type: "01",
+                    tone_flag,
+                    scene: "",
+                    lower_quality_content_id: content_id,
+                })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu public stream").await?;
+            parse_public_stream_response(&bytes)
+        }
+        .await;
+        self.log_upstream_request(
+            "public_stream",
+            "c.musicapp.migu.cn",
+            "/strategy/listen-url/h5/v2.4",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn resource_info(&self, content_id: &str) -> Result<MiguResource> {
-        let response = self
-            .http
-            .get(RESOURCE_INFO_ENDPOINT)
-            .header(ACCEPT, "application/json")
-            .query(&MiguResourceInfoRequest {
-                resource_id: content_id,
-                copyright_id: "",
-                resource_type: 2,
-            })
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let bytes = read_bounded_response(response, "Migu resource detail").await?;
-        parse_resource_record(&bytes, content_id)
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(RESOURCE_INFO_ENDPOINT)
+                .header(ACCEPT, "application/json")
+                .query(&MiguResourceInfoRequest {
+                    resource_id: content_id,
+                    copyright_id: "",
+                    resource_type: 2,
+                })
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let bytes = read_bounded_response(response, "Migu resource detail").await?;
+            parse_resource_record(&bytes, content_id)
+        }
+        .await;
+        self.log_upstream_request(
+            "resource_detail",
+            "app.u.nf.migu.cn",
+            "/MIGUM2.0/v1.0/content/resourceinfo.do",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn download_optional_lyric(
@@ -1034,36 +1141,114 @@ impl MiguClient {
         let Some(url) = url else {
             return Ok(None);
         };
-        let response = self
-            .http
-            .get(url)
-            .header(ACCEPT, "*/*")
-            .header("referer", "https://app.c.nf.migu.cn/")
-            .header("channel", "0146921")
-            .send()
-            .await
-            .map_err(migu_network_error)?;
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| bounded_text(value, 128));
-        let bytes = read_bounded_response_with_limit(
-            response,
-            &format!("Migu {} lyric", kind.as_str().to_ascii_uppercase()),
-            MAX_LYRIC_RESPONSE_BYTES,
-        )
-        .await?;
-        let byte_length = bytes.len();
-        let text = match kind {
-            MiguLyricKind::WordSynced => decrypt_mrc(&bytes)?,
-            MiguLyricKind::Plain | MiguLyricKind::Translated => decode_lyric_text(&bytes)?,
-        };
-        Ok(Some(DownloadedLyric {
-            text,
-            content_type,
-            byte_length,
-        }))
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(url)
+                .header(ACCEPT, "*/*")
+                .header("referer", "https://app.c.nf.migu.cn/")
+                .header("channel", "0146921")
+                .send()
+                .await
+                .map_err(migu_network_error)?;
+            http_status = Some(response.status());
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| bounded_text(value, 128));
+            let bytes = read_bounded_response_with_limit(
+                response,
+                &format!("Migu {} lyric", kind.as_str().to_ascii_uppercase()),
+                MAX_LYRIC_RESPONSE_BYTES,
+            )
+            .await?;
+            let byte_length = bytes.len();
+            let text = match kind {
+                MiguLyricKind::WordSynced => decrypt_mrc(&bytes)?,
+                MiguLyricKind::Plain | MiguLyricKind::Translated => decode_lyric_text(&bytes)?,
+            };
+            Ok(Some(DownloadedLyric {
+                text,
+                content_type,
+                byte_length,
+            }))
+        }
+        .await;
+        self.log_upstream_request(
+            kind.log_operation(),
+            MEDIA_HOST,
+            "/data/oss/{resource}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        let (business_class, outcome) = migu_upstream_classification(outcome);
+        UpstreamRequestSummary {
+            provider: Platform::Migu,
+            operation,
+            upstream_host,
+            endpoint,
+            http_status: http_status.map(|status| status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: None,
+            retry_count: 0,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome,
+        }
+        .emit();
+    }
+}
+
+fn migu_upstream_classification<T>(
+    outcome: &Result<T>,
+) -> (UpstreamBusinessClass, UpstreamOutcome) {
+    match outcome {
+        Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
+        Err(error) => {
+            let business_class = if error
+                .details
+                .get("platform_code")
+                .and_then(serde_json::Value::as_i64)
+                .is_some()
+                || matches!(
+                    error.code,
+                    ErrorCode::AuthenticationRequired
+                        | ErrorCode::PermissionDenied
+                        | ErrorCode::ResourceNotFound
+                        | ErrorCode::Conflict
+                        | ErrorCode::RateLimited
+                        | ErrorCode::MatchRejected
+                ) {
+                UpstreamBusinessClass::RejectedError
+            } else {
+                UpstreamBusinessClass::Unavailable
+            };
+            (
+                business_class,
+                UpstreamOutcome::Failure {
+                    code: error.code,
+                    retryable: error.retryable,
+                },
+            )
+        }
     }
 }
 
@@ -2918,6 +3103,45 @@ fn migu_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_summary_separates_business_and_transport_failures() {
+        assert_eq!(
+            migu_upstream_classification(&Ok::<_, TuneWeaveError>(())),
+            (UpstreamBusinessClass::Success, UpstreamOutcome::Success)
+        );
+
+        let missing = Err::<(), _>(
+            TuneWeaveError::new(ErrorCode::ResourceNotFound, "sensitive resource text")
+                .with_platform(Platform::Migu),
+        );
+        assert_eq!(
+            migu_upstream_classification(&missing),
+            (
+                UpstreamBusinessClass::RejectedError,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::ResourceNotFound,
+                    retryable: false
+                }
+            )
+        );
+
+        let timeout = Err::<(), _>(
+            TuneWeaveError::new(ErrorCode::UpstreamTimeout, "sensitive transport text")
+                .with_platform(Platform::Migu)
+                .retryable(true),
+        );
+        assert_eq!(
+            migu_upstream_classification(&timeout),
+            (
+                UpstreamBusinessClass::Unavailable,
+                UpstreamOutcome::Failure {
+                    code: ErrorCode::UpstreamTimeout,
+                    retryable: true
+                }
+            )
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const SEARCH_RESPONSE: &str = r#"{
