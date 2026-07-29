@@ -2137,6 +2137,7 @@ dependencies = [
  "sha1",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
  "tuneweave-core",
 ]
 

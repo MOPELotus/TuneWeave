@@ -311,7 +311,7 @@ impl IntoResponse for ApiError {
 }
 
 fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
-    let error_code = error_code_name(error.code);
+    let error_code = error.code.as_str();
     let platform = error.platform.map_or("none", Platform::as_str);
     let status = status.as_u16();
     if matches!(
@@ -340,22 +340,5 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             retryable = error.retryable,
             "TuneWeave request failed"
         );
-    }
-}
-
-const fn error_code_name(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::InvalidRequest => "invalid_request",
-        ErrorCode::AuthenticationRequired => "authentication_required",
-        ErrorCode::PermissionDenied => "permission_denied",
-        ErrorCode::ResourceNotFound => "resource_not_found",
-        ErrorCode::Conflict => "conflict",
-        ErrorCode::CapabilityNotSupported => "capability_not_supported",
-        ErrorCode::RateLimited => "rate_limited",
-        ErrorCode::UpstreamError => "upstream_error",
-        ErrorCode::PlatformUnavailable => "platform_unavailable",
-        ErrorCode::UpstreamTimeout => "upstream_timeout",
-        ErrorCode::MatchRejected => "match_rejected",
-        ErrorCode::InternalError => "internal_error",
     }
 }

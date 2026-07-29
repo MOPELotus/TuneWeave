@@ -22,6 +22,27 @@ pub enum ErrorCode {
     InternalError,
 }
 
+impl ErrorCode {
+    /// Returns the stable wire-format name used by logs and HTTP responses.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::PermissionDenied => "permission_denied",
+            Self::ResourceNotFound => "resource_not_found",
+            Self::Conflict => "conflict",
+            Self::CapabilityNotSupported => "capability_not_supported",
+            Self::RateLimited => "rate_limited",
+            Self::UpstreamError => "upstream_error",
+            Self::PlatformUnavailable => "platform_unavailable",
+            Self::UpstreamTimeout => "upstream_timeout",
+            Self::MatchRejected => "match_rejected",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
 /// A platform-neutral TuneWeave failure.
 #[derive(Debug, Error)]
 #[error("{message}")]
@@ -90,3 +111,31 @@ impl TuneWeaveError {
 }
 
 pub type Result<T> = std::result::Result<T, TuneWeaveError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_names_match_the_wire_format() {
+        for code in [
+            ErrorCode::InvalidRequest,
+            ErrorCode::AuthenticationRequired,
+            ErrorCode::PermissionDenied,
+            ErrorCode::ResourceNotFound,
+            ErrorCode::Conflict,
+            ErrorCode::CapabilityNotSupported,
+            ErrorCode::RateLimited,
+            ErrorCode::UpstreamError,
+            ErrorCode::PlatformUnavailable,
+            ErrorCode::UpstreamTimeout,
+            ErrorCode::MatchRejected,
+            ErrorCode::InternalError,
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).expect("serialize error code"),
+                Value::String(code.as_str().to_owned())
+            );
+        }
+    }
+}
