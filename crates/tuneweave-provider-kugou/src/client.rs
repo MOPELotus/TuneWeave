@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::Read,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -16,8 +16,9 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, Platform,
-    Quality, ResourceRef, Result, Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, MediaDownload,
+    MediaStream, Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
+    TrialWindow, TuneWeaveError,
 };
 use url::Url;
 
@@ -25,11 +26,13 @@ const SEARCH_ENDPOINT: &str = "https://songsearch.kugou.com/song_search_v2";
 const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
 const LYRIC_SEARCH_ENDPOINT: &str = "https://lyrics.kugou.com/v1/search";
 const LYRIC_DOWNLOAD_ENDPOINT: &str = "https://lyrics.kugou.com/download";
+const TRACKER_ENDPOINT: &str = "https://gateway.kugou.com/v5/url";
 const WEB_REFERER: &str = "https://www.kugou.com/";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const ANDROID_USER_AGENT: &str = "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi";
 const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
+const TRACKER_KEY_SALT: &str = "57ae12eb6890223e355ccfcb74edf70d";
 const ANDROID_APP_ID: u16 = 1005;
 const ANDROID_CLIENT_VERSION: u32 = 20489;
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
@@ -99,6 +102,7 @@ struct KugouSearchRequest<'a> {
 enum AndroidEndpoint {
     TrackMetadata,
     AudioMetadata,
+    Privilege,
 }
 
 impl AndroidEndpoint {
@@ -106,6 +110,7 @@ impl AndroidEndpoint {
         match self {
             Self::TrackMetadata => "/kmr/v2/audio",
             Self::AudioMetadata => "/v1/audio/audio",
+            Self::Privilege => "/v2/get_res_privilege/lite",
         }
     }
 
@@ -113,13 +118,22 @@ impl AndroidEndpoint {
         match self {
             Self::TrackMetadata => "openapi.kugou.com",
             Self::AudioMetadata => "kmr.service.kugou.com",
+            Self::Privilege => "media.store.kugou.com",
         }
     }
 
     const fn kg_tid(self) -> Option<&'static str> {
         match self {
             Self::TrackMetadata => Some("238"),
-            Self::AudioMetadata => None,
+            Self::AudioMetadata | Self::Privilege => None,
+        }
+    }
+
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::TrackMetadata => "KuGou track detail",
+            Self::AudioMetadata => "KuGou audio metadata",
+            Self::Privilege => "KuGou media privilege",
         }
     }
 }
@@ -434,6 +448,171 @@ struct EmbeddedLyricLanguages {
     version: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct PrivilegeRequest<'a> {
+    appid: u16,
+    area_code: u8,
+    behavior: &'static str,
+    clientver: u32,
+    need_hash_offset: u8,
+    relate: u8,
+    support_verify: u8,
+    resource: [PrivilegeIdentity<'a>; 1],
+    qualities: [&'static str; 9],
+}
+
+#[derive(Serialize)]
+struct PrivilegeIdentity<'a> {
+    #[serde(rename = "type")]
+    resource_type: &'static str,
+    page_id: u8,
+    hash: &'a str,
+    album_id: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PrivilegeEnvelope {
+    status: i64,
+    error_code: i64,
+    message: String,
+    data: Vec<PrivilegeResource>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PrivilegeResource {
+    #[serde(rename = "type")]
+    resource_type: String,
+    id: Option<FlexibleInteger>,
+    album_id: Option<FlexibleInteger>,
+    album_audio_id: Option<FlexibleInteger>,
+    hash: String,
+    name: String,
+    level: Option<FlexibleInteger>,
+    quality: String,
+    expire: Option<FlexibleInteger>,
+    publish: Option<FlexibleInteger>,
+    is_publish: Option<FlexibleInteger>,
+    privilege: Option<FlexibleInteger>,
+    status: Option<FlexibleInteger>,
+    fail_process: Option<FlexibleInteger>,
+    pay_type: Option<FlexibleInteger>,
+    price: Option<FlexibleInteger>,
+    info: PrivilegeInfo,
+    popup: PrivilegePopup,
+    trans_param: PrivilegeTransParam,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PrivilegeInfo {
+    duration: Option<FlexibleInteger>,
+    filesize: Option<FlexibleInteger>,
+    bitrate: Option<FlexibleInteger>,
+    extname: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PrivilegePopup {
+    title: String,
+    content: String,
+    btn_name: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PrivilegeTransParam {
+    hash_offset: Option<HashOffset>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HashOffset {
+    start_byte: Option<FlexibleInteger>,
+    end_byte: Option<FlexibleInteger>,
+    start_ms: Option<FlexibleInteger>,
+    end_ms: Option<FlexibleInteger>,
+    offset_hash: String,
+    clip_hash: String,
+    file_type: Option<FlexibleInteger>,
+}
+
+#[derive(Serialize)]
+struct TrackerQuery<'a> {
+    #[serde(rename = "IsFreePart")]
+    is_free_part: u8,
+    album_audio_id: u64,
+    album_id: u64,
+    appid: u16,
+    area_code: u8,
+    behavior: &'static str,
+    #[serde(rename = "cdnBackup")]
+    cdn_backup: u8,
+    clienttime: u64,
+    clientver: u32,
+    cmd: u8,
+    dfid: &'static str,
+    hash: &'a str,
+    key: String,
+    mid: &'a str,
+    module: &'static str,
+    page_id: u64,
+    pid: u8,
+    pidversion: u32,
+    ppage_id: &'static str,
+    quality: &'a str,
+    ssa_flag: &'static str,
+    uuid: &'static str,
+    version: u32,
+    signature: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TrackerEnvelope {
+    status: i64,
+    q: Option<FlexibleInteger>,
+    url: Vec<String>,
+    #[serde(rename = "backupUrl")]
+    backup_url: Vec<String>,
+    #[serde(rename = "timeLength")]
+    time_length: Option<FlexibleInteger>,
+    #[serde(rename = "fileSize")]
+    file_size: Option<FlexibleInteger>,
+    #[serde(rename = "bitRate")]
+    bit_rate: Option<FlexibleInteger>,
+    #[serde(rename = "fileName")]
+    file_name: String,
+    #[serde(rename = "extName")]
+    extension: String,
+    hash: String,
+    priv_status: Option<FlexibleInteger>,
+    fail_process: Vec<String>,
+    hash_offset: Option<HashOffset>,
+}
+
+struct SelectedMediaSpec {
+    requested_quality: Quality,
+    actual_quality: Quality,
+    tracker_quality: &'static str,
+    hash: String,
+    size: Option<u64>,
+    bitrate: Option<u64>,
+    duration_ms: Option<u64>,
+    format: Option<String>,
+}
+
+struct MediaResolution {
+    spec: SelectedMediaSpec,
+    url: Option<String>,
+    backup_urls: Vec<String>,
+    trial: Option<TrialWindow>,
+    privilege: PrivilegeResource,
+    tracker: TrackerEnvelope,
+}
+
 #[derive(Deserialize)]
 struct KugouSearchEnvelope {
     status: i64,
@@ -732,6 +911,286 @@ impl KugouClient {
         map_lyrics(album_audio_id, candidate, search_diagnostics, krc, lrc)
     }
 
+    pub(crate) async fn stream(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaStream> {
+        let resolution = self.resolve_media(track, request, true).await?;
+        let url = resolution.url.clone().ok_or_else(|| {
+            media_permission_error(request, &resolution.privilege, &resolution.tracker)
+        })?;
+        Ok(MediaStream {
+            url,
+            backup_urls: resolution.backup_urls,
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: resolution.spec.format.clone(),
+            codec: resolution.spec.format.clone(),
+            bitrate: resolution
+                .tracker
+                .bit_rate
+                .as_ref()
+                .and_then(FlexibleInteger::as_u64)
+                .or(resolution.spec.bitrate),
+            size: resolution
+                .trial
+                .as_ref()
+                .and_then(|_| trial_size_from_offsets(resolution.tracker.hash_offset.as_ref()))
+                .or_else(|| {
+                    resolution
+                        .tracker
+                        .file_size
+                        .as_ref()
+                        .and_then(FlexibleInteger::as_u64)
+                })
+                .or(resolution.spec.size),
+            duration_ms: resolution
+                .tracker
+                .time_length
+                .as_ref()
+                .and_then(FlexibleInteger::as_u64)
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .or(resolution.spec.duration_ms)
+                .or(track.duration_ms),
+            requested_quality: resolution.spec.requested_quality,
+            actual_quality: resolution.spec.actual_quality,
+            trial: resolution.trial,
+            origin_track: Some(track.resource_ref.clone()),
+            resolved_track: track.resource_ref.clone(),
+            resolved_platform: Platform::Kugou,
+            match_score: Some(1.0),
+            attempts: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn download(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaDownload> {
+        let resolution = self.resolve_media(track, request, false).await?;
+        let available = resolution.url.is_some();
+        let message = (!available)
+            .then(|| {
+                nonempty(&resolution.privilege.popup.title)
+                    .or_else(|| nonempty(&resolution.privilege.popup.content))
+                    .map(str::to_owned)
+            })
+            .flatten()
+            .or_else(|| {
+                (!available).then(|| "KuGou did not return a full downloadable file".to_owned())
+            });
+        let mut extensions = Extensions::new();
+        extensions.insert(
+            "privilege".to_owned(),
+            privilege_diagnostics(&resolution.privilege),
+        );
+        extensions.insert(
+            "tracker".to_owned(),
+            tracker_diagnostics(&resolution.tracker),
+        );
+        extensions.insert(
+            "trial".to_owned(),
+            json!(trial_from_offsets(
+                resolution.tracker.hash_offset.as_ref().or(resolution
+                    .privilege
+                    .trans_param
+                    .hash_offset
+                    .as_ref())
+            )),
+        );
+        Ok(MediaDownload {
+            track_ref: track.resource_ref.clone(),
+            platform: Platform::Kugou,
+            available,
+            url: resolution.url,
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: resolution.spec.format.clone(),
+            codec: resolution.spec.format,
+            bitrate: resolution.spec.bitrate,
+            size: resolution.spec.size,
+            duration_ms: resolution.spec.duration_ms.or(track.duration_ms),
+            requested_quality: resolution.spec.requested_quality,
+            actual_quality: resolution.spec.actual_quality,
+            platform_code: Some(resolution.tracker.status),
+            fee: resolution
+                .privilege
+                .pay_type
+                .as_ref()
+                .and_then(FlexibleInteger::as_u64)
+                .and_then(|value| i64::try_from(value).ok()),
+            message,
+            extensions,
+        })
+    }
+
+    async fn resolve_media(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+        allow_trial: bool,
+    ) -> Result<MediaResolution> {
+        let album_audio_id = canonical_track_id(track)?;
+        let album_id = canonical_album_id(track)?;
+        let spec = select_media_spec(track, request)?;
+        let privilege = self
+            .media_privilege(album_audio_id, album_id, &spec.hash)
+            .await?;
+        let mut tracker = self.tracker(album_audio_id, album_id, &spec, false).await?;
+        let mut used_trial = false;
+        if tracker.status != 1 && allow_trial {
+            tracker = self.tracker(album_audio_id, album_id, &spec, true).await?;
+            used_trial = tracker.status == 1;
+        }
+        let (url, backup_urls) = map_tracker_urls(&tracker)?;
+        if tracker.status == 1 && url.is_none() {
+            return Err(kugou_upstream_error(
+                "KuGou tracker reported success without a media URL",
+            ));
+        }
+        let trial = used_trial
+            .then(|| {
+                trial_from_offsets(
+                    tracker
+                        .hash_offset
+                        .as_ref()
+                        .or(privilege.trans_param.hash_offset.as_ref()),
+                )
+            })
+            .flatten();
+        Ok(MediaResolution {
+            spec,
+            url,
+            backup_urls,
+            trial,
+            privilege,
+            tracker,
+        })
+    }
+
+    async fn media_privilege(
+        &self,
+        album_audio_id: u64,
+        album_id: u64,
+        hash: &str,
+    ) -> Result<PrivilegeResource> {
+        let request = PrivilegeRequest {
+            appid: ANDROID_APP_ID,
+            area_code: 1,
+            behavior: "play",
+            clientver: ANDROID_CLIENT_VERSION,
+            need_hash_offset: 1,
+            relate: 1,
+            support_verify: 1,
+            resource: [PrivilegeIdentity {
+                resource_type: "audio",
+                page_id: 0,
+                hash,
+                album_id,
+            }],
+            qualities: [
+                "128",
+                "320",
+                "flac",
+                "high",
+                "viper_atmos",
+                "viper_tape",
+                "viper_clear",
+                "super",
+                "multitrack",
+            ],
+        };
+        let bytes = self
+            .post_android(AndroidEndpoint::Privilege, &request)
+            .await?;
+        parse_privilege_response(&bytes, album_audio_id, album_id, hash)
+    }
+
+    async fn tracker(
+        &self,
+        album_audio_id: u64,
+        album_id: u64,
+        spec: &SelectedMediaSpec,
+        free_part: bool,
+    ) -> Result<TrackerEnvelope> {
+        let clienttime = unix_seconds_now();
+        let hash = spec.hash.to_ascii_lowercase();
+        let key = md5_hex(format!(
+            "{hash}{TRACKER_KEY_SALT}{ANDROID_APP_ID}{}0",
+            self.mid
+        ));
+        let parameters = BTreeMap::from([
+            ("IsFreePart", u8::from(free_part).to_string()),
+            ("album_audio_id", album_audio_id.to_string()),
+            ("album_id", album_id.to_string()),
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("area_code", "1".to_owned()),
+            ("behavior", "play".to_owned()),
+            ("cdnBackup", "1".to_owned()),
+            ("clienttime", clienttime.to_string()),
+            ("clientver", "11430".to_owned()),
+            ("cmd", "26".to_owned()),
+            ("dfid", "-".to_owned()),
+            ("hash", hash.clone()),
+            ("key", key.clone()),
+            ("mid", self.mid.clone()),
+            ("module", String::new()),
+            ("page_id", "151369488".to_owned()),
+            ("pid", "2".to_owned()),
+            ("pidversion", "3001".to_owned()),
+            ("ppage_id", "463467626,350369493,788954147".to_owned()),
+            ("quality", spec.tracker_quality.to_owned()),
+            ("ssa_flag", "is_fromtrack".to_owned()),
+            ("uuid", "-".to_owned()),
+            ("version", "11430".to_owned()),
+        ]);
+        let query = TrackerQuery {
+            is_free_part: u8::from(free_part),
+            album_audio_id,
+            album_id,
+            appid: ANDROID_APP_ID,
+            area_code: 1,
+            behavior: "play",
+            cdn_backup: 1,
+            clienttime,
+            clientver: 11430,
+            cmd: 26,
+            dfid: "-",
+            hash: &hash,
+            key,
+            mid: &self.mid,
+            module: "",
+            page_id: 151_369_488,
+            pid: 2,
+            pidversion: 3001,
+            ppage_id: "463467626,350369493,788954147",
+            quality: spec.tracker_quality,
+            ssa_flag: "is_fromtrack",
+            uuid: "-",
+            version: 11430,
+            signature: android_signature_for_parameters(&parameters, &[]),
+        };
+        let response = self
+            .android_get(TRACKER_ENDPOINT, clienttime)
+            .header("x-router", "trackercdn.kugou.com")
+            .query(&query)
+            .send()
+            .await
+            .map_err(kugou_network_error)?;
+        if response.headers().contains_key("ssa-code") {
+            return Err(TuneWeaveError::new(
+                ErrorCode::PermissionDenied,
+                "KuGou tracker requires additional verification",
+            )
+            .with_platform(Platform::Kugou)
+            .with_details(json!({ "verification_required": true })));
+        }
+        let bytes = read_bounded_response(response, "KuGou media tracker").await?;
+        parse_tracker_response(&bytes, &spec.hash)
+    }
+
     async fn search_lyric_candidate(
         &self,
         album_audio_id: u64,
@@ -870,7 +1329,7 @@ impl KugouClient {
             request = request.header("kg-tid", kg_tid);
         }
         let response = request.send().await.map_err(kugou_network_error)?;
-        read_bounded_response(response, "KuGou track detail").await
+        read_bounded_response(response, endpoint.operation()).await
     }
 }
 
@@ -1361,6 +1820,358 @@ fn detail_quality_asset(
         "duration_ms": duration_ms,
         "format": format,
     }))
+}
+
+fn canonical_track_id(track: &Track) -> Result<u64> {
+    if track.platform != Platform::Kugou || track.resource_ref.platform() != Platform::Kugou {
+        return Err(kugou_invalid_media_request(
+            "KuGou media resolution requires a KuGou track",
+        ));
+    }
+    canonical_positive_u64(track.resource_ref.id()).ok_or_else(|| {
+        kugou_invalid_media_request("KuGou media resolution requires a canonical album_audio_id")
+    })
+}
+
+fn canonical_album_id(track: &Track) -> Result<u64> {
+    let Some(reference) = track
+        .album
+        .as_ref()
+        .and_then(|album| album.resource_ref.as_ref())
+    else {
+        return Ok(0);
+    };
+    if reference.platform() != Platform::Kugou {
+        return Err(kugou_upstream_error(
+            "KuGou track metadata contained a foreign album identity",
+        ));
+    }
+    canonical_positive_u64(reference.id()).ok_or_else(|| {
+        kugou_upstream_error("KuGou track metadata contained an invalid album identity")
+    })
+}
+
+fn select_media_spec(track: &Track, request: &StreamRequest) -> Result<SelectedMediaSpec> {
+    if request.variant != StreamVariant::Default {
+        return Err(kugou_invalid_media_request(
+            "KuGou public media only supports the default stream variant",
+        ));
+    }
+    if request.account.is_some() {
+        return Err(kugou_invalid_media_request(
+            "KuGou public media does not accept an account",
+        ));
+    }
+    if request.immersive_type.is_some() {
+        return Err(kugou_invalid_media_request(
+            "KuGou public media does not accept immersive_type",
+        ));
+    }
+    let requested_quality = request.quality;
+    let target = if let Some(bitrate) = request.bitrate {
+        match bitrate {
+            1..=128_000 => Quality::Standard,
+            128_001..=320_000 => Quality::High,
+            _ => {
+                return Err(kugou_invalid_media_request(
+                    "KuGou public media bitrate must be between 1 and 320000",
+                ));
+            }
+        }
+    } else {
+        match request.quality {
+            Quality::Auto | Quality::Low | Quality::Standard => Quality::Standard,
+            Quality::Higher | Quality::High => Quality::High,
+            Quality::Lossless => Quality::Lossless,
+            Quality::Hires => Quality::Hires,
+            Quality::Master => Quality::Master,
+            Quality::Surround | Quality::Spatial | Quality::Dolby => {
+                return Err(kugou_invalid_media_request(
+                    "KuGou public media does not yet expose immersive quality families",
+                ));
+            }
+        }
+    };
+    let fallbacks: &[(&str, Quality, &str, &str)] = match target {
+        Quality::Master => &[
+            ("master", Quality::Master, "super", "flac"),
+            ("hires", Quality::Hires, "high", "flac"),
+            ("lossless", Quality::Lossless, "flac", "flac"),
+            ("high", Quality::High, "320", "mp3"),
+            ("standard", Quality::Standard, "128", "mp3"),
+        ],
+        Quality::Hires => &[
+            ("hires", Quality::Hires, "high", "flac"),
+            ("lossless", Quality::Lossless, "flac", "flac"),
+            ("high", Quality::High, "320", "mp3"),
+            ("standard", Quality::Standard, "128", "mp3"),
+        ],
+        Quality::Lossless => &[
+            ("lossless", Quality::Lossless, "flac", "flac"),
+            ("high", Quality::High, "320", "mp3"),
+            ("standard", Quality::Standard, "128", "mp3"),
+        ],
+        Quality::High => &[
+            ("high", Quality::High, "320", "mp3"),
+            ("standard", Quality::Standard, "128", "mp3"),
+        ],
+        _ => &[("standard", Quality::Standard, "128", "mp3")],
+    };
+    let assets = track
+        .extensions
+        .get("qualities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| kugou_upstream_error("KuGou track omitted media quality metadata"))?;
+    for (key, actual_quality, tracker_quality, fallback_format) in fallbacks {
+        let Some(asset) = assets.get(*key).and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(hash) = asset.get("hash").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if hash.len() != 32 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(kugou_upstream_error(
+                "KuGou track contained an invalid media hash",
+            ));
+        }
+        return Ok(SelectedMediaSpec {
+            requested_quality,
+            actual_quality: *actual_quality,
+            tracker_quality,
+            hash: hash.to_ascii_uppercase(),
+            size: asset.get("size").and_then(Value::as_u64),
+            bitrate: asset.get("bitrate").and_then(Value::as_u64).map(|value| {
+                if value <= 10_000 {
+                    value.saturating_mul(1_000)
+                } else {
+                    value
+                }
+            }),
+            duration_ms: asset.get("duration_ms").and_then(Value::as_u64),
+            format: asset
+                .get("format")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| Some((*fallback_format).to_owned())),
+        });
+    }
+    Err(TuneWeaveError::new(
+        ErrorCode::ResourceNotFound,
+        "KuGou track has no media asset for the requested quality",
+    )
+    .with_platform(Platform::Kugou))
+}
+
+fn parse_privilege_response(
+    bytes: &[u8],
+    album_audio_id: u64,
+    album_id: u64,
+    hash: &str,
+) -> Result<PrivilegeResource> {
+    let envelope: PrivilegeEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou media privilege returned malformed JSON"))?;
+    if envelope.status != 1 || envelope.error_code != 0 {
+        return Err(
+            kugou_upstream_error("KuGou media privilege rejected the request").with_details(
+                json!({
+                    "platform_code": envelope.error_code,
+                    "platform_message": safe_upstream_message(&envelope.message),
+                }),
+            ),
+        );
+    }
+    let [resource] = <[PrivilegeResource; 1]>::try_from(envelope.data).map_err(|_| {
+        kugou_upstream_error("KuGou media privilege returned an unexpected result count")
+    })?;
+    let returned_album_audio_id = resource
+        .album_audio_id
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64);
+    let returned_album_id = resource.album_id.as_ref().and_then(FlexibleInteger::as_u64);
+    if resource.resource_type != "audio"
+        || returned_album_audio_id != Some(album_audio_id)
+        || returned_album_id != Some(album_id)
+        || !resource.hash.eq_ignore_ascii_case(hash)
+    {
+        return Err(kugou_upstream_error(
+            "KuGou media privilege returned mismatched media identities",
+        ));
+    }
+    Ok(resource)
+}
+
+fn parse_tracker_response(bytes: &[u8], requested_hash: &str) -> Result<TrackerEnvelope> {
+    let tracker: TrackerEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou media tracker returned malformed JSON"))?;
+    if !matches!(tracker.status, 1 | 2) {
+        return Err(
+            kugou_upstream_error("KuGou media tracker rejected the request").with_details(json!({
+                "platform_code": tracker.status,
+            })),
+        );
+    }
+    if tracker.status == 1 && !tracker.hash.eq_ignore_ascii_case(requested_hash) {
+        return Err(kugou_upstream_error(
+            "KuGou media tracker returned a mismatched media hash",
+        ));
+    }
+    if tracker.status != 1 && (!tracker.url.is_empty() || !tracker.backup_url.is_empty()) {
+        return Err(kugou_upstream_error(
+            "KuGou media tracker returned URLs for a rejected request",
+        ));
+    }
+    Ok(tracker)
+}
+
+fn map_tracker_urls(tracker: &TrackerEnvelope) -> Result<(Option<String>, Vec<String>)> {
+    if tracker.status != 1 {
+        return Ok((None, Vec::new()));
+    }
+    let mut seen = BTreeSet::new();
+    let mut urls = Vec::new();
+    for url in tracker.url.iter().chain(&tracker.backup_url) {
+        let url = normalize_media_url(url)?;
+        if seen.insert(url.clone()) {
+            urls.push(url);
+        }
+    }
+    let primary = urls.first().cloned();
+    let backups = urls.into_iter().skip(1).collect();
+    Ok((primary, backups))
+}
+
+fn normalize_media_url(value: &str) -> Result<String> {
+    let value = nonempty(value)
+        .ok_or_else(|| kugou_upstream_error("KuGou media tracker returned an empty URL"))?;
+    let value = if let Some(rest) = value.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else {
+        value.to_owned()
+    };
+    let url = Url::parse(&value)
+        .map_err(|_| kugou_upstream_error("KuGou media tracker returned an invalid URL"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| kugou_upstream_error("KuGou media tracker URL omitted a host"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+        || !(host == "kugou.com" || host.ends_with(".kugou.com"))
+    {
+        return Err(kugou_upstream_error(
+            "KuGou media tracker returned an untrusted URL",
+        ));
+    }
+    Ok(value)
+}
+
+fn trial_from_offsets(offset: Option<&HashOffset>) -> Option<TrialWindow> {
+    let offset = offset?;
+    let start_ms = offset.start_ms.as_ref().and_then(FlexibleInteger::as_u64)?;
+    let end_ms = offset.end_ms.as_ref().and_then(FlexibleInteger::as_u64)?;
+    (end_ms > start_ms).then_some(TrialWindow { start_ms, end_ms })
+}
+
+fn trial_size_from_offsets(offset: Option<&HashOffset>) -> Option<u64> {
+    let offset = offset?;
+    let start = offset
+        .start_byte
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64)?;
+    let end = offset.end_byte.as_ref().and_then(FlexibleInteger::as_u64)?;
+    (end >= start).then(|| end.saturating_sub(start).saturating_add(1))
+}
+
+fn privilege_diagnostics(resource: &PrivilegeResource) -> Value {
+    json!({
+        "audio_id": resource.id.as_ref().and_then(FlexibleInteger::as_u64),
+        "album_audio_id": resource.album_audio_id.as_ref().and_then(FlexibleInteger::as_u64),
+        "name": nonempty(&resource.name),
+        "level": resource.level.as_ref().and_then(FlexibleInteger::as_u64),
+        "quality": nonempty(&resource.quality),
+        "expires_in_seconds": resource.expire.as_ref().and_then(FlexibleInteger::as_u64),
+        "publish": resource.publish.as_ref().and_then(FlexibleInteger::as_u64),
+        "is_publish": resource.is_publish.as_ref().and_then(FlexibleInteger::as_u64),
+        "privilege": resource.privilege.as_ref().and_then(FlexibleInteger::as_u64),
+        "status": resource.status.as_ref().and_then(FlexibleInteger::as_u64),
+        "fail_process": resource.fail_process.as_ref().and_then(FlexibleInteger::as_u64),
+        "pay_type": resource.pay_type.as_ref().and_then(FlexibleInteger::as_u64),
+        "price": resource.price.as_ref().and_then(FlexibleInteger::as_u64),
+        "media": {
+            "duration_ms": resource.info.duration.as_ref().and_then(FlexibleInteger::as_u64),
+            "size": resource.info.filesize.as_ref().and_then(FlexibleInteger::as_u64),
+            "bitrate": resource.info.bitrate.as_ref().and_then(FlexibleInteger::as_u64),
+            "format": nonempty(&resource.info.extname),
+        },
+        "popup": {
+            "title": nonempty(&resource.popup.title),
+            "content": nonempty(&resource.popup.content),
+            "button": nonempty(&resource.popup.btn_name),
+        },
+        "trial": hash_offset_diagnostics(resource.trans_param.hash_offset.as_ref()),
+    })
+}
+
+fn tracker_diagnostics(tracker: &TrackerEnvelope) -> Value {
+    json!({
+        "status": tracker.status,
+        "quality_code": tracker.q.as_ref().and_then(FlexibleInteger::as_u64),
+        "private_status": tracker.priv_status.as_ref().and_then(FlexibleInteger::as_u64),
+        "fail_process": tracker.fail_process,
+        "file_name": nonempty(&tracker.file_name),
+        "format": nonempty(&tracker.extension),
+        "hash": nonempty(&tracker.hash),
+        "trial": hash_offset_diagnostics(tracker.hash_offset.as_ref()),
+    })
+}
+
+fn hash_offset_diagnostics(offset: Option<&HashOffset>) -> Value {
+    let Some(offset) = offset else {
+        return Value::Null;
+    };
+    json!({
+        "start_byte": offset.start_byte.as_ref().and_then(FlexibleInteger::as_u64),
+        "end_byte": offset.end_byte.as_ref().and_then(FlexibleInteger::as_u64),
+        "start_ms": offset.start_ms.as_ref().and_then(FlexibleInteger::as_u64),
+        "end_ms": offset.end_ms.as_ref().and_then(FlexibleInteger::as_u64),
+        "offset_hash": nonempty(&offset.offset_hash),
+        "clip_hash": nonempty(&offset.clip_hash),
+        "file_type": offset.file_type.as_ref().and_then(FlexibleInteger::as_u64),
+    })
+}
+
+fn media_permission_error(
+    request: &StreamRequest,
+    privilege: &PrivilegeResource,
+    tracker: &TrackerEnvelope,
+) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::PermissionDenied,
+        "KuGou did not authorize this media stream",
+    )
+    .with_platform(Platform::Kugou)
+    .with_details(json!({
+        "requested_quality": request.quality,
+        "privilege": privilege_diagnostics(privilege),
+        "tracker": tracker_diagnostics(tracker),
+        "trial_available": trial_from_offsets(
+            tracker
+                .hash_offset
+                .as_ref()
+                .or(privilege.trans_param.hash_offset.as_ref())
+        ).is_some(),
+    }))
+}
+
+fn canonical_positive_u64(value: &str) -> Option<u64> {
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed > 0 && parsed.to_string() == value).then_some(parsed)
+}
+
+fn kugou_invalid_media_request(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::invalid_request(message).with_platform(Platform::Kugou)
 }
 
 fn parse_lyric_search_response(bytes: &[u8]) -> Result<(LyricCandidate, Value)> {
@@ -2549,6 +3360,100 @@ mod tests {
             krc_to_lrc(krc).as_deref(),
             Some("[ti:song]\n[00:01.00]逐字\n")
         );
+    }
+
+    #[test]
+    fn media_selection_falls_back_by_quality_without_confusing_requested_quality() {
+        let mut track = Track::new(
+            ResourceRef::new(Platform::Kugou, "32100650").expect("track reference"),
+            "track",
+        );
+        track.album = Some(AlbumSummary {
+            resource_ref: Some(
+                ResourceRef::new(Platform::Kugou, "966846").expect("album reference"),
+            ),
+            name: "album".to_owned(),
+            cover_url: None,
+        });
+        track.extensions.insert(
+            "qualities".to_owned(),
+            json!({
+                "standard": {
+                    "hash": "B3A52A7A958BF0AED0EBFBA2E9A818B7",
+                    "size": 4317292,
+                    "bitrate": 128,
+                    "duration_ms": 269000,
+                    "format": "mp3"
+                }
+            }),
+        );
+        let request = StreamRequest {
+            quality: Quality::Hires,
+            ..StreamRequest::default()
+        };
+        let selected = select_media_spec(&track, &request).expect("select lower media");
+        assert_eq!(selected.requested_quality, Quality::Hires);
+        assert_eq!(selected.actual_quality, Quality::Standard);
+        assert_eq!(selected.tracker_quality, "128");
+        assert_eq!(selected.bitrate, Some(128_000));
+    }
+
+    #[test]
+    fn tracker_urls_upgrade_only_trusted_kugou_hosts_and_deduplicate_backups() {
+        let tracker = TrackerEnvelope {
+            status: 1,
+            hash: "HASH".to_owned(),
+            url: vec![
+                "http://fsandroid.kugou.com/path/audio.mp3".to_owned(),
+                "http://fsmobile.tx.kugou.com/path/audio.mp3".to_owned(),
+            ],
+            backup_url: vec!["http://fsandroid.kugou.com/path/audio.mp3".to_owned()],
+            ..TrackerEnvelope::default()
+        };
+        let (primary, backups) = map_tracker_urls(&tracker).expect("map tracker URLs");
+        assert_eq!(
+            primary.as_deref(),
+            Some("https://fsandroid.kugou.com/path/audio.mp3")
+        );
+        assert_eq!(backups, ["https://fsmobile.tx.kugou.com/path/audio.mp3"]);
+
+        let mut untrusted = tracker;
+        untrusted.url = vec!["https://example.com/audio.mp3".to_owned()];
+        assert!(map_tracker_urls(&untrusted).is_err());
+    }
+
+    #[test]
+    fn privilege_and_trial_parsers_keep_media_identities_and_byte_window_exact() {
+        let response = r#"{
+          "status":1,"error_code":0,"message":"",
+          "data":[{
+            "type":"audio","id":"20505418","album_id":"966846",
+            "album_audio_id":"32100650","hash":"BASEHASH","name":"track",
+            "quality":"128","privilege":10,"status":0,"fail_process":12,"pay_type":3,
+            "info":{"duration":269000,"filesize":4317292,"bitrate":128,"extname":"mp3"},
+            "trans_param":{"hash_offset":{
+              "start_byte":0,"end_byte":960115,"start_ms":0,"end_ms":60000,
+              "offset_hash":"OFFSET","clip_hash":"CLIP","file_type":0
+            }}
+          }]
+        }"#;
+        let privilege =
+            parse_privilege_response(response.as_bytes(), 32_100_650, 966_846, "basehash")
+                .expect("parse privilege");
+        let offset = privilege
+            .trans_param
+            .hash_offset
+            .as_ref()
+            .expect("trial offsets");
+        assert_eq!(
+            trial_from_offsets(Some(offset)),
+            Some(TrialWindow {
+                start_ms: 0,
+                end_ms: 60_000
+            })
+        );
+        assert_eq!(trial_size_from_offsets(Some(offset)), Some(960_116));
+        assert!(parse_privilege_response(response.as_bytes(), 1, 966_846, "basehash").is_err());
     }
 
     #[test]

@@ -1448,6 +1448,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷狗歌词使用 `GET /v1/tracks/kugou:<album_audio_id>/lyrics`，支持统一 `word_synced/qrc`、`translated/trans` 与 `romanized/roma` 展示选项，不接受账户、歌曲类型或助唱标注参数。实现先复用歌曲详情形成稳定的 `album_audio_id + hash + duration + keyword` 候选搜索，再优先选择平台 proposal，并分别下载 KRC 与 LRC；候选 `accesskey` 只存在于当前请求内，不进入响应、日志或错误。KRC 必须通过 `krc1` 文件头、循环 XOR、受限 zlib 解压和 UTF-8 校验，嵌入语言目录中的原生 `type=1/0` 分别映射为翻译和音译；普通 LRC 独立进入 `plain`，KRC 进入 `word_synced` 并决定 `format=krc`，因此普通歌词不会覆盖更高精度逐字歌词。某一格式缺失时保留另一格式，只有两者都不可用才返回失败。
 
+酷狗公开播放和下载分别复用统一 `/v1/tracks/{ref}/stream` 与 `/download` 端点，当前接受默认 variant、匿名账户和普通音质家族；`auto/low/standard` 从 128 kbps 起步，`higher/high`、`lossless`、`hires`、`master` 在目标规格缺失时按明确顺序降级并通过 `actual_quality` 如实返回，显式 bitrate 只接受 1–320000。每次请求先用固定 HTTPS Android 网关校验 privilege，再用同一 `album_audio_id + album_id + hash` 请求 tracker；响应哈希和身份必须回配。平台返回的 HTTP CDN 地址不会原样暴露，仅在主机属于受信 `*.kugou.com` 且无凭据、端口和片段时升级为 HTTPS。完整授权返回全曲；只有试听权益时 stream 返回准确 `TrialWindow`，文件大小按字节窗口而非上游误报的全曲大小计算，download 则保持 `available=false` 并附权益诊断，不把试听片段伪装为完整下载。当前公开层不接受账户、非默认 variant 或沉浸式参数。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

@@ -3,8 +3,9 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
-    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
+    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
+    TuneWeaveError,
 };
 
 use crate::client::{KugouClient, KugouConfig};
@@ -49,6 +50,8 @@ impl MusicProvider for KugouProvider {
 
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::AudioDownload,
+            Capability::AudioStream,
             Capability::Lyrics,
             Capability::SearchTracks,
             Capability::TrackDetail,
@@ -125,6 +128,14 @@ impl MusicProvider for KugouProvider {
         validate_lyrics_request(request)?;
         let album_audio_id = parse_album_audio_id(id)?;
         self.client.lyrics(album_audio_id).await
+    }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        self.client.stream(track, request).await
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        self.client.download(track, request).await
     }
 }
 
@@ -232,6 +243,8 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::AudioDownload,
+                Capability::AudioStream,
                 Capability::Lyrics,
                 Capability::SearchTracks,
                 Capability::TrackDetail
