@@ -122,10 +122,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         error!(%error, "TuneWeave server exited with an error");
     }
     let dropped_lines = logging.dropped_lines();
-    if dropped_lines > 0 {
-        error!(dropped_lines, "non-blocking file logger dropped events");
+    let file_write_errors = logging.file_write_errors();
+    if dropped_lines > 0 || file_write_errors > 0 {
+        error!(
+            dropped_lines,
+            file_write_errors, "non-blocking file logger encountered errors"
+        );
     }
-    info!(dropped_lines, "TuneWeave shutdown completed");
+    info!(
+        dropped_lines,
+        file_write_errors, "TuneWeave shutdown completed"
+    );
     drop(logging);
     serve_result?;
     Ok(())

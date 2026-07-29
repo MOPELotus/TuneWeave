@@ -3,6 +3,12 @@ use std::{
     env, fs,
     io::{self, ErrorKind},
     path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime},
 };
 
@@ -20,6 +26,7 @@ const DEFAULT_RETENTION_DAYS: u32 = 14;
 const DEFAULT_MAX_FILES: usize = 30;
 const MAX_RETENTION_DAYS: u32 = 3_650;
 const MAX_LOG_FILES: usize = 10_000;
+const LOG_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_ENVIRONMENT_VARIABLES: [&str; 9] = [
     "TUNEWEAVE_LOG_LEVEL",
     "RUST_LOG",
@@ -201,7 +208,9 @@ pub struct RetentionWarning {
 
 pub struct LoggingHandle {
     file_guard: Option<WorkerGuard>,
+    _health_monitor: Option<FileLogHealthMonitor>,
     error_counter: Option<ErrorCounter>,
+    write_error_counter: Option<FileWriteErrorCounter>,
     pub retention_warnings: Vec<RetentionWarning>,
 }
 
@@ -214,8 +223,22 @@ impl LoggingHandle {
     }
 
     #[must_use]
+    pub fn file_write_errors(&self) -> usize {
+        self.write_error_counter
+            .as_ref()
+            .map_or(0, FileWriteErrorCounter::total)
+    }
+
+    #[must_use]
     pub const fn file_output_active(&self) -> bool {
         self.file_guard.is_some()
+    }
+}
+
+impl Drop for LoggingHandle {
+    fn drop(&mut self) {
+        drop(self.file_guard.take());
+        drop(self._health_monitor.take());
     }
 }
 
@@ -226,15 +249,17 @@ pub fn init_logging(
         .to_file
         .then(|| build_file_output(config))
         .transpose()?;
-    let (file_writer, file_guard, error_counter, retention_warnings) = match file_output {
-        Some(output) => (
-            Some(output.writer),
-            Some(output.guard),
-            Some(output.error_counter),
-            output.retention_warnings,
-        ),
-        None => (None, None, None, Vec::new()),
-    };
+    let (file_writer, file_guard, error_counter, write_error_counter, retention_warnings) =
+        match file_output {
+            Some(output) => (
+                Some(output.writer),
+                Some(output.guard),
+                Some(output.error_counter),
+                Some(output.write_error_counter),
+                output.retention_warnings,
+            ),
+            None => (None, None, None, None, Vec::new()),
+        };
 
     match (config.to_stderr, file_writer) {
         (true, Some(writer)) => install_subscriber(config, std::io::stderr.and(writer))?,
@@ -244,10 +269,174 @@ pub fn init_logging(
     }
 
     Ok(LoggingHandle {
+        _health_monitor: error_counter
+            .as_ref()
+            .zip(write_error_counter.as_ref())
+            .map(|(queue_counter, write_counter)| {
+                FileLogHealthMonitor::start(queue_counter.clone(), write_counter.clone())
+            })
+            .transpose()?,
         file_guard,
         error_counter,
+        write_error_counter,
         retention_warnings,
     })
+}
+
+struct FileLogHealthMonitor {
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    reported_total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FileLogHealthMonitor {
+    fn start(
+        queue_error_counter: ErrorCounter,
+        write_error_counter: FileWriteErrorCounter,
+    ) -> io::Result<Self> {
+        Self::start_with_interval(
+            queue_error_counter,
+            write_error_counter,
+            LOG_HEALTH_INTERVAL,
+        )
+    }
+
+    fn start_with_interval(
+        queue_error_counter: ErrorCounter,
+        write_error_counter: FileWriteErrorCounter,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        let (stop, receiver) = mpsc::channel();
+        #[cfg(test)]
+        let reported_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let thread_reported_total = reported_total.clone();
+        let thread = thread::Builder::new()
+            .name("tuneweave-log-health".to_owned())
+            .spawn(move || {
+                monitor_file_log_health(
+                    &receiver,
+                    &queue_error_counter,
+                    &write_error_counter,
+                    interval,
+                    #[cfg(test)]
+                    &thread_reported_total,
+                );
+            })?;
+        Ok(Self {
+            stop: Some(stop),
+            thread: Some(thread),
+            #[cfg(test)]
+            reported_total,
+        })
+    }
+
+    #[cfg(test)]
+    fn reported_total(&self) -> usize {
+        self.reported_total
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for FileLogHealthMonitor {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn monitor_file_log_health(
+    receiver: &Receiver<()>,
+    queue_error_counter: &ErrorCounter,
+    write_error_counter: &FileWriteErrorCounter,
+    interval: Duration,
+    #[cfg(test)] reported_total: &std::sync::atomic::AtomicUsize,
+) {
+    let mut previous_queue_errors = 0;
+    let mut previous_write_errors = 0;
+    loop {
+        let stopping = match receiver.recv_timeout(interval) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => true,
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+        };
+        let queue_errors = queue_error_counter.dropped_lines();
+        let write_errors = write_error_counter.total();
+        let queue_delta = queue_errors.saturating_sub(previous_queue_errors);
+        let write_delta = write_errors.saturating_sub(previous_write_errors);
+        if queue_delta > 0 || write_delta > 0 {
+            previous_queue_errors = queue_errors;
+            previous_write_errors = write_errors;
+            #[cfg(test)]
+            reported_total.store(
+                queue_errors.saturating_add(write_errors),
+                std::sync::atomic::Ordering::Release,
+            );
+            eprintln!(
+                "ERROR tuneweave: non-blocking file logger encountered errors \
+                 dropped_lines_delta={queue_delta} dropped_lines_total={queue_errors} \
+                 file_write_errors_delta={write_delta} file_write_errors_total={write_errors}"
+            );
+        }
+        if stopping {
+            break;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct FileWriteErrorCounter(Arc<AtomicUsize>);
+
+impl FileWriteErrorCounter {
+    fn record(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_add(1))
+            });
+    }
+
+    fn total(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct MonitoredWriter<W> {
+    inner: W,
+    error_counter: FileWriteErrorCounter,
+}
+
+impl<W> MonitoredWriter<W> {
+    fn new(inner: W, error_counter: FileWriteErrorCounter) -> Self {
+        Self {
+            inner,
+            error_counter,
+        }
+    }
+}
+
+impl<W: io::Write> io::Write for MonitoredWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.inner.write(buffer).inspect_err(|_| {
+            self.error_counter.record();
+        })
+    }
+
+    fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
+        self.inner.write_all(buffer).inspect_err(|_| {
+            self.error_counter.record();
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush().inspect_err(|_| {
+            self.error_counter.record();
+        })
+    }
 }
 
 fn install_subscriber<W>(
@@ -272,6 +461,7 @@ struct FileOutput {
     writer: NonBlocking,
     guard: WorkerGuard,
     error_counter: ErrorCounter,
+    write_error_counter: FileWriteErrorCounter,
     retention_warnings: Vec<RetentionWarning>,
 }
 
@@ -286,15 +476,17 @@ fn build_file_output(config: &LoggingConfig) -> io::Result<FileOutput> {
         .max_log_files(config.max_files)
         .build(&config.directory)
         .map_err(|error| io::Error::other(format!("failed to open rolling log file: {error}")))?;
+    let write_error_counter = FileWriteErrorCounter::default();
     let (writer, guard) = NonBlockingBuilder::default()
         .lossy(true)
         .thread_name("tuneweave-log-writer")
-        .finish(appender);
+        .finish(MonitoredWriter::new(appender, write_error_counter.clone()));
     let error_counter = writer.error_counter();
     Ok(FileOutput {
         writer,
         guard,
         error_counter,
+        write_error_counter,
         retention_warnings,
     })
 }
@@ -448,6 +640,7 @@ fn invalid_config(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::Write,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -566,6 +759,7 @@ mod tests {
             writer,
             guard,
             error_counter,
+            write_error_counter,
             retention_warnings,
         } = output;
         assert!(retention_warnings.is_empty());
@@ -579,6 +773,7 @@ mod tests {
         });
         drop(guard);
         assert_eq!(error_counter.dropped_lines(), 0);
+        assert_eq!(write_error_counter.total(), 0);
         let logs = fs::read_dir(&directory)
             .expect("read test log directory")
             .filter_map(Result::ok)
@@ -593,6 +788,45 @@ mod tests {
             b"keep"
         );
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn file_health_monitor_observes_background_writer_failures() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("intentional test failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let write_error_counter = FileWriteErrorCounter::default();
+        let monitored_writer = MonitoredWriter::new(FailingWriter, write_error_counter.clone());
+        let (mut writer, guard) = NonBlockingBuilder::default()
+            .lossy(true)
+            .finish(monitored_writer);
+        let queue_error_counter = writer.error_counter();
+        let monitor = FileLogHealthMonitor::start_with_interval(
+            queue_error_counter.clone(),
+            write_error_counter.clone(),
+            Duration::from_secs(60),
+        )
+        .expect("start file log health monitor");
+        writer
+            .write_all(b"background writer failure\n")
+            .expect("enqueue test event");
+        drop(guard);
+        assert_eq!(queue_error_counter.dropped_lines(), 0);
+        assert_eq!(write_error_counter.total(), 1);
+        assert_eq!(monitor.reported_total(), 0);
+        let reported_total = monitor.reported_total.clone();
+        drop(monitor);
+        assert_eq!(reported_total.load(std::sync::atomic::Ordering::Acquire), 1);
+        drop(writer);
     }
 
     fn values(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
