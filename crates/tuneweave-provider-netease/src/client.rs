@@ -116,6 +116,7 @@ pub struct NeteaseClient {
     anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
     base_upstream_host: &'static str,
     web_upstream_host: &'static str,
+    xeapi_upstream_host: &'static str,
     proxy_configured: bool,
 }
 
@@ -280,6 +281,8 @@ impl NeteaseClient {
         let base_upstream_host =
             configured_upstream_host(&config.base_url, "interface.music.163.com");
         let web_upstream_host = configured_upstream_host(&config.web_base_url, "music.163.com");
+        let xeapi_upstream_host =
+            configured_upstream_host(&config.xeapi_base_url, "interface3.music.163.com");
         let http = configure_proxy(
             Client::builder()
                 .timeout(config.timeout)
@@ -351,6 +354,7 @@ impl NeteaseClient {
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
             base_upstream_host,
             web_upstream_host,
+            xeapi_upstream_host,
             proxy_configured,
         })
     }
@@ -1063,30 +1067,45 @@ impl NeteaseClient {
         if let Some(token) = anti_cheat_token {
             request = request.header("X-antiCheatToken", token);
         }
-        let response = request
-            .form(&[("B", encrypted.b), ("S", encrypted.s), ("R", encrypted.r)])
-            .send()
-            .await
-            .map_err(request_error)?;
-        let next_session = response
-            .headers()
-            .get("x-encr-ssid")
-            .and_then(|value| value.to_str().ok())
-            .zip(
-                response
-                    .headers()
-                    .get("x-encr-sskey")
-                    .and_then(|value| value.to_str().ok()),
-            )
-            .map(|(id, key)| (id.to_owned(), key.to_owned()));
-        if let Some((session_id, session_key)) = next_session
-            && session_key.len() == 16
-        {
-            let mut state = self.xeapi_state.write().map_err(|_| xeapi_state_error())?;
-            state.session_id = session_id;
-            state.session_key = session_key;
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request
+                .form(&[("B", encrypted.b), ("S", encrypted.s), ("R", encrypted.r)])
+                .send()
+                .await
+                .map_err(request_error)?;
+            http_status = Some(response.status());
+            let next_session = response
+                .headers()
+                .get("x-encr-ssid")
+                .and_then(|value| value.to_str().ok())
+                .zip(
+                    response
+                        .headers()
+                        .get("x-encr-sskey")
+                        .and_then(|value| value.to_str().ok()),
+                )
+                .map(|(id, key)| (id.to_owned(), key.to_owned()));
+            if let Some((session_id, session_key)) = next_session
+                && session_key.len() == 16
+            {
+                let mut state = self.xeapi_state.write().map_err(|_| xeapi_state_error())?;
+                state.session_id = session_id;
+                state.session_key = session_key;
+            }
+            parse_response_with_encryption(response, true).await
         }
-        parse_response_with_encryption(response, true).await
+        .await;
+        self.log_uninspected_upstream_request(
+            "xeapi_request",
+            self.xeapi_upstream_host,
+            "/xeapi/{path}",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     async fn xeapi_public_key(&self) -> Result<XeapiPublicKey> {
@@ -1134,72 +1153,24 @@ impl NeteaseClient {
                 .header(header::COOKIE, format!("deviceId={}", self.device_id))
                 .form(&form),
         );
-        let response = request.send().await.map_err(request_error)?;
-        let response = parse_response(response).await?;
-        if response_code(&response.body) != Some(200) {
-            return Err(TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                "NetEase XEAPI public key registration failed",
-            )
-            .with_platform(Platform::Netease)
-            .with_details(json!({ "response": response.body })));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(request_error)?;
+            http_status = Some(response.status());
+            let response = parse_response(response).await?;
+            parse_xeapi_public_key_registration(response, &nonce)
         }
-        let data = response.body.get("data").ok_or_else(|| {
-            xeapi_registration_error("response did not contain data", &response.body)
-        })?;
-        let response_timestamp = scalar_string(data.get("timestamp")).ok_or_else(|| {
-            xeapi_registration_error("response did not contain a timestamp", &response.body)
-        })?;
-        let response_signature =
-            data.get("signature")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    xeapi_registration_error("response did not contain a signature", &response.body)
-                })?;
-        if xeapi_sign(&response_timestamp, &nonce) != response_signature {
-            return Err(xeapi_registration_error(
-                "response signature did not match",
-                &response.body,
-            ));
-        }
-        let encrypted = data
-            .get("encryptedData")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                xeapi_registration_error(
-                    "response did not contain encrypted key data",
-                    &response.body,
-                )
-            })?;
-        let plaintext = decrypt_xeapi_public_key(encrypted)
-            .map_err(|error| xeapi_crypto_error("decrypt public key", error))?;
-        let wire: XeapiPublicKeyWire = serde_json::from_str(&plaintext).map_err(|error| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("NetEase XEAPI public key is invalid: {error}"),
-            )
-            .with_platform(Platform::Netease)
-        })?;
-        if wire.sk.is_empty() {
-            return Err(xeapi_registration_error(
-                "decrypted public key did not contain sk",
-                &response.body,
-            ));
-        }
-        let public_key: [u8; 32] = BASE64
-            .decode(wire.public_key)
-            .map_err(|_| {
-                xeapi_registration_error("public key is not valid base64", &response.body)
-            })?
-            .try_into()
-            .map_err(|_| {
-                xeapi_registration_error("public key must contain 32 bytes", &response.body)
-            })?;
-        Ok(XeapiPublicKey {
-            public_key,
-            version: wire.version,
-            server_key: wire.sk,
-        })
+        .await;
+        self.log_validated_upstream_request(
+            "xeapi_public_key",
+            self.base_upstream_host,
+            "/api/gorilla/anti/crawler/security/key/get",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn create_qr_login(&self) -> Result<NeteaseQrLogin> {
@@ -1307,11 +1278,51 @@ impl NeteaseClient {
         started: Instant,
         outcome: &Result<T>,
     ) {
+        self.log_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            UpstreamBusinessClass::NotInspected,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_validated_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        outcome: &Result<T>,
+    ) {
+        self.log_upstream_request(
+            operation,
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            UpstreamBusinessClass::Success,
+            outcome,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_upstream_request<T>(
+        &self,
+        operation: &'static str,
+        upstream_host: &'static str,
+        endpoint: &'static str,
+        http_status: Option<StatusCode>,
+        started: Instant,
+        success_class: UpstreamBusinessClass,
+        outcome: &Result<T>,
+    ) {
         let (business_class, upstream_outcome) = match outcome {
-            Ok(_) => (
-                UpstreamBusinessClass::NotInspected,
-                UpstreamOutcome::Success,
-            ),
+            Ok(_) => (success_class, UpstreamOutcome::Success),
             Err(error) => netease_upstream_classification(error),
         };
         UpstreamRequestSummary {
@@ -1379,6 +1390,75 @@ async fn parse_response_with_encryption(
         status,
         body,
         cookies,
+    })
+}
+
+fn parse_xeapi_public_key_registration(
+    response: NeteaseResponse,
+    nonce: &str,
+) -> Result<XeapiPublicKey> {
+    if response_code(&response.body) != Some(200) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase XEAPI public key registration failed",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "code": response_code(&response.body) })));
+    }
+    let data = response
+        .body
+        .get("data")
+        .ok_or_else(|| xeapi_registration_error("response did not contain data", &response.body))?;
+    let response_timestamp = scalar_string(data.get("timestamp")).ok_or_else(|| {
+        xeapi_registration_error("response did not contain a timestamp", &response.body)
+    })?;
+    let response_signature = data
+        .get("signature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            xeapi_registration_error("response did not contain a signature", &response.body)
+        })?;
+    if xeapi_sign(&response_timestamp, nonce) != response_signature {
+        return Err(xeapi_registration_error(
+            "response signature did not match",
+            &response.body,
+        ));
+    }
+    let encrypted = data
+        .get("encryptedData")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            xeapi_registration_error(
+                "response did not contain encrypted key data",
+                &response.body,
+            )
+        })?;
+    let plaintext = decrypt_xeapi_public_key(encrypted)
+        .map_err(|error| xeapi_crypto_error("decrypt public key", error))?;
+    let wire: XeapiPublicKeyWire = serde_json::from_str(&plaintext).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase XEAPI public key is invalid: {error}"),
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    if wire.sk.is_empty() {
+        return Err(xeapi_registration_error(
+            "decrypted public key did not contain sk",
+            &response.body,
+        ));
+    }
+    let public_key: [u8; 32] = BASE64
+        .decode(wire.public_key)
+        .map_err(|_| xeapi_registration_error("public key is not valid base64", &response.body))?
+        .try_into()
+        .map_err(|_| {
+            xeapi_registration_error("public key must contain 32 bytes", &response.body)
+        })?;
+    Ok(XeapiPublicKey {
+        public_key,
+        version: wire.version,
+        server_key: wire.sk,
     })
 }
 
@@ -1734,7 +1814,7 @@ fn xeapi_registration_error(message: &str, body: &Value) -> TuneWeaveError {
         format!("NetEase XEAPI public key {message}"),
     )
     .with_platform(Platform::Netease)
-    .with_details(json!({ "response": body }))
+    .with_details(json!({ "code": response_code(body) }))
 }
 
 fn xeapi_crypto_error(operation: &str, message: &str) -> TuneWeaveError {
@@ -2021,6 +2101,21 @@ mod tests {
                 },
             )
         );
+
+        let registration_error = xeapi_registration_error(
+            "response did not contain data",
+            &json!({
+                "code": 500,
+                "data": {
+                    "encryptedData": "private-encrypted-material",
+                    "signature": "private-signature"
+                }
+            }),
+        );
+        let debug = format!("{registration_error:?}");
+        assert!(!debug.contains("private-encrypted-material"));
+        assert!(!debug.contains("private-signature"));
+        assert_eq!(registration_error.details, json!({ "code": 500 }));
     }
 
     #[test]
