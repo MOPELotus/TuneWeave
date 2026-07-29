@@ -111,6 +111,38 @@ pub struct FileAccountCredentialStore {
     root: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum CredentialStoreOperation {
+    LoadPlatform,
+    Put,
+    Remove,
+}
+
+impl CredentialStoreOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LoadPlatform => "load_platform",
+            Self::Put => "put",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+fn log_credential_store_failure(
+    operation: CredentialStoreOperation,
+    platform: Platform,
+    error: &TuneWeaveError,
+) {
+    tracing::error!(
+        event = "credential_store_failure",
+        operation = operation.name(),
+        platform = %platform,
+        error_code = error.code.as_str(),
+        retryable = error.retryable,
+        "TuneWeave account credential persistence failed"
+    );
+}
+
 impl FileAccountCredentialStore {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -143,84 +175,104 @@ impl FileAccountCredentialStore {
 
 impl AccountCredentialStore for FileAccountCredentialStore {
     fn load_platform(&self, platform: Platform) -> Result<Vec<StoredAccountCredential>> {
-        let platform_dir = self.platform_dir(platform);
-        let entries = match fs::read_dir(&platform_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(store_io_error("read platform credentials", error)),
-        };
-        let mut credentials = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|error| store_io_error("read credential entry", error))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| store_io_error("inspect credential entry", error))?;
-            if !file_type.is_dir() || file_type.is_symlink() {
-                continue;
+        let result = (|| {
+            let platform_dir = self.platform_dir(platform);
+            let entries = match fs::read_dir(&platform_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(store_io_error("read platform credentials", error)),
+            };
+            let mut credentials = Vec::new();
+            for entry in entries {
+                let entry =
+                    entry.map_err(|error| store_io_error("read credential entry", error))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| store_io_error("inspect credential entry", error))?;
+                if !file_type.is_dir() || file_type.is_symlink() {
+                    continue;
+                }
+                if let Some(credential) = load_latest_credential(&entry.path(), platform)? {
+                    credentials.push(credential);
+                }
             }
-            if let Some(credential) = load_latest_credential(&entry.path(), platform)? {
-                credentials.push(credential);
-            }
+            credentials.sort_by(|left, right| left.account.cmp(&right.account));
+            Ok(credentials)
+        })();
+        if let Err(error) = &result {
+            log_credential_store_failure(CredentialStoreOperation::LoadPlatform, platform, error);
         }
-        credentials.sort_by(|left, right| left.account.cmp(&right.account));
-        Ok(credentials)
+        result
     }
 
     fn put(&self, credential: &StoredAccountCredential) -> Result<()> {
-        credential.validate()?;
-        let account_dir = self.account_dir(credential.platform, &credential.account);
-        create_private_dir_all(&account_dir)?;
-        let generation = credential_generation()?;
-        let temporary_path = account_dir.join(format!("{generation}.tmp"));
-        let final_path = account_dir.join(format!("{generation}.json"));
-        let file = CredentialFile {
-            version: CREDENTIAL_FILE_VERSION,
-            credential: credential.clone(),
-        };
-        let encoded = serde_json::to_vec(&file).map_err(|error| {
-            TuneWeaveError::new(
-                ErrorCode::InternalError,
-                format!("failed to serialize account credential: {error}"),
-            )
-        })?;
-        if let Err(error) = write_private_file(&temporary_path, &encoded) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(error);
+        let result = (|| {
+            credential.validate()?;
+            let account_dir = self.account_dir(credential.platform, &credential.account);
+            create_private_dir_all(&account_dir)?;
+            let generation = credential_generation()?;
+            let temporary_path = account_dir.join(format!("{generation}.tmp"));
+            let final_path = account_dir.join(format!("{generation}.json"));
+            let file = CredentialFile {
+                version: CREDENTIAL_FILE_VERSION,
+                credential: credential.clone(),
+            };
+            let encoded = serde_json::to_vec(&file).map_err(|error| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    format!("failed to serialize account credential: {error}"),
+                )
+            })?;
+            if let Err(error) = write_private_file(&temporary_path, &encoded) {
+                let _ = fs::remove_file(&temporary_path);
+                return Err(error);
+            }
+            if let Err(error) = fs::rename(&temporary_path, &final_path) {
+                let _ = fs::remove_file(&temporary_path);
+                return Err(store_io_error("publish account credential", error));
+            }
+            remove_old_generations(&account_dir, &final_path)?;
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            log_credential_store_failure(CredentialStoreOperation::Put, credential.platform, error);
         }
-        if let Err(error) = fs::rename(&temporary_path, &final_path) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(store_io_error("publish account credential", error));
-        }
-        remove_old_generations(&account_dir, &final_path)?;
-        Ok(())
+        result
     }
 
     fn remove(&self, platform: Platform, account: &str) -> Result<bool> {
-        let account = account.trim();
-        if account.is_empty() || account.len() > 64 {
-            return Err(TuneWeaveError::invalid_request(
-                "stored account alias must contain at most 64 bytes",
-            ));
-        }
-        let account_dir = self.account_dir(platform, account);
-        let entries = match fs::read_dir(&account_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(store_io_error("read account credentials", error)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| store_io_error("read credential entry", error))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| store_io_error("inspect credential entry", error))?;
-            if file_type.is_file() && is_credential_generation(&entry.path()) {
-                fs::remove_file(entry.path())
-                    .map_err(|error| store_io_error("remove account credential", error))?;
+        let result = (|| {
+            let account = account.trim();
+            if account.is_empty() || account.len() > 64 {
+                return Err(TuneWeaveError::invalid_request(
+                    "stored account alias must contain at most 64 bytes",
+                ));
             }
+            let account_dir = self.account_dir(platform, account);
+            let entries = match fs::read_dir(&account_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(store_io_error("read account credentials", error)),
+            };
+            for entry in entries {
+                let entry =
+                    entry.map_err(|error| store_io_error("read credential entry", error))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| store_io_error("inspect credential entry", error))?;
+                if file_type.is_file() && is_credential_generation(&entry.path()) {
+                    fs::remove_file(entry.path())
+                        .map_err(|error| store_io_error("remove account credential", error))?;
+                }
+            }
+            fs::remove_dir(&account_dir)
+                .map_err(|error| store_io_error("remove account credential directory", error))?;
+            Ok(true)
+        })();
+        if let Err(error) = &result {
+            log_credential_store_failure(CredentialStoreOperation::Remove, platform, error);
         }
-        fs::remove_dir(&account_dir)
-            .map_err(|error| store_io_error("remove account credential directory", error))?;
-        Ok(true)
+        result
     }
 }
 
@@ -381,6 +433,16 @@ fn store_io_error(operation: &str, error: std::io::Error) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_store_operation_names_are_stable() {
+        assert_eq!(
+            CredentialStoreOperation::LoadPlatform.name(),
+            "load_platform"
+        );
+        assert_eq!(CredentialStoreOperation::Put.name(), "put");
+        assert_eq!(CredentialStoreOperation::Remove.name(), "remove");
+    }
 
     struct TestDirectory(PathBuf);
 
