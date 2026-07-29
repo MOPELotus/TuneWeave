@@ -5039,6 +5039,25 @@ pub struct MediaStream {
     pub attempts: Vec<ResolutionAttempt>,
 }
 
+pub struct AudioContent {
+    pub track_ref: ResourceRef,
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+    pub filename: String,
+}
+
+impl fmt::Debug for AudioContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AudioContent")
+            .field("track_ref", &self.track_ref)
+            .field("bytes", &format_args!("[{} bytes]", self.bytes.len()))
+            .field("content_type", &self.content_type)
+            .field("filename", &self.filename)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MediaDownload {
     #[serde(rename = "ref")]
@@ -5080,6 +5099,20 @@ mod tests {
         assert_eq!(track.resource_ref, reference);
         assert_eq!(track.platform, Platform::Netease);
         assert_eq!(track.id, "123");
+    }
+
+    #[test]
+    fn audio_content_debug_never_dumps_media_bytes() {
+        let content = AudioContent {
+            track_ref: ResourceRef::new(Platform::Soda, "123").expect("valid reference"),
+            bytes: b"private-decrypted-media".to_vec(),
+            content_type: "audio/mp4".to_owned(),
+            filename: "soda-123.m4a".to_owned(),
+        };
+
+        let debug = format!("{content:?}");
+        assert!(debug.contains("[23 bytes]"));
+        assert!(!debug.contains("private-decrypted-media"));
     }
 
     #[test]

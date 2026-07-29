@@ -1417,6 +1417,7 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | GET | `/v1/episodes/{ref}/stream/redirect` | 同上 | 成功解析节目音频后返回 302，不向客户端暴露账户凭据 |
 | GET | `/v1/tracks/{ref}/stream` | `quality?`、`variant?`、`bitrate?`、`immersive_type?`、`playback_platform?`、`fallback?`、`fallback_platforms?`、`unblock?`、`source?`、`account?` | `MediaStream` |
 | GET | `/v1/tracks/{ref}/stream/redirect` | 同上 | 成功解析完整统一回退链后返回无缓存 302 |
+| GET | `/v1/tracks/{ref}/stream/content` | `quality?`、`variant?`、`bitrate?`、`account?`；不接受二次回退或目标平台参数 | 仅供需要服务端本地处理的 provider 交付真实音频字节；固定 `private, no-store`、`nosniff`、受限音频 MIME/文件名和 512 MiB 上限，其他 provider 返回能力不支持 |
 | GET | `/v1/tracks/streams` | `refs` 或 `ids`（兼容 `id`）、`platform?`、同上播放控制参数 | `StreamBatch`；逐项成功或失败，保留输入顺序与重复项 |
 | POST | `/v1/tracks/streams` | JSON `{refs?|ids?, platform?, quality?, variant?, bitrate?, immersive_type?, playback_platform?, fallback?, fallback_platforms?, unblock?, source?, account?}` | `StreamBatch`；`refs/ids` 可为字符串或字符串数组 |
 | GET | `/v1/tracks/{ref}/download` | `quality?`、`variant?`、`bitrate?`、`account?`；兼容 `level/backend/br` | `MediaDownload`；无可用 URL 仍是可检查的成功数据 |

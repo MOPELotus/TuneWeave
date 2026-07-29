@@ -31,19 +31,20 @@ use tuneweave_core::{
     ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabRequest,
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest,
     ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
-    ArtistWorksRequest, AudioCdnDispatch, AudioFileBatch, AudioFileRequest, AudioFileRequestItem,
-    AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential, Capability,
-    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
-    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch, AudioFileRequest,
+    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
+    BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential,
+    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
+    ChartTrackListRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
+    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -118,6 +119,7 @@ const MAX_UNI_PLAYLIST_MATERIALIZE_PAGE_ITEMS: u32 = 500;
 const MAX_UNI_PLAYLIST_SOURCE_PAGES: usize = 2_000;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
+const MAX_AUDIO_CONTENT_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Default)]
 struct AuthTransactions {
@@ -656,6 +658,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
+        .route(
+            "/tracks/{reference}/stream/content",
+            get(track_stream_content),
+        )
         .route(
             "/tracks/{reference}/stream/redirect",
             get(track_stream_redirect),
@@ -4404,6 +4410,115 @@ async fn track_stream_redirect(
     let params = query_params(params)?;
     let (stream, _) = resolve_track_stream_request(&state, &headers, reference, params).await?;
     Ok(download_redirect_response(&stream.url))
+}
+
+async fn track_stream_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    params: Result<Query<DownloadParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let mut request = download_request(&params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        reference.platform(),
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account = access.provider_account;
+    let provider = access.provider;
+    let track = provider
+        .track(reference.id(), request.account.as_deref())
+        .await?;
+    let content = provider.audio_content(&track, &request).await?;
+    audio_content_response(&track, content).map_err(Into::into)
+}
+
+fn audio_content_response(
+    track: &Track,
+    content: AudioContent,
+) -> Result<Response, TuneWeaveError> {
+    if content.track_ref != track.resource_ref {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned audio content for a different track",
+        )
+        .with_platform(track.platform));
+    }
+    if content.bytes.is_empty() || content.bytes.len() > MAX_AUDIO_CONTENT_BYTES {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned audio content outside the server size bound",
+        )
+        .with_platform(track.platform));
+    }
+    if !matches!(
+        content.content_type.as_str(),
+        "audio/mp4"
+            | "audio/mpeg"
+            | "audio/flac"
+            | "audio/aac"
+            | "audio/ogg"
+            | "audio/webm"
+            | "application/octet-stream"
+    ) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned an unsupported audio content type",
+        )
+        .with_platform(track.platform));
+    }
+    if content.filename.is_empty()
+        || content.filename.len() > 200
+        || content.filename.starts_with('.')
+        || !content
+            .filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "provider returned an unsafe audio filename",
+        )
+        .with_platform(track.platform));
+    }
+    let content_length = content.bytes.len().to_string();
+    let content_disposition = format!("inline; filename=\"{}\"", content.filename);
+    let mut response = Response::new(Body::from(content.bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&content.content_type).map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "provider returned an invalid audio content type",
+            )
+            .with_platform(track.platform)
+        })?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&content_length).expect("decimal content length is a valid header"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition)
+            .expect("validated ASCII filename is a valid content disposition"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 async fn resolve_track_stream_request(
@@ -20224,6 +20339,26 @@ mod tests {
             })
         }
 
+        async fn audio_content(
+            &self,
+            track: &Track,
+            request: &StreamRequest,
+        ) -> Result<AudioContent> {
+            let bytes = format!(
+                "test-audio:{}:{:?}:{}",
+                track.id,
+                request.quality,
+                request.bitrate.unwrap_or_default()
+            )
+            .into_bytes();
+            Ok(AudioContent {
+                track_ref: track.resource_ref.clone(),
+                bytes,
+                content_type: "audio/mpeg".to_owned(),
+                filename: format!("netease-{}.mp3", track.id),
+            })
+        }
+
         async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
             let available = !matches!(track.id.as_str(), "fallback" | "trial");
             Ok(MediaDownload {
@@ -33470,6 +33605,64 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-referrer")
         );
+    }
+
+    #[tokio::test]
+    async fn track_stream_content_returns_bounded_no_store_audio_without_routing_inputs() {
+        let response = test_app_with_provider()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/v1/tracks/netease:2709812973/stream/content?quality=high&bitrate=192123&account=reader",
+                    )
+                    .body(Body::empty())
+                    .expect("build audio content request"),
+            )
+            .await
+            .expect("audio content request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("audio/mpeg")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok()),
+            Some("inline; filename=\"netease-2709812973.mp3\"")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read audio body");
+        assert_eq!(body, "test-audio:2709812973:High:192123");
+
+        for query in ["fallback=true", "playback_platform=qq", "unexpected=true"] {
+            let (status, json) = json_response_from(
+                test_app_with_provider(),
+                &format!("/v1/tracks/netease:2709812973/stream/content?{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(json["error"]["code"], "invalid_request", "{query}");
+        }
     }
 
     #[tokio::test]
