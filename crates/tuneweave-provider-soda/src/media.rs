@@ -3,6 +3,7 @@ use aes::{
     cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::fmt;
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
 const MAX_MEDIA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -11,6 +12,8 @@ const MAX_CHUNK_COUNT: usize = 2_000_000;
 const MAX_SUBSAMPLES_PER_SAMPLE: usize = 4_096;
 const MAX_BOXES_PER_LEVEL: usize = 1_000_000;
 const MAX_SPADE_CHARS: usize = 16 * 1024;
+const MAX_FLAC_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_FLAC_METADATA_BLOCKS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SodaAudioFormat {
@@ -23,6 +26,31 @@ pub enum SodaAudioFormat {
 pub struct DecryptedSodaMedia {
     pub format: SodaAudioFormat,
     pub sample_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SodaAudioContainer {
+    IsoBaseMedia,
+    Flac,
+}
+
+pub struct DecryptedSodaAudio {
+    pub bytes: Vec<u8>,
+    pub format: SodaAudioFormat,
+    pub container: SodaAudioContainer,
+    pub sample_count: usize,
+}
+
+impl fmt::Debug for DecryptedSodaAudio {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedSodaAudio")
+            .field("bytes", &format_args!("[{} bytes]", self.bytes.len()))
+            .field("format", &self.format)
+            .field("container", &self.container)
+            .field("sample_count", &self.sample_count)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +96,13 @@ struct EncryptedSampleEntry {
     original_fourcc: [u8; 4],
     per_sample_iv_size: usize,
     key_id: [u8; 16],
+    flac_metadata: Option<Vec<u8>>,
+}
+
+struct InternalDecryption {
+    metadata: DecryptedSodaMedia,
+    sample_ranges: Vec<std::ops::Range<usize>>,
+    flac_metadata: Option<Vec<u8>>,
 }
 
 pub fn decrypt_cenc_audio_in_place(
@@ -75,6 +110,34 @@ pub fn decrypt_cenc_audio_in_place(
     spade_a: &str,
     expected_key_id: &str,
 ) -> Result<DecryptedSodaMedia> {
+    decrypt_cenc_audio_internal(media, spade_a, expected_key_id).map(|decrypted| decrypted.metadata)
+}
+
+pub fn decrypt_cenc_audio(
+    mut media: Vec<u8>,
+    spade_a: &str,
+    expected_key_id: &str,
+) -> Result<DecryptedSodaAudio> {
+    let decrypted = decrypt_cenc_audio_internal(&mut media, spade_a, expected_key_id)?;
+    let container = if let Some(flac_metadata) = decrypted.flac_metadata.as_deref() {
+        assemble_flac(&mut media, flac_metadata, &decrypted.sample_ranges)?;
+        SodaAudioContainer::Flac
+    } else {
+        SodaAudioContainer::IsoBaseMedia
+    };
+    Ok(DecryptedSodaAudio {
+        bytes: media,
+        format: decrypted.metadata.format,
+        container,
+        sample_count: decrypted.metadata.sample_count,
+    })
+}
+
+fn decrypt_cenc_audio_internal(
+    media: &mut [u8],
+    spade_a: &str,
+    expected_key_id: &str,
+) -> Result<InternalDecryption> {
     let media_len = u64::try_from(media.len())
         .map_err(|_| media_error("Soda media is too large for this platform"))?;
     if media.is_empty() || media_len > MAX_MEDIA_BYTES {
@@ -148,23 +211,62 @@ pub fn decrypt_cenc_audio_in_place(
     )?;
 
     for ((range, encryption), expected_size) in
-        sample_ranges.into_iter().zip(encryption).zip(sample_sizes)
+        sample_ranges.iter().zip(&encryption).zip(&sample_sizes)
     {
-        let sample = &mut media[range];
-        if sample.len() != usize::try_from(expected_size).unwrap_or(usize::MAX) {
+        let sample = &mut media[range.clone()];
+        if sample.len() != usize::try_from(*expected_size).unwrap_or(usize::MAX) {
             return Err(media_error(
                 "Soda media sample table changed during decoding",
             ));
         }
-        decrypt_sample(&cipher, sample, &encryption)?;
+        decrypt_sample(&cipher, sample, encryption)?;
     }
 
     media[sample_entry.header.offset + 4..sample_entry.header.offset + 8]
         .copy_from_slice(&sample_entry.original_fourcc);
-    Ok(DecryptedSodaMedia {
-        format: sample_entry.original_format,
-        sample_count,
+    Ok(InternalDecryption {
+        metadata: DecryptedSodaMedia {
+            format: sample_entry.original_format,
+            sample_count,
+        },
+        sample_ranges,
+        flac_metadata: sample_entry.flac_metadata,
     })
+}
+
+fn assemble_flac(
+    media: &mut Vec<u8>,
+    metadata: &[u8],
+    sample_ranges: &[std::ops::Range<usize>],
+) -> Result<()> {
+    let prefix_len = 4_usize
+        .checked_add(metadata.len())
+        .ok_or_else(|| media_error("Soda FLAC metadata is too large"))?;
+    let first_sample = sample_ranges
+        .first()
+        .ok_or_else(|| media_error("Soda FLAC media contains no samples"))?;
+    if prefix_len > first_sample.start || prefix_len > media.len() {
+        return Err(media_error(
+            "Soda FLAC metadata overlaps its encoded samples",
+        ));
+    }
+    media[..4].copy_from_slice(b"fLaC");
+    media[4..prefix_len].copy_from_slice(metadata);
+    let mut write_cursor = prefix_len;
+    for range in sample_ranges {
+        if write_cursor > range.start || range.end > media.len() {
+            return Err(media_error(
+                "Soda FLAC sample order cannot be reconstructed safely",
+            ));
+        }
+        let sample_len = range.end - range.start;
+        media.copy_within(range.clone(), write_cursor);
+        write_cursor = write_cursor
+            .checked_add(sample_len)
+            .ok_or_else(|| media_error("Soda FLAC output size overflowed"))?;
+    }
+    media.truncate(write_cursor);
+    Ok(())
 }
 
 fn decode_spade_key(value: &str) -> Result<[u8; 16]> {
@@ -369,6 +471,23 @@ fn encrypted_sample_entry(media: &[u8], stsd: BoxHeader) -> Result<Option<Encryp
             b"alac" => SodaAudioFormat::Alac,
             _ => return Err(media_error("Soda media uses an unsupported audio codec")),
         };
+        let flac_box = optional_one(
+            &children,
+            b"dfLa",
+            "Soda encrypted sample entry contains duplicate dfLa boxes",
+        )?;
+        let flac_metadata = match (original_format, flac_box) {
+            (SodaAudioFormat::Flac, Some(header)) => Some(parse_flac_metadata(media, header)?),
+            (SodaAudioFormat::Flac, None) => {
+                return Err(media_error("Soda FLAC sample entry omitted its dfLa box"));
+            }
+            (_, Some(_)) => {
+                return Err(media_error(
+                    "Soda non-FLAC sample entry unexpectedly contains dfLa metadata",
+                ));
+            }
+            (_, None) => None,
+        };
         let schm = exactly_one(
             &protection,
             b"schm",
@@ -395,9 +514,63 @@ fn encrypted_sample_entry(media: &[u8], stsd: BoxHeader) -> Result<Option<Encryp
             original_fourcc,
             per_sample_iv_size,
             key_id,
+            flac_metadata,
         });
     }
     Ok(encrypted)
+}
+
+fn parse_flac_metadata(media: &[u8], header: BoxHeader) -> Result<Vec<u8>> {
+    let data = payload(media, header)?;
+    if data.len() < 4 + 4 + 34
+        || data.len() > MAX_FLAC_METADATA_BYTES + 4
+        || data[..4] != [0, 0, 0, 0]
+    {
+        return Err(media_error("Soda media contains invalid dfLa metadata"));
+    }
+    let metadata = &data[4..];
+    let mut cursor = 0_usize;
+    let mut block_count = 0_usize;
+    let mut saw_stream_info = false;
+    loop {
+        if block_count >= MAX_FLAC_METADATA_BLOCKS || metadata.len() - cursor < 4 {
+            return Err(media_error(
+                "Soda media contains invalid FLAC metadata blocks",
+            ));
+        }
+        let header_byte = metadata[cursor];
+        let is_last = header_byte & 0x80 != 0;
+        let block_type = header_byte & 0x7f;
+        let block_len = (usize::from(metadata[cursor + 1]) << 16)
+            | (usize::from(metadata[cursor + 2]) << 8)
+            | usize::from(metadata[cursor + 3]);
+        if block_type == 127
+            || (block_count == 0 && (block_type != 0 || block_len != 34))
+            || (block_type == 0 && saw_stream_info)
+        {
+            return Err(media_error(
+                "Soda media contains invalid FLAC metadata blocks",
+            ));
+        }
+        saw_stream_info |= block_type == 0;
+        cursor = cursor
+            .checked_add(4)
+            .and_then(|value| value.checked_add(block_len))
+            .filter(|cursor| *cursor <= metadata.len())
+            .ok_or_else(|| media_error("Soda media contains truncated FLAC metadata"))?;
+        block_count += 1;
+        if is_last {
+            if cursor != metadata.len() || !saw_stream_info {
+                return Err(media_error("Soda media contains trailing FLAC metadata"));
+            }
+            return Ok(metadata.to_vec());
+        }
+        if cursor == metadata.len() {
+            return Err(media_error(
+                "Soda media FLAC metadata omitted its final block",
+            ));
+        }
+    }
 }
 
 fn validate_scheme(media: &[u8], header: BoxHeader) -> Result<()> {
@@ -927,6 +1100,50 @@ mod tests {
     }
 
     #[test]
+    fn owned_cenc_flac_reuses_the_input_buffer_for_raw_container_output() {
+        let plaintext = [
+            b"flac-frame-one".to_vec(),
+            b"flac-frame-two-is-longer".to_vec(),
+            b"last-frame".to_vec(),
+        ];
+        let ivs = [
+            [
+                0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ];
+        let mut encrypted = plaintext.clone();
+        let cipher = Aes128::new_from_slice(&test_key()).expect("AES key");
+        for (sample, iv) in encrypted.iter_mut().zip(ivs) {
+            CencCtr::new(&cipher, iv).apply(sample);
+        }
+        let mut metadata = vec![0x80, 0, 0, 34];
+        metadata.extend_from_slice(&[0x24; 34]);
+        let (media, _) = fixture_mp4_with_format(&encrypted, &ivs, *b"fLaC", Some(&metadata));
+
+        let decrypted = decrypt_cenc_audio(media, &encode_test_spade(TEST_KEY_HEX), TEST_KID_HEX)
+            .expect("decrypt raw FLAC");
+
+        assert_eq!(decrypted.format, SodaAudioFormat::Flac);
+        assert_eq!(decrypted.container, SodaAudioContainer::Flac);
+        assert_eq!(decrypted.sample_count, 3);
+        let mut expected = b"fLaC".to_vec();
+        expected.extend_from_slice(&metadata);
+        for sample in plaintext {
+            expected.extend_from_slice(&sample);
+        }
+        assert_eq!(decrypted.bytes, expected);
+        let debug = format!("{decrypted:?}");
+        assert!(debug.contains("bytes]"));
+        assert!(!debug.contains("flac-frame-one"));
+    }
+
+    #[test]
     fn cenc_audio_rejects_inconsistent_sample_encryption_counts() {
         let plaintext = [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
         let ivs = [
@@ -1014,7 +1231,7 @@ mod tests {
         let root = std::env::var_os("TUNEWEAVE_SODA_MEDIA_FIXTURE_DIR")
             .map(std::path::PathBuf::from)
             .expect("fixture directory");
-        let mut media = std::fs::read(root.join("preview-smallest.mp4")).expect("encrypted media");
+        let media = std::fs::read(root.join("preview-smallest.mp4")).expect("encrypted media");
         let spade_a = std::fs::read_to_string(root.join("spade-a.txt"))
             .expect("authorization")
             .trim()
@@ -1024,19 +1241,29 @@ mod tests {
             .trim()
             .to_owned();
 
-        let result =
-            decrypt_cenc_audio_in_place(&mut media, &spade_a, &key_id).expect("decrypt preview");
+        let result = decrypt_cenc_audio(media, &spade_a, &key_id).expect("decrypt preview");
         assert_eq!(result.format, SodaAudioFormat::Aac);
+        assert_eq!(result.container, SodaAudioContainer::IsoBaseMedia);
         assert!(result.sample_count > 1_000);
-        std::fs::write(root.join("preview-decrypted.m4a"), media).expect("decrypted fixture");
+        std::fs::write(root.join("preview-decrypted.m4a"), result.bytes)
+            .expect("decrypted fixture");
     }
 
     fn fixture_mp4(
         samples: &[Vec<u8>; 3],
         ivs: &[[u8; 16]; 3],
     ) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
+        fixture_mp4_with_format(samples, ivs, *b"mp4a", None)
+    }
+
+    fn fixture_mp4_with_format(
+        samples: &[Vec<u8>; 3],
+        ivs: &[[u8; 16]; 3],
+        format: [u8; 4],
+        flac_metadata: Option<&[u8]>,
+    ) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
         let ftyp = make_box(*b"ftyp", b"isom\0\0\0\0isom");
-        let placeholder = build_moov(samples, ivs, [0, 0]);
+        let placeholder = build_moov(samples, ivs, [0, 0], format, flac_metadata);
         let mdat_start = ftyp.len() + placeholder.len();
         let first_offset = mdat_start + 8;
         let padding = 5_usize;
@@ -1048,6 +1275,8 @@ mod tests {
                 u32::try_from(first_offset).expect("small fixture"),
                 u32::try_from(second_offset).expect("small fixture"),
             ],
+            format,
+            flac_metadata,
         );
         assert_eq!(placeholder.len(), moov.len());
         let mut mdat_payload = Vec::new();
@@ -1068,8 +1297,14 @@ mod tests {
         (media, ranges)
     }
 
-    fn build_moov(samples: &[Vec<u8>; 3], ivs: &[[u8; 16]; 3], offsets: [u32; 2]) -> Vec<u8> {
-        let frma = make_box(*b"frma", b"mp4a");
+    fn build_moov(
+        samples: &[Vec<u8>; 3],
+        ivs: &[[u8; 16]; 3],
+        offsets: [u32; 2],
+        format: [u8; 4],
+        flac_metadata: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let frma = make_box(*b"frma", &format);
         let mut schm_payload = vec![0, 0, 0, 0];
         schm_payload.extend_from_slice(b"cenc");
         schm_payload.extend_from_slice(&[0, 1, 0, 0]);
@@ -1083,6 +1318,11 @@ mod tests {
         sinf_payload.extend_from_slice(&schi);
         let sinf = make_box(*b"sinf", &sinf_payload);
         let mut entry_payload = vec![0; 28];
+        if let Some(metadata) = flac_metadata {
+            let mut dfla_payload = vec![0, 0, 0, 0];
+            dfla_payload.extend_from_slice(metadata);
+            entry_payload.extend_from_slice(&make_box(*b"dfLa", &dfla_payload));
+        }
         entry_payload.extend_from_slice(&sinf);
         let enca = make_box(*b"enca", &entry_payload);
         let mut stsd_payload = vec![0, 0, 0, 0];
