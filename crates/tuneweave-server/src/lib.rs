@@ -136,6 +136,7 @@ struct AuthTransactions {
 
 #[derive(Clone)]
 struct StoredAuthTransaction {
+    created_at: Instant,
     expires_at: Instant,
     kind: StoredAuthKind,
 }
@@ -155,56 +156,230 @@ enum StoredAuthKind {
     },
 }
 
+impl StoredAuthKind {
+    const fn platform(&self) -> Platform {
+        match self {
+            Self::Qr { platform, .. } | Self::Challenge { platform, .. } => *platform,
+        }
+    }
+
+    const fn credential_mode(&self) -> CredentialMode {
+        match self {
+            Self::Qr {
+                credential_mode, ..
+            }
+            | Self::Challenge {
+                credential_mode, ..
+            } => *credential_mode,
+        }
+    }
+
+    const fn method_name(&self) -> &'static str {
+        match self {
+            Self::Qr { .. } => "qr",
+            Self::Challenge {
+                request:
+                    AuthChallengeRequest {
+                        method: ChallengeMethod::Sms,
+                        ..
+                    },
+                ..
+            } => "sms",
+        }
+    }
+}
+
+fn credential_mode_name(mode: CredentialMode) -> &'static str {
+    match mode {
+        CredentialMode::Server => "server",
+        CredentialMode::Client => "client",
+        CredentialMode::Both => "both",
+    }
+}
+
+fn auth_state_name(state: AuthState) -> &'static str {
+    match state {
+        AuthState::Waiting => "waiting",
+        AuthState::Scanned => "scanned",
+        AuthState::Confirmed => "confirmed",
+        AuthState::Expired => "expired",
+        AuthState::Failed => "failed",
+    }
+}
+
+fn auth_transaction_elapsed_ms(transaction: &StoredAuthTransaction) -> u64 {
+    u64::try_from(transaction.created_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn log_auth_transaction_started(transaction_id: &str, transaction: &StoredAuthTransaction) {
+    tracing::info!(
+        event = "auth_transaction",
+        phase = "started",
+        transaction_id,
+        platform = %transaction.kind.platform(),
+        auth_method = transaction.kind.method_name(),
+        credential_mode = credential_mode_name(transaction.kind.credential_mode()),
+        elapsed_ms = auth_transaction_elapsed_ms(transaction),
+        "TuneWeave authentication transaction started"
+    );
+}
+
+fn log_auth_transaction_progress(
+    transaction_id: &str,
+    transaction: &StoredAuthTransaction,
+    state: AuthState,
+) {
+    tracing::debug!(
+        event = "auth_transaction",
+        phase = "progress",
+        transaction_id,
+        platform = %transaction.kind.platform(),
+        auth_method = transaction.kind.method_name(),
+        credential_mode = credential_mode_name(transaction.kind.credential_mode()),
+        auth_state = auth_state_name(state),
+        elapsed_ms = auth_transaction_elapsed_ms(transaction),
+        "TuneWeave authentication transaction progressed"
+    );
+}
+
+fn log_auth_transaction_attempt_failure(
+    transaction_id: &str,
+    transaction: &StoredAuthTransaction,
+    error: &TuneWeaveError,
+) {
+    tracing::debug!(
+        event = "auth_transaction",
+        phase = "attempt_failed",
+        transaction_id,
+        platform = %transaction.kind.platform(),
+        auth_method = transaction.kind.method_name(),
+        credential_mode = credential_mode_name(transaction.kind.credential_mode()),
+        error_code = error.code.as_str(),
+        retryable = error.retryable,
+        elapsed_ms = auth_transaction_elapsed_ms(transaction),
+        "TuneWeave authentication transaction attempt failed"
+    );
+}
+
+fn log_auth_transaction_completed(
+    transaction_id: &str,
+    transaction: &StoredAuthTransaction,
+    state: AuthState,
+) {
+    let platform = transaction.kind.platform();
+    let method = transaction.kind.method_name();
+    let credential_mode = credential_mode_name(transaction.kind.credential_mode());
+    let state = auth_state_name(state);
+    let elapsed_ms = auth_transaction_elapsed_ms(transaction);
+    if matches!(state, "expired" | "failed") {
+        tracing::warn!(
+            event = "auth_transaction",
+            phase = "completed",
+            transaction_id,
+            platform = %platform,
+            auth_method = method,
+            credential_mode,
+            auth_state = state,
+            elapsed_ms,
+            "TuneWeave authentication transaction completed"
+        );
+    } else {
+        tracing::info!(
+            event = "auth_transaction",
+            phase = "completed",
+            transaction_id,
+            platform = %platform,
+            auth_method = method,
+            credential_mode,
+            auth_state = state,
+            elapsed_ms,
+            "TuneWeave authentication transaction completed"
+        );
+    }
+}
+
 impl AuthTransactions {
+    fn take_expired(
+        entries: &mut HashMap<String, StoredAuthTransaction>,
+        now: Instant,
+    ) -> Vec<(String, StoredAuthTransaction)> {
+        let expired_ids = entries
+            .iter()
+            .filter(|(_, transaction)| transaction.expires_at <= now)
+            .map(|(transaction_id, _)| transaction_id.clone())
+            .collect::<Vec<_>>();
+        expired_ids
+            .into_iter()
+            .filter_map(|transaction_id| {
+                entries
+                    .remove(&transaction_id)
+                    .map(|transaction| (transaction_id, transaction))
+            })
+            .collect()
+    }
+
+    fn log_expired(expired: Vec<(String, StoredAuthTransaction)>) {
+        for (transaction_id, transaction) in expired {
+            log_auth_transaction_completed(&transaction_id, &transaction, AuthState::Expired);
+        }
+    }
+
     fn insert(&self, kind: StoredAuthKind) -> Result<String, TuneWeaveError> {
         let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
         let now = Instant::now();
-        entries.retain(|_, transaction| transaction.expires_at > now);
-        for _ in 0..8 {
-            let suffix = rand::rng()
-                .sample_iter(Alphanumeric)
-                .take(24)
-                .map(char::from)
-                .collect::<String>();
-            let transaction_id = format!("tw-auth-{suffix}");
-            if !entries.contains_key(&transaction_id) {
-                entries.insert(
-                    transaction_id.clone(),
-                    StoredAuthTransaction {
-                        expires_at: now + AUTH_TRANSACTION_TTL,
-                        kind,
-                    },
-                );
-                return Ok(transaction_id);
-            }
-        }
-        Err(TuneWeaveError::new(
-            tuneweave_core::ErrorCode::InternalError,
-            "failed to allocate a unique authentication transaction",
-        ))
-    }
-
-    fn get(&self, transaction_id: &str) -> Result<StoredAuthKind, TuneWeaveError> {
-        let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
-        let now = Instant::now();
-        entries.retain(|_, transaction| transaction.expires_at > now);
-        entries
-            .get(transaction_id)
-            .map(|transaction| transaction.kind.clone())
+        let expired = Self::take_expired(&mut entries, now);
+        let transaction_id = (0..8)
+            .map(|_| {
+                let suffix = rand::rng()
+                    .sample_iter(Alphanumeric)
+                    .take(24)
+                    .map(char::from)
+                    .collect::<String>();
+                format!("tw-auth-{suffix}")
+            })
+            .find(|transaction_id| !entries.contains_key(transaction_id))
             .ok_or_else(|| {
                 TuneWeaveError::new(
-                    tuneweave_core::ErrorCode::ResourceNotFound,
-                    "authentication transaction was not found or has expired",
+                    tuneweave_core::ErrorCode::InternalError,
+                    "failed to allocate a unique authentication transaction",
                 )
-            })
+            })?;
+        let transaction = StoredAuthTransaction {
+            created_at: now,
+            expires_at: now + AUTH_TRANSACTION_TTL,
+            kind,
+        };
+        entries.insert(transaction_id.clone(), transaction.clone());
+        drop(entries);
+        Self::log_expired(expired);
+        log_auth_transaction_started(&transaction_id, &transaction);
+        Ok(transaction_id)
     }
 
-    fn remove(&self, transaction_id: &str) -> Result<(), TuneWeaveError> {
-        self.entries
+    fn get(&self, transaction_id: &str) -> Result<StoredAuthTransaction, TuneWeaveError> {
+        let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
+        let now = Instant::now();
+        let expired = Self::take_expired(&mut entries, now);
+        let transaction = entries.get(transaction_id).cloned();
+        drop(entries);
+        Self::log_expired(expired);
+        transaction.ok_or_else(|| {
+            TuneWeaveError::new(
+                tuneweave_core::ErrorCode::ResourceNotFound,
+                "authentication transaction was not found or has expired",
+            )
+        })
+    }
+
+    fn remove(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Option<StoredAuthTransaction>, TuneWeaveError> {
+        Ok(self
+            .entries
             .write()
             .map_err(|_| auth_store_error())?
-            .remove(transaction_id);
-        Ok(())
+            .remove(transaction_id))
     }
 }
 
@@ -12238,23 +12413,40 @@ async fn auth_qr_poll(
         account,
         credential_mode,
         provider_transaction_id,
-    } = stored
+    } = &stored.kind
     else {
         return Err(auth_transaction_not_found().into());
     };
-    let provider = state.registry.require(platform)?;
-    let poll = provider
-        .poll_qr_login_with_mode(&provider_transaction_id, &account, credential_mode)
-        .await?;
-    let caller_credential = finalize_qr_credential(
-        platform,
-        credential_mode,
+    let provider = state.registry.require(*platform)?;
+    let poll = match provider
+        .poll_qr_login_with_mode(provider_transaction_id, account, *credential_mode)
+        .await
+    {
+        Ok(poll) => poll,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            return Err(error.into());
+        }
+    };
+    let caller_credential = match finalize_qr_credential(
+        *platform,
+        *credential_mode,
         poll.state,
         poll.profile.as_ref(),
         poll.credential,
-    )?;
+    ) {
+        Ok(credential) => credential,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            return Err(error.into());
+        }
+    };
     if poll.state.is_terminal() {
-        state.auth_transactions.remove(&transaction_id)?;
+        if let Some(transaction) = state.auth_transactions.remove(&transaction_id)? {
+            log_auth_transaction_completed(&transaction_id, &transaction, poll.state);
+        }
+    } else {
+        log_auth_transaction_progress(&transaction_id, &stored, poll.state);
     }
     let data = AuthQrPollData {
         transaction_id,
@@ -12264,7 +12456,7 @@ async fn auth_qr_poll(
         caller_credential,
     };
     Ok(auth_json_response(
-        auth_api_response(data, platform, &account, credential_mode),
+        auth_api_response(data, *platform, account, *credential_mode),
         credential_mode.returns_to_caller() && poll.state == AuthState::Confirmed,
     ))
 }
@@ -12503,17 +12695,32 @@ async fn auth_challenge_verify(
         platform,
         credential_mode,
         request,
-    } = stored
+    } = &stored.kind
     else {
         return Err(auth_transaction_not_found().into());
     };
-    let provider = state.registry.require(platform)?;
-    let result = provider
-        .verify_auth_challenge_with_mode(&request, &code, credential_mode)
-        .await?;
-    let result = finalize_auth_result(platform, credential_mode, result)?;
-    state.auth_transactions.remove(&transaction_id)?;
-    let account = request.account;
+    let provider = state.registry.require(*platform)?;
+    let result = match provider
+        .verify_auth_challenge_with_mode(request, &code, *credential_mode)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            return Err(error.into());
+        }
+    };
+    let result = match finalize_auth_result(*platform, *credential_mode, result) {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            return Err(error.into());
+        }
+    };
+    if let Some(transaction) = state.auth_transactions.remove(&transaction_id)? {
+        log_auth_transaction_completed(&transaction_id, &transaction, AuthState::Confirmed);
+    }
+    let account = request.account.clone();
     Ok(auth_json_response(
         auth_api_response(
             AuthChallengeVerifyData {
@@ -12521,9 +12728,9 @@ async fn auth_challenge_verify(
                 profile: result.profile,
                 caller_credential: result.caller_credential,
             },
-            platform,
+            *platform,
             &account,
-            credential_mode,
+            *credential_mode,
         ),
         credential_mode.returns_to_caller(),
     ))
@@ -17035,6 +17242,77 @@ mod tests {
                 .expect("test provider credential")
             }),
         }
+    }
+
+    #[test]
+    fn auth_transactions_keep_stable_safe_metadata_and_remove_once() {
+        let transactions = AuthTransactions::default();
+        let transaction_id = transactions
+            .insert(StoredAuthKind::Qr {
+                platform: Platform::Qq,
+                account: "private-account-alias".to_owned(),
+                credential_mode: CredentialMode::Both,
+                provider_transaction_id: "private-provider-key".to_owned(),
+            })
+            .expect("insert authentication transaction");
+        let stored = transactions
+            .get(&transaction_id)
+            .expect("read authentication transaction");
+        assert_eq!(stored.kind.platform(), Platform::Qq);
+        assert_eq!(stored.kind.method_name(), "qr");
+        assert_eq!(credential_mode_name(stored.kind.credential_mode()), "both");
+        assert_eq!(auth_state_name(AuthState::Scanned), "scanned");
+        assert!(
+            transactions
+                .remove(&transaction_id)
+                .expect("remove authentication transaction")
+                .is_some()
+        );
+        assert!(
+            transactions
+                .remove(&transaction_id)
+                .expect("remove authentication transaction again")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn auth_transactions_evict_expired_entries_before_lookup() {
+        let transactions = AuthTransactions::default();
+        let now = Instant::now();
+        transactions
+            .entries
+            .write()
+            .expect("lock authentication transactions")
+            .insert(
+                "tw-auth-expired-test".to_owned(),
+                StoredAuthTransaction {
+                    created_at: now - Duration::from_secs(2),
+                    expires_at: now - Duration::from_secs(1),
+                    kind: StoredAuthKind::Challenge {
+                        platform: Platform::Netease,
+                        credential_mode: CredentialMode::Client,
+                        request: AuthChallengeRequest {
+                            account: "private-account-alias".to_owned(),
+                            method: ChallengeMethod::Sms,
+                            principal: "private-principal".to_owned(),
+                            country_code: Some("86".to_owned()),
+                        },
+                    },
+                },
+            );
+        let error = match transactions.get("tw-auth-expired-test") {
+            Ok(_) => panic!("expired transaction must not be readable"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+        assert!(
+            transactions
+                .entries
+                .read()
+                .expect("lock authentication transactions")
+                .is_empty()
+        );
     }
 
     #[async_trait]
