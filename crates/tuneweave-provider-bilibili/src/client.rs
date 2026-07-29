@@ -2668,25 +2668,40 @@ impl BilibiliClient {
             )
             .await?;
         let endpoint = format!("{VIDEO_PLAYER_ENDPOINT}?{}", context.query);
-        let response = self
-            .http
-            .get(endpoint)
-            .header(COOKIE, context.cookie_header)
-            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili subtitle catalog", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .header(COOKIE, context.cookie_header)
+                .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili subtitle catalog", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili subtitle catalog response exceeded the size limit",
+                ));
+            }
+            parse_video_subtitle_catalog(&bytes, aid, bvid, cid)
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili subtitle catalog response exceeded the size limit",
-            ));
-        }
-        parse_video_subtitle_catalog(&bytes, aid, bvid, cid)
+        .await;
+        self.log_upstream_request(
+            "subtitle_catalog",
+            "api.bilibili.com",
+            "/x/player/wbi/v2",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn playback_manifest(
@@ -2732,42 +2747,57 @@ impl BilibiliClient {
         }
         let context = self.signed_web_context(&parameters, credential).await?;
         let endpoint = format!("{VIDEO_PLAYBACK_ENDPOINT}?{}", context.query);
-        let mut response = self
-            .http
-            .get(endpoint)
-            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
-            .header(COOKIE, context.cookie_header)
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili playback manifest", status));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
-        {
-            return Err(bilibili_upstream_error(
-                "Bilibili playback manifest response exceeded the size limit",
-            ));
-        }
-        let mut bytes = Vec::with_capacity(
-            response
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let mut response = self
+                .http
+                .get(endpoint)
+                .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+                .header(COOKIE, context.cookie_header)
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili playback manifest", status));
+            }
+            if response
                 .content_length()
-                .and_then(|length| usize::try_from(length).ok())
-                .unwrap_or_default()
-                .min(MAX_SUBTITLE_RESPONSE_BYTES),
-        );
-        while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
+            {
                 return Err(bilibili_upstream_error(
                     "Bilibili playback manifest response exceeded the size limit",
                 ));
             }
-            bytes.extend_from_slice(&chunk);
+            let mut bytes = Vec::with_capacity(
+                response
+                    .content_length()
+                    .and_then(|length| usize::try_from(length).ok())
+                    .unwrap_or_default()
+                    .min(MAX_SUBTITLE_RESPONSE_BYTES),
+            );
+            while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+                if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                    return Err(bilibili_upstream_error(
+                        "Bilibili playback manifest response exceeded the size limit",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            parse_playback_manifest(&bytes, aid, bvid, cid)
         }
-        parse_playback_manifest(&bytes, aid, bvid, cid)
+        .await;
+        self.log_upstream_request(
+            "playback_manifest",
+            "api.bilibili.com",
+            "/x/player/wbi/playurl",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn subtitle_body(
@@ -2776,6 +2806,7 @@ impl BilibiliClient {
         bvid: &str,
     ) -> Result<BilibiliSubtitleBody> {
         let resource_url = normalize_bilibili_subtitle_url(resource_url.as_str())?;
+        let (upstream_host, endpoint) = bilibili_subtitle_request_summary(&resource_url)?;
         if !matches!(
             crate::BilibiliVideoIdentity::parse(bvid),
             Ok(crate::BilibiliVideoIdentity::Bvid(ref value)) if value == bvid
@@ -2784,41 +2815,56 @@ impl BilibiliClient {
                 "Bilibili subtitle body request contains an invalid BVID",
             ));
         }
-        let mut response = self
-            .http
-            .get(resource_url)
-            .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
-            .send()
-            .await
-            .map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili subtitle body", status));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
-        {
-            return Err(bilibili_upstream_error(
-                "Bilibili subtitle body response exceeded the size limit",
-            ));
-        }
-        let mut bytes = Vec::with_capacity(
-            response
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let mut response = self
+                .http
+                .get(resource_url)
+                .header(REFERER, format!("https://www.bilibili.com/video/{bvid}"))
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili subtitle body", status));
+            }
+            if response
                 .content_length()
-                .and_then(|length| usize::try_from(length).ok())
-                .unwrap_or_default()
-                .min(MAX_SUBTITLE_RESPONSE_BYTES),
-        );
-        while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                .is_some_and(|length| length > MAX_SUBTITLE_RESPONSE_BYTES as u64)
+            {
                 return Err(bilibili_upstream_error(
                     "Bilibili subtitle body response exceeded the size limit",
                 ));
             }
-            bytes.extend_from_slice(&chunk);
+            let mut bytes = Vec::with_capacity(
+                response
+                    .content_length()
+                    .and_then(|length| usize::try_from(length).ok())
+                    .unwrap_or_default()
+                    .min(MAX_SUBTITLE_RESPONSE_BYTES),
+            );
+            while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+                if bytes.len().saturating_add(chunk.len()) > MAX_SUBTITLE_RESPONSE_BYTES {
+                    return Err(bilibili_upstream_error(
+                        "Bilibili subtitle body response exceeded the size limit",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            parse_subtitle_body(&bytes)
         }
-        parse_subtitle_body(&bytes)
+        .await;
+        self.log_upstream_request(
+            "subtitle_body",
+            upstream_host,
+            endpoint,
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn created_favorite_folders(
@@ -6222,6 +6268,31 @@ fn normalize_bilibili_subtitle_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
+fn bilibili_subtitle_request_summary(url: &Url) -> Result<(&'static str, &'static str)> {
+    let upstream_host = match url.host_str() {
+        Some("aisubtitle.hdslb.com") => "aisubtitle.hdslb.com",
+        Some("i0.hdslb.com") => "i0.hdslb.com",
+        Some("i1.hdslb.com") => "i1.hdslb.com",
+        Some("i2.hdslb.com") => "i2.hdslb.com",
+        Some("s1.hdslb.com") => "s1.hdslb.com",
+        _ => {
+            return Err(bilibili_internal_error(
+                "Bilibili subtitle resource host was not classified",
+            ));
+        }
+    };
+    let endpoint = if url.path().starts_with("/bfs/subtitle/") {
+        "/bfs/subtitle/{resource}.json"
+    } else if url.path().starts_with("/bfs/ai_subtitle/prod/") {
+        "/bfs/ai_subtitle/prod/{resource}"
+    } else {
+        return Err(bilibili_internal_error(
+            "Bilibili subtitle resource path was not classified",
+        ));
+    };
+    Ok((upstream_host, endpoint))
+}
+
 fn subtitle_path_suffix_allowed(suffix: &str) -> bool {
     !suffix.is_empty()
         && suffix.len() <= 1024
@@ -8167,12 +8238,22 @@ mod tests {
 
     #[test]
     fn subtitle_resource_urls_allow_only_fixed_https_cdn_paths() {
-        for allowed in [
-            "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/opaque-id?auth_key=secret",
-            "//i0.hdslb.com/bfs/subtitle/opaque.json",
+        for (allowed, expected_summary) in [
+            (
+                "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/opaque-id?auth_key=secret",
+                ("aisubtitle.hdslb.com", "/bfs/ai_subtitle/prod/{resource}"),
+            ),
+            (
+                "//i0.hdslb.com/bfs/subtitle/opaque.json",
+                ("i0.hdslb.com", "/bfs/subtitle/{resource}.json"),
+            ),
         ] {
             let url = normalize_bilibili_subtitle_url(allowed).expect("trusted subtitle URL");
             assert_eq!(url.scheme(), "https");
+            assert_eq!(
+                bilibili_subtitle_request_summary(&url).expect("safe summary"),
+                expected_summary
+            );
         }
 
         for rejected in [
