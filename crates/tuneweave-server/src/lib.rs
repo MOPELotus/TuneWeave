@@ -109,7 +109,13 @@ use tuneweave_core::{
 };
 
 pub use response::{ApiError, ApiResponse, REQUEST_ID_HEADER, ResponseMeta};
-use response::{RequestCredentialSource, record_request_provider_access};
+use response::{RequestCredentialSource, ResponseResultCount, record_request_provider_access};
+
+impl ResponseResultCount for UniPlaylistMaterializeImportsResult {
+    fn response_result_count(&self) -> usize {
+        self.items.len()
+    }
+}
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
@@ -13474,6 +13480,12 @@ struct CommentPageData {
     extensions: Extensions,
 }
 
+impl ResponseResultCount for CommentPageData {
+    fn response_result_count(&self) -> usize {
+        self.comments.len()
+    }
+}
+
 async fn comment_list(
     State(state): State<AppState>,
     Path((kind, reference)): Path<(String, String)>,
@@ -13580,6 +13592,12 @@ struct CommentReactionPageData {
     reactions: Vec<CommentReaction>,
     current_comment: Option<Comment>,
     extensions: Extensions,
+}
+
+impl ResponseResultCount for CommentReactionPageData {
+    fn response_result_count(&self) -> usize {
+        self.reactions.len()
+    }
 }
 
 async fn comment_reaction_list(

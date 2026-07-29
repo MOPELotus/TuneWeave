@@ -28,6 +28,16 @@ pub(crate) enum RequestCredentialSource {
     Caller,
 }
 
+pub(crate) trait ResponseResultCount {
+    fn response_result_count(&self) -> usize;
+}
+
+impl<T> ResponseResultCount for Vec<T> {
+    fn response_result_count(&self) -> usize {
+        self.len()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum RequestPlatformSummary {
     #[default]
@@ -49,6 +59,7 @@ struct RequestCompletionSummary {
     platform: RequestPlatformSummary,
     credential_source: RequestCredentialSummary,
     pagination_has_more: Option<bool>,
+    result_count: Option<u64>,
 }
 
 impl RequestCompletionSummary {
@@ -114,6 +125,13 @@ fn record_request_pagination(has_more: bool) {
     });
 }
 
+fn record_request_result_count(result_count: usize) {
+    let result_count = u64::try_from(result_count).unwrap_or(u64::MAX);
+    let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
+        summary.borrow_mut().result_count = Some(result_count);
+    });
+}
+
 fn current_request_summary() -> RequestCompletionSummary {
     CURRENT_REQUEST_SUMMARY
         .try_with(|summary| *summary.borrow())
@@ -156,8 +174,12 @@ impl<T> ApiResponse<T> {
     }
 
     #[must_use]
-    pub fn with_pagination(mut self, pagination: PageMeta) -> Self {
+    pub(crate) fn with_pagination(mut self, pagination: PageMeta) -> Self
+    where
+        T: ResponseResultCount,
+    {
         record_request_pagination(pagination.has_more);
+        record_request_result_count(self.data.response_result_count());
         self.meta.pagination = Some(pagination);
         self
     }
@@ -302,6 +324,8 @@ fn log_request_completion(
     let credential_source = summary.credential_source_name();
     let pagination_present = summary.pagination_has_more.is_some();
     let pagination_has_more = summary.pagination_has_more.unwrap_or(false);
+    let result_count_present = summary.result_count.is_some();
+    let result_count = summary.result_count.unwrap_or(0);
     if status.is_server_error() {
         tracing::error!(
             request_id,
@@ -315,6 +339,8 @@ fn log_request_completion(
             credential_source,
             pagination_present,
             pagination_has_more,
+            result_count_present,
+            result_count,
             "HTTP request completed"
         );
     } else if status.is_client_error() {
@@ -330,6 +356,8 @@ fn log_request_completion(
             credential_source,
             pagination_present,
             pagination_has_more,
+            result_count_present,
+            result_count,
             "HTTP request completed"
         );
     } else if is_quiet_route(route) {
@@ -345,6 +373,8 @@ fn log_request_completion(
             credential_source,
             pagination_present,
             pagination_has_more,
+            result_count_present,
+            result_count,
             "HTTP request completed"
         );
     } else {
@@ -360,6 +390,8 @@ fn log_request_completion(
             credential_source,
             pagination_present,
             pagination_has_more,
+            result_count_present,
+            result_count,
             "HTTP request completed"
         );
     }
@@ -501,6 +533,7 @@ mod tests {
                 assert_eq!(summary.platform_name(), "netease");
                 assert_eq!(summary.credential_source_name(), "caller");
                 assert_eq!(summary.pagination_has_more, Some(true));
+                assert_eq!(summary.result_count, Some(0));
 
                 record_request_provider_access(Platform::Qq, RequestCredentialSource::Server);
                 let summary = current_request_summary();
