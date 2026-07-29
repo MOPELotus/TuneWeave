@@ -8,18 +8,23 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, Platform, Quality, ResourceRef,
-    Result, Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
+    Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 use url::Url;
 
 const SEARCH_ENDPOINT: &str = "https://app.c.nf.migu.cn/bmw/search/song/v1.0";
 const RESOURCE_INFO_ENDPOINT: &str =
     "https://app.u.nf.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do";
+const LISTENING_RIGHTS_ENDPOINT: &str = "https://app.c.nf.migu.cn/strategy/pc/can-listen/v1.0";
+const PUBLIC_STREAM_ENDPOINT: &str = "https://c.musicapp.migu.cn/strategy/listen-url/h5/v2.4";
 const MEDIA_HOST: &str = "d.musicapp.migu.cn";
+const PUBLIC_AUDIO_HOST: &str = "freetyst.nf.migu.cn";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LYRIC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const USER_AGENT: &str = "TuneWeave/0.1 (Migu public music provider)";
+const PUBLIC_STREAM_KEY: &[u8] = b"Jk8qzuePiJ1qE3mDYhLQ3T73DtDoAhLP";
 const MRC_DELTA: i64 = 2_654_435_769;
 const MRC_KEY: [i64; 4] = [
     27_303_562_373_562_475,
@@ -465,6 +470,113 @@ struct MiguResourceRights {
     code_rates: BTreeMap<String, MiguCodeRateRights>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MiguListeningRightsRequest<'a> {
+    content_ids: &'a str,
+}
+
+#[derive(Deserialize)]
+struct MiguListeningRightsEnvelope {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    info: String,
+    data: Option<MiguListeningRightsData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguListeningRightsData {
+    can_listen_resp_item_list: Vec<MiguListeningRights>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguListeningRights {
+    content_id: String,
+    can_listen: bool,
+    limit_length: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MiguPublicStreamRequest<'a> {
+    content_id: &'a str,
+    copyright_id: &'a str,
+    resource_type: u8,
+    net_type: &'static str,
+    tone_flag: &'static str,
+    scene: &'static str,
+    lower_quality_content_id: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiguPlaybackEnvelope {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    info: String,
+    data: Option<MiguPlaybackData>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaybackData {
+    version: String,
+    url: String,
+    audio_format_type: String,
+    auditions_length: Option<FlexibleU64>,
+    auditions_start_time: Option<FlexibleU64>,
+    cannot_code: String,
+    free_listen_type: String,
+    dialog_info: Option<MiguPlaybackDialog>,
+    song: Option<MiguPlaybackSong>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaybackDialog {
+    show_type: Option<i64>,
+    text: String,
+    pay_complete_text: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaybackSong {
+    resource_type: String,
+    content_id: String,
+    copyright_id: String,
+    duration: Option<FlexibleU64>,
+}
+
+#[derive(Clone, Copy)]
+struct MiguSelectedTone {
+    requested_quality: Quality,
+    tone_flag: &'static str,
+}
+
+struct MiguMediaResolution {
+    url: String,
+    requested_quality: Quality,
+    actual_quality: Quality,
+    format: Option<String>,
+    codec: Option<String>,
+    bitrate: Option<u64>,
+    size: Option<u64>,
+    duration_ms: Option<u64>,
+    trial: Option<TrialWindow>,
+    rights: MiguListeningRights,
+    playback_version: Option<String>,
+    free_listen_type: Option<String>,
+    dialog_show_type: Option<i64>,
+    dialog_text: Option<String>,
+    pay_complete_text: Option<String>,
+    requested_tone: &'static str,
+    actual_tone: String,
+}
+
 struct DownloadedLyric {
     text: String,
     content_type: Option<String>,
@@ -556,6 +668,209 @@ impl MiguClient {
         let trc = self.download_optional_lyric(trc_url, MiguLyricKind::Translated);
         let (lrc, mrc, trc) = tokio::join!(lrc, mrc, trc);
         map_lyrics(content_id, &resource.copyright_id, lrc, mrc, trc)
+    }
+
+    pub(crate) async fn track_availability(
+        &self,
+        content_id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let rights = self.listening_rights(content_id).await?;
+        let track_ref = migu_track_ref(content_id)?;
+        let mut extensions = Extensions::new();
+        extensions.insert("backend".to_owned(), json!("pc_can_listen_v1"));
+        extensions.insert("limit_length".to_owned(), json!(rights.limit_length));
+        Ok(TrackAvailability {
+            track_ref,
+            playable: rights.can_listen,
+            requested_bitrate: request.bitrate,
+            actual_bitrate: None,
+            platform_code: Some(0),
+            message: if rights.can_listen {
+                "ok".to_owned()
+            } else if rights.limit_length {
+                "Migu only permits a limited preview".to_owned()
+            } else {
+                "Migu did not authorize full playback".to_owned()
+            },
+            extensions,
+        })
+    }
+
+    pub(crate) async fn stream(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaStream> {
+        let resolution = self.resolve_media(track, request).await?;
+        Ok(MediaStream {
+            url: resolution.url,
+            backup_urls: Vec::new(),
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: resolution.format,
+            codec: resolution.codec,
+            bitrate: resolution.bitrate,
+            size: resolution.size,
+            duration_ms: resolution.duration_ms,
+            requested_quality: resolution.requested_quality,
+            actual_quality: resolution.actual_quality,
+            trial: resolution.trial,
+            origin_track: Some(track.resource_ref.clone()),
+            resolved_track: track.resource_ref.clone(),
+            resolved_platform: Platform::Migu,
+            match_score: Some(1.0),
+            attempts: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn download(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MediaDownload> {
+        let resolution = self.resolve_media(track, request).await?;
+        let available = resolution.rights.can_listen && resolution.trial.is_none();
+        let message = (!available).then(|| {
+            resolution
+                .pay_complete_text
+                .as_deref()
+                .or(resolution.dialog_text.as_deref())
+                .unwrap_or("Migu only returned a preview; a full download is unavailable")
+                .to_owned()
+        });
+        let mut extensions = media_resolution_diagnostics(&resolution);
+        extensions.insert("preview_url_withheld".to_owned(), json!(!available));
+        Ok(MediaDownload {
+            track_ref: track.resource_ref.clone(),
+            platform: Platform::Migu,
+            available,
+            url: available.then_some(resolution.url),
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: resolution.format,
+            codec: resolution.codec,
+            bitrate: resolution.bitrate,
+            size: available.then_some(resolution.size).flatten(),
+            duration_ms: resolution.duration_ms,
+            requested_quality: resolution.requested_quality,
+            actual_quality: resolution.actual_quality,
+            platform_code: Some(0),
+            fee: None,
+            message,
+            extensions,
+        })
+    }
+
+    async fn resolve_media(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<MiguMediaResolution> {
+        let content_id = canonical_media_track_id(track)?;
+        let selected = select_media_tone(track, request)?;
+        let resource = self.resource_info(content_id).await?;
+        let copyright_id = canonical_platform_id(&resource.copyright_id)
+            .ok_or_else(|| migu_upstream_error("Migu media metadata omitted a copyright ID"))?
+            .to_owned();
+        let rights = self.listening_rights(content_id);
+        let playback = self.public_stream(content_id, &copyright_id, selected.tone_flag);
+        let (rights, playback) = tokio::try_join!(rights, playback)?;
+        validate_playback_identity(&playback, content_id, &copyright_id)?;
+        let actual_tone = canonical_playback_tone(&playback.audio_format_type)?;
+        let actual_quality = quality_for_migu_tone(actual_tone)?;
+        let url = validate_public_audio_url(&playback.url)?;
+        let trial = playback_trial(&rights, &playback)?;
+        let (format, codec, bitrate) = media_spec_from_url(&url, actual_tone)?;
+        let size = (!url.is_empty())
+            .then(|| rate_format_size(&resource, actual_tone))
+            .flatten();
+        let duration_ms = playback
+            .song
+            .as_ref()
+            .and_then(|song| song.duration.as_ref())
+            .and_then(FlexibleU64::get)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .or(parse_duration_text(&resource.length)?)
+            .or(track.duration_ms);
+        let dialog_show_type = playback
+            .dialog_info
+            .as_ref()
+            .and_then(|dialog| dialog.show_type);
+        let dialog_text = playback
+            .dialog_info
+            .as_ref()
+            .and_then(|dialog| bounded_optional(&dialog.text, 512));
+        let pay_complete_text = playback
+            .dialog_info
+            .as_ref()
+            .and_then(|dialog| bounded_optional(&dialog.pay_complete_text, 512));
+        Ok(MiguMediaResolution {
+            url,
+            requested_quality: selected.requested_quality,
+            actual_quality,
+            format,
+            codec,
+            bitrate,
+            size,
+            duration_ms,
+            trial,
+            rights,
+            playback_version: bounded_optional(&playback.version, 128),
+            free_listen_type: bounded_optional(&playback.free_listen_type, 32),
+            dialog_show_type,
+            dialog_text,
+            pay_complete_text,
+            requested_tone: selected.tone_flag,
+            actual_tone: actual_tone.to_owned(),
+        })
+    }
+
+    async fn listening_rights(&self, content_id: &str) -> Result<MiguListeningRights> {
+        let response = self
+            .http
+            .post(LISTENING_RIGHTS_ENDPOINT)
+            .header(ACCEPT, "application/json")
+            .header("channel", "014X031")
+            .json(&MiguListeningRightsRequest {
+                content_ids: content_id,
+            })
+            .send()
+            .await
+            .map_err(migu_network_error)?;
+        let bytes = read_bounded_response(response, "Migu listening rights").await?;
+        parse_listening_rights_response(&bytes, content_id)
+    }
+
+    async fn public_stream(
+        &self,
+        content_id: &str,
+        copyright_id: &str,
+        tone_flag: &'static str,
+    ) -> Result<MiguPlaybackData> {
+        let response = self
+            .http
+            .get(PUBLIC_STREAM_ENDPOINT)
+            .header(ACCEPT, "application/octet-stream, application/json")
+            .header("birth", "h5page")
+            .header("channel", "014X031")
+            .header("referer", "https://y.migu.cn/")
+            .header("location-data", "30.6698676660,104.1229614820")
+            .header("location-info", "")
+            .query(&MiguPublicStreamRequest {
+                content_id,
+                copyright_id,
+                resource_type: 2,
+                net_type: "01",
+                tone_flag,
+                scene: "",
+                lower_quality_content_id: content_id,
+            })
+            .send()
+            .await
+            .map_err(migu_network_error)?;
+        let bytes = read_bounded_response(response, "Migu public stream").await?;
+        parse_public_stream_response(&bytes)
     }
 
     async fn resource_info(&self, content_id: &str) -> Result<MiguResource> {
@@ -684,6 +999,367 @@ fn parse_resource_record(bytes: &[u8], requested_content_id: &str) -> Result<Mig
         ));
     }
     Ok(resource)
+}
+
+fn parse_listening_rights_response(
+    bytes: &[u8],
+    requested_content_id: &str,
+) -> Result<MiguListeningRights> {
+    let envelope: MiguListeningRightsEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| migu_upstream_error("Migu listening rights returned malformed JSON"))?;
+    if envelope.code != "000000" {
+        return Err(
+            migu_upstream_error("Migu listening rights rejected the request").with_details(json!({
+                "platform_code": bounded_text(&envelope.code, 64),
+                "platform_message": bounded_text(&envelope.info, 256),
+            })),
+        );
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| migu_upstream_error("Migu listening rights omitted data"))?;
+    let [rights] =
+        <[MiguListeningRights; 1]>::try_from(data.can_listen_resp_item_list).map_err(|_| {
+            migu_upstream_error("Migu listening rights returned an unexpected result count")
+        })?;
+    if rights.content_id != requested_content_id {
+        return Err(migu_upstream_error(
+            "Migu listening rights returned a mismatched content ID",
+        ));
+    }
+    if rights.can_listen && rights.limit_length {
+        return Err(migu_upstream_error(
+            "Migu listening rights returned contradictory full and limited flags",
+        ));
+    }
+    Ok(rights)
+}
+
+fn parse_public_stream_response(bytes: &[u8]) -> Result<MiguPlaybackData> {
+    let decoded = decrypt_public_stream_response(bytes)?;
+    let envelope: MiguPlaybackEnvelope = serde_json::from_slice(&decoded)
+        .map_err(|_| migu_upstream_error("Migu public stream returned malformed JSON"))?;
+    if envelope.code != "000000" {
+        return Err(TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "Migu did not authorize the requested public media",
+        )
+        .with_platform(Platform::Migu)
+        .with_details(json!({
+            "platform_code": bounded_text(&envelope.code, 64),
+            "platform_message": bounded_text(&envelope.info, 256),
+        })));
+    }
+    envelope
+        .data
+        .ok_or_else(|| migu_upstream_error("Migu public stream omitted data"))
+}
+
+fn decrypt_public_stream_response(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.len() < 4 || bytes[..3] != [0xab, 0xcd, 0x01] {
+        return Err(migu_upstream_error(
+            "Migu public stream returned an invalid encrypted envelope",
+        ));
+    }
+    let seed = bytes[3];
+    Ok(bytes[4..]
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            byte.wrapping_add(seed)
+                .wrapping_sub(PUBLIC_STREAM_KEY[index % PUBLIC_STREAM_KEY.len()])
+        })
+        .collect())
+}
+
+fn canonical_media_track_id(track: &Track) -> Result<&str> {
+    if track.platform != Platform::Migu || track.resource_ref.platform() != Platform::Migu {
+        return Err(migu_invalid_request(
+            "Migu media resolution requires a Migu track",
+        ));
+    }
+    let content_id = track.resource_ref.id();
+    if content_id != track.id
+        || content_id.is_empty()
+        || content_id.len() > 64
+        || !content_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(migu_invalid_request(
+            "Migu media resolution requires a canonical contentId",
+        ));
+    }
+    Ok(content_id)
+}
+
+fn migu_track_ref(content_id: &str) -> Result<ResourceRef> {
+    ResourceRef::new(Platform::Migu, content_id.to_owned())
+        .map_err(|_| migu_upstream_error("Migu returned an invalid track identity"))
+}
+
+fn select_media_tone(track: &Track, request: &StreamRequest) -> Result<MiguSelectedTone> {
+    if request.variant != StreamVariant::Default {
+        return Err(migu_invalid_request(
+            "Migu public media only supports the default stream variant",
+        ));
+    }
+    if request.account.is_some() {
+        return Err(migu_invalid_request(
+            "Migu public media does not accept an account",
+        ));
+    }
+    if request.immersive_type.is_some() {
+        return Err(migu_invalid_request(
+            "Migu public media does not accept immersive_type",
+        ));
+    }
+    let tone_flag = if let Some(bitrate) = request.bitrate {
+        match bitrate {
+            1..=128_000 => "PQ",
+            128_001..=320_000 => "HQ",
+            _ => {
+                return Err(migu_invalid_request(
+                    "Migu public media bitrate must be between 1 and 320000; use quality for lossless media",
+                ));
+            }
+        }
+    } else {
+        match request.quality {
+            Quality::Auto => {
+                if track.available_qualities.contains(&Quality::Hires) {
+                    "ZQ24"
+                } else if track.available_qualities.contains(&Quality::Lossless) {
+                    "SQ"
+                } else if track.available_qualities.contains(&Quality::High) {
+                    "HQ"
+                } else {
+                    "PQ"
+                }
+            }
+            Quality::Low | Quality::Standard => "PQ",
+            Quality::Higher | Quality::High => "HQ",
+            Quality::Lossless => "SQ",
+            Quality::Hires => "ZQ24",
+            Quality::Surround | Quality::Spatial | Quality::Dolby | Quality::Master => {
+                return Err(migu_invalid_request(
+                    "Migu public media does not expose immersive or master quality families",
+                ));
+            }
+        }
+    };
+    Ok(MiguSelectedTone {
+        requested_quality: request.quality,
+        tone_flag,
+    })
+}
+
+fn validate_playback_identity(
+    playback: &MiguPlaybackData,
+    requested_content_id: &str,
+    requested_copyright_id: &str,
+) -> Result<()> {
+    let Some(song) = playback.song.as_ref() else {
+        return Ok(());
+    };
+    if (!song.resource_type.is_empty() && song.resource_type != "2")
+        || (!song.content_id.is_empty() && song.content_id != requested_content_id)
+        || (!song.copyright_id.is_empty() && song.copyright_id != requested_copyright_id)
+    {
+        return Err(migu_upstream_error(
+            "Migu public stream returned mismatched media identity",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_playback_tone(value: &str) -> Result<&'static str> {
+    match value.trim() {
+        "PQ" => Ok("PQ"),
+        "HQ" => Ok("HQ"),
+        "SQ" => Ok("SQ"),
+        "ZQ" => Ok("ZQ"),
+        "ZQ24" => Ok("ZQ24"),
+        _ => Err(migu_upstream_error(
+            "Migu public stream returned an unknown audio format",
+        )),
+    }
+}
+
+fn quality_for_migu_tone(tone: &str) -> Result<Quality> {
+    match tone {
+        "PQ" => Ok(Quality::Standard),
+        "HQ" => Ok(Quality::High),
+        "SQ" => Ok(Quality::Lossless),
+        "ZQ" | "ZQ24" => Ok(Quality::Hires),
+        _ => Err(migu_upstream_error(
+            "Migu public stream returned an unknown quality",
+        )),
+    }
+}
+
+fn validate_public_audio_url(value: &str) -> Result<String> {
+    if value.is_empty() || value.len() > 8_192 {
+        return Err(migu_media_permission_error(
+            "Migu did not return a public media URL",
+        ));
+    }
+    let url = Url::parse(value)
+        .map_err(|_| migu_upstream_error("Migu public stream returned an invalid media URL"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str() != Some(PUBLIC_AUDIO_HOST)
+        || !matches!(url.port(), None | Some(443))
+        || !(url.path().starts_with("/public/product8th/product")
+            || url.path().starts_with("/public/product9th/product"))
+        || url.fragment().is_some()
+    {
+        return Err(migu_upstream_error(
+            "Migu public stream returned an untrusted media URL",
+        ));
+    }
+    let mut timestamp_count = 0_u8;
+    let mut key_count = 0_u8;
+    let mut session_count = 0_u8;
+    let mut pair_count = 0_usize;
+    for (key, value) in url.query_pairs() {
+        pair_count = pair_count.saturating_add(1);
+        if pair_count > 16 || key.len() > 64 || value.len() > 512 {
+            return Err(migu_upstream_error(
+                "Migu public stream returned an invalid signed URL",
+            ));
+        }
+        match key.as_ref() {
+            "Tim" if !value.is_empty() => timestamp_count = timestamp_count.saturating_add(1),
+            "Key" if !value.is_empty() => key_count = key_count.saturating_add(1),
+            "playSessionId" if !value.is_empty() => {
+                session_count = session_count.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    if timestamp_count != 1 || key_count != 1 || session_count != 1 {
+        return Err(migu_upstream_error(
+            "Migu public stream returned invalid URL authorization fields",
+        ));
+    }
+    Ok(url.to_string())
+}
+
+fn playback_trial(
+    rights: &MiguListeningRights,
+    playback: &MiguPlaybackData,
+) -> Result<Option<TrialWindow>> {
+    let start = playback
+        .auditions_start_time
+        .as_ref()
+        .and_then(FlexibleU64::get);
+    let length = playback
+        .auditions_length
+        .as_ref()
+        .and_then(FlexibleU64::get);
+    let trial = match (start, length) {
+        (None, None) => None,
+        (Some(start), Some(length)) if length > 0 => {
+            let start_ms = start
+                .checked_mul(1_000)
+                .ok_or_else(|| migu_upstream_error("Migu preview start overflowed"))?;
+            let end_ms = start
+                .checked_add(length)
+                .and_then(|value| value.checked_mul(1_000))
+                .ok_or_else(|| migu_upstream_error("Migu preview end overflowed"))?;
+            Some(TrialWindow { start_ms, end_ms })
+        }
+        _ => {
+            return Err(migu_upstream_error(
+                "Migu public stream returned an incomplete preview window",
+            ));
+        }
+    };
+    match (rights.can_listen, rights.limit_length, trial) {
+        (true, false, None) => Ok(None),
+        (false, true, Some(trial)) => Ok(Some(trial)),
+        (false, false, _) => Err(migu_media_permission_error(
+            "Migu did not authorize public playback",
+        )),
+        _ => Err(migu_upstream_error(
+            "Migu playback response contradicted its listening rights",
+        )),
+    }
+}
+
+fn media_spec_from_url(
+    url: &str,
+    actual_tone: &str,
+) -> Result<(Option<String>, Option<String>, Option<u64>)> {
+    let parsed = Url::parse(url)
+        .map_err(|_| migu_upstream_error("Migu public stream returned an invalid media URL"))?;
+    let extension = parsed
+        .path_segments()
+        .and_then(Iterator::last)
+        .and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| migu_upstream_error("Migu public media URL omitted a file format"))?;
+    match (actual_tone, extension.as_str()) {
+        ("PQ", "mp3") => Ok((Some(extension.clone()), Some(extension), Some(128_000))),
+        ("HQ", "mp3") => Ok((Some(extension.clone()), Some(extension), Some(320_000))),
+        ("SQ" | "ZQ" | "ZQ24", "flac") => Ok((Some(extension.clone()), Some(extension), None)),
+        _ => Err(migu_upstream_error(
+            "Migu public stream format did not match its audio quality",
+        )),
+    }
+}
+
+fn rate_format_size(resource: &MiguResource, actual_tone: &str) -> Option<u64> {
+    resource
+        .new_rate_formats
+        .iter()
+        .chain(&resource.rate_formats)
+        .find(|format| tone_matches_rate_format(actual_tone, &format.format_type))
+        .and_then(|format| {
+            format
+                .size
+                .as_ref()
+                .or(format.android_size.as_ref())
+                .or(format.ios_size.as_ref())
+                .and_then(FlexibleU64::get)
+                .filter(|size| *size > 0)
+        })
+}
+
+fn tone_matches_rate_format(tone: &str, format: &str) -> bool {
+    tone == format || (matches!(tone, "ZQ" | "ZQ24") && matches!(format, "ZQ" | "ZQ24"))
+}
+
+fn media_resolution_diagnostics(resolution: &MiguMediaResolution) -> Extensions {
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("listen_url_h5_v2_4"));
+    extensions.insert(
+        "requested_tone".to_owned(),
+        json!(resolution.requested_tone),
+    );
+    extensions.insert("actual_tone".to_owned(), json!(resolution.actual_tone));
+    extensions.insert(
+        "rights".to_owned(),
+        json!({
+            "can_listen": resolution.rights.can_listen,
+            "limit_length": resolution.rights.limit_length,
+        }),
+    );
+    extensions.insert("trial".to_owned(), json!(resolution.trial));
+    if let Some(value) = resolution.playback_version.as_deref() {
+        extensions.insert("playback_version".to_owned(), json!(value));
+    }
+    if let Some(value) = resolution.free_listen_type.as_deref() {
+        extensions.insert("free_listen_type".to_owned(), json!(value));
+    }
+    if let Some(value) = resolution.dialog_show_type {
+        extensions.insert("dialog_show_type".to_owned(), json!(value));
+    }
+    extensions
+}
+
+fn migu_media_permission_error(message: impl Into<String>) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::PermissionDenied, message).with_platform(Platform::Migu)
 }
 
 fn map_lyrics(
@@ -1285,7 +1961,7 @@ fn mapped_rate_qualities<'a>(
             "PQ" => Some(Quality::Standard),
             "HQ" => Some(Quality::High),
             "SQ" => Some(Quality::Lossless),
-            "ZQ24" => Some(Quality::Hires),
+            "ZQ" | "ZQ24" => Some(Quality::Hires),
             _ => None,
         };
         if let Some(quality) = quality
@@ -1482,7 +2158,7 @@ fn mapped_qualities(formats: &[MiguAudioFormat]) -> Vec<Quality> {
             "PQ" => Some(Quality::Standard),
             "HQ" => Some(Quality::High),
             "SQ" => Some(Quality::Lossless),
-            "ZQ24" => Some(Quality::Hires),
+            "ZQ" | "ZQ24" => Some(Quality::Hires),
             _ => None,
         };
         if let Some(quality) = quality
@@ -1982,6 +2658,7 @@ mod tests {
           {"resourceType":"2","formatType":"PQ","format":"020007","size":"3450883","fileType":"mp3"},
           {"resourceType":"2","formatType":"HQ","format":"020010","size":"8626889","fileType":"mp3"},
           {"resourceType":"E","formatType":"SQ","format":"011002","size":"25117488","androidFileType":"flac"},
+          {"resourceType":"2","formatType":"ZQ","format":"011005","androidSize":"33943553","androidFileType":"flac"},
           {"resourceType":"2","formatType":"AV3A","format":"020041","size":"22426036","fileType":"m4a"}
         ],
         "lrcUrl":"https://d.musicapp.migu.cn/data/oss/resource/lrc",
@@ -2114,13 +2791,14 @@ mod tests {
                 Quality::Low,
                 Quality::Standard,
                 Quality::High,
-                Quality::Lossless
+                Quality::Lossless,
+                Quality::Hires
             ]
         );
         assert_eq!(track.playable, None);
         assert_eq!(track.extensions["backend"], "resourceinfo_v1");
         assert_eq!(
-            track.extensions["new_rate_formats"][3]["formatType"],
+            track.extensions["new_rate_formats"][4]["formatType"],
             "AV3A"
         );
         assert_eq!(track.extensions["rights"]["auditions_start_seconds"], 65);
@@ -2227,6 +2905,218 @@ mod tests {
         assert_eq!(lyrics.extensions["plain_source"], "derived_mrc");
         assert_eq!(lyrics.extensions["downloads"][0]["available"], false);
         assert_eq!(lyrics.extensions["downloads"][1]["available"], true);
+    }
+
+    fn encrypt_public_stream_fixture(json: &str) -> Vec<u8> {
+        let seed = 17_u8;
+        let mut encrypted = vec![0xab, 0xcd, 0x01, seed];
+        encrypted.extend(json.as_bytes().iter().enumerate().map(|(index, byte)| {
+            byte.wrapping_sub(seed)
+                .wrapping_add(PUBLIC_STREAM_KEY[index % PUBLIC_STREAM_KEY.len()])
+        }));
+        encrypted
+    }
+
+    fn public_audio_url(extension: &str) -> String {
+        format!(
+            "https://freetyst.nf.migu.cn/public/product9th/product/example/audio.{extension}?\
+             channelid=014X031&msisdn=&Tim=1785325050934&Key=0123456789abcdef&\
+             playSessionId=0123456789abcdef0123456789abcdef"
+        )
+    }
+
+    #[test]
+    fn listening_rights_require_one_matching_noncontradictory_item() {
+        let response = r#"{
+          "code":"000000",
+          "info":"操作成功",
+          "data":{"canListenRespItemList":[{
+            "contentId":"600908000007288315",
+            "canListen":false,
+            "limitLength":true
+          }]}
+        }"#;
+        let rights = parse_listening_rights_response(response.as_bytes(), "600908000007288315")
+            .expect("parse listening rights");
+        assert!(!rights.can_listen);
+        assert!(rights.limit_length);
+
+        let mismatch = response.replace("600908000007288315", "600908000007288316");
+        assert!(
+            parse_listening_rights_response(mismatch.as_bytes(), "600908000007288315").is_err()
+        );
+        let contradictory = response.replace("\"canListen\":false", "\"canListen\":true");
+        assert!(
+            parse_listening_rights_response(contradictory.as_bytes(), "600908000007288315")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn encrypted_playback_preserves_identity_quality_and_preview_fields() {
+        let fixture = format!(
+            r#"{{
+              "code":"000000",
+              "info":"操作成功",
+              "data":{{
+                "version":"safe-version",
+                "url":"{}",
+                "audioFormatType":"PQ",
+                "auditionsStartTime":65,
+                "auditionsLength":60,
+                "freeListenType":"2",
+                "dialogInfo":{{
+                  "showType":0,
+                  "text":"preview",
+                  "payCompleteText":"full playback requires entitlement"
+                }},
+                "song":{{
+                  "resourceType":"2",
+                  "contentId":"600908000007288315",
+                  "copyrightId":"60054704028",
+                  "duration":215
+                }}
+              }}
+            }}"#,
+            public_audio_url("mp3")
+        );
+        let playback = parse_public_stream_response(&encrypt_public_stream_fixture(&fixture))
+            .expect("decrypt playback");
+        assert_eq!(playback.audio_format_type, "PQ");
+        assert_eq!(
+            playback
+                .song
+                .as_ref()
+                .and_then(|song| song.duration.as_ref())
+                .and_then(FlexibleU64::get),
+            Some(215)
+        );
+        validate_playback_identity(&playback, "600908000007288315", "60054704028")
+            .expect("matching identity");
+        assert!(decrypt_public_stream_response(b"plain JSON").is_err());
+
+        let rejected = encrypt_public_stream_fixture(
+            r#"{"code":"440013","info":"entitlement required","data":null}"#,
+        );
+        let error = parse_public_stream_response(&rejected).expect_err("business rejection");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert_eq!(error.details["platform_code"], "440013");
+    }
+
+    #[test]
+    fn media_selection_keeps_requested_and_actual_quality_distinct() {
+        let track = parse_resource_response(RESOURCE_RESPONSE.as_bytes(), "600908000007288315")
+            .expect("parse resource detail");
+        let automatic = select_media_tone(&track, &StreamRequest::default()).expect("auto tone");
+        assert_eq!(automatic.requested_quality, Quality::Auto);
+        assert_eq!(automatic.tone_flag, "ZQ24");
+
+        let high = select_media_tone(
+            &track,
+            &StreamRequest {
+                quality: Quality::High,
+                ..StreamRequest::default()
+            },
+        )
+        .expect("high tone");
+        assert_eq!(high.tone_flag, "HQ");
+
+        let bitrate = select_media_tone(
+            &track,
+            &StreamRequest {
+                bitrate: Some(192_000),
+                ..StreamRequest::default()
+            },
+        )
+        .expect("bitrate tone");
+        assert_eq!(bitrate.tone_flag, "HQ");
+
+        for request in [
+            StreamRequest {
+                variant: StreamVariant::Legacy,
+                ..StreamRequest::default()
+            },
+            StreamRequest {
+                quality: Quality::Master,
+                ..StreamRequest::default()
+            },
+            StreamRequest {
+                bitrate: Some(320_001),
+                ..StreamRequest::default()
+            },
+        ] {
+            assert!(select_media_tone(&track, &request).is_err());
+        }
+    }
+
+    #[test]
+    fn preview_windows_follow_explicit_listening_rights() {
+        let preview_rights = MiguListeningRights {
+            content_id: "600908000007288315".to_owned(),
+            can_listen: false,
+            limit_length: true,
+        };
+        let preview = MiguPlaybackData {
+            auditions_start_time: Some(FlexibleU64::Number(65)),
+            auditions_length: Some(FlexibleU64::Number(60)),
+            ..MiguPlaybackData::default()
+        };
+        assert_eq!(
+            playback_trial(&preview_rights, &preview).expect("preview"),
+            Some(TrialWindow {
+                start_ms: 65_000,
+                end_ms: 125_000
+            })
+        );
+
+        let full_rights = MiguListeningRights {
+            content_id: "600913000000358395".to_owned(),
+            can_listen: true,
+            limit_length: false,
+        };
+        assert_eq!(
+            playback_trial(&full_rights, &MiguPlaybackData::default()).expect("full playback"),
+            None
+        );
+        assert!(playback_trial(&preview_rights, &MiguPlaybackData::default()).is_err());
+        assert!(playback_trial(&full_rights, &preview).is_err());
+    }
+
+    #[test]
+    fn public_audio_urls_are_fixed_signed_https_resources() {
+        let mp3 = public_audio_url("mp3");
+        assert_eq!(
+            validate_public_audio_url(&mp3).expect("trusted public audio URL"),
+            mp3
+        );
+        let product8 = mp3.replace("/product9th/product", "/product8th/product");
+        assert_eq!(
+            validate_public_audio_url(&product8).expect("trusted legacy public audio URL"),
+            product8
+        );
+        assert_eq!(
+            media_spec_from_url(&mp3, "PQ").expect("PQ MP3"),
+            (
+                Some("mp3".to_owned()),
+                Some("mp3".to_owned()),
+                Some(128_000)
+            )
+        );
+        assert!(media_spec_from_url(&mp3, "SQ").is_err());
+        for value in [
+            "http://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://evil.example/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://freetyst.nf.migu.cn:444/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://user@freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://freetyst.nf.migu.cn/private/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1",
+            "https://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&Key=3&playSessionId=4",
+        ] {
+            assert!(
+                validate_public_audio_url(value).is_err(),
+                "{value} must fail"
+            );
+        }
     }
 
     #[test]

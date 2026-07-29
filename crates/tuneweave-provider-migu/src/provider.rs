@@ -3,8 +3,9 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
-    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
+    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
+    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
 };
 
 use crate::client::{MiguClient, MiguConfig, MiguSearchCondition};
@@ -50,8 +51,11 @@ impl MusicProvider for MiguProvider {
 
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::AudioDownload,
+            Capability::AudioStream,
             Capability::Lyrics,
             Capability::SearchTracks,
+            Capability::TrackAvailability,
             Capability::TrackDetail,
         ])
     }
@@ -145,6 +149,16 @@ impl MusicProvider for MiguProvider {
         self.client.track_detail(content_id).await
     }
 
+    async fn track_availability(
+        &self,
+        id: &str,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        validate_availability_request(request)?;
+        let content_id = parse_content_id(id)?;
+        self.client.track_availability(content_id, request).await
+    }
+
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
         if account.is_some() {
             return Err(migu_invalid_request(
@@ -160,6 +174,28 @@ impl MusicProvider for MiguProvider {
         let content_id = parse_content_id(id)?;
         self.client.lyrics(content_id).await
     }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        self.client.stream(track, request).await
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        self.client.download(track, request).await
+    }
+}
+
+fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(migu_invalid_request(
+            "Migu public listening rights do not accept an account",
+        ));
+    }
+    if request.bitrate == 0 || request.bitrate > 10_000_000 {
+        return Err(migu_invalid_request(
+            "Migu availability bitrate must be between 1 and 10000000",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_lyrics_request(request: &LyricsRequest) -> Result<()> {
@@ -268,11 +304,28 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::AudioDownload,
+                Capability::AudioStream,
                 Capability::Lyrics,
                 Capability::SearchTracks,
+                Capability::TrackAvailability,
                 Capability::TrackDetail
             ])
         );
+    }
+
+    #[test]
+    fn availability_rejects_accounts_and_invalid_bitrate_bounds() {
+        assert!(validate_availability_request(&TrackAvailabilityRequest::default()).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(1)).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(10_000_000)).is_ok());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(0)).is_err());
+        assert!(validate_availability_request(&TrackAvailabilityRequest::new(10_000_001)).is_err());
+        let account = TrackAvailabilityRequest {
+            account: Some("default".to_owned()),
+            ..TrackAvailabilityRequest::default()
+        };
+        assert!(validate_availability_request(&account).is_err());
     }
 
     #[test]
@@ -400,5 +453,68 @@ mod tests {
         assert_eq!(lyrics.format, "mrc");
         assert!(lyrics.word_synced.is_some());
         assert!(lyrics.plain.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Migu media access"]
+    async fn live_public_media_distinguishes_full_playback_preview_and_download() {
+        let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
+
+        let free = provider
+            .track("600913000000358395", None)
+            .await
+            .expect("free Migu track");
+        let free_rights = provider
+            .track_availability("600913000000358395", &TrackAvailabilityRequest::default())
+            .await
+            .expect("free listening rights");
+        assert!(free_rights.playable);
+        assert_eq!(free_rights.extensions["limit_length"], false);
+        let free_stream = provider
+            .stream(&free, &StreamRequest::default())
+            .await
+            .expect("free public stream");
+        assert_eq!(free_stream.requested_quality, tuneweave_core::Quality::Auto);
+        assert_eq!(
+            free_stream.actual_quality,
+            tuneweave_core::Quality::Standard
+        );
+        assert_eq!(free_stream.trial, None);
+        let free_download = provider
+            .download(&free, &StreamRequest::default())
+            .await
+            .expect("free public download");
+        assert!(free_download.available);
+        assert!(free_download.url.is_some());
+
+        let restricted = provider
+            .track("600908000007288315", None)
+            .await
+            .expect("restricted Migu track");
+        let restricted_rights = provider
+            .track_availability("600908000007288315", &TrackAvailabilityRequest::default())
+            .await
+            .expect("restricted listening rights");
+        assert!(!restricted_rights.playable);
+        assert_eq!(restricted_rights.extensions["limit_length"], true);
+        let preview = provider
+            .stream(&restricted, &StreamRequest::default())
+            .await
+            .expect("restricted preview");
+        assert_eq!(
+            preview.trial,
+            Some(tuneweave_core::TrialWindow {
+                start_ms: 65_000,
+                end_ms: 125_000
+            })
+        );
+        assert_eq!(preview.actual_quality, tuneweave_core::Quality::Standard);
+        let blocked_download = provider
+            .download(&restricted, &StreamRequest::default())
+            .await
+            .expect("restricted download result");
+        assert!(!blocked_download.available);
+        assert!(blocked_download.url.is_none());
+        assert_eq!(blocked_download.extensions["preview_url_withheld"], true);
     }
 }
