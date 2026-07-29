@@ -2350,6 +2350,7 @@ fn kuwo_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const SEARCH_RESPONSE: &str = r#"{
       "PN":"0",
@@ -2889,6 +2890,127 @@ mod tests {
         let mut wrong_platform = track;
         wrong_platform.platform = Platform::Migu;
         assert!(canonical_media_track_id(&wrong_platform).is_err());
+    }
+
+    #[test]
+    fn public_protocol_uses_only_fixed_https_endpoints_and_bounded_responses() {
+        let endpoints = [
+            HOME_ENDPOINT,
+            SEARCH_ENDPOINT,
+            TRACK_DETAIL_ENDPOINT,
+            PLAYBACK_ENDPOINT,
+            PLAYLIST_ENDPOINT,
+            WORD_LYRIC_ENDPOINT,
+            MOBILE_LYRIC_ENDPOINT,
+            SEARCH_REFERER,
+            WEB_REFERER,
+        ];
+        for endpoint in endpoints {
+            let url = Url::parse(endpoint).expect("fixed Kuwo endpoint must be valid");
+            assert_eq!(url.scheme(), "https", "{endpoint}");
+            assert!(url.username().is_empty(), "{endpoint}");
+            assert!(url.password().is_none(), "{endpoint}");
+            assert!(matches!(url.port(), None | Some(443)), "{endpoint}");
+            assert!(url.query().is_none(), "{endpoint}");
+            assert!(url.fragment().is_none(), "{endpoint}");
+            assert!(
+                matches!(
+                    url.host_str(),
+                    Some("www.kuwo.cn" | "newlyric.kuwo.cn" | "m.kuwo.cn")
+                ),
+                "{endpoint}"
+            );
+        }
+        assert_eq!(MAX_API_RESPONSE_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_LYRIC_RESPONSE_BYTES, 4 * 1024 * 1024);
+        assert_eq!(MAX_LYRIC_DECOMPRESSED_BYTES, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configuration_and_client_debug_hide_proxy_and_web_session_state() {
+        let config = KuwoConfig {
+            proxy_url: Some("http://user:secret@example.test:8080".to_owned()),
+        };
+        let config_debug = format!("{config:?}");
+        assert!(config_debug.contains("[configured]"));
+        assert!(!config_debug.contains("secret"));
+        assert!(!config_debug.contains("example.test"));
+
+        let client_debug = format!("{:?}", KuwoClient::test_client());
+        assert_eq!(client_debug, "KuwoClient { .. }");
+        assert!(!client_debug.contains(WEB_SESSION_COOKIE));
+    }
+
+    #[test]
+    fn http_statuses_keep_rate_limits_and_retryable_failures_distinct() {
+        let rate_limited = kuwo_http_error(StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(rate_limited.code, ErrorCode::RateLimited);
+        assert!(rate_limited.retryable);
+        assert_eq!(rate_limited.platform, Some(Platform::Kuwo));
+
+        let unavailable = kuwo_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable.code, ErrorCode::UpstreamError);
+        assert!(unavailable.retryable);
+
+        let rejected = kuwo_http_error(StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.code, ErrorCode::UpstreamError);
+        assert!(!rejected.retryable);
+    }
+
+    #[tokio::test]
+    async fn response_reader_enforces_declared_and_streamed_size_limits() {
+        let declared = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n12345678",
+        )
+        .await;
+        let error = read_bounded_response_with_limit(declared, "declared test", 7)
+            .await
+            .expect_err("declared oversized response must fail");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+
+        let streamed = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\n1234\r\n4\r\n5678\r\n0\r\n\r\n",
+        )
+        .await;
+        let error = read_bounded_response_with_limit(streamed, "streamed test", 7)
+            .await
+            .expect_err("streamed oversized response must fail");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+
+        let bounded = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsafe",
+        )
+        .await;
+        assert_eq!(
+            read_bounded_response_with_limit(bounded, "bounded test", 4)
+                .await
+                .expect("bounded response"),
+            b"safe"
+        );
+    }
+
+    async fn raw_test_response(raw: &'static [u8]) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut request = [0_u8; 1_024];
+            let _ = socket.read(&mut request).await.expect("read test request");
+            socket.write_all(raw).await.expect("write test response");
+            socket.shutdown().await.expect("close test response");
+        });
+        let response = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .expect("build test HTTP client")
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("receive test response");
+        server.await.expect("test HTTP server");
+        response
     }
 
     #[test]

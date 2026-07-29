@@ -1485,6 +1485,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 公开酷我歌单可通过 `{ "platform":"kuwo", "type":"playlist", "id":"<pid>" }` 导入 Uni Playlist。Server 模式完整遍历后原子保存，Client 模式同样先验证完整来源再按统一 offset/limit 返回无状态项目，且不会创建服务器记录；两者都保持来源顺序、重复项和每项稳定身份。真实统一 HTTP 已完整导入一份 69 首用户公开歌单，Client 模式只返回所请求的位置 68 且服务器目录仍为空；另一份 318 首官方歌单以 `offset=99&limit=3` 跨两个物理页返回连续位置 99–101。服务端防回归测试另以重复来源确认两个 Uni 项拥有不同 item ID。
 
+酷我公开音源协议的首页、搜索、详情、播放、歌单、LRCX 和移动歌词入口均是编译期固定的官方 HTTPS 标准端口，客户端禁止重定向，连接和整次请求分别限制为 10 秒与 20 秒。普通 API 最多读取 8 MiB，歌词传输最多 4 MiB，LRCX 解压最多 8 MiB；声明长度、分块累计长度和解压累计长度分别执行上限。429 映射为可重试限流，5xx 映射为可重试上游错误，其余 4xx 不重试；业务拒绝、身份漂移和结构错误不会伪装成传输失败。请求不能覆盖目标 URL、Cookie、任意头、账户或请求级代理，部署方只有 `TUNEWEAVE_KUWO_PROXY` 可配置服务端代理；配置及客户端 Debug 不输出代理、匿名 Cookie、动态签名或会话状态。全新数据目录下的统一 HTTP 已覆盖搜索、详情、逐字歌词、免费与付费权益、播放、跨页歌单、Client Uni 和非法输入，并从受信 CDN 通过 HTTP 206 读取 1 KiB `audio/mpeg` 验证真实媒体，不下载整首或记录签名 URL。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

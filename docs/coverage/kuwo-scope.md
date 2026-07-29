@@ -2,7 +2,7 @@
 
 协议基线为 `qyhqiu/kuwoMusicApi@e8e720b90b4d7e3052078a3380906f2b3349e388`，并以当前酷我官网实际请求和平台真实响应校正参考项目中 2023 年的旧入口、静态 Cookie、签名与重试行为。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
 
-当前公开音源补充层共 7 个验收单元：`pending=1`、`implemented=0`、`verified=6`，完成度 `6/7 = 85.71%`。登录、账户和写操作属于后续酷我完整项目范围，不阻塞本层。
+当前公开音源补充层共 7 个验收单元：`pending=0`、`implemented=0`、`verified=7`，完成度 `7/7 = 100%`。登录、账户和写操作属于后续酷我完整项目范围，不阻塞本层。
 
 | ID | 验收单元 | 状态 | 实施与验收边界 |
 | --- | --- | --- | --- |
@@ -12,7 +12,7 @@
 | KW04 | 公开播放、下载与权益 | `verified` | `GET /v1/tracks/kuwo:<rid>/availability`、`/stream` 与 `/download` 共用当前官网签名后的固定 HTTPS `playUrl` 链，只请求已真实验证的匿名 `128kmp3` 档。实时对照确认平台忽略 `320kmp3/2000kflac` 请求并签发同一 128 kbps MP3，因此即使调用方请求无损或 Hi-Res，也明确返回 `actual_quality=standard`、`bitrate=128000`，不把搜索目录中的无损规格冒充公开权益。`code=200` 且受信 `*-sycdn.kuwo.cn` 无查询 HTTPS MP3 才是完整全曲；`-1` 映射匿名权限拒绝，stream 返回 403、download 保持 `available=false/url=null`；`-1001` 表示资源不可用，当前链没有试听窗口时不伪造 trial。媒体 URL 禁止凭据、端口、片段、查询、嵌套主机和非 MP3 路径；Cookie、Secret、请求 ID 与端点不进入统一响应。免费与付费样本均已通过真实 Provider 和全新目录统一 HTTP 验收。 |
 | KW05 | 统一播放回退与 302 | `verified` | 酷我已进入默认 resolver 的网易 → QQ → 酷狗 → 酷我 → 咪咕顺序，也支持显式 `playback_platform/source/fallback_platforms`；跨平台候选仍按标题、歌手、专辑、时长和版本严格评分，不因免费可播放宽阈值。真实统一 HTTP 已将网易“好运来”以 `match_score=1.0` 解析为免费酷我来源并保留 `requested_quality=lossless`、`actual_quality=standard`、128 kbps 与完整尝试轨迹；`source=kuwo` 使用同一解析器。调用方托管的 `kuwo:` Uni 项可无持久化播放。完整 stream/download 的 `/redirect` 只返回 provider 已校验的 HTTPS CDN，附 `private, no-store` 与 `no-referrer`；付费下载跳转返回 403 且没有 `Location`。默认顺序、显式来源、Uni 无状态播放和两类 302 均有服务端防回归测试。 |
 | KW06 | 公开歌单与 Uni 导入 | `verified` | `GET /v1/playlists/kuwo:<pid>` 与 `/tracks` 共用当前官网动态签名后的 HTTPS `playListInfo`，只接受规范正整数公开 PID 且不接受账户。歌单必须回配 ID，强类型返回标题、描述、可信官方封面、创建者、曲数、标签、收听数和官方标志；`-1` 且无 data 映射不存在或不公开。Provider 固定使用 100 首物理页，以最多两个连续页实现统一 `limit=1..100` 与任意 offset，跨页复核歌单身份和总数；曲目同时校验 `MUSIC_<rid>` 与数字 `rid`，保存全局位置，保持顺序和重复项。瞬时 429/5xx/超时只允许在同一页等待 250 ms 后重试一次，不复用参考项目的递归重试。真实统一 HTTP 已完成 69 首用户歌单的 Server 全量导入；Client 模式完整展开后只返回位置 68 且未创建服务器状态。318 首官方歌单以 `offset=99&limit=3` 跨两页返回位置 99–101，非法账户在联网前 400；服务端回归固定覆盖重复项拥有不同 Uni item ID。 |
-| KW07 | 协议、安全与真实权益验收 | `pending` | 固定官方 HTTPS 域名、响应上限、重定向和错误分类；全新数据目录执行真实搜索、详情、歌词、播放、歌单、Uni 与媒体探测。 |
+| KW07 | 协议、安全与真实权益验收 | `verified` | 首页、搜索、详情、播放、歌单及两条歌词入口均为编译期固定的官方 HTTPS 标准端口，客户端禁用重定向、连接超时 10 秒、总超时 20 秒；公开请求不能覆盖账户、Cookie、目标 URL、请求头或请求级代理，部署代理只能来自环境配置。普通 API、歌词传输和歌词解压分别限制 8 MiB、4 MiB 和 8 MiB，既检查声明长度也限制分块累计读取；429、5xx 和其他 4xx 分别保持可重试限流、可重试上游失败和不可重试拒绝。配置与客户端 Debug 不泄漏代理、匿名 Cookie 或会话状态。全部 5 条真实 Provider 用例一次通过；全新数据目录的统一 HTTP 又完成搜索、详情、逐字歌词、免费/付费权益、公开播放、跨页歌单和 Client Uni 导入，并从受信 CDN 以 HTTP 206 实际读取 1 KiB `audio/mpeg`，未下载整首或回显签名状态。 |
 
 参考项目的 `/api/www/search/searchMusicBykeyWord` 当前会返回拒绝或非法请求，官网已经改用 `/search/searchMusicBykeyWord` 与不同参数组合；TuneWeave 只实现实时验证可用的后者。详情和歌单当前仍可用，但需要官网根据当次匿名跟踪 Cookie 动态生成 `Secret`，不得把参考项目 2023 年的静态 Cookie、固定 CSRF、共享超时计数、递归重试或完整请求日志迁入。
 
