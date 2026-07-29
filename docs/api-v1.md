@@ -1459,6 +1459,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 咪咕歌曲详情使用 `GET /v1/tracks/migu:<contentId>`，只接受 1–64 位规范 ASCII 字母数字 `contentId`，当前公开层不接受账户。Provider 固定访问官方 HTTPS `MIGUM2.0/v1.0/content/resourceinfo.do`，并要求成功响应恰好包含一条 `resourceType=2` 的歌曲、其 `contentId` 与请求完全一致且 `copyrightId` 合法；空目录返回资源不存在，多条、错位或类型漂移视为上游错误。详情返回平台当前别名、歌手、专辑、可信官方封面、时长、关联 MV、标签、统计、歌词资源、试听窗口、VIP/下载标志及关联资源；外部 URL 仍只允许固定 `d.musicapp.migu.cn/data/oss/` HTTPS 路径。平台同时返回的 `rateFormats` 和 `newRateFormats` 分开强类型保留，可用音质从两者并集计算，因此新版列表不会遮掉旧列表独有的 LQ；已确认的 LQ/PQ/HQ/SQ/ZQ24 映射统一音质，其他格式只保留平台原码。详情中的有效、VIP 或试听标志都不足以证明当前请求可播放，只有平台明确返回资源或素材失效时才设 `playable=false`；实时可听性和播放权益由后续播放链负责。
 
+咪咕歌词使用 `GET /v1/tracks/migu:<contentId>/lyrics`，当前公开层不接受账户、`song_type` 或助唱标注参数。Provider 从严格歌曲详情取得 LRC、MRC 和 TRC 资源，只允许固定咪咕 HTTPS 媒体域名及 `/data/oss/` 路径；三种格式并发下载、独立记录成功或失败，每个响应限制为 4 MiB。MRC 密文按平台 64 位有符号分组算法解密为 UTF-16LE，并要求同时存在行时间和逐字时间。MRC 存在时 `format=mrc` 且完整内容位于 `word_synced`，普通 LRC 仍独立保存在 `plain`；只有 LRC 缺失或下载失败时才从 MRC 派生行级歌词。TRC 独立映射为 `translated`，不存在时不伪造翻译；诊断只包含格式、内容类型、字节数和错误分类，不回显歌词地址。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, MusicProvider, Page, PageMeta, Platform, Result, SearchKind,
-    SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
+    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
 };
 
 use crate::client::{MiguClient, MiguConfig, MiguSearchCondition};
@@ -49,7 +49,11 @@ impl MusicProvider for MiguProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+        BTreeSet::from([
+            Capability::Lyrics,
+            Capability::SearchTracks,
+            Capability::TrackDetail,
+        ])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -140,6 +144,36 @@ impl MusicProvider for MiguProvider {
         let content_id = parse_content_id(id)?;
         self.client.track_detail(content_id).await
     }
+
+    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+        if account.is_some() {
+            return Err(migu_invalid_request(
+                "Migu public lyrics do not accept an account",
+            ));
+        }
+        let content_id = parse_content_id(id)?;
+        self.client.lyrics(content_id).await
+    }
+
+    async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        validate_lyrics_request(request)?;
+        let content_id = parse_content_id(id)?;
+        self.client.lyrics(content_id).await
+    }
+}
+
+fn validate_lyrics_request(request: &LyricsRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(migu_invalid_request(
+            "Migu public lyrics do not accept an account",
+        ));
+    }
+    if request.song_type.is_some() || request.singing_annotations {
+        return Err(migu_invalid_request(
+            "Migu lyrics do not accept song_type or singing annotations",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_content_id(id: &str) -> Result<&str> {
@@ -233,8 +267,35 @@ mod tests {
         assert_eq!(provider.platform(), Platform::Migu);
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+            BTreeSet::from([
+                Capability::Lyrics,
+                Capability::SearchTracks,
+                Capability::TrackDetail
+            ])
         );
+    }
+
+    #[test]
+    fn lyrics_accept_display_preferences_but_reject_foreign_protocol_options() {
+        let rich = LyricsRequest {
+            word_synced: true,
+            translated: true,
+            romanized: true,
+            ..LyricsRequest::default()
+        };
+        assert!(validate_lyrics_request(&rich).is_ok());
+
+        let mut account = rich.clone();
+        account.account = Some("default".to_owned());
+        assert!(validate_lyrics_request(&account).is_err());
+
+        let mut song_type = rich.clone();
+        song_type.song_type = Some(1);
+        assert!(validate_lyrics_request(&song_type).is_err());
+
+        let mut annotations = rich;
+        annotations.singing_annotations = true;
+        assert!(validate_lyrics_request(&annotations).is_err());
     }
 
     #[test]
@@ -326,5 +387,18 @@ mod tests {
         assert_eq!(track.resource_ref.to_string(), "migu:600908000007288315");
         assert_eq!(track.extensions["backend"], "resourceinfo_v1");
         assert!(!track.available_qualities.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Migu network access"]
+    async fn live_provider_prefers_word_synced_mrc_over_plain_lrc() {
+        let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
+        let lyrics = provider
+            .lyrics("600908000007288315", None)
+            .await
+            .expect("live Migu lyrics");
+        assert_eq!(lyrics.format, "mrc");
+        assert!(lyrics.word_synced.is_some());
+        assert!(lyrics.plain.is_some());
     }
 }

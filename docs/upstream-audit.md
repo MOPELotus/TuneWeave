@@ -78,6 +78,7 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 - 搜索、资源信息、可听性与多条播放 URL 链使用不同响应结构。歌曲搜索当前仍固定返回每页 20 项，参考项目暴露的 `size` 没有进入实际请求；TuneWeave 通过受限多页窗口实现统一 offset/limit，不把无效参数写进契约。
 - 当前 HTTPS 搜索响应以 `contentId` 作为稳定播放身份，同时返回 `songId`、`copyrightId`、`resourceType`、歌词地址、替代版本和平台音频规格。`PQ/HQ/SQ/ZQ24` 已有明确统一映射；`AV3A/Z3D` 等尚未确认的沉浸格式只保留平台原码，不猜测音质名称。
 - 当前 `resourceinfo.do` 可匿名按 `contentId` 返回详情、关联资源、旧/新两套音频规格、歌词资源、标签、统计与试听/VIP 标志；两套规格不是替代关系，`newRateFormats` 会省略仍存在于 `rateFormats` 的 LQ，因此必须分别保留并从并集计算统一音质。
+- 参考项目的歌词模块只下载 `lrcUrl`，但真实资源详情还返回加密 `mrcUrl` 和可选 `trcUrl`。MRC 是 16 字符一组的十六进制密文，使用平台 64 位有符号分组算法解密后按 UTF-16LE 解释，正文同时包含行级与逐字毫秒时间。TuneWeave 将 LRC、MRC、TRC 作为独立通道；MRC 优先但不覆盖普通歌词，单通道失败也不会丢弃其他有效格式。
 - `47d2edb` 新增的 `ninan_signInfo` 与 H5/用户接口重构属于后续项目范围，未改变公开音源补充层的实施优先级。
 - 关键资源身份包括 `contentId + copyrightId + resourceType`，登录播放还可能使用 PACM token。
 - 外部歌单匹配只接受经过验证的公开来源，不提供任意 URL 转发。

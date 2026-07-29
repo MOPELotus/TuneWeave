@@ -8,8 +8,8 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Platform, Quality, ResourceRef, Result, Track,
-    TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, Platform, Quality, ResourceRef,
+    Result, Track, TuneWeaveError,
 };
 use url::Url;
 
@@ -18,7 +18,15 @@ const RESOURCE_INFO_ENDPOINT: &str =
     "https://app.u.nf.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do";
 const MEDIA_HOST: &str = "d.musicapp.migu.cn";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LYRIC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const USER_AGENT: &str = "TuneWeave/0.1 (Migu public music provider)";
+const MRC_DELTA: i64 = 2_654_435_769;
+const MRC_KEY: [i64; 4] = [
+    27_303_562_373_562_475,
+    18_014_862_372_307_051,
+    22_799_692_160_172_081,
+    34_058_940_340_699_235,
+];
 
 #[derive(Clone, Default)]
 pub struct MiguConfig {
@@ -457,6 +465,29 @@ struct MiguResourceRights {
     code_rates: BTreeMap<String, MiguCodeRateRights>,
 }
 
+struct DownloadedLyric {
+    text: String,
+    content_type: Option<String>,
+    byte_length: usize,
+}
+
+#[derive(Clone, Copy)]
+enum MiguLyricKind {
+    Plain,
+    WordSynced,
+    Translated,
+}
+
+impl MiguLyricKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "lrc",
+            Self::WordSynced => "mrc",
+            Self::Translated => "trc",
+        }
+    }
+}
+
 impl MiguClient {
     pub fn new(config: &MiguConfig) -> Result<Self> {
         let mut builder = Client::builder()
@@ -503,6 +534,31 @@ impl MiguClient {
     }
 
     pub(crate) async fn track_detail(&self, content_id: &str) -> Result<Track> {
+        let resource = self.resource_info(content_id).await?;
+        map_resource_track(resource)
+    }
+
+    pub(crate) async fn lyrics(&self, content_id: &str) -> Result<Lyrics> {
+        let resource = self.resource_info(content_id).await?;
+        let lrc_url = validated_optional_lyric_url(&resource.lrc_url, "LRC")?;
+        let mrc_url = validated_optional_lyric_url(&resource.mrc_url, "MRC")?;
+        let trc_url = validated_optional_lyric_url(&resource.trc_url, "TRC")?;
+        if lrc_url.is_none() && mrc_url.is_none() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Migu lyrics were not found",
+            )
+            .with_platform(Platform::Migu));
+        }
+
+        let lrc = self.download_optional_lyric(lrc_url, MiguLyricKind::Plain);
+        let mrc = self.download_optional_lyric(mrc_url, MiguLyricKind::WordSynced);
+        let trc = self.download_optional_lyric(trc_url, MiguLyricKind::Translated);
+        let (lrc, mrc, trc) = tokio::join!(lrc, mrc, trc);
+        map_lyrics(content_id, &resource.copyright_id, lrc, mrc, trc)
+    }
+
+    async fn resource_info(&self, content_id: &str) -> Result<MiguResource> {
         let response = self
             .http
             .get(RESOURCE_INFO_ENDPOINT)
@@ -516,7 +572,47 @@ impl MiguClient {
             .await
             .map_err(migu_network_error)?;
         let bytes = read_bounded_response(response, "Migu resource detail").await?;
-        parse_resource_response(&bytes, content_id)
+        parse_resource_record(&bytes, content_id)
+    }
+
+    async fn download_optional_lyric(
+        &self,
+        url: Option<String>,
+        kind: MiguLyricKind,
+    ) -> Result<Option<DownloadedLyric>> {
+        let Some(url) = url else {
+            return Ok(None);
+        };
+        let response = self
+            .http
+            .get(url)
+            .header(ACCEPT, "*/*")
+            .header("referer", "https://app.c.nf.migu.cn/")
+            .header("channel", "0146921")
+            .send()
+            .await
+            .map_err(migu_network_error)?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| bounded_text(value, 128));
+        let bytes = read_bounded_response_with_limit(
+            response,
+            &format!("Migu {} lyric", kind.as_str().to_ascii_uppercase()),
+            MAX_LYRIC_RESPONSE_BYTES,
+        )
+        .await?;
+        let byte_length = bytes.len();
+        let text = match kind {
+            MiguLyricKind::WordSynced => decrypt_mrc(&bytes)?,
+            MiguLyricKind::Plain | MiguLyricKind::Translated => decode_lyric_text(&bytes)?,
+        };
+        Ok(Some(DownloadedLyric {
+            text,
+            content_type,
+            byte_length,
+        }))
     }
 }
 
@@ -551,7 +647,12 @@ fn parse_search_response(bytes: &[u8]) -> Result<MiguSearchPage> {
     })
 }
 
+#[cfg(test)]
 fn parse_resource_response(bytes: &[u8], requested_content_id: &str) -> Result<Track> {
+    parse_resource_record(bytes, requested_content_id).and_then(map_resource_track)
+}
+
+fn parse_resource_record(bytes: &[u8], requested_content_id: &str) -> Result<MiguResource> {
     let envelope: MiguResourceEnvelope = serde_json::from_slice(bytes)
         .map_err(|_| migu_upstream_error("Migu resource detail returned malformed JSON"))?;
     if envelope.code != "000000" {
@@ -582,7 +683,350 @@ fn parse_resource_response(bytes: &[u8], requested_content_id: &str) -> Result<T
             "Migu resource detail returned a mismatched content ID",
         ));
     }
-    map_resource_track(resource)
+    Ok(resource)
+}
+
+fn map_lyrics(
+    content_id: &str,
+    copyright_id: &str,
+    lrc: Result<Option<DownloadedLyric>>,
+    mrc: Result<Option<DownloadedLyric>>,
+    trc: Result<Option<DownloadedLyric>>,
+) -> Result<Lyrics> {
+    let mut diagnostics = Vec::new();
+    let mut first_primary_error = None;
+    let lrc = consume_lyric_download(
+        MiguLyricKind::Plain,
+        lrc,
+        &mut diagnostics,
+        &mut first_primary_error,
+    );
+    let mrc = consume_lyric_download(
+        MiguLyricKind::WordSynced,
+        mrc,
+        &mut diagnostics,
+        &mut first_primary_error,
+    );
+    let mut ignored_translation_error = None;
+    let trc = consume_lyric_download(
+        MiguLyricKind::Translated,
+        trc,
+        &mut diagnostics,
+        &mut ignored_translation_error,
+    );
+    if lrc.is_none() && mrc.is_none() {
+        return Err(first_primary_error.unwrap_or_else(|| {
+            TuneWeaveError::new(ErrorCode::ResourceNotFound, "Migu lyrics were not found")
+                .with_platform(Platform::Migu)
+        }));
+    }
+
+    let word_synced = mrc.as_ref().map(|download| download.text.clone());
+    let (plain, plain_source) = if let Some(download) = lrc {
+        (Some(download.text), "lrc")
+    } else if let Some(text) = word_synced.as_deref() {
+        (Some(mrc_to_lrc(text)?), "derived_mrc")
+    } else {
+        (None, "unavailable")
+    };
+    let format = if word_synced.is_some() { "mrc" } else { "lrc" };
+    let track_ref = ResourceRef::new(Platform::Migu, content_id.to_owned())
+        .map_err(|_| migu_upstream_error("Migu lyric identity was invalid"))?;
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("resourceinfo_v1"));
+    extensions.insert(
+        "copyright_id".to_owned(),
+        json!(bounded_text(copyright_id, 64)),
+    );
+    extensions.insert("plain_source".to_owned(), json!(plain_source));
+    extensions.insert("downloads".to_owned(), json!(diagnostics));
+    if word_synced.is_some() {
+        extensions.insert("word_synced_format".to_owned(), json!("migu_mrc"));
+    }
+    Ok(Lyrics {
+        track_ref,
+        plain,
+        translated: trc.map(|download| download.text),
+        romanized: None,
+        word_synced,
+        singing_annotations: None,
+        singing_annotations_timestamp: None,
+        format: format.to_owned(),
+        contributors: Vec::new(),
+        extensions,
+    })
+}
+
+fn consume_lyric_download(
+    kind: MiguLyricKind,
+    result: Result<Option<DownloadedLyric>>,
+    diagnostics: &mut Vec<serde_json::Value>,
+    first_error: &mut Option<TuneWeaveError>,
+) -> Option<DownloadedLyric> {
+    match result {
+        Ok(Some(download)) => {
+            diagnostics.push(json!({
+                "format": kind.as_str(),
+                "available": true,
+                "content_type": download.content_type,
+                "byte_length": download.byte_length,
+            }));
+            Some(download)
+        }
+        Ok(None) => {
+            diagnostics.push(json!({
+                "format": kind.as_str(),
+                "available": false,
+                "reason": "not_advertised",
+            }));
+            None
+        }
+        Err(error) => {
+            diagnostics.push(json!({
+                "format": kind.as_str(),
+                "available": false,
+                "reason": "download_failed",
+                "error_code": error.code,
+            }));
+            if first_error.is_none() {
+                *first_error = Some(error);
+            }
+            None
+        }
+    }
+}
+
+fn validated_optional_lyric_url(value: &str, format: &str) -> Result<Option<String>> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    normalize_media_url(value).map(Some).ok_or_else(|| {
+        migu_upstream_error(format!(
+            "Migu {format} lyric returned an untrusted resource URL"
+        ))
+    })
+}
+
+fn decode_lyric_text(bytes: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| migu_upstream_error("Migu lyric response was not valid UTF-8"))?;
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .trim_end_matches('\0');
+    validate_lyric_text(text)?;
+    Ok(text.to_owned())
+}
+
+fn decrypt_mrc(bytes: &[u8]) -> Result<String> {
+    let encoded = std::str::from_utf8(bytes)
+        .map_err(|_| migu_upstream_error("Migu MRC response was not ASCII hexadecimal"))?
+        .trim();
+    if encoded.starts_with('[') {
+        validate_mrc(encoded)?;
+        return Ok(encoded.to_owned());
+    }
+    if encoded.len() < 32
+        || encoded.len() % 16 != 0
+        || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(migu_upstream_error(
+            "Migu MRC response had an invalid encrypted shape",
+        ));
+    }
+    let mut words = encoded
+        .as_bytes()
+        .chunks_exact(16)
+        .map(|chunk| {
+            let chunk = std::str::from_utf8(chunk).map_err(|_| {
+                migu_upstream_error("Migu MRC response contained invalid hexadecimal")
+            })?;
+            u64::from_str_radix(chunk, 16)
+                .map(|value| value as i64)
+                .map_err(|_| migu_upstream_error("Migu MRC response contained invalid hexadecimal"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    decrypt_mrc_words(&mut words);
+    let mut utf16 = Vec::with_capacity(words.len().saturating_mul(4));
+    for word in words {
+        let bytes = (word as u64).to_le_bytes();
+        for chunk in bytes.chunks_exact(2) {
+            utf16.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+    }
+    while utf16.last() == Some(&0) {
+        utf16.pop();
+    }
+    let text = String::from_utf16(&utf16)
+        .map_err(|_| migu_upstream_error("Migu MRC decrypted to invalid UTF-16LE"))?;
+    validate_mrc(&text)?;
+    Ok(text)
+}
+
+fn decrypt_mrc_words(words: &mut [i64]) {
+    if words.is_empty() {
+        return;
+    }
+    let length = words.len();
+    let rounds = 6_i64.wrapping_add(52_i64.wrapping_div(length as i64));
+    let mut sum = rounds.wrapping_mul(MRC_DELTA);
+    let mut current = words[0];
+    while sum != 0 {
+        let selector = ((sum >> 2) & 3) as usize;
+        for index in (1..length).rev() {
+            let previous = words[index - 1];
+            current = words[index].wrapping_sub(mrc_mix(
+                previous,
+                current,
+                sum,
+                MRC_KEY[(index & 3) ^ selector],
+            ));
+            words[index] = current;
+        }
+        let previous = words[length - 1];
+        current = words[0].wrapping_sub(mrc_mix(previous, current, sum, MRC_KEY[selector]));
+        words[0] = current;
+        sum = sum.wrapping_sub(MRC_DELTA);
+    }
+}
+
+fn mrc_mix(previous: i64, current: i64, sum: i64, key: i64) -> i64 {
+    let identity = (current ^ sum).wrapping_add(previous ^ key);
+    let shifts = ((previous >> 5) ^ current.wrapping_shl(2))
+        .wrapping_add((current >> 3) ^ previous.wrapping_shl(4));
+    identity ^ shifts
+}
+
+fn validate_mrc(text: &str) -> Result<()> {
+    validate_lyric_text(text)?;
+    let mut timed_lines = 0_usize;
+    let mut word_timings = 0_usize;
+    for line in text.lines() {
+        if let Some((_, _, payload)) = parse_mrc_line(line)? {
+            timed_lines = timed_lines.saturating_add(1);
+            word_timings =
+                word_timings.saturating_add(count_mrc_word_timings(payload).ok_or_else(|| {
+                    migu_upstream_error("Migu MRC contained a malformed word timing")
+                })?);
+        }
+    }
+    if timed_lines == 0 || word_timings == 0 {
+        return Err(migu_upstream_error(
+            "Migu MRC did not contain word-synchronized lyric lines",
+        ));
+    }
+    Ok(())
+}
+
+fn mrc_to_lrc(text: &str) -> Result<String> {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let Some((start_ms, _, payload)) = parse_mrc_line(line)? else {
+            continue;
+        };
+        let words = strip_mrc_word_timings(payload)?;
+        let minutes = start_ms / 60_000;
+        let seconds = start_ms % 60_000 / 1_000;
+        let milliseconds = start_ms % 1_000;
+        lines.push(format!(
+            "[{minutes:02}:{seconds:02}.{milliseconds:03}]{words}"
+        ));
+    }
+    if lines.is_empty() {
+        return Err(migu_upstream_error(
+            "Migu MRC did not contain line-synchronized lyrics",
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn parse_mrc_line(line: &str) -> Result<Option<(u64, u64, &str)>> {
+    let line = line.trim_start();
+    let Some(rest) = line.strip_prefix('[') else {
+        return Ok(None);
+    };
+    let Some((header, payload)) = rest.split_once(']') else {
+        return Ok(None);
+    };
+    let Some((start, duration)) = header.split_once(',') else {
+        return Ok(None);
+    };
+    if start.is_empty()
+        || duration.is_empty()
+        || !start.bytes().all(|byte| byte.is_ascii_digit())
+        || !duration.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| migu_upstream_error("Migu MRC line start overflowed"))?;
+    let duration = duration
+        .parse::<u64>()
+        .map_err(|_| migu_upstream_error("Migu MRC line duration overflowed"))?;
+    Ok(Some((start, duration, payload)))
+}
+
+fn count_mrc_word_timings(payload: &str) -> Option<usize> {
+    let mut rest = payload;
+    let mut count = 0_usize;
+    while let Some(open) = rest.find('(') {
+        let after_open = &rest[open + 1..];
+        let close = after_open.find(')')?;
+        let marker = &after_open[..close];
+        if is_mrc_word_timing(marker) {
+            count = count.saturating_add(1);
+        }
+        rest = &after_open[close + 1..];
+    }
+    Some(count)
+}
+
+fn strip_mrc_word_timings(payload: &str) -> Result<String> {
+    let mut output = String::with_capacity(payload.len());
+    let mut rest = payload;
+    while let Some(open) = rest.find('(') {
+        output.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(')') else {
+            return Err(migu_upstream_error(
+                "Migu MRC contained an unterminated word timing",
+            ));
+        };
+        let marker = &after_open[..close];
+        if !is_mrc_word_timing(marker) {
+            output.push('(');
+            output.push_str(marker);
+            output.push(')');
+        }
+        rest = &after_open[close + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+fn is_mrc_word_timing(value: &str) -> bool {
+    value.split_once(',').is_some_and(|(start, duration)| {
+        !start.is_empty()
+            && !duration.is_empty()
+            && start.bytes().all(|byte| byte.is_ascii_digit())
+            && duration.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn validate_lyric_text(text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        return Err(migu_upstream_error("Migu lyric response was empty"));
+    }
+    if text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(migu_upstream_error(
+            "Migu lyric response contained unsupported control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn map_resource_track(resource: MiguResource) -> Result<Track> {
@@ -1381,9 +1825,14 @@ fn insert_safe_media_url(extensions: &mut tuneweave_core::Extensions, key: &str,
     }
 }
 
-async fn read_bounded_response(
+async fn read_bounded_response(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+    read_bounded_response_with_limit(response, operation, MAX_API_RESPONSE_BYTES).await
+}
+
+async fn read_bounded_response_with_limit(
     mut response: reqwest::Response,
     operation: &str,
+    limit: u64,
 ) -> Result<Vec<u8>> {
     let status = response.status();
     if !status.is_success() {
@@ -1394,13 +1843,13 @@ async fn read_bounded_response(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > MAX_API_RESPONSE_BYTES)
+        .is_some_and(|length| length > limit)
     {
         return Err(migu_upstream_error(format!(
             "{operation} response exceeded the size limit"
         )));
     }
-    let max_size = usize::try_from(MAX_API_RESPONSE_BYTES).unwrap_or(usize::MAX);
+    let max_size = usize::try_from(limit).unwrap_or(usize::MAX);
     let initial_capacity = response
         .content_length()
         .and_then(|length| usize::try_from(length).ok())
@@ -1708,6 +2157,76 @@ mod tests {
         let track = parse_resource_response(invalid.as_bytes(), "600908000007288315")
             .expect("parse invalid material");
         assert_eq!(track.playable, Some(false));
+    }
+
+    #[test]
+    fn mrc_parser_preserves_word_timing_and_derives_plain_lrc() {
+        let mrc = "[1000,2000](1000,500)你(1500,500)好\n\
+                   [3000,1000](3000,1000)世界";
+        assert!(validate_mrc(mrc).is_ok());
+        assert_eq!(
+            mrc_to_lrc(mrc).expect("derive LRC"),
+            "[00:01.000]你好\n[00:03.000]世界"
+        );
+        assert_eq!(
+            decrypt_mrc(mrc.as_bytes()).expect("accept plaintext MRC"),
+            mrc
+        );
+        assert!(validate_mrc("[1000,2000]line only").is_err());
+        assert!(decrypt_mrc(b"not encrypted mrc").is_err());
+    }
+
+    #[test]
+    fn lyric_mapping_keeps_mrc_primary_without_discarding_plain_or_translation() {
+        let mrc = "[1000,2000](1000,500)你(1500,500)好";
+        let lyrics = map_lyrics(
+            "600908000007288315",
+            "60054704028",
+            Ok(Some(DownloadedLyric {
+                text: "[00:01.00]你好".to_owned(),
+                content_type: Some("application/octet-stream".to_owned()),
+                byte_length: 20,
+            })),
+            Ok(Some(DownloadedLyric {
+                text: mrc.to_owned(),
+                content_type: Some("application/marc".to_owned()),
+                byte_length: 64,
+            })),
+            Ok(Some(DownloadedLyric {
+                text: "[00:01.00]hello".to_owned(),
+                content_type: Some("text/plain".to_owned()),
+                byte_length: 20,
+            })),
+        )
+        .expect("map lyrics");
+        assert_eq!(lyrics.format, "mrc");
+        assert_eq!(lyrics.plain.as_deref(), Some("[00:01.00]你好"));
+        assert_eq!(lyrics.word_synced.as_deref(), Some(mrc));
+        assert_eq!(lyrics.translated.as_deref(), Some("[00:01.00]hello"));
+        assert_eq!(lyrics.romanized, None);
+        assert_eq!(lyrics.extensions["plain_source"], "lrc");
+    }
+
+    #[test]
+    fn lyric_mapping_derives_plain_from_mrc_and_tolerates_independent_lrc_failure() {
+        let mrc = "[1000,2000](1000,500)你(1500,500)好";
+        let lyrics = map_lyrics(
+            "600908000007288315",
+            "60054704028",
+            Err(migu_upstream_error("LRC unavailable")),
+            Ok(Some(DownloadedLyric {
+                text: mrc.to_owned(),
+                content_type: Some("application/marc".to_owned()),
+                byte_length: 64,
+            })),
+            Ok(None),
+        )
+        .expect("map MRC fallback");
+        assert_eq!(lyrics.format, "mrc");
+        assert_eq!(lyrics.plain.as_deref(), Some("[00:01.000]你好"));
+        assert_eq!(lyrics.extensions["plain_source"], "derived_mrc");
+        assert_eq!(lyrics.extensions["downloads"][0]["available"], false);
+        assert_eq!(lyrics.extensions["downloads"][1]["available"], true);
     }
 
     #[test]
