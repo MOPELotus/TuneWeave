@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
-    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
-    TuneWeaveError,
+    PageMeta, PageRequest, Platform, Playlist, Result, SearchKind, SearchQuery, SearchVariant,
+    StreamRequest, Track, TuneWeaveError,
 };
 
 use crate::client::{KugouClient, KugouConfig};
@@ -53,6 +53,7 @@ impl MusicProvider for KugouProvider {
             Capability::AudioDownload,
             Capability::AudioStream,
             Capability::Lyrics,
+            Capability::PlaylistRead,
             Capability::SearchTracks,
             Capability::TrackDetail,
         ])
@@ -136,6 +137,19 @@ impl MusicProvider for KugouProvider {
 
     async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
         self.client.download(track, request).await
+    }
+
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        if account.is_some() {
+            return Err(kugou_invalid_request(
+                "KuGou public playlists do not accept an account",
+            ));
+        }
+        self.client.playlist_detail(id).await
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        self.client.playlist_tracks(id, request).await
     }
 }
 
@@ -246,6 +260,7 @@ mod tests {
                 Capability::AudioDownload,
                 Capability::AudioStream,
                 Capability::Lyrics,
+                Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::TrackDetail
             ])

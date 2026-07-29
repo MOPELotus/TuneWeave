@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, MediaDownload,
-    MediaStream, Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
-    TrialWindow, TuneWeaveError,
+    MediaStream, Page, PageMeta, PageRequest, Platform, Playlist, Quality, ResourceRef, Result,
+    StreamRequest, StreamVariant, Track, TrialWindow, TuneWeaveError,
 };
 use url::Url;
 
@@ -27,6 +27,8 @@ const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
 const LYRIC_SEARCH_ENDPOINT: &str = "https://lyrics.kugou.com/v1/search";
 const LYRIC_DOWNLOAD_ENDPOINT: &str = "https://lyrics.kugou.com/download";
 const TRACKER_ENDPOINT: &str = "https://gateway.kugou.com/v5/url";
+const PLAYLIST_TRACKS_ENDPOINT: &str =
+    "https://gateway.kugou.com/pubsongs/v2/get_other_list_file_nofilt";
 const WEB_REFERER: &str = "https://www.kugou.com/";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -103,6 +105,7 @@ enum AndroidEndpoint {
     TrackMetadata,
     AudioMetadata,
     Privilege,
+    PlaylistDetail,
 }
 
 impl AndroidEndpoint {
@@ -111,6 +114,7 @@ impl AndroidEndpoint {
             Self::TrackMetadata => "/kmr/v2/audio",
             Self::AudioMetadata => "/v1/audio/audio",
             Self::Privilege => "/v2/get_res_privilege/lite",
+            Self::PlaylistDetail => "/v3/get_list_info",
         }
     }
 
@@ -119,13 +123,14 @@ impl AndroidEndpoint {
             Self::TrackMetadata => "openapi.kugou.com",
             Self::AudioMetadata => "kmr.service.kugou.com",
             Self::Privilege => "media.store.kugou.com",
+            Self::PlaylistDetail => "pubsongs.kugou.com",
         }
     }
 
     const fn kg_tid(self) -> Option<&'static str> {
         match self {
             Self::TrackMetadata => Some("238"),
-            Self::AudioMetadata | Self::Privilege => None,
+            Self::AudioMetadata | Self::Privilege | Self::PlaylistDetail => None,
         }
     }
 
@@ -134,6 +139,7 @@ impl AndroidEndpoint {
             Self::TrackMetadata => "KuGou track detail",
             Self::AudioMetadata => "KuGou audio metadata",
             Self::Privilege => "KuGou media privilege",
+            Self::PlaylistDetail => "KuGou playlist detail",
         }
     }
 }
@@ -779,6 +785,164 @@ impl FlexibleInteger {
     }
 }
 
+#[derive(Serialize)]
+struct PlaylistDetailRequest<'a> {
+    data: [PlaylistCollectionIdentity<'a>; 1],
+    userid: u64,
+    token: &'static str,
+}
+
+#[derive(Serialize)]
+struct PlaylistCollectionIdentity<'a> {
+    global_collection_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct PlaylistTracksQuery<'a> {
+    dfid: &'static str,
+    mid: &'a str,
+    uuid: &'static str,
+    appid: u16,
+    clientver: u32,
+    clienttime: u64,
+    signature: String,
+    area_code: u8,
+    begin_idx: u32,
+    plat: u8,
+    #[serde(rename = "type")]
+    resource_type: u8,
+    mode: u8,
+    personal_switch: u8,
+    extend_fields: &'static str,
+    pagesize: u32,
+    global_collection_id: &'a str,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PlaylistDetailEnvelope {
+    status: i64,
+    error_code: i64,
+    data: Vec<KugouPlaylistInfo>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistInfo {
+    global_collection_id: String,
+    parent_global_collection_id: String,
+    list_create_gid: String,
+    name: String,
+    intro: String,
+    pic: String,
+    tags: String,
+    musiclib_tags: Vec<KugouPlaylistTag>,
+    list_create_userid: Option<FlexibleInteger>,
+    list_create_username: String,
+    count: Option<FlexibleInteger>,
+    create_time: Option<FlexibleInteger>,
+    update_time: Option<FlexibleInteger>,
+    publish_date: String,
+    status: Option<FlexibleInteger>,
+    code: Option<FlexibleInteger>,
+    is_pri: Option<FlexibleInteger>,
+    is_publish: Option<FlexibleInteger>,
+    is_drop: Option<FlexibleInteger>,
+    collect_total: Option<FlexibleInteger>,
+    specialid: Option<FlexibleInteger>,
+    listid: Option<FlexibleInteger>,
+    list_create_listid: Option<FlexibleInteger>,
+    source: Option<FlexibleInteger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistTag {
+    tag_id: Option<FlexibleInteger>,
+    parent_id: Option<FlexibleInteger>,
+    tag_name: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PlaylistTracksEnvelope {
+    status: i64,
+    error_code: i64,
+    errmsg: String,
+    data: Option<KugouPlaylistTrackData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistTrackData {
+    begin_idx: Option<FlexibleInteger>,
+    pagesize: Option<FlexibleInteger>,
+    count: Option<FlexibleInteger>,
+    userid: Option<FlexibleInteger>,
+    list_info: Option<KugouPlaylistInfo>,
+    songs: Vec<KugouPlaylistSong>,
+    popularization: Value,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistSong {
+    hash: String,
+    audio_id: Option<FlexibleInteger>,
+    mixsongid: Option<FlexibleInteger>,
+    add_mixsongid: Option<FlexibleInteger>,
+    name: String,
+    brief: String,
+    publish_date: String,
+    remark: String,
+    album_id: Option<FlexibleInteger>,
+    albuminfo: KugouPlaylistAlbum,
+    timelen: Option<FlexibleInteger>,
+    relate_goods: Vec<KugouPlaylistMediaAsset>,
+    singerinfo: Vec<KugouSinger>,
+    cover: String,
+    mvhash: String,
+    privilege: Option<FlexibleInteger>,
+    feetype: Option<FlexibleInteger>,
+    fileid: Option<FlexibleInteger>,
+    sort: Option<FlexibleInteger>,
+    bitrate: Option<FlexibleInteger>,
+    size: Option<FlexibleInteger>,
+    extname: String,
+    language: String,
+    collecttime: Option<FlexibleInteger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistAlbum {
+    id: Option<FlexibleInteger>,
+    name: String,
+    publish: Option<FlexibleInteger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KugouPlaylistMediaAsset {
+    hash: String,
+    size: Option<FlexibleInteger>,
+    bitrate: Option<FlexibleInteger>,
+    privilege: Option<FlexibleInteger>,
+    level: Option<FlexibleInteger>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 impl KugouClient {
     pub fn new(config: &KugouConfig) -> Result<Self> {
         let mut builder = Client::builder()
@@ -885,6 +1049,74 @@ impl KugouClient {
             .await?;
         let audio = parse_audio_metadata(&audio_bytes, &audio_id)?;
         map_track_detail(album_audio_id, metadata, audio)
+    }
+
+    pub(crate) async fn playlist_detail(&self, collection_id: &str) -> Result<Playlist> {
+        let collection_id = validate_collection_id(collection_id)?;
+        let request = PlaylistDetailRequest {
+            data: [PlaylistCollectionIdentity {
+                global_collection_id: collection_id,
+            }],
+            userid: 0,
+            token: "",
+        };
+        let bytes = self
+            .post_android(AndroidEndpoint::PlaylistDetail, &request)
+            .await?;
+        parse_playlist_detail_response(&bytes, collection_id)
+    }
+
+    pub(crate) async fn playlist_tracks(
+        &self,
+        collection_id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<Track>> {
+        let collection_id = validate_collection_id(collection_id)?;
+        validate_public_playlist_page(request)?;
+        let clienttime = unix_seconds_now();
+        let parameters = BTreeMap::from([
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("area_code", "1".to_owned()),
+            ("begin_idx", request.offset.to_string()),
+            ("clienttime", clienttime.to_string()),
+            ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+            ("dfid", "-".to_owned()),
+            ("extend_fields", "abtags,hot_cmt,popularization".to_owned()),
+            ("global_collection_id", collection_id.to_owned()),
+            ("mid", self.mid.clone()),
+            ("mode", "1".to_owned()),
+            ("pagesize", request.limit.to_string()),
+            ("personal_switch", "1".to_owned()),
+            ("plat", "1".to_owned()),
+            ("type", "1".to_owned()),
+            ("uuid", "-".to_owned()),
+        ]);
+        let query = PlaylistTracksQuery {
+            dfid: "-",
+            mid: &self.mid,
+            uuid: "-",
+            appid: ANDROID_APP_ID,
+            clientver: ANDROID_CLIENT_VERSION,
+            clienttime,
+            signature: android_signature_for_parameters(&parameters, &[]),
+            area_code: 1,
+            begin_idx: request.offset,
+            plat: 1,
+            resource_type: 1,
+            mode: 1,
+            personal_switch: 1,
+            extend_fields: "abtags,hot_cmt,popularization",
+            pagesize: request.limit,
+            global_collection_id: collection_id,
+        };
+        let response = self
+            .android_get(PLAYLIST_TRACKS_ENDPOINT, clienttime)
+            .query(&query)
+            .send()
+            .await
+            .map_err(kugou_network_error)?;
+        let bytes = read_bounded_response(response, "KuGou playlist tracks").await?;
+        parse_playlist_tracks_response(&bytes, collection_id, request.offset, request.limit)
     }
 
     pub(crate) async fn lyrics(&self, album_audio_id: u64) -> Result<Lyrics> {
@@ -1448,6 +1680,562 @@ fn parse_audio_metadata(bytes: &[u8], audio_id: &str) -> Result<AudioMetadata> {
         ));
     }
     Ok(audio)
+}
+
+fn validate_collection_id(value: &str) -> Result<&str> {
+    let trimmed = value.trim();
+    if trimmed != value {
+        return Err(kugou_invalid_media_request(
+            "KuGou public playlist ID must be a canonical global_collection_id",
+        ));
+    }
+    let value = trimmed;
+    if value.len() < "collection_0_0_0_0".len()
+        || value.len() > 160
+        || !value.starts_with("collection_")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(kugou_invalid_media_request(
+            "KuGou public playlist ID must be a canonical global_collection_id",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_public_playlist_page(request: &PageRequest) -> Result<()> {
+    if !(1..=100).contains(&request.limit) {
+        return Err(kugou_invalid_media_request(
+            "KuGou public playlist limit must be between 1 and 100",
+        ));
+    }
+    if request.account.is_some() {
+        return Err(kugou_invalid_media_request(
+            "KuGou public playlists do not accept an account",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_playlist_detail_response(bytes: &[u8], collection_id: &str) -> Result<Playlist> {
+    let envelope: PlaylistDetailEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou playlist detail returned malformed JSON"))?;
+    if envelope.status != 1 || envelope.error_code != 0 {
+        return Err(
+            kugou_upstream_error("KuGou playlist detail rejected the request").with_details(
+                json!({
+                    "status": envelope.status,
+                    "error_code": envelope.error_code
+                }),
+            ),
+        );
+    }
+    if envelope.data.len() != 1 {
+        return Err(kugou_upstream_error(
+            "KuGou playlist detail returned an unexpected result count",
+        )
+        .with_details(json!({ "returned": envelope.data.len() })));
+    }
+    map_playlist_info(
+        envelope
+            .data
+            .into_iter()
+            .next()
+            .expect("validated one playlist result"),
+        collection_id,
+    )
+}
+
+fn map_playlist_info(info: KugouPlaylistInfo, collection_id: &str) -> Result<Playlist> {
+    validate_playlist_identity(&info, collection_id)?;
+    let name = nonempty(&info.name)
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist detail omitted a name"))?;
+    let resource_ref = ResourceRef::new(Platform::Kugou, collection_id.to_owned())
+        .map_err(|_| kugou_upstream_error("KuGou playlist identity was invalid"))?;
+    let creator_id = info
+        .list_create_userid
+        .as_ref()
+        .and_then(FlexibleInteger::as_resource_id);
+    let creator_name = nonempty(&info.list_create_username);
+    let creator = (creator_id.is_some() || creator_name.is_some()).then(|| ArtistSummary {
+        resource_ref: creator_id
+            .as_deref()
+            .and_then(|id| ResourceRef::new(Platform::Kugou, id.to_owned()).ok()),
+        name: creator_name.unwrap_or("").to_owned(),
+    });
+    let mut tags = Vec::new();
+    for tag in &info.musiclib_tags {
+        if let Some(name) = nonempty(&tag.tag_name)
+            && !tags.iter().any(|existing| existing == name)
+        {
+            tags.push(name.to_owned());
+        }
+    }
+    for name in info.tags.split(',').filter_map(nonempty) {
+        if !tags.iter().any(|existing| existing == name) {
+            tags.push(name.to_owned());
+        }
+    }
+    let mut extensions = Extensions::from([
+        ("public".to_owned(), json!(true)),
+        (
+            "privacy".to_owned(),
+            json!(info.is_pri.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "published".to_owned(),
+            json!(info.is_publish.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "dropped".to_owned(),
+            json!(info.is_drop.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "status".to_owned(),
+            json!(info.status.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "code".to_owned(),
+            json!(info.code.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "collection_count".to_owned(),
+            json!(
+                info.collect_total
+                    .as_ref()
+                    .and_then(FlexibleInteger::as_u64)
+            ),
+        ),
+        (
+            "special_id".to_owned(),
+            json!(info.specialid.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "list_id".to_owned(),
+            json!(info.listid.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "list_create_id".to_owned(),
+            json!(
+                info.list_create_listid
+                    .as_ref()
+                    .and_then(FlexibleInteger::as_u64)
+            ),
+        ),
+        (
+            "source".to_owned(),
+            json!(info.source.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        (
+            "publish_date".to_owned(),
+            json!(nonempty(&info.publish_date)),
+        ),
+        (
+            "tag_metadata".to_owned(),
+            json!(
+                info.musiclib_tags
+                    .iter()
+                    .map(|tag| json!({
+                        "id": tag.tag_id.as_ref().and_then(FlexibleInteger::as_u64),
+                        "parent_id": tag.parent_id.as_ref().and_then(FlexibleInteger::as_u64),
+                        "name": nonempty(&tag.tag_name),
+                        "extra": tag.extra
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        ),
+    ]);
+    if !info.extra.is_empty() {
+        extensions.insert("platform_extra".to_owned(), json!(info.extra));
+    }
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Kugou,
+        id: collection_id.to_owned(),
+        name: name.to_owned(),
+        description: nonempty(&info.intro).unwrap_or("").to_owned(),
+        cover_url: normalize_image_url(&info.pic),
+        creator,
+        track_count: info.count.as_ref().and_then(FlexibleInteger::as_u64),
+        tags,
+        subscribed: None,
+        created_at: info
+            .create_time
+            .as_ref()
+            .and_then(FlexibleInteger::as_nonempty_string),
+        updated_at: info
+            .update_time
+            .as_ref()
+            .and_then(FlexibleInteger::as_nonempty_string),
+        extensions,
+    })
+}
+
+fn validate_playlist_identity(info: &KugouPlaylistInfo, collection_id: &str) -> Result<()> {
+    if info.global_collection_id != collection_id {
+        return Err(kugou_upstream_error(
+            "KuGou playlist detail returned a mismatched collection identity",
+        ));
+    }
+    for related in [&info.parent_global_collection_id, &info.list_create_gid] {
+        if let Some(related) = nonempty(related)
+            && related != collection_id
+        {
+            return Err(kugou_upstream_error(
+                "KuGou playlist detail returned conflicting collection identities",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_playlist_tracks_response(
+    bytes: &[u8],
+    collection_id: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<Page<Track>> {
+    let envelope: PlaylistTracksEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kugou_upstream_error("KuGou playlist tracks returned malformed JSON"))?;
+    if envelope.status != 1 || envelope.error_code != 0 {
+        return Err(kugou_upstream_error(
+            safe_upstream_message(&envelope.errmsg)
+                .unwrap_or_else(|| "KuGou playlist tracks rejected the request".to_owned()),
+        )
+        .with_details(json!({
+            "status": envelope.status,
+            "error_code": envelope.error_code
+        })));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist tracks omitted data"))?;
+    let returned_offset = data
+        .begin_idx
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64)
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist tracks omitted begin_idx"))?;
+    let returned_limit = data
+        .pagesize
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64)
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist tracks omitted pagesize"))?;
+    let total = data
+        .count
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64)
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist tracks omitted count"))?;
+    if returned_offset != u64::from(offset) || returned_limit != u64::from(limit) {
+        return Err(
+            kugou_upstream_error("KuGou playlist tracks returned mismatched pagination")
+                .with_details(json!({
+                    "requested_offset": offset,
+                    "returned_offset": returned_offset,
+                    "requested_limit": limit,
+                    "returned_limit": returned_limit
+                })),
+        );
+    }
+    if let Some(list_info) = data.list_info.as_ref() {
+        if nonempty(&list_info.global_collection_id).is_some() {
+            validate_playlist_identity(list_info, collection_id)?;
+        }
+        if let Some(info_count) = list_info.count.as_ref().and_then(FlexibleInteger::as_u64)
+            && info_count != total
+        {
+            return Err(kugou_upstream_error(
+                "KuGou playlist tracks returned conflicting total counts",
+            ));
+        }
+    }
+    if data.songs.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
+        return Err(kugou_upstream_error(
+            "KuGou playlist tracks exceeded the requested page size",
+        ));
+    }
+    let end = u64::from(offset)
+        .checked_add(u64::try_from(data.songs.len()).unwrap_or(u64::MAX))
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist pagination overflowed"))?;
+    if end > total || (u64::from(offset) < total && data.songs.is_empty()) {
+        return Err(kugou_upstream_error(
+            "KuGou playlist tracks returned a non-progressing or out-of-range page",
+        )
+        .with_details(json!({
+            "offset": offset,
+            "returned": data.songs.len(),
+            "total": total
+        })));
+    }
+    let items = data
+        .songs
+        .into_iter()
+        .enumerate()
+        .map(|(index, song)| map_playlist_song(song, offset, index))
+        .collect::<Result<Vec<_>>>()?;
+    let has_more = end < total;
+    let next_offset = if has_more {
+        Some(u32::try_from(end).map_err(|_| {
+            kugou_upstream_error("KuGou playlist next offset exceeded the unified range")
+        })?)
+    } else {
+        None
+    };
+    let mut extensions = Extensions::from([
+        ("collection_id".to_owned(), json!(collection_id)),
+        (
+            "user_id".to_owned(),
+            json!(data.userid.as_ref().and_then(FlexibleInteger::as_u64)),
+        ),
+        ("popularization".to_owned(), data.popularization),
+    ]);
+    if !data.extra.is_empty() {
+        extensions.insert("platform_extra".to_owned(), json!(data.extra));
+    }
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset,
+            has_more,
+            extensions,
+        },
+    })
+}
+
+fn map_playlist_song(song: KugouPlaylistSong, offset: u32, index: usize) -> Result<Track> {
+    let mix_song_id = song
+        .mixsongid
+        .as_ref()
+        .and_then(FlexibleInteger::as_resource_id);
+    let added_mix_song_id = song
+        .add_mixsongid
+        .as_ref()
+        .and_then(FlexibleInteger::as_resource_id);
+    let album_audio_id = mix_song_id
+        .clone()
+        .or(added_mix_song_id.clone())
+        .ok_or_else(|| {
+            kugou_upstream_error("KuGou playlist track omitted a stable album_audio_id")
+        })?;
+    if !canonical_positive_decimal(&album_audio_id) {
+        return Err(kugou_upstream_error(
+            "KuGou playlist track returned an invalid album_audio_id",
+        ));
+    }
+    let name = playlist_song_title(&song)?;
+    let resource_ref = ResourceRef::new(Platform::Kugou, album_audio_id.clone())
+        .map_err(|_| kugou_upstream_error("KuGou playlist track identity was invalid"))?;
+    let mut track = Track::new(resource_ref, name);
+    track.artists = map_singers(&song.singerinfo, "");
+    track.album = map_playlist_album(&song)?;
+    track.duration_ms = song
+        .timelen
+        .as_ref()
+        .and_then(FlexibleInteger::as_u64)
+        .filter(|duration| *duration > 0);
+    track.mv_ref = nonempty(&song.mvhash)
+        .map(|hash| format!("hash:{hash}"))
+        .and_then(|id| ResourceRef::new(Platform::Kugou, id).ok());
+
+    let mut qualities = BTreeMap::new();
+    if let Some(asset) = playlist_quality_asset(
+        &song.hash,
+        song.size.as_ref(),
+        song.bitrate.as_ref(),
+        &song.extname,
+    ) {
+        qualities.insert("standard", asset);
+        track.available_qualities.push(Quality::Standard);
+    }
+    for asset in &song.relate_goods {
+        let Some((key, quality, mapped)) = map_playlist_related_asset(asset) else {
+            continue;
+        };
+        if qualities.insert(key, mapped).is_none() && !track.available_qualities.contains(&quality)
+        {
+            track.available_qualities.push(quality);
+        }
+    }
+    insert_optional(
+        &mut track.extensions,
+        "album_audio_id",
+        Some(album_audio_id),
+    );
+    insert_optional(
+        &mut track.extensions,
+        "added_album_audio_id",
+        added_mix_song_id.filter(|added| mix_song_id.as_ref() != Some(added)),
+    );
+    insert_optional(
+        &mut track.extensions,
+        "audio_id",
+        song.audio_id
+            .as_ref()
+            .and_then(FlexibleInteger::as_resource_id),
+    );
+    insert_optional(
+        &mut track.extensions,
+        "hash",
+        nonempty(&song.hash).map(str::to_owned),
+    );
+    insert_optional(
+        &mut track.extensions,
+        "published_at",
+        nonempty(&song.publish_date).map(str::to_owned),
+    );
+    insert_optional(
+        &mut track.extensions,
+        "language",
+        nonempty(&song.language).map(str::to_owned),
+    );
+    for (key, value) in [
+        ("privilege", song.privilege.as_ref()),
+        ("fee_type", song.feetype.as_ref()),
+        ("file_id", song.fileid.as_ref()),
+        ("sort", song.sort.as_ref()),
+        ("collected_at", song.collecttime.as_ref()),
+        ("album_publish", song.albuminfo.publish.as_ref()),
+    ] {
+        insert_optional_u64(
+            &mut track.extensions,
+            key,
+            value.and_then(FlexibleInteger::as_u64),
+        );
+    }
+    let position = u64::from(offset)
+        .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist position overflowed"))?;
+    track
+        .extensions
+        .insert("playlist_position".to_owned(), json!(position));
+    track
+        .extensions
+        .insert("qualities".to_owned(), json!(qualities));
+    if !song.extra.is_empty() {
+        track
+            .extensions
+            .insert("playlist_item_extra".to_owned(), json!(song.extra));
+    }
+    if !song.albuminfo.extra.is_empty() {
+        track.extensions.insert(
+            "playlist_album_extra".to_owned(),
+            json!(song.albuminfo.extra),
+        );
+    }
+    Ok(track)
+}
+
+fn playlist_song_title(song: &KugouPlaylistSong) -> Result<String> {
+    let name = nonempty(&song.name)
+        .ok_or_else(|| kugou_upstream_error("KuGou playlist track omitted a name"))?;
+    let singer_prefix = song
+        .singerinfo
+        .iter()
+        .filter_map(|singer| nonempty(&singer.name))
+        .collect::<Vec<_>>()
+        .join("、");
+    if let Some((prefix, title)) = name.split_once(" - ")
+        && nonempty(title).is_some()
+        && (prefix == singer_prefix
+            || song
+                .singerinfo
+                .iter()
+                .filter_map(|singer| nonempty(&singer.name))
+                .any(|singer| singer == prefix))
+    {
+        return Ok(title.trim().to_owned());
+    }
+    Ok(name.to_owned())
+}
+
+fn map_playlist_album(song: &KugouPlaylistSong) -> Result<Option<AlbumSummary>> {
+    let nested_id = song
+        .albuminfo
+        .id
+        .as_ref()
+        .and_then(FlexibleInteger::as_resource_id);
+    let outer_id = song
+        .album_id
+        .as_ref()
+        .and_then(FlexibleInteger::as_resource_id);
+    if let (Some(left), Some(right)) = (&nested_id, &outer_id)
+        && left != right
+    {
+        return Err(kugou_upstream_error(
+            "KuGou playlist track returned conflicting album identities",
+        ));
+    }
+    let name = nonempty(&song.albuminfo.name).or_else(|| nonempty(&song.remark));
+    if name.is_none() && nested_id.is_none() && outer_id.is_none() {
+        return Ok(None);
+    }
+    let resource_ref = nested_id
+        .or(outer_id)
+        .and_then(|id| ResourceRef::new(Platform::Kugou, id).ok());
+    Ok(Some(AlbumSummary {
+        resource_ref,
+        name: name.unwrap_or("").to_owned(),
+        cover_url: normalize_image_url(&song.cover),
+    }))
+}
+
+fn playlist_quality_asset(
+    hash: &str,
+    size: Option<&FlexibleInteger>,
+    bitrate: Option<&FlexibleInteger>,
+    extension: &str,
+) -> Option<Value> {
+    let hash = nonempty(hash)?;
+    Some(json!({
+        "hash": hash,
+        "size": size.and_then(FlexibleInteger::as_u64),
+        "bitrate": bitrate
+            .and_then(FlexibleInteger::as_u64)
+            .map(normalize_kugou_bitrate),
+        "format": nonempty(extension).unwrap_or("mp3")
+    }))
+}
+
+fn map_playlist_related_asset(
+    asset: &KugouPlaylistMediaAsset,
+) -> Option<(&'static str, Quality, Value)> {
+    let bitrate = asset.bitrate.as_ref().and_then(FlexibleInteger::as_u64)?;
+    let (key, quality, format) = match bitrate {
+        0..=128 => ("standard", Quality::Standard, "mp3"),
+        129..=320 => ("high", Quality::High, "mp3"),
+        321..=1_500 => ("lossless", Quality::Lossless, "flac"),
+        _ => ("hires", Quality::Hires, "flac"),
+    };
+    let mut mapped = playlist_quality_asset(
+        &asset.hash,
+        asset.size.as_ref(),
+        asset.bitrate.as_ref(),
+        format,
+    )?;
+    let object = mapped.as_object_mut()?;
+    object.insert(
+        "privilege".to_owned(),
+        json!(asset.privilege.as_ref().and_then(FlexibleInteger::as_u64)),
+    );
+    object.insert(
+        "level".to_owned(),
+        json!(asset.level.as_ref().and_then(FlexibleInteger::as_u64)),
+    );
+    if !asset.extra.is_empty() {
+        object.insert("extra".to_owned(), json!(asset.extra));
+    }
+    Some((key, quality, mapped))
+}
+
+fn normalize_kugou_bitrate(value: u64) -> u64 {
+    if value <= 10_000 {
+        value.saturating_mul(1_000)
+    } else {
+        value
+    }
 }
 
 fn map_track_detail(
@@ -2948,7 +3736,10 @@ fn normalize_image_url(value: &str) -> Option<String> {
         && url.password().is_none()
         && url.port().is_none()
         && url.fragment().is_none()
-        && (host == "kugou.com" || host.ends_with(".kugou.com"));
+        && (host == "kugou.com"
+            || host.ends_with(".kugou.com")
+            || host == "kgimg.com"
+            || host.ends_with(".kgimg.com"));
     trusted.then_some(value)
 }
 
@@ -3232,10 +4023,211 @@ mod tests {
     }
 
     #[test]
+    fn playlist_detail_maps_public_identity_creator_tags_and_safe_cover() {
+        let response = r#"{
+          "status":1,"error_code":0,
+          "data":[{
+            "global_collection_id":"collection_3_1708619358_54_0",
+            "parent_global_collection_id":"collection_3_1708619358_54_0",
+            "list_create_gid":"collection_3_1708619358_54_0",
+            "name":"精选广播剧歌曲",
+            "intro":"公开简介",
+            "pic":"http://c1.kgimg.com/custom/{size}/cover.jpg",
+            "tags":"网络,快乐,国语",
+            "musiclib_tags":[
+              {"tag_id":35,"parent_id":1,"tag_name":"网络"},
+              {"tag_id":49,"parent_id":4,"tag_name":"快乐"}
+            ],
+            "list_create_userid":1708619358,
+            "list_create_username":"残阳",
+            "count":91,
+            "create_time":1684336222,
+            "update_time":1736055717,
+            "publish_date":"2023-05-17",
+            "status":1,"code":1,"is_pri":0,"is_publish":1,"is_drop":0,
+            "collect_total":12,"specialid":6742172,"listid":54,
+            "list_create_listid":54,"source":1
+          }]
+        }"#;
+        let playlist =
+            parse_playlist_detail_response(response.as_bytes(), "collection_3_1708619358_54_0")
+                .expect("map playlist");
+        assert_eq!(
+            playlist.resource_ref.to_string(),
+            "kugou:collection_3_1708619358_54_0"
+        );
+        assert_eq!(playlist.name, "精选广播剧歌曲");
+        assert_eq!(playlist.description, "公开简介");
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://c1.kgimg.com/custom/400/cover.jpg")
+        );
+        assert_eq!(
+            playlist
+                .creator
+                .as_ref()
+                .and_then(|creator| creator.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("kugou:1708619358")
+        );
+        assert_eq!(playlist.track_count, Some(91));
+        assert_eq!(playlist.tags, ["网络", "快乐", "国语"]);
+        assert_eq!(playlist.created_at.as_deref(), Some("1684336222"));
+        assert_eq!(playlist.extensions["privacy"], 0);
+
+        assert!(
+            parse_playlist_detail_response(response.as_bytes(), "collection_3_1708619358_55_0")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn playlist_tracks_preserve_offset_identity_titles_and_media_tiers() {
+        let response = r#"{
+          "status":1,"error_code":0,"errmsg":"",
+          "data":{
+            "begin_idx":2,"pagesize":2,"count":5,"userid":0,
+            "list_info":{
+              "global_collection_id":"collection_3_1708619358_54_0",
+              "parent_global_collection_id":"collection_3_1708619358_54_0",
+              "list_create_gid":"collection_3_1708619358_54_0",
+              "name":"精选广播剧歌曲","count":5
+            },
+            "songs":[
+              {
+                "hash":"BASEHASH","audio_id":114485185,
+                "mixsongid":329587869,"add_mixsongid":318274148,
+                "name":"Kaleido、方觉夏 - Kaleido","brief":"",
+                "publish_date":"2021-07-30","remark":"Kaleido",
+                "album_id":"47410810",
+                "albuminfo":{"id":47410810,"name":"Kaleido","publish":1},
+                "timelen":249103,
+                "relate_goods":[
+                  {"hash":"BASEHASH","size":3986294,"bitrate":128,"privilege":0,"level":2},
+                  {"hash":"HIGHHASH","size":9965410,"bitrate":320,"privilege":0,"level":4},
+                  {"hash":"FLACHASH","size":31225205,"bitrate":1002,"privilege":0,"level":5},
+                  {"hash":"HIRESHASH","size":54733034,"bitrate":1757,"privilege":0,"level":6}
+                ],
+                "singerinfo":[{"id":7378726,"name":"Kaleido"},{"id":6769527,"name":"方觉夏"}],
+                "cover":"http://imge.kugou.com/stdmusic/{size}/cover.jpg",
+                "mvhash":"5B7D8AAA26EE12540CC5FB9272C98568",
+                "privilege":0,"feetype":0,"fileid":91,"sort":2,
+                "bitrate":128,"size":3986294,"extname":"mp3",
+                "language":"国语","collecttime":1700630391
+              },
+              {
+                "hash":"SECONDHASH","audio_id":7,
+                "mixsongid":329587870,"add_mixsongid":329587870,
+                "name":"独唱","timelen":180000,
+                "singerinfo":[{"id":8,"name":"歌手"}],
+                "albuminfo":{"id":9,"name":"专辑"},
+                "bitrate":128,"size":1000,"extname":"mp3"
+              }
+            ],
+            "popularization":[],"server_marker":"kept"
+          }
+        }"#;
+        let page = parse_playlist_tracks_response(
+            response.as_bytes(),
+            "collection_3_1708619358_54_0",
+            2,
+            2,
+        )
+        .expect("map playlist tracks");
+        assert_eq!(page.pagination.total, Some(5));
+        assert_eq!(page.pagination.next_offset, Some(4));
+        assert!(page.pagination.has_more);
+        let first = &page.items[0];
+        assert_eq!(first.resource_ref.to_string(), "kugou:329587869");
+        assert_eq!(first.name, "Kaleido");
+        assert_eq!(first.duration_ms, Some(249_103));
+        assert_eq!(
+            first.available_qualities,
+            [
+                Quality::Standard,
+                Quality::High,
+                Quality::Lossless,
+                Quality::Hires
+            ]
+        );
+        assert_eq!(first.extensions["playlist_position"], 2);
+        assert_eq!(first.extensions["added_album_audio_id"], "318274148");
+        assert_eq!(first.extensions["qualities"]["high"]["bitrate"], 320_000);
+        assert_eq!(
+            first
+                .album
+                .as_ref()
+                .and_then(|album| album.cover_url.as_deref()),
+            Some("https://imge.kugou.com/stdmusic/400/cover.jpg")
+        );
+        assert_eq!(page.items[1].name, "独唱");
+        assert_eq!(
+            page.pagination.extensions["platform_extra"]["server_marker"],
+            "kept"
+        );
+
+        assert!(
+            parse_playlist_tracks_response(
+                response.as_bytes(),
+                "collection_3_1708619358_54_0",
+                0,
+                2
+            )
+            .is_err()
+        );
+
+        let continuation = r#"{
+          "status":1,"error_code":0,
+          "data":{
+            "begin_idx":2,"pagesize":1,"count":3,"list_info":{},
+            "songs":[{"hash":"HASH","mixsongid":329587871,"name":"续页歌曲",
+                      "timelen":1000,"bitrate":128,"size":100,"extname":"mp3"}]
+          }
+        }"#;
+        let page = parse_playlist_tracks_response(
+            continuation.as_bytes(),
+            "collection_3_1708619358_54_0",
+            2,
+            1,
+        )
+        .expect("accept an intentionally omitted continuation list_info");
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.items[0].resource_ref.to_string(), "kugou:329587871");
+    }
+
+    #[test]
+    fn public_playlist_inputs_reject_accounts_and_noncanonical_collection_ids() {
+        assert!(validate_collection_id("collection_3_1708619358_54_0").is_ok());
+        for invalid in [
+            "",
+            "54",
+            " collection_3_1708619358_54_0 ",
+            "collection_3_1/../../secret",
+            "collection_3_1?x=1",
+        ] {
+            assert!(validate_collection_id(invalid).is_err(), "{invalid}");
+        }
+        assert!(
+            validate_public_playlist_page(&PageRequest {
+                limit: 30,
+                offset: 0,
+                account: Some("default".to_owned())
+            })
+            .is_err()
+        );
+        assert!(validate_public_playlist_page(&PageRequest::new(0, 0)).is_err());
+    }
+
+    #[test]
     fn image_normalization_only_accepts_trusted_https_kugou_hosts() {
         assert_eq!(
             normalize_image_url("//imge.kugou.com/stdmusic/{size}/cover.jpg").as_deref(),
             Some("https://imge.kugou.com/stdmusic/400/cover.jpg")
+        );
+        assert_eq!(
+            normalize_image_url("http://c1.kgimg.com/custom/{size}/cover.jpg").as_deref(),
+            Some("https://c1.kgimg.com/custom/400/cover.jpg")
         );
         assert!(normalize_image_url("https://example.com/cover.jpg").is_none());
         assert!(normalize_image_url("https://user@imge.kugou.com/cover.jpg").is_none());
@@ -3590,6 +4582,27 @@ mod tests {
         assert_eq!(track.resource_ref.to_string(), "kugou:32100650");
         assert_eq!(track.extensions["audio_id"], "20505418");
         assert!(track.available_qualities.contains(&Quality::Standard));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live KuGou network access"]
+    async fn live_public_playlist_supports_non_aligned_offsets() {
+        let client = KugouClient::new(&KugouConfig::default()).expect("create client");
+        let collection_id = "collection_3_1708619358_54_0";
+        let playlist = client
+            .playlist_detail(collection_id)
+            .await
+            .expect("live KuGou playlist detail");
+        assert_eq!(playlist.resource_ref.id(), collection_id);
+        assert!(playlist.track_count.is_some_and(|count| count > 2));
+
+        let page = client
+            .playlist_tracks(collection_id, &PageRequest::new(2, 1))
+            .await
+            .expect("live KuGou playlist continuation");
+        assert_eq!(page.pagination.offset, 1);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].extensions["playlist_position"], 1);
     }
 
     #[tokio::test]
