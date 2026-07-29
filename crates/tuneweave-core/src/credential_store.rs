@@ -117,6 +117,15 @@ impl FileAccountCredentialStore {
         Self { root: root.into() }
     }
 
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        let store = Self::new(root);
+        create_private_dir_all(&store.root)?;
+        for platform in Platform::ALL {
+            store.load_platform(platform)?;
+        }
+        Ok(store)
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -505,5 +514,23 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+    }
+
+    #[test]
+    fn open_creates_the_private_root_and_rejects_corrupt_generations() {
+        let directory = TestDirectory::new();
+        let root = directory.0.join("accounts");
+        let store = FileAccountCredentialStore::open(&root).expect("open empty store");
+        assert_eq!(store.root(), root);
+        assert!(root.is_dir());
+
+        let account_dir = store.account_dir(Platform::Netease, "default");
+        fs::create_dir_all(&account_dir).expect("create corrupt account directory");
+        fs::write(account_dir.join("generation.json"), b"{not-json")
+            .expect("write corrupt generation");
+        let error = FileAccountCredentialStore::open(&root).expect_err("reject corrupt store");
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert!(!error.message.contains(&root.to_string_lossy().to_string()));
+        assert!(!error.message.contains("{not-json"));
     }
 }
