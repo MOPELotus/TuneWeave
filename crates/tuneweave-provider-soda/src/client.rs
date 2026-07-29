@@ -8,8 +8,8 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, Platform,
-    Quality, ResourceRef, Result, Track, TrackAvailability, TrackAvailabilityRequest,
+    AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor, Lyrics,
+    Platform, Quality, ResourceRef, Result, Track, TrackAvailability, TrackAvailabilityRequest,
     TuneWeaveError,
 };
 use url::Url;
@@ -18,11 +18,13 @@ use crate::identity::{
     SodaTrackIdentity, SodaTrackIdentityInput, classify_track_identity,
     parse_short_redirect_location,
 };
+use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decrypt_cenc_audio};
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
 const SODA_APP_ID: &str = "386088";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MEDIA_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_LYRIC_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LYRIC_LINES: usize = 20_000;
 const MAX_WORDS_PER_LINE: usize = 2_000;
@@ -165,7 +167,7 @@ struct SodaMediaEncryption {
     encryption_method: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct SodaPublicMediaSpec {
     quality: String,
     format: String,
@@ -176,6 +178,27 @@ struct SodaPublicMediaSpec {
     sample_rate_hz: Option<u64>,
     encrypted: bool,
     encryption_method: Option<String>,
+}
+
+struct SodaAuthorizedVariant {
+    main_url: String,
+    backup_urls: Vec<String>,
+    key_id: Option<String>,
+    spade_a: Option<String>,
+    spec: SodaPublicMediaSpec,
+}
+
+pub(crate) struct SodaPlayback {
+    pub preview: bool,
+    pub preview_start_ms: Option<u64>,
+    pub preview_duration_ms: Option<u64>,
+    pub duration_ms: u64,
+    pub bitrate: u64,
+    pub quality: Quality,
+    pub codec: String,
+    pub size: Option<u64>,
+    pub platform_code: i64,
+    pub encrypted: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -488,6 +511,123 @@ impl SodaClient {
         parse_track_availability_response(&body, identity, request)
     }
 
+    pub(crate) async fn playback(
+        &self,
+        identity: &SodaTrackIdentity,
+        requested_bitrate: u64,
+    ) -> Result<SodaPlayback> {
+        let media = self
+            .authorized_media(identity, requested_bitrate, "Soda playback")
+            .await?;
+        if media.selected.spec.size > MAX_MEDIA_RESPONSE_BYTES {
+            return Err(soda_upstream_error(
+                "Soda media exceeds the local delivery size limit",
+            ));
+        }
+        Ok(media.playback())
+    }
+
+    pub(crate) async fn audio_content(
+        &self,
+        identity: &SodaTrackIdentity,
+        requested_bitrate: u64,
+    ) -> Result<AudioContent> {
+        let media = self
+            .authorized_media(identity, requested_bitrate, "Soda audio content")
+            .await?;
+        let track_ref = identity.resource_ref()?;
+        let bytes = self.download_authorized_variant(&media.selected).await?;
+        let decrypted = if media.selected.spec.encrypted {
+            let spade_a = media.selected.spade_a.as_deref().ok_or_else(|| {
+                soda_upstream_error("Soda encrypted media omitted its authorization")
+            })?;
+            let key_id = media.selected.key_id.as_deref().ok_or_else(|| {
+                soda_upstream_error("Soda encrypted media omitted its key identifier")
+            })?;
+            decrypt_cenc_audio(bytes, spade_a, key_id)?
+        } else {
+            validate_unencrypted_audio(bytes, &media.selected.spec)?
+        };
+        validate_decrypted_codec(&decrypted, &media.selected.spec.codec)?;
+        let (content_type, extension) = match decrypted.container {
+            SodaAudioContainer::IsoBaseMedia => ("audio/mp4", "m4a"),
+            SodaAudioContainer::Flac => ("audio/flac", "flac"),
+        };
+        Ok(AudioContent {
+            track_ref,
+            bytes: decrypted.bytes,
+            content_type: content_type.to_owned(),
+            filename: format!("soda-{}.{}", identity.id(), extension),
+        })
+    }
+
+    async fn authorized_media(
+        &self,
+        identity: &SodaTrackIdentity,
+        requested_bitrate: u64,
+        operation: &str,
+    ) -> Result<ValidatedSodaMedia> {
+        let body = self.fetch_track_v2_body(identity, operation).await?;
+        let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(&body)
+            .map_err(|_| soda_upstream_error(format!("{operation} returned malformed JSON")))?;
+        validate_status_metadata(&envelope.status_info, operation)?;
+        if envelope.risk_result.is_some_and(|value| value != 0) {
+            return Err(soda_upstream_error(format!(
+                "{operation} was rejected by platform risk control"
+            )));
+        }
+        let track = envelope
+            .track
+            .ok_or_else(|| soda_upstream_error(format!("{operation} omitted the track payload")))?;
+        if track.id.trim() != identity.id()
+            || (!track.media_type.trim().is_empty() && track.media_type.trim() != "track")
+        {
+            return Err(soda_upstream_error(format!(
+                "{operation} returned a mismatched track identity"
+            )));
+        }
+        if track.state.offline == Some(true) {
+            return Err(TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Soda reported that this track is offline",
+            )
+            .with_platform(Platform::Soda));
+        }
+        let player = envelope.track_player.ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::PermissionDenied,
+                "Soda did not authorize anonymous media",
+            )
+            .with_platform(Platform::Soda)
+        })?;
+        validate_player_model(&track, &player, requested_bitrate, envelope.status_info.now)
+    }
+
+    async fn download_authorized_variant(&self, media: &SodaAuthorizedVariant) -> Result<Vec<u8>> {
+        if media.spec.size > MAX_MEDIA_RESPONSE_BYTES {
+            return Err(soda_upstream_error(
+                "Soda media exceeds the local delivery size limit",
+            ));
+        }
+        let mut last_error = None;
+        for url in std::iter::once(&media.main_url).chain(&media.backup_urls) {
+            let response = match self.http.get(url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(soda_network_error(error));
+                    continue;
+                }
+            };
+            match read_bounded_media_response(response, media.spec.size).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            soda_upstream_error("Soda media did not contain an available CDN source")
+        }))
+    }
+
     pub async fn resolve_track_identity(&self, input: &str) -> Result<SodaTrackIdentity> {
         let short_url = match classify_track_identity(input)? {
             SodaTrackIdentityInput::Direct(identity) => return Ok(identity),
@@ -744,7 +884,12 @@ fn parse_track_availability_response(
         json!(media.expires_at),
     );
     if media.preview {
-        let (start_ms, duration_ms) = validated_preview_window(&track, media.duration_ms)?;
+        let start_ms = media
+            .preview_start_ms
+            .expect("validated preview contains a start time");
+        let duration_ms = media
+            .preview_duration_ms
+            .expect("validated preview contains a duration");
         extensions.insert("preview_start_ms".to_owned(), json!(start_ms));
         extensions.insert("preview_duration_ms".to_owned(), json!(duration_ms));
         extensions.insert(
@@ -769,6 +914,8 @@ fn parse_track_availability_response(
 
 struct ValidatedSodaMedia {
     preview: bool,
+    preview_start_ms: Option<u64>,
+    preview_duration_ms: Option<u64>,
     encrypted: bool,
     duration_ms: u64,
     selected_bitrate: u64,
@@ -776,6 +923,25 @@ struct ValidatedSodaMedia {
     expires_at: u64,
     qualities: Vec<Quality>,
     specs: Vec<SodaPublicMediaSpec>,
+    selected: SodaAuthorizedVariant,
+}
+
+impl ValidatedSodaMedia {
+    fn playback(&self) -> SodaPlayback {
+        SodaPlayback {
+            preview: self.preview,
+            preview_start_ms: self.preview_start_ms,
+            preview_duration_ms: self.preview_duration_ms,
+            duration_ms: self.duration_ms,
+            bitrate: self.selected_bitrate,
+            quality: map_quality(&self.selected.spec.quality).unwrap_or(Quality::Auto),
+            codec: self.selected.spec.codec.clone(),
+            size: (!self.selected.spec.codec.eq_ignore_ascii_case("flac"))
+                .then_some(self.selected.spec.size),
+            platform_code: self.platform_code,
+            encrypted: self.selected.spec.encrypted,
+        }
+    }
 }
 
 fn validate_player_model(
@@ -838,18 +1004,17 @@ fn validate_player_model(
 
     let mut specs = Vec::with_capacity(model.video_list.len());
     let mut qualities = Vec::new();
-    let mut encrypted = false;
-    let mut selectable_bitrates = Vec::new();
+    let mut variants = Vec::with_capacity(model.video_list.len());
     for variant in model.video_list {
-        let spec = validate_video_variant(variant)?;
+        let variant = validate_video_variant(variant)?;
+        let spec = variant.spec.clone();
         if let Some(quality) = map_quality(&spec.quality)
             && !qualities.contains(&quality)
         {
             qualities.push(quality);
         }
-        encrypted |= spec.encrypted;
-        selectable_bitrates.push(spec.bitrate);
         specs.push(spec);
+        variants.push(variant);
     }
     qualities = [
         Quality::Low,
@@ -862,8 +1027,19 @@ fn validate_player_model(
     .into_iter()
     .filter(|quality| qualities.contains(quality))
     .collect();
-    let selected_bitrate = select_bitrate(&selectable_bitrates, requested_bitrate)
-        .ok_or_else(|| soda_upstream_error("Soda availability omitted a usable bitrate"))?;
+    let selected_bitrate = select_bitrate(
+        &variants
+            .iter()
+            .map(|variant| variant.spec.bitrate)
+            .collect::<Vec<_>>(),
+        requested_bitrate,
+    )
+    .ok_or_else(|| soda_upstream_error("Soda availability omitted a usable bitrate"))?;
+    let selected_index = variants
+        .iter()
+        .position(|variant| variant.spec.bitrate == selected_bitrate)
+        .ok_or_else(|| soda_upstream_error("Soda availability lost its selected media"))?;
+    let selected = variants.swap_remove(selected_index);
     let expires_at = [player.expire_at, model.url_expire]
         .into_iter()
         .filter(|value| *value > 0)
@@ -877,27 +1053,42 @@ fn validate_player_model(
             "Soda availability returned an invalid media expiry",
         ));
     }
+    let (preview_start_ms, preview_duration_ms) = if preview {
+        let (start, duration) = validated_preview_window(track, duration_ms)?;
+        (Some(start), Some(duration))
+    } else {
+        (None, None)
+    };
     Ok(ValidatedSodaMedia {
         preview,
-        encrypted,
+        preview_start_ms,
+        preview_duration_ms,
+        encrypted: selected.spec.encrypted,
         duration_ms,
         selected_bitrate,
         platform_code: model.status,
         expires_at,
         qualities,
         specs,
+        selected,
     })
 }
 
-fn validate_video_variant(variant: SodaVideoVariant) -> Result<SodaPublicMediaSpec> {
+fn validate_video_variant(variant: SodaVideoVariant) -> Result<SodaAuthorizedVariant> {
     let meta = variant.video_meta;
     let backup_urls = variant.backup_url.into_vec();
     if meta.quality.is_empty()
         || meta.quality.len() > 64
+        || map_quality(&meta.quality).is_none()
         || meta.vtype.is_empty()
         || meta.vtype.len() > 32
+        || !matches!(meta.vtype.to_ascii_lowercase().as_str(), "m4a" | "mp4")
         || meta.codec_type.is_empty()
         || meta.codec_type.len() > 32
+        || !matches!(
+            meta.codec_type.to_ascii_lowercase().as_str(),
+            "aac" | "flac" | "alac"
+        )
         || meta.bitrate == 0
         || meta.bitrate > 10_000_000
         || meta.real_bitrate == 0
@@ -914,33 +1105,60 @@ fn validate_video_variant(variant: SodaVideoVariant) -> Result<SodaPublicMediaSp
     for url in &backup_urls {
         validate_media_url(url)?;
     }
-    let encryption_method = if variant.encrypt_info.encrypt {
+    let (encryption_method, key_id, spade_a) = if variant.encrypt_info.encrypt {
         if variant.encrypt_info.encryption_method != "cenc-aes-ctr"
-            || variant.encrypt_info.kid.is_empty()
-            || variant.encrypt_info.kid.len() > 512
+            || variant.encrypt_info.kid.len() != 32
+            || !variant
+                .encrypt_info
+                .kid
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
             || variant.encrypt_info.spade_a.is_empty()
             || variant.encrypt_info.spade_a.len() > 16 * 1024
+            || !variant
+                .encrypt_info
+                .spade_a
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
         {
             return Err(soda_upstream_error(
                 "Soda availability returned unsupported media encryption",
             ));
         }
-        Some(variant.encrypt_info.encryption_method)
+        (
+            Some(variant.encrypt_info.encryption_method),
+            Some(variant.encrypt_info.kid),
+            Some(variant.encrypt_info.spade_a),
+        )
     } else {
-        None
+        if !variant.encrypt_info.encryption_method.is_empty()
+            || !variant.encrypt_info.kid.is_empty()
+            || !variant.encrypt_info.spade_a.is_empty()
+        {
+            return Err(soda_upstream_error(
+                "Soda availability returned inconsistent media encryption",
+            ));
+        }
+        (None, None, None)
     };
     let sample_rate_hz = canonical_positive_decimal(&meta.audio_sample_rate)
         .and_then(|value| value.parse::<u64>().ok());
-    Ok(SodaPublicMediaSpec {
-        quality: meta.quality,
-        format: meta.vtype,
-        codec: meta.codec_type,
-        bitrate: meta.bitrate,
-        real_bitrate: meta.real_bitrate,
-        size: meta.size,
-        sample_rate_hz,
-        encrypted: variant.encrypt_info.encrypt,
-        encryption_method,
+    Ok(SodaAuthorizedVariant {
+        main_url: variant.main_url,
+        backup_urls,
+        key_id,
+        spade_a,
+        spec: SodaPublicMediaSpec {
+            quality: meta.quality,
+            format: meta.vtype,
+            codec: meta.codec_type,
+            bitrate: meta.bitrate,
+            real_bitrate: meta.real_bitrate,
+            size: meta.size,
+            sample_rate_hz,
+            encrypted: variant.encrypt_info.encrypt,
+            encryption_method,
+        },
     })
 }
 
@@ -1480,6 +1698,99 @@ async fn read_bounded_response(response: reqwest::Response, operation: &str) -> 
     Ok(body)
 }
 
+async fn read_bounded_media_response(
+    mut response: reqwest::Response,
+    expected_size: u64,
+) -> Result<Vec<u8>> {
+    if response.status() != StatusCode::OK {
+        return Err(soda_media_http_error(response.status()));
+    }
+    if expected_size == 0 || expected_size > MAX_MEDIA_RESPONSE_BYTES {
+        return Err(soda_upstream_error(
+            "Soda media declared a size outside the local delivery limit",
+        ));
+    }
+    if response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length != expected_size)
+    {
+        return Err(soda_upstream_error(
+            "Soda media response length did not match its authorization",
+        ));
+    }
+    let maximum = usize::try_from(MAX_MEDIA_RESPONSE_BYTES).unwrap_or(usize::MAX);
+    let expected = usize::try_from(expected_size)
+        .map_err(|_| soda_upstream_error("Soda media size is unsupported on this platform"))?;
+    let mut body = Vec::with_capacity(expected.min(maximum));
+    while let Some(chunk) = response.chunk().await.map_err(soda_network_error)? {
+        if body.len().saturating_add(chunk.len()) > expected {
+            return Err(soda_upstream_error(
+                "Soda media response exceeded its authorized size",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.len() != expected {
+        return Err(soda_upstream_error(
+            "Soda media response ended before its authorized size",
+        ));
+    }
+    Ok(body)
+}
+
+fn validate_unencrypted_audio(
+    bytes: Vec<u8>,
+    spec: &SodaPublicMediaSpec,
+) -> Result<DecryptedSodaAudio> {
+    let codec = spec.codec.to_ascii_lowercase();
+    let (format, container) = match codec.as_str() {
+        "aac" if bytes.get(4..8) == Some(b"ftyp") => {
+            (SodaAudioFormat::Aac, SodaAudioContainer::IsoBaseMedia)
+        }
+        "alac" if bytes.get(4..8) == Some(b"ftyp") => {
+            (SodaAudioFormat::Alac, SodaAudioContainer::IsoBaseMedia)
+        }
+        "flac" if bytes.starts_with(b"fLaC") => (SodaAudioFormat::Flac, SodaAudioContainer::Flac),
+        _ => {
+            return Err(soda_upstream_error(
+                "Soda returned an unrecognized unencrypted audio container",
+            ));
+        }
+    };
+    Ok(DecryptedSodaAudio {
+        bytes,
+        format,
+        container,
+        sample_count: 0,
+    })
+}
+
+fn validate_decrypted_codec(audio: &DecryptedSodaAudio, declared_codec: &str) -> Result<()> {
+    let valid = match declared_codec.to_ascii_lowercase().as_str() {
+        "aac" => {
+            audio.format == SodaAudioFormat::Aac
+                && audio.container == SodaAudioContainer::IsoBaseMedia
+        }
+        "alac" => {
+            audio.format == SodaAudioFormat::Alac
+                && audio.container == SodaAudioContainer::IsoBaseMedia
+        }
+        "flac" => {
+            audio.format == SodaAudioFormat::Flac && audio.container == SodaAudioContainer::Flac
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(soda_upstream_error(
+            "Soda decrypted audio did not match its declared codec",
+        ));
+    }
+    Ok(())
+}
+
 fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
     let code = if error.is_timeout() {
         ErrorCode::UpstreamTimeout
@@ -1498,6 +1809,19 @@ fn soda_http_error(status: StatusCode) -> TuneWeaveError {
         ErrorCode::UpstreamError
     };
     TuneWeaveError::new(code, format!("Soda API returned HTTP {status}"))
+        .with_platform(Platform::Soda)
+        .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+}
+
+fn soda_media_http_error(status: StatusCode) -> TuneWeaveError {
+    let code = if status == StatusCode::TOO_MANY_REQUESTS {
+        ErrorCode::RateLimited
+    } else if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        ErrorCode::PermissionDenied
+    } else {
+        ErrorCode::UpstreamError
+    };
+    TuneWeaveError::new(code, format!("Soda media CDN returned HTTP {status}"))
         .with_platform(Platform::Soda)
         .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
 }
@@ -1724,8 +2048,8 @@ mod tests {
                 },
                 "encrypt_info": {
                     "encrypt": true,
-                    "kid": "private-kid",
-                    "spade_a": "private-spade",
+                    "kid": "42424242424242424242424242424242",
+                    "spade_a": "cHJpdmF0ZS1zcGFkZQ==",
                     "encryption_method": "cenc-aes-ctr"
                 }
             })
@@ -1789,8 +2113,8 @@ mod tests {
         assert_eq!(preview.extensions["preview_actual_bitrate"], 132_424);
         let serialized = serde_json::to_string(&preview).expect("serialize Soda availability");
         for secret in [
-            "private-kid",
-            "private-spade",
+            "42424242424242424242424242424242",
+            "cHJpdmF0ZS1zcGFkZQ==",
             "url_player_info",
             "token=private",
             "file_id",
@@ -1922,6 +2246,47 @@ mod tests {
                 .expect("bounded response"),
             b"safe"
         );
+
+        let exact = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsafe",
+        )
+        .await;
+        assert_eq!(
+            read_bounded_media_response(exact, 4)
+                .await
+                .expect("exact media response"),
+            b"safe"
+        );
+        let wrong_length = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsafe",
+        )
+        .await;
+        assert!(read_bounded_media_response(wrong_length, 5).await.is_err());
+        let redirect = raw_test_response(
+            b"HTTP/1.1 302 Found\r\nLocation: https://evil.example/media\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(read_bounded_media_response(redirect, 1).await.is_err());
+    }
+
+    #[test]
+    fn unencrypted_audio_must_match_its_declared_codec_and_container() {
+        let spec = SodaPublicMediaSpec {
+            quality: "medium".to_owned(),
+            format: "m4a".to_owned(),
+            codec: "aac".to_owned(),
+            bitrate: 128_000,
+            real_bitrate: 128_000,
+            size: 12,
+            sample_rate_hz: Some(44_100),
+            encrypted: false,
+            encryption_method: None,
+        };
+        let audio = validate_unencrypted_audio(b"\0\0\0\x0cftypisom".to_vec(), &spec)
+            .expect("plain ISO audio");
+        validate_decrypted_codec(&audio, "aac").expect("AAC container");
+        assert!(validate_decrypted_codec(&audio, "flac").is_err());
+        assert!(validate_unencrypted_audio(b"not audio".to_vec(), &spec).is_err());
     }
 
     async fn raw_test_response(raw: &'static [u8]) -> reqwest::Response {
@@ -2061,5 +2426,23 @@ mod tests {
         assert_eq!(paid.extensions["preview_available"], true);
         assert_eq!(paid.extensions["preview_start_ms"], 107_904);
         assert_eq!(paid.extensions["preview_duration_ms"], 60_001);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access and downloads authorized audio"]
+    async fn live_anonymous_audio_content_decrypts_full_and_preview_media() {
+        let client = SodaClient::test_client();
+        for id in ["6911353635137914887", "7304719759323564095"] {
+            let identity = SodaTrackIdentity::parse(id).expect("valid Soda identity");
+            let content = client
+                .audio_content(&identity, 200_000)
+                .await
+                .expect("live Soda audio content");
+            assert_eq!(content.track_ref.id(), id);
+            assert_eq!(content.content_type, "audio/mp4");
+            assert_eq!(content.bytes.get(4..8), Some(b"ftyp".as_slice()));
+            assert!(content.bytes.len() > 100_000);
+            assert!(content.filename.ends_with(".m4a"));
+        }
     }
 }

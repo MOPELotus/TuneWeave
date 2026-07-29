@@ -1,14 +1,21 @@
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
-    SearchKind, SearchQuery, SearchVariant, Track, TrackAvailability, TrackAvailabilityRequest,
-    TuneWeaveError,
+    AudioContent, Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
+    MusicProvider, Page, PageMeta, Platform, Quality, Result, SearchKind, SearchQuery,
+    SearchVariant, StreamRequest, StreamVariant, Track, TrackAvailability,
+    TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 
-use crate::client::{SodaClient, SodaConfig, UPSTREAM_SEARCH_PAGE_SIZE};
+use crate::{
+    client::{SodaClient, SodaConfig, SodaPlayback, UPSTREAM_SEARCH_PAGE_SIZE},
+    identity::SodaTrackIdentity,
+};
 
 const MAX_UPSTREAM_PAGES_PER_SEARCH: u32 = 6;
 
@@ -50,6 +57,8 @@ impl MusicProvider for SodaProvider {
 
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::AudioDownload,
+            Capability::AudioStream,
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::Lyrics,
@@ -162,6 +171,175 @@ impl MusicProvider for SodaProvider {
         let identity = self.client.resolve_track_identity(id).await?;
         self.client.track_availability(&identity, request).await
     }
+
+    async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        let identity = canonical_media_identity(track)?;
+        validate_media_request(request)?;
+        let requested_bitrate = requested_media_bitrate(request);
+        let playback = self.client.playback(&identity, requested_bitrate).await?;
+        let url = local_content_url(&identity, &playback);
+        Ok(MediaStream {
+            url,
+            backup_urls: Vec::new(),
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: Some(delivery_format(&playback).to_owned()),
+            codec: Some(playback.codec.clone()),
+            bitrate: Some(playback.bitrate),
+            size: playback.size,
+            duration_ms: Some(playback.duration_ms),
+            requested_quality: request.quality,
+            actual_quality: playback.quality,
+            trial: playback.preview.then(|| TrialWindow {
+                start_ms: playback.preview_start_ms.unwrap_or_default(),
+                end_ms: playback
+                    .preview_start_ms
+                    .unwrap_or_default()
+                    .saturating_add(playback.preview_duration_ms.unwrap_or(playback.duration_ms)),
+            }),
+            origin_track: Some(track.resource_ref.clone()),
+            resolved_track: track.resource_ref.clone(),
+            resolved_platform: Platform::Soda,
+            match_score: Some(1.0),
+            attempts: Vec::new(),
+        })
+    }
+
+    async fn audio_content(&self, track: &Track, request: &StreamRequest) -> Result<AudioContent> {
+        let identity = canonical_media_identity(track)?;
+        validate_media_request(request)?;
+        self.client
+            .audio_content(&identity, requested_media_bitrate(request))
+            .await
+    }
+
+    async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        let identity = canonical_media_identity(track)?;
+        validate_media_request(request)?;
+        let playback = self
+            .client
+            .playback(&identity, requested_media_bitrate(request))
+            .await?;
+        let available = !playback.preview;
+        let mut extensions = Extensions::new();
+        extensions.insert("backend".to_owned(), json!("official_pc_track_v2"));
+        extensions.insert("local_delivery".to_owned(), json!(true));
+        extensions.insert("encrypted_upstream".to_owned(), json!(playback.encrypted));
+        extensions.insert("preview_url_withheld".to_owned(), json!(!available));
+        Ok(MediaDownload {
+            track_ref: track.resource_ref.clone(),
+            platform: Platform::Soda,
+            available,
+            url: available.then(|| local_content_url(&identity, &playback)),
+            headers: BTreeMap::new(),
+            expires_at: None,
+            format: Some(delivery_format(&playback).to_owned()),
+            codec: Some(playback.codec),
+            bitrate: Some(playback.bitrate),
+            size: available.then_some(playback.size).flatten(),
+            duration_ms: Some(playback.duration_ms),
+            requested_quality: request.quality,
+            actual_quality: playback.quality,
+            platform_code: Some(playback.platform_code),
+            fee: None,
+            message: (!available).then(|| {
+                "Soda only authorized a preview; a full download is unavailable".to_owned()
+            }),
+            extensions,
+        })
+    }
+}
+
+fn canonical_media_identity(track: &Track) -> Result<SodaTrackIdentity> {
+    if track.platform != Platform::Soda
+        || track.resource_ref.platform() != Platform::Soda
+        || track.id != track.resource_ref.id()
+    {
+        return Err(soda_invalid_request(
+            "Soda media resolution requires a canonical Soda track",
+        ));
+    }
+    SodaTrackIdentity::parse(track.resource_ref.id())
+}
+
+fn validate_media_request(request: &StreamRequest) -> Result<()> {
+    if request.variant != StreamVariant::Default {
+        return Err(soda_invalid_request(
+            "Soda public media only supports the default stream variant",
+        ));
+    }
+    if request.account.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public media does not accept an account",
+        ));
+    }
+    if request.immersive_type.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public media does not accept immersive_type",
+        ));
+    }
+    if request
+        .bitrate
+        .is_some_and(|bitrate| bitrate == 0 || bitrate > 10_000_000)
+    {
+        return Err(soda_invalid_request(
+            "Soda public media bitrate must be between 1 and 10000000",
+        ));
+    }
+    if matches!(
+        request.quality,
+        Quality::Surround | Quality::Dolby | Quality::Master
+    ) {
+        return Err(soda_invalid_request(
+            "Soda public media does not support the requested quality class",
+        ));
+    }
+    Ok(())
+}
+
+fn requested_media_bitrate(request: &StreamRequest) -> u64 {
+    request.bitrate.unwrap_or(match request.quality {
+        Quality::Auto | Quality::Spatial => 10_000_000,
+        Quality::Low => 96_000,
+        Quality::Standard => 192_000,
+        Quality::Higher | Quality::High => 500_000,
+        Quality::Lossless => 2_000_000,
+        Quality::Hires => 5_000_000,
+        Quality::Surround | Quality::Dolby | Quality::Master => 10_000_000,
+    })
+}
+
+fn local_content_url(identity: &SodaTrackIdentity, playback: &SodaPlayback) -> String {
+    format!(
+        "/v1/tracks/soda:{}/stream/content?quality={}&bitrate={}",
+        identity.id(),
+        quality_parameter(playback.quality),
+        playback.bitrate
+    )
+}
+
+const fn quality_parameter(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Auto => "auto",
+        Quality::Low => "low",
+        Quality::Standard => "standard",
+        Quality::Higher => "higher",
+        Quality::High => "high",
+        Quality::Lossless => "lossless",
+        Quality::Hires => "hires",
+        Quality::Surround => "surround",
+        Quality::Spatial => "spatial",
+        Quality::Dolby => "dolby",
+        Quality::Master => "master",
+    }
+}
+
+fn delivery_format(playback: &SodaPlayback) -> &'static str {
+    if playback.codec.eq_ignore_ascii_case("flac") {
+        "flac"
+    } else {
+        "m4a"
+    }
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -257,6 +435,8 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::AudioDownload,
+                Capability::AudioStream,
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::Lyrics,
@@ -266,7 +446,8 @@ mod tests {
         assert!(provider.supports(Capability::TrackDetail));
         assert!(provider.supports(Capability::Lyrics));
         assert!(provider.supports(Capability::TrackAvailability));
-        assert!(!provider.supports(Capability::AudioStream));
+        assert!(provider.supports(Capability::AudioStream));
+        assert!(provider.supports(Capability::AudioDownload));
     }
 
     #[test]
@@ -329,5 +510,54 @@ mod tests {
             .await
             .expect_err("Soda availability must reject zero bitrate");
         assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn public_media_request_maps_quality_and_builds_only_local_delivery_urls() {
+        let request = StreamRequest {
+            quality: Quality::Lossless,
+            ..StreamRequest::default()
+        };
+        assert!(validate_media_request(&request).is_ok());
+        assert_eq!(requested_media_bitrate(&request), 2_000_000);
+
+        let request = StreamRequest {
+            quality: Quality::Low,
+            bitrate: Some(123_456),
+            ..StreamRequest::default()
+        };
+        assert_eq!(requested_media_bitrate(&request), 123_456);
+
+        let identity = SodaTrackIdentity::parse("7304719759323564095").expect("Soda identity");
+        let playback = SodaPlayback {
+            preview: false,
+            preview_start_ms: None,
+            preview_duration_ms: None,
+            duration_ms: 180_822,
+            bitrate: 132_424,
+            quality: Quality::Standard,
+            codec: "aac".to_owned(),
+            size: Some(3_000_000),
+            platform_code: 10,
+            encrypted: true,
+        };
+        assert_eq!(
+            local_content_url(&identity, &playback),
+            "/v1/tracks/soda:7304719759323564095/stream/content?quality=standard&bitrate=132424"
+        );
+        assert!(!local_content_url(&identity, &playback).contains("http"));
+
+        for quality in [Quality::Surround, Quality::Dolby, Quality::Master] {
+            let request = StreamRequest {
+                quality,
+                ..StreamRequest::default()
+            };
+            assert!(validate_media_request(&request).is_err());
+        }
+        let account = StreamRequest {
+            account: Some("default".to_owned()),
+            ..StreamRequest::default()
+        };
+        assert!(validate_media_request(&account).is_err());
     }
 }
