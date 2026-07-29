@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, fmt, time::Duration};
 
-use reqwest::{Client, Proxy, StatusCode, header::CONTENT_LENGTH, redirect::Policy};
+use reqwest::{
+    Client, Proxy, StatusCode,
+    header::{CONTENT_LENGTH, LOCATION},
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
@@ -8,6 +12,11 @@ use tuneweave_core::{
     Track, TuneWeaveError,
 };
 use url::Url;
+
+use crate::identity::{
+    SodaTrackIdentity, SodaTrackIdentityInput, classify_track_identity,
+    parse_short_redirect_location,
+};
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
@@ -255,6 +264,31 @@ impl SodaClient {
             .map_err(soda_network_error)?;
         let body = read_bounded_response(response, "Soda track search").await?;
         parse_search_response(&body, cursor)
+    }
+
+    pub async fn resolve_track_identity(&self, input: &str) -> Result<SodaTrackIdentity> {
+        let short_url = match classify_track_identity(input)? {
+            SodaTrackIdentityInput::Direct(identity) => return Ok(identity),
+            SodaTrackIdentityInput::ShortLink(url) => url,
+        };
+        let response = self
+            .http
+            .head(short_url)
+            .send()
+            .await
+            .map_err(soda_network_error)?;
+        if !response.status().is_redirection() {
+            return Err(soda_upstream_error(
+                "Soda short link did not return a redirect",
+            ));
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| soda_upstream_error("Soda short link omitted its redirect location"))?;
+        parse_short_redirect_location(location)
+            .map_err(|_| soda_upstream_error("Soda short link returned an untrusted destination"))
     }
 }
 
@@ -778,6 +812,20 @@ mod tests {
             page.tracks
                 .iter()
                 .any(|track| track.resource_ref.id() == "7304719759323564095")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_official_short_link_resolves_without_following_arbitrary_redirects() {
+        let identity = SodaClient::test_client()
+            .resolve_track_identity("https://qishui.douyin.com/s/iQeFw9cE/")
+            .await
+            .expect("resolve official Soda short link");
+        assert_eq!(identity.id(), "7304719759323564095");
+        assert_eq!(
+            identity.resource_ref().expect("Soda reference").to_string(),
+            "soda:7304719759323564095"
         );
     }
 }
