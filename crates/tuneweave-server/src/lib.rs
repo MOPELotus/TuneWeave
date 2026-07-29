@@ -298,6 +298,94 @@ fn log_auth_transaction_completed(
     }
 }
 
+#[derive(Clone, Copy)]
+enum AuthOperation {
+    PasswordLogin,
+    SessionRefresh,
+    SessionLogout,
+}
+
+impl AuthOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::PasswordLogin => "password_login",
+            Self::SessionRefresh => "session_refresh",
+            Self::SessionLogout => "session_logout",
+        }
+    }
+}
+
+fn auth_operation_elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn log_auth_operation_success(
+    operation: AuthOperation,
+    platform: Platform,
+    credential_mode: CredentialMode,
+    started_at: Instant,
+    credential_removed: Option<bool>,
+    caller_discard_required: Option<bool>,
+) {
+    tracing::info!(
+        event = "auth_operation",
+        operation = operation.name(),
+        platform = %platform,
+        credential_mode = credential_mode_name(credential_mode),
+        result = "success",
+        elapsed_ms = auth_operation_elapsed_ms(started_at),
+        credential_removed_present = credential_removed.is_some(),
+        credential_removed = credential_removed.unwrap_or(false),
+        caller_discard_required_present = caller_discard_required.is_some(),
+        caller_discard_required = caller_discard_required.unwrap_or(false),
+        "TuneWeave authentication operation completed"
+    );
+}
+
+fn log_auth_operation_failure(
+    operation: AuthOperation,
+    platform: Platform,
+    credential_mode: CredentialMode,
+    started_at: Instant,
+    error: &TuneWeaveError,
+) {
+    let operation = operation.name();
+    let credential_mode = credential_mode_name(credential_mode);
+    let error_code = error.code.as_str();
+    let elapsed_ms = auth_operation_elapsed_ms(started_at);
+    if matches!(
+        error.code,
+        ErrorCode::UpstreamError
+            | ErrorCode::PlatformUnavailable
+            | ErrorCode::UpstreamTimeout
+            | ErrorCode::InternalError
+    ) {
+        tracing::error!(
+            event = "auth_operation",
+            operation,
+            platform = %platform,
+            credential_mode,
+            result = "failure",
+            error_code,
+            retryable = error.retryable,
+            elapsed_ms,
+            "TuneWeave authentication operation failed"
+        );
+    } else {
+        tracing::warn!(
+            event = "auth_operation",
+            operation,
+            platform = %platform,
+            credential_mode,
+            result = "failure",
+            error_code,
+            retryable = error.retryable,
+            elapsed_ms,
+            "TuneWeave authentication operation failed"
+        );
+    }
+}
+
 impl AuthTransactions {
     fn take_expired(
         entries: &mut HashMap<String, StoredAuthTransaction>,
@@ -12491,7 +12579,8 @@ async fn auth_password(
     let platform = parse_platform_parameter(&body.platform)?;
     let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
-    let result = provider
+    let started_at = Instant::now();
+    let result = match provider
         .password_login_with_mode(
             &PasswordLoginRequest {
                 account: account.clone(),
@@ -12503,8 +12592,41 @@ async fn auth_password(
             },
             body.credential_mode,
         )
-        .await?;
-    let data = finalize_auth_result(platform, body.credential_mode, result)?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::PasswordLogin,
+                platform,
+                body.credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    let data = match finalize_auth_result(platform, body.credential_mode, result) {
+        Ok(data) => data,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::PasswordLogin,
+                platform,
+                body.credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    log_auth_operation_success(
+        AuthOperation::PasswordLogin,
+        platform,
+        body.credential_mode,
+        started_at,
+        None,
+        None,
+    );
     Ok(auth_json_response(
         auth_api_response(data, platform, &account, body.credential_mode),
         body.credential_mode.returns_to_caller(),
@@ -12794,10 +12916,44 @@ async fn auth_session_refresh(
         credential_mode,
     )?;
     let provider = state.registry.require(platform)?;
-    let result = provider
+    let started_at = Instant::now();
+    let result = match provider
         .refresh_session_with_ownership(&account, source_credential, credential_mode)
-        .await?;
-    let data = finalize_auth_result(platform, credential_mode, result)?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::SessionRefresh,
+                platform,
+                credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    let data = match finalize_auth_result(platform, credential_mode, result) {
+        Ok(data) => data,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::SessionRefresh,
+                platform,
+                credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    log_auth_operation_success(
+        AuthOperation::SessionRefresh,
+        platform,
+        credential_mode,
+        started_at,
+        None,
+        None,
+    );
     Ok(auth_json_response(
         auth_api_response(data, platform, &account, credential_mode),
         credential_mode.returns_to_caller(),
@@ -12838,9 +12994,31 @@ async fn auth_session_delete(
         credential_mode,
     )?;
     let provider = state.registry.require(platform)?;
-    let result = provider
+    let started_at = Instant::now();
+    let result = match provider
         .logout_with_ownership(&account, source_credential, credential_mode)
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::SessionLogout,
+                platform,
+                credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    log_auth_operation_success(
+        AuthOperation::SessionLogout,
+        platform,
+        credential_mode,
+        started_at,
+        Some(result.removed),
+        Some(result.caller_credential_discard_required),
+    );
     Ok(Json(auth_api_response(
         AuthSessionDeleteData {
             removed: result.removed,
@@ -17313,6 +17491,13 @@ mod tests {
                 .expect("lock authentication transactions")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn auth_operation_names_are_stable_and_do_not_include_account_inputs() {
+        assert_eq!(AuthOperation::PasswordLogin.name(), "password_login");
+        assert_eq!(AuthOperation::SessionRefresh.name(), "session_refresh");
+        assert_eq!(AuthOperation::SessionLogout.name(), "session_logout");
     }
 
     #[async_trait]
