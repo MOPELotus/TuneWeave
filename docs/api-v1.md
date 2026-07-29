@@ -1500,6 +1500,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 汽水公开歌单使用 `GET /v1/playlists/soda:<playlist_id>` 与 `/tracks`，只接受规范正整数 ID 且不接受账户。Provider 固定调用官方匿名 HTTPS `/luna/pc/playlist/detail`，只提交 ID、原始 cursor、`count=100`、固定 `aid=386088`、`device_platform=web` 和 `channel=pc_web`；参考实现使用的 `cnt` 当前会被平台忽略并一次返回整表，因此不沿用。详情强类型保留标题、描述、可信封面、创建者显示名、可见曲数、收藏/分享/评论统计、审核状态、排序类型、创建/更新时间和原始资源数；响应必须回配同一歌单 ID，平台码 `1000005` 映射为不存在或不公开。上游 cursor 按原始位置推进，受限、删除或过滤项会造成一页少于 100 首：真实歌单的 506 个原始位置只产生 398 首可见曲，因此统一 offset 必须从起点按 cursor 顺序累计可见曲，不能直接透传，也不能按歌曲 ID 去重。每页核对可见总数、原始资源数和更新时间，cursor 必须前进且不得重复，单次统一窗口最多扫描 128 个物理页；返回曲目携带从 0 开始的稳定可见位置。`{ "platform":"soda", "type":"playlist", "id":"<playlist_id>" }` 可直接用于 Server 或 Client Uni Playlist 导入；真实验收中跨页窗口 `offset=87&limit=4` 连续返回位置 87–90，两种导入均得到完整 398 项，Client 物化只返回请求的末项位置 397 且不创建服务器记录。
 
+汽水公开专辑使用 `GET /v1/albums/soda:<album_id>` 与 `/tracks`，只接受规范正整数 ID 且不接受账户。Provider 固定访问 `https://www.qishui.com/share/album?album_id=...`，禁用重定向、限制 HTML 为 8 MiB，并以带字符串转义和 128 层深度上限的扫描器只提取 `_ROUTER_DATA` 顶层 JSON；页面的请求头、日志器和其他 SSR 元数据不会进入统一响应。专辑 ID、名称、艺人、发行公司、说明、封面、发行时间、声明曲数及每首歌曲的专辑身份均需回配，`hasError=true` 映射为资源不存在；曲目表最多 10,000 项且必须与声明曲数一致，保留原始顺序和重复项并以 `album_position` 标明零基位置。官方分享页当前返回完整专辑快照，因此统一 `limit=1..100` 与任意 offset 在验证完整快照后本地切片，不虚构上游分页。`{ "platform":"soda", "type":"album", "id":"<album_id>" }` 可作为 Uni Playlist 来源；真实 38 首专辑已通过详情、`offset=37` 末曲、Client 物化和 Server 原子持久化导入验收，导入结果完整保留 38 项及 `type=album` 来源摘要。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

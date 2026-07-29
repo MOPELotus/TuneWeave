@@ -2,14 +2,14 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{CONTENT_LENGTH, LOCATION},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor, Lyrics,
-    Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
+    Album, AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor,
+    Lyrics, Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
     TrackAvailabilityRequest, TuneWeaveError,
 };
 use url::Url;
@@ -23,6 +23,7 @@ use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decr
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
 const PLAYLIST_DETAIL_ENDPOINT: &str = "https://api.qishui.com/luna/pc/playlist/detail";
+const ALBUM_SHARE_ENDPOINT: &str = "https://www.qishui.com/share/album";
 const SODA_APP_ID: &str = "386088";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEDIA_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
@@ -77,6 +78,12 @@ pub(crate) struct SodaPlaylistPage {
     pub has_more: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct SodaAlbumPage {
+    pub album: Album,
+    pub tracks: Vec<Track>,
+}
+
 #[derive(Serialize)]
 struct SodaSearchQuery<'a> {
     q: &'a str,
@@ -101,6 +108,11 @@ struct SodaPlaylistDetailQuery<'a> {
     aid: &'static str,
     device_platform: &'static str,
     channel: &'static str,
+}
+
+#[derive(Serialize)]
+struct SodaAlbumShareQuery<'a> {
+    album_id: &'a str,
 }
 
 #[derive(Default, Deserialize)]
@@ -319,6 +331,43 @@ struct SodaPlaylistResourceEntity {
 #[serde(default)]
 struct SodaPlaylistTrackWrapper {
     track: SodaTrack,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaRouterEnvelope {
+    #[serde(rename = "loaderData")]
+    loader_data: SodaRouterLoader,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaRouterLoader {
+    album_page: SodaShareAlbumPage,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaShareAlbumPage {
+    #[serde(rename = "albumInfo")]
+    album_info: SodaAlbumMetadata,
+    #[serde(rename = "trackList")]
+    track_list: Vec<SodaTrack>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaAlbumMetadata {
+    id: String,
+    name: String,
+    artists: Vec<SodaArtist>,
+    company: String,
+    count_tracks: u64,
+    url_cover: SodaImage,
+    release_date: u64,
+    pclines: Vec<String>,
+    #[serde(rename = "hasError")]
+    has_error: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -598,6 +647,31 @@ impl SodaClient {
             .map_err(soda_network_error)?;
         let body = read_bounded_response(response, "Soda playlist detail").await?;
         parse_playlist_response(&body, playlist_id, cursor, count)
+    }
+
+    pub(crate) async fn album_page(&self, album_id: &str) -> Result<SodaAlbumPage> {
+        let response = self
+            .http
+            .get(ALBUM_SHARE_ENDPOINT)
+            .query(&SodaAlbumShareQuery { album_id })
+            .send()
+            .await
+            .map_err(soda_network_error)?;
+        if !response.status().is_success() {
+            return Err(soda_http_error(response.status()));
+        }
+        if response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.to_ascii_lowercase().starts_with("text/html"))
+        {
+            return Err(soda_upstream_error(
+                "Soda album share page returned an unexpected content type",
+            ));
+        }
+        let body = read_bounded_response(response, "Soda album share page").await?;
+        parse_album_share_page(&body, album_id)
     }
 
     async fn fetch_track_v2_body(
@@ -1046,6 +1120,205 @@ fn map_playlist(
         total,
         raw_total,
         source.update_time,
+    ))
+}
+
+fn parse_album_share_page(body: &[u8], expected_id: &str) -> Result<SodaAlbumPage> {
+    let router_json = extract_router_json(body)?;
+    let envelope: SodaRouterEnvelope = serde_json::from_slice(router_json).map_err(|_| {
+        soda_upstream_error("Soda album share page contained malformed router JSON")
+    })?;
+    let page = envelope.loader_data.album_page;
+    if page.album_info.has_error {
+        return Err(TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Soda album was not found or is not public",
+        )
+        .with_platform(Platform::Soda));
+    }
+    if page.track_list.len() > 10_000 {
+        return Err(soda_upstream_error(
+            "Soda album share page exceeded the track safety limit",
+        ));
+    }
+    let actual_track_count = u64::try_from(page.track_list.len()).unwrap_or(u64::MAX);
+    let album = map_album_metadata(&page.album_info, expected_id, actual_track_count)?;
+    let mut tracks = Vec::with_capacity(page.track_list.len());
+    for (position, mut source) in page.track_list.into_iter().enumerate() {
+        if source.album.id.trim().is_empty() {
+            source.album.id = expected_id.to_owned();
+        } else if canonical_positive_decimal(&source.album.id) != Some(expected_id) {
+            return Err(soda_upstream_error(
+                "Soda album share page returned a track from a different album",
+            ));
+        }
+        if source.album.name.trim().is_empty() {
+            source.album.name.clone_from(&page.album_info.name);
+        }
+        if normalize_image(&source.album.url_cover).is_none() {
+            source
+                .album
+                .url_cover
+                .clone_from(&page.album_info.url_cover);
+        }
+        if source.album.release_date <= 0 && page.album_info.release_date > 0 {
+            source.album.release_date = i64::try_from(page.album_info.release_date)
+                .map_err(|_| soda_upstream_error("Soda album release date was out of range"))?;
+        }
+        if source.artists.is_empty() {
+            source.artists.clone_from(&page.album_info.artists);
+        }
+        let mut track = map_track(source, "official_web_album_share")?;
+        track.extensions.insert(
+            "album_position".to_owned(),
+            json!(u64::try_from(position).unwrap_or(u64::MAX)),
+        );
+        tracks.push(track);
+    }
+    Ok(SodaAlbumPage { album, tracks })
+}
+
+fn map_album_metadata(
+    source: &SodaAlbumMetadata,
+    expected_id: &str,
+    actual_track_count: u64,
+) -> Result<Album> {
+    let album_id = canonical_positive_decimal(&source.id)
+        .filter(|id| *id == expected_id)
+        .ok_or_else(|| {
+            soda_upstream_error("Soda album share page returned a mismatched album identity")
+        })?;
+    let name = source.name.trim();
+    let lines = source
+        .pclines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let description = lines.join("\n");
+    if name.is_empty()
+        || name.len() > 1_000
+        || source.company.len() > 4_000
+        || source.artists.len() > 128
+        || source.pclines.len() > 256
+        || source.pclines.iter().any(|line| line.len() > 4_000)
+        || description.len() > 64 * 1024
+        || source.count_tracks > 10_000
+        || source.count_tracks != actual_track_count
+        || source.release_date > 4_102_444_800
+        || source.artists.iter().any(|artist| {
+            artist.name.len() > 1_000
+                || artist.simple_display_name.len() > 1_000
+                || (!artist.id.trim().is_empty()
+                    && canonical_positive_decimal(&artist.id).is_none())
+        })
+    {
+        return Err(soda_upstream_error(
+            "Soda album share page returned invalid album metadata",
+        ));
+    }
+    let resource_ref = ResourceRef::new(Platform::Soda, album_id)
+        .map_err(|_| soda_upstream_error("Soda album identity could not be normalized"))?;
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_web_album_share"));
+    extensions.insert(
+        "canonical_share_url".to_owned(),
+        json!(format!(
+            "https://www.qishui.com/share/album?album_id={album_id}"
+        )),
+    );
+    if source.release_date > 0 {
+        extensions.insert(
+            "release_date_epoch_seconds".to_owned(),
+            json!(source.release_date),
+        );
+    }
+    if !source.pclines.is_empty() {
+        extensions.insert("description_lines".to_owned(), json!(source.pclines));
+    }
+    let company = bounded_text(&source.company, 4_000);
+    Ok(Album {
+        resource_ref,
+        platform: Platform::Soda,
+        id: album_id.to_owned(),
+        name: name.to_owned(),
+        aliases: Vec::new(),
+        artists: source
+            .artists
+            .iter()
+            .filter_map(map_artist_summary)
+            .collect(),
+        description: if description.is_empty() {
+            company.clone().unwrap_or_default()
+        } else {
+            description
+        },
+        cover_url: normalize_image(&source.url_cover),
+        published_at: (source.release_date > 0)
+            .then(|| unix_rfc3339(source.release_date))
+            .flatten(),
+        track_count: Some(actual_track_count),
+        company,
+        kind: None,
+        extensions,
+    })
+}
+
+fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
+    const MARKER: &[u8] = b"_ROUTER_DATA = ";
+    let marker_start = body
+        .windows(MARKER.len())
+        .position(|window| window == MARKER)
+        .ok_or_else(|| soda_upstream_error("Soda album share page omitted its router data"))?;
+    let mut start = marker_start.saturating_add(MARKER.len());
+    while body.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start = start.saturating_add(1);
+    }
+    if body.get(start) != Some(&b'{') {
+        return Err(soda_upstream_error(
+            "Soda album share page contained invalid router data",
+        ));
+    }
+
+    let mut depth = 0_u16;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (relative, byte) in body[start..].iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => {
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    soda_upstream_error("Soda album router data nested too deeply")
+                })?;
+                if depth > 128 {
+                    return Err(soda_upstream_error(
+                        "Soda album router data nested too deeply",
+                    ));
+                }
+            }
+            b'}' => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    soda_upstream_error("Soda album router data closed unexpectedly")
+                })?;
+                if depth == 0 {
+                    return Ok(&body[start..=start.saturating_add(relative)]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(soda_upstream_error(
+        "Soda album share page contained incomplete router data",
     ))
 }
 
@@ -1989,6 +2262,33 @@ fn canonical_nonnegative_decimal(value: &str) -> Option<&str> {
     .then_some(value)
 }
 
+fn unix_rfc3339(timestamp: u64) -> Option<String> {
+    let days = i64::try_from(timestamp / 86_400).ok()?;
+    let seconds = timestamp % 86_400;
+    let shifted_days = days.checked_add(719_468)?;
+    let era = shifted_days / 146_097;
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
 async fn read_bounded_response(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
     let mut response = response;
     let status = response.status();
@@ -2468,6 +2768,41 @@ mod tests {
         .expect("serialize playlist fixture")
     }
 
+    fn album_fixture(has_error: bool) -> Vec<u8> {
+        let detail: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        let mut track = detail["track"].clone();
+        track["album"]["id"] = json!("7528799183039825936");
+        track["album"]["name"] = json!("通俗说唱");
+        track["album"]["release_date"] = json!(1_752_969_600_u64);
+        let router = json!({
+            "loaderData": {
+                "album_page": {
+                    "albumInfo": {
+                        "id": "7528799183039825936",
+                        "name": "通俗说唱",
+                        "artists": [{
+                            "id": "6795393014723250177",
+                            "name": "专辑艺人"
+                        }],
+                        "company": "发行公司",
+                        "count_tracks": 2,
+                        "url_cover": track["album"]["url_cover"].clone(),
+                        "release_date": 1_752_969_600_u64,
+                        "pclines": ["第一行包含 } 和引号 \"", "第二行"],
+                        "hasError": has_error
+                    },
+                    "trackList": [track.clone(), track]
+                }
+            }
+        });
+        format!(
+            "<!doctype html><script>const before = {{safe: true}}; _ROUTER_DATA = {}; const after = 1;</script>",
+            serde_json::to_string(&router).expect("serialize album router fixture")
+        )
+        .into_bytes()
+    }
+
     #[test]
     fn availability_distinguishes_full_media_from_preview_and_hides_crypto_material() {
         let identity =
@@ -2568,6 +2903,61 @@ mod tests {
     }
 
     #[test]
+    fn album_page_maps_complete_ordered_snapshot_without_leaking_page_metadata() {
+        let page = parse_album_share_page(&album_fixture(false), "7528799183039825936")
+            .expect("parse Soda album share page");
+        assert_eq!(
+            page.album.resource_ref.to_string(),
+            "soda:7528799183039825936"
+        );
+        assert_eq!(page.album.name, "通俗说唱");
+        assert_eq!(page.album.description, "第一行包含 } 和引号 \"\n第二行");
+        assert_eq!(page.album.company.as_deref(), Some("发行公司"));
+        assert_eq!(
+            page.album.published_at.as_deref(),
+            Some("2025-07-20T00:00:00Z")
+        );
+        assert_eq!(page.album.track_count, Some(2));
+        assert_eq!(page.album.artists[0].name, "专辑艺人");
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(page.tracks[0].resource_ref, page.tracks[1].resource_ref);
+        assert_eq!(page.tracks[0].extensions["album_position"], 0);
+        assert_eq!(page.tracks[1].extensions["album_position"], 1);
+        assert_eq!(
+            page.tracks[0]
+                .album
+                .as_ref()
+                .and_then(|album| album.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("soda:7528799183039825936")
+        );
+        let serialized = serde_json::to_string(&page.album).expect("serialize Soda album");
+        assert!(!serialized.contains("loaderData"));
+        assert!(!serialized.contains("const before"));
+    }
+
+    #[test]
+    fn album_page_rejects_missing_identity_count_track_and_router_drift() {
+        assert!(parse_album_share_page(&album_fixture(false), "1").is_err());
+
+        let source = String::from_utf8(album_fixture(false)).expect("album fixture UTF-8");
+        let count_drift = source.replacen("\"count_tracks\":2", "\"count_tracks\":3", 1);
+        assert!(parse_album_share_page(count_drift.as_bytes(), "7528799183039825936").is_err());
+        let track_drift = source.replace(
+            "\"album\":{\"id\":\"7528799183039825936\"",
+            "\"album\":{\"id\":\"7528799183039825937\"",
+        );
+        assert!(parse_album_share_page(track_drift.as_bytes(), "7528799183039825936").is_err());
+
+        let missing = parse_album_share_page(&album_fixture(true), "7528799183039825936")
+            .expect_err("missing Soda album");
+        assert_eq!(missing.code, ErrorCode::ResourceNotFound);
+        assert!(parse_album_share_page(b"<html>no router data</html>", "1").is_err());
+        assert!(extract_router_json(b"_ROUTER_DATA = {\"open\":true").is_err());
+    }
+
+    #[test]
     fn availability_rejects_untrusted_media_identity_encryption_and_expiry() {
         let identity =
             SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
@@ -2642,6 +3032,13 @@ mod tests {
         assert!(matches!(endpoint.port(), None | Some(443)));
         assert!(endpoint.query().is_none());
         assert!(endpoint.fragment().is_none());
+        let album_endpoint = Url::parse(ALBUM_SHARE_ENDPOINT).expect("fixed Soda album endpoint");
+        assert_eq!(album_endpoint.scheme(), "https");
+        assert_eq!(album_endpoint.host_str(), Some("www.qishui.com"));
+        assert_eq!(album_endpoint.path(), "/share/album");
+        assert!(matches!(album_endpoint.port(), None | Some(443)));
+        assert!(album_endpoint.query().is_none());
+        assert!(album_endpoint.fragment().is_none());
         assert_eq!(MAX_API_RESPONSE_BYTES, 8 * 1024 * 1024);
 
         let config = SodaConfig {
@@ -2887,6 +3284,29 @@ mod tests {
             assert!(content.bytes.len() > 100_000);
             assert!(content.filename.ends_with(".m4a"));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_public_album_returns_a_complete_ordered_snapshot() {
+        let page = SodaClient::test_client()
+            .album_page("6696408018612914177")
+            .await
+            .expect("live Soda album page");
+        assert_eq!(page.album.id, "6696408018612914177");
+        assert_eq!(page.album.track_count, Some(38));
+        assert_eq!(page.tracks.len(), 38);
+        assert!(page.tracks.iter().enumerate().all(|(position, track)| {
+            track.platform == Platform::Soda
+                && track.extensions["album_position"]
+                    == json!(u64::try_from(position).unwrap_or(u64::MAX))
+                && track.album.as_ref().is_some_and(|album| {
+                    album.resource_ref.as_ref().is_some_and(|reference| {
+                        reference.platform() == Platform::Soda
+                            && reference.id() == "6696408018612914177"
+                    })
+                })
+        }));
     }
 
     #[tokio::test]

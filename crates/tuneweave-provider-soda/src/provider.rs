@@ -6,10 +6,10 @@ use std::{
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    AudioContent, Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
-    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, Quality, Result, SearchKind,
-    SearchQuery, SearchVariant, StreamRequest, StreamVariant, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
+    Album, AudioContent, Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
+    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, PlaylistPlayableItem, Quality,
+    Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, StreamVariant, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
@@ -59,6 +59,7 @@ impl MusicProvider for SodaProvider {
 
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::AlbumDetail,
             Capability::AudioDownload,
             Capability::AudioStream,
             Capability::PlaylistRead,
@@ -252,6 +253,23 @@ impl MusicProvider for SodaProvider {
         })
     }
 
+    async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
+        if account.is_some() {
+            return Err(soda_invalid_request(
+                "Soda public albums do not accept an account",
+            ));
+        }
+        let album_id = parse_album_id(id)?;
+        Ok(self.client.album_page(album_id).await?.album)
+    }
+
+    async fn album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let album_id = parse_album_id(id)?;
+        validate_album_page(request)?;
+        let page = self.client.album_page(album_id).await?;
+        Ok(soda_album_track_page(page.tracks, request))
+    }
+
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
         if account.is_some() {
             return Err(soda_invalid_request(
@@ -355,6 +373,100 @@ impl MusicProvider for SodaProvider {
             raw_total,
         ))
     }
+
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        match source_type {
+            "playlist" => self.playlist(id, account).await,
+            "album" => Ok(album_as_playlist(self.album(id, account).await?)),
+            _ => Err(unsupported_soda_playlist_source_type(source_type)),
+        }
+    }
+
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        let page = match source_type {
+            "playlist" => self.playlist_tracks(id, request).await?,
+            "album" => self.album_tracks(id, request).await?,
+            _ => return Err(unsupported_soda_playlist_source_type(source_type)),
+        };
+        Ok(Page {
+            items: page
+                .items
+                .into_iter()
+                .map(PlaylistPlayableItem::Track)
+                .collect(),
+            pagination: page.pagination,
+        })
+    }
+}
+
+fn soda_album_track_page(tracks: Vec<Track>, request: &PageRequest) -> Page<Track> {
+    let total = u64::try_from(tracks.len()).unwrap_or(u64::MAX);
+    let start = usize::try_from(request.offset)
+        .unwrap_or(usize::MAX)
+        .min(tracks.len());
+    let items = tracks
+        .into_iter()
+        .skip(start)
+        .take(usize::try_from(request.limit).unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    let returned = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let consumed = request.offset.saturating_add(returned);
+    let has_more = u64::from(consumed) < total;
+    Page {
+        items,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(total),
+            next_offset: (has_more && returned > 0).then_some(consumed),
+            has_more,
+            extensions: Extensions::from([
+                ("backend".to_owned(), json!("official_web_album_share")),
+                ("complete_snapshot".to_owned(), json!(true)),
+            ]),
+        },
+    }
+}
+
+fn album_as_playlist(album: Album) -> Playlist {
+    let creator = album.artists.first().cloned();
+    let mut extensions = album.extensions;
+    extensions.insert("source_type".to_owned(), json!("album"));
+    extensions.insert("album_artists".to_owned(), json!(album.artists));
+    if let Some(value) = album.published_at {
+        extensions.insert("published_at".to_owned(), json!(value));
+    }
+    if let Some(value) = album.company {
+        extensions.insert("company".to_owned(), json!(value));
+    }
+    if let Some(value) = album.kind {
+        extensions.insert("album_kind".to_owned(), json!(value));
+    }
+    Playlist {
+        resource_ref: album.resource_ref,
+        platform: album.platform,
+        id: album.id,
+        name: album.name,
+        description: album.description,
+        cover_url: album.cover_url,
+        creator,
+        track_count: album.track_count,
+        tags: Vec::new(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    }
 }
 
 fn soda_playlist_page(
@@ -404,6 +516,18 @@ fn parse_playlist_id(id: &str) -> Result<&str> {
     Ok(id)
 }
 
+fn parse_album_id(id: &str) -> Result<&str> {
+    let parsed = id
+        .parse::<u64>()
+        .map_err(|_| soda_invalid_request("Soda album ID must be a canonical positive integer"))?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(soda_invalid_request(
+            "Soda album ID must be a canonical positive integer",
+        ));
+    }
+    Ok(id)
+}
+
 fn validate_playlist_page(request: &PageRequest) -> Result<()> {
     if request.account.is_some() {
         return Err(soda_invalid_request(
@@ -416,6 +540,29 @@ fn validate_playlist_page(request: &PageRequest) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_album_page(request: &PageRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public albums do not accept an account",
+        ));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(soda_invalid_request(
+            "Soda album limit must be between 1 and 100",
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_soda_playlist_source_type(source_type: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        tuneweave_core::ErrorCode::CapabilityNotSupported,
+        format!("Soda does not support playlist source type {source_type}"),
+    )
+    .with_platform(Platform::Soda)
+    .with_details(json!({ "source_type": source_type }))
 }
 
 fn canonical_media_identity(track: &Track) -> Result<SodaTrackIdentity> {
@@ -603,6 +750,7 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::AlbumDetail,
                 Capability::AudioDownload,
                 Capability::AudioStream,
                 Capability::PlaylistRead,
@@ -618,6 +766,7 @@ mod tests {
         assert!(provider.supports(Capability::AudioStream));
         assert!(provider.supports(Capability::AudioDownload));
         assert!(provider.supports(Capability::PlaylistRead));
+        assert!(provider.supports(Capability::AlbumDetail));
     }
 
     #[test]
@@ -758,5 +907,54 @@ mod tests {
             page.pagination.extensions["upstream_raw_resource_count"],
             506
         );
+    }
+
+    #[test]
+    fn public_albums_require_canonical_ids_and_support_album_import_pages() {
+        assert_eq!(
+            parse_album_id("7528799183039825936").expect("album ID"),
+            "7528799183039825936"
+        );
+        for value in ["", "0", "01", "-1", "album:1", "1/path", " 1"] {
+            assert!(parse_album_id(value).is_err(), "{value:?} must fail");
+        }
+
+        assert!(validate_album_page(&PageRequest::new(100, 0)).is_ok());
+        assert!(validate_album_page(&PageRequest::new(0, 0)).is_err());
+        assert!(validate_album_page(&PageRequest::new(101, 0)).is_err());
+        let account = PageRequest {
+            account: Some("default".to_owned()),
+            ..PageRequest::new(20, 0)
+        };
+        assert!(validate_album_page(&account).is_err());
+
+        let tracks = (0..3)
+            .map(|index| {
+                Track::new(
+                    tuneweave_core::ResourceRef::new(
+                        Platform::Soda,
+                        format!("75287991830398259{index:02}"),
+                    )
+                    .expect("track ref"),
+                    format!("Track {index}"),
+                )
+            })
+            .collect();
+        let page = soda_album_track_page(tracks, &PageRequest::new(2, 1));
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.pagination.total, Some(3));
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, None);
+        assert_eq!(
+            page.pagination.extensions["backend"],
+            "official_web_album_share"
+        );
+
+        let error = unsupported_soda_playlist_source_type("favorite_tracks");
+        assert_eq!(
+            error.code,
+            tuneweave_core::ErrorCode::CapabilityNotSupported
+        );
+        assert_eq!(error.details["source_type"], "favorite_tracks");
     }
 }
