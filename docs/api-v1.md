@@ -1619,6 +1619,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 
 | 方法 | 端点 | 主要输入 | `data` |
 | --- | --- | --- | --- |
+| GET | `/v1/uni/playlists` | `limit?`、`offset?` | 分页服务端 `UniPlaylist[]` 目录，不内联项目 |
 | POST | `/v1/uni/playlists` | JSON `{name, description?}` | 新建的空 `UniPlaylist` |
 | POST | `/v1/uni/playlists/imports` | JSON `{name?, description?, sources:[{ref?, platform?, type?, id?, account?}]}` | `UniPlaylistImportResult`，完整分页后原子创建的多来源合并歌单 |
 | GET | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | 持久化的 `UniPlaylist` 元数据 |
@@ -1627,7 +1628,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 | DELETE | `/v1/uni/playlists/{ref}/items/{item_id}` | 稳定的单次出现项目 ID | `UniPlaylistItemDeleteResult`，仅删除该项目并重编号后续位置 |
 | PATCH | `/v1/uni/playlists/{ref}/items/order` | JSON `{item_ids:[...]}` | `UniPlaylistItemOrderResult`，原子提交完整显式顺序 |
 
-`UniPlaylist` 使用独立 `uni:` 命名空间，不归属于网易云等外部 provider。稳定字段包含同值的 `ref/platform/id` 身份、名称、描述、`item_count` 以及毫秒级 `created_at_ms/updated_at_ms`；新建歌单的项目数为 0。名称去除首尾空白后必须为 1–200 字节，描述去除首尾空白后最多 4000 字节，未知 JSON 或查询字段会被拒绝。`GET` 必须提交完整引用，错误平台、畸形 ID 和不存在的歌单分别返回统一错误包络。
+`UniPlaylist` 使用独立 `uni:` 命名空间，不归属于网易云等外部 provider。稳定字段包含同值的 `ref/platform/id` 身份、名称、描述、`item_count` 以及毫秒级 `created_at_ms/updated_at_ms`；新建歌单的项目数为 0。名称去除首尾空白后必须为 1–200 字节，描述去除首尾空白后最多 4000 字节，未知 JSON 或查询字段会被拒绝。目录默认 `limit=50/offset=0`，限制 1–100 项，按不可变 `created_at_ms` 降序并以 ID 升序打破同时间并列；响应包含真实 `total/next_offset/has_more`，不为目录项复制完整项目列表。单项 `GET` 必须提交完整引用，错误平台、畸形 ID 和不存在的歌单分别返回统一错误包络。
 
 生产服务把数据保存到 `TUNEWEAVE_DATA_DIR/uni-playlists.json`，与 `accounts` 凭据目录分离。文件后端在内存维护已验证快照，创建时在同目录写入并同步临时文件后发布；Unix 使用原子替换，Windows 使用可在下次启动恢复的同目录备份切换。未知数据库版本或畸形记录会阻止启动而不会被静默覆盖。该文件只保存歌单结构与后续的必要元数据快照，不保存媒体字节或平台凭据。
 

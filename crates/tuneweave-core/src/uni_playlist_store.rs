@@ -26,6 +26,7 @@ pub trait UniPlaylistStore: Send + Sync {
     fn create(&self, playlist: &UniPlaylist) -> Result<()>;
     fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<UniPlaylist>>;
+    fn playlists(&self, limit: u32, offset: u32) -> Result<Page<UniPlaylist>>;
     fn append_items(
         &self,
         playlist_id: &str,
@@ -94,6 +95,14 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .playlists
             .get(id)
             .cloned())
+    }
+
+    fn playlists(&self, limit: u32, offset: u32) -> Result<Page<UniPlaylist>> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_page(&database, limit, offset)
     }
 
     fn append_items(
@@ -220,6 +229,14 @@ impl UniPlaylistStore for FileUniPlaylistStore {
             .cloned())
     }
 
+    fn playlists(&self, limit: u32, offset: u32) -> Result<Page<UniPlaylist>> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_page(&database, limit, offset)
+    }
+
     fn append_items(
         &self,
         playlist_id: &str,
@@ -305,6 +322,45 @@ impl Default for UniPlaylistDatabase {
             items: BTreeMap::new(),
         }
     }
+}
+
+fn playlist_page(
+    database: &UniPlaylistDatabase,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<UniPlaylist>> {
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist directory limit must be between 1 and 100",
+        ));
+    }
+    let mut playlists = database.playlists.values().cloned().collect::<Vec<_>>();
+    playlists.sort_by(|left, right| {
+        right
+            .created_at_ms
+            .cmp(&left.created_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let total = u64::try_from(playlists.len()).unwrap_or(u64::MAX);
+    let items = playlists
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect::<Vec<_>>();
+    let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    let candidate_next = offset.saturating_add(consumed);
+    let has_more = u64::from(candidate_next) < total;
+    Ok(Page {
+        items,
+        pagination: PageMeta {
+            limit,
+            offset,
+            total: Some(total),
+            next_offset: has_more.then_some(candidate_next),
+            has_more,
+            extensions: Extensions::from([("sort".to_owned(), json!("created_at_desc_id_asc"))]),
+        },
+    })
 }
 
 fn append_items_to_database(
@@ -960,6 +1016,63 @@ mod tests {
     }
 
     #[test]
+    fn playlist_directory_is_stable_paginated_and_does_not_inline_items() {
+        let store = MemoryUniPlaylistStore::default();
+        let oldest = sample_playlist("pl_01abcdefghijklmnop");
+        let mut newest_first = sample_playlist("pl_02abcdefghijklmnop");
+        newest_first.created_at_ms += 1_000;
+        newest_first.updated_at_ms = newest_first.created_at_ms;
+        let mut newest_second = sample_playlist("pl_03abcdefghijklmnop");
+        newest_second.created_at_ms = newest_first.created_at_ms;
+        newest_second.updated_at_ms = newest_second.created_at_ms;
+        for playlist in [&oldest, &newest_second, &newest_first] {
+            store.create(playlist).expect("create directory playlist");
+        }
+        store
+            .append_items(
+                &newest_first.id,
+                &[sample_item(
+                    "item_01abcdefghijklmnop",
+                    "185809",
+                    newest_first.created_at_ms + 100,
+                )],
+            )
+            .expect("append item without changing creation order");
+
+        let first_page = store.playlists(2, 0).expect("first directory page");
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .map(|playlist| playlist.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![newest_first.id.as_str(), newest_second.id.as_str()]
+        );
+        assert_eq!(first_page.items[0].item_count, 1);
+        assert_eq!(first_page.pagination.total, Some(3));
+        assert_eq!(first_page.pagination.next_offset, Some(2));
+        assert!(first_page.pagination.has_more);
+        assert_eq!(
+            first_page.pagination.extensions["sort"],
+            "created_at_desc_id_asc"
+        );
+
+        let second_page = store.playlists(2, 2).expect("second directory page");
+        assert_eq!(second_page.items, vec![oldest]);
+        assert!(!second_page.pagination.has_more);
+        assert_eq!(second_page.pagination.next_offset, None);
+        for limit in [0, 101] {
+            assert_eq!(
+                store
+                    .playlists(limit, 0)
+                    .expect_err("reject invalid directory limit")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
     fn imported_playlist_and_items_are_created_as_one_validated_unit() {
         let store = MemoryUniPlaylistStore::default();
         let mut playlist = sample_playlist("pl_01abcdefghijklmnop");
@@ -1194,6 +1307,18 @@ mod tests {
                     position: 1,
                     ..second
                 },
+            ]
+        );
+        assert_eq!(
+            reopened
+                .playlists(100, 0)
+                .expect("reload playlist directory")
+                .items,
+            vec![
+                reopened
+                    .get(&playlist.id)
+                    .expect("read reloaded playlist")
+                    .expect("stored playlist")
             ]
         );
     }

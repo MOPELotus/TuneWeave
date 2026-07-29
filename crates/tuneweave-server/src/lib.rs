@@ -646,7 +646,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
-        .route("/uni/playlists", post(uni_playlist_create))
+        .route(
+            "/uni/playlists",
+            get(uni_playlists).post(uni_playlist_create),
+        )
         .route("/uni/playlists/imports", post(uni_playlist_import))
         .route(
             "/uni/playlists/{reference}/items",
@@ -6399,6 +6402,21 @@ async fn uni_playlist(
     })?;
     Ok(Json(
         ApiResponse::new(playlist).with_platform(Platform::Uni),
+    ))
+}
+
+async fn uni_playlists(
+    State(state): State<AppState>,
+    params: Result<Query<UniPlaylistItemsQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<UniPlaylist>>>, ApiError> {
+    let params = query_params(params)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 50)?;
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let page = state.uni_playlists.playlists(limit, offset)?;
+    Ok(Json(
+        ApiResponse::new(page.items)
+            .with_platform(Platform::Uni)
+            .with_pagination(page.pagination),
     ))
 }
 
@@ -29630,6 +29648,83 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(loaded["data"], created["data"]);
         assert_eq!(loaded["meta"]["platform"], "uni");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_directory_is_paginated_without_inlining_items() {
+        let store = Arc::new(MemoryUniPlaylistStore::default());
+        let oldest = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_01abcdefghijklmnop").expect("oldest playlist ref"),
+            "旧歌单",
+            "最早创建",
+            1_753_137_600_000,
+        );
+        let newest_first = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_02abcdefghijklmnop")
+                .expect("first newest playlist ref"),
+            "新歌单 A",
+            "同时间按 ID 排序",
+            1_753_137_601_000,
+        );
+        let newest_second = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_03abcdefghijklmnop")
+                .expect("second newest playlist ref"),
+            "新歌单 B",
+            "同时间按 ID 排序",
+            1_753_137_601_000,
+        );
+        for playlist in [&oldest, &newest_second, &newest_first] {
+            store.create(playlist).expect("create directory playlist");
+        }
+        let mut registry = ProviderRegistry::new();
+        registry.register(TestProvider).expect("register provider");
+        let app = build_router(
+            AppState::new(registry, Platform::Netease).with_uni_playlist_store(store.clone()),
+        );
+
+        let (status, first_page) =
+            json_response_from(app.clone(), "/v1/uni/playlists?limit=2&offset=0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            first_page["data"][0]["ref"],
+            newest_first.resource_ref.to_string()
+        );
+        assert_eq!(
+            first_page["data"][1]["ref"],
+            newest_second.resource_ref.to_string()
+        );
+        assert!(first_page["data"][0].get("items").is_none());
+        assert_eq!(first_page["meta"]["platform"], "uni");
+        assert_eq!(first_page["meta"]["pagination"]["total"], 3);
+        assert_eq!(first_page["meta"]["pagination"]["next_offset"], 2);
+        assert_eq!(first_page["meta"]["pagination"]["has_more"], true);
+        assert_eq!(
+            first_page["meta"]["pagination"]["extensions"]["sort"],
+            "created_at_desc_id_asc"
+        );
+
+        let (status, second_page) =
+            json_response_from(app.clone(), "/v1/uni/playlists?limit=2&offset=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second_page["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            second_page["data"][0]["ref"],
+            oldest.resource_ref.to_string()
+        );
+        assert_eq!(second_page["meta"]["pagination"]["has_more"], false);
+        assert!(second_page["meta"]["pagination"]["next_offset"].is_null());
+
+        for path in [
+            "/v1/uni/playlists?limit=0",
+            "/v1/uni/playlists?limit=101",
+            "/v1/uni/playlists?offset=-1",
+            "/v1/uni/playlists?unknown=true",
+        ] {
+            let (status, response) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]
