@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     AudioContent, Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
-    MusicProvider, Page, PageMeta, Platform, Quality, Result, SearchKind, SearchQuery,
-    SearchVariant, StreamRequest, StreamVariant, Track, TrackAvailability,
+    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, Quality, Result, SearchKind,
+    SearchQuery, SearchVariant, StreamRequest, StreamVariant, Track, TrackAvailability,
     TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 
@@ -18,6 +18,8 @@ use crate::{
 };
 
 const MAX_UPSTREAM_PAGES_PER_SEARCH: u32 = 6;
+const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
+const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 128;
 
 #[derive(Clone)]
 pub struct SodaProvider {
@@ -59,6 +61,7 @@ impl MusicProvider for SodaProvider {
         BTreeSet::from([
             Capability::AudioDownload,
             Capability::AudioStream,
+            Capability::PlaylistRead,
             Capability::SearchTracks,
             Capability::TrackDetail,
             Capability::Lyrics,
@@ -248,6 +251,171 @@ impl MusicProvider for SodaProvider {
             extensions,
         })
     }
+
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        if account.is_some() {
+            return Err(soda_invalid_request(
+                "Soda public playlists do not accept an account",
+            ));
+        }
+        let playlist_id = parse_playlist_id(id)?;
+        Ok(self.client.playlist_page(playlist_id, 0, 1).await?.playlist)
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let playlist_id = parse_playlist_id(id)?;
+        validate_playlist_page(request)?;
+        let requested = usize::try_from(request.limit)
+            .map_err(|_| soda_invalid_request("Soda playlist limit is too large"))?;
+        let requested_start = u64::from(request.offset);
+        let requested_end = requested_start
+            .checked_add(u64::from(request.limit))
+            .ok_or_else(|| soda_invalid_request("Soda playlist window overflowed"))?;
+        let mut cursor = 0_u64;
+        let mut seen_cursors = BTreeSet::new();
+        let mut snapshot = None;
+        let mut visible_position = 0_u64;
+        let mut tracks = Vec::with_capacity(requested);
+        let mut pages_fetched = 0_u32;
+
+        loop {
+            if pages_fetched >= MAX_UPSTREAM_PLAYLIST_PAGES {
+                return Err(soda_upstream_error(
+                    "Soda playlist exceeded the bounded upstream page count",
+                ));
+            }
+            if !seen_cursors.insert(cursor) {
+                return Err(soda_upstream_error(
+                    "Soda playlist repeated an upstream cursor",
+                ));
+            }
+            let page = self
+                .client
+                .playlist_page(playlist_id, cursor, UPSTREAM_PLAYLIST_PAGE_SIZE)
+                .await?;
+            pages_fetched = pages_fetched.saturating_add(1);
+            let current_snapshot = (page.total, page.raw_total, page.updated_at);
+            if let Some(expected) = snapshot {
+                if current_snapshot != expected {
+                    return Err(soda_upstream_error(
+                        "Soda playlist changed during pagination",
+                    ));
+                }
+            } else {
+                snapshot = Some(current_snapshot);
+                if requested_start >= page.total {
+                    return Ok(soda_playlist_page(
+                        Vec::new(),
+                        request,
+                        page.total,
+                        pages_fetched,
+                        cursor,
+                        page.raw_total,
+                    ));
+                }
+            }
+
+            for mut track in page.tracks {
+                if visible_position >= requested_start && tracks.len() < requested {
+                    track
+                        .extensions
+                        .insert("playlist_position".to_owned(), json!(visible_position));
+                    tracks.push(track);
+                }
+                visible_position = visible_position.checked_add(1).ok_or_else(|| {
+                    soda_upstream_error("Soda playlist visible position overflowed")
+                })?;
+            }
+            if tracks.len() == requested || visible_position >= page.total {
+                break;
+            }
+            if !page.has_more {
+                return Err(soda_upstream_error(
+                    "Soda playlist pagination ended before its visible track total",
+                ));
+            }
+            cursor = page
+                .next_cursor
+                .ok_or_else(|| soda_upstream_error("Soda playlist continuation cursor was lost"))?;
+        }
+
+        let (total, raw_total, _) = snapshot
+            .ok_or_else(|| soda_upstream_error("Soda playlist snapshot was not established"))?;
+        if visible_position < total.min(requested_end) {
+            return Err(soda_upstream_error(
+                "Soda playlist pagination ended before the requested window",
+            ));
+        }
+        Ok(soda_playlist_page(
+            tracks,
+            request,
+            total,
+            pages_fetched,
+            cursor,
+            raw_total,
+        ))
+    }
+}
+
+fn soda_playlist_page(
+    tracks: Vec<Track>,
+    request: &PageRequest,
+    total: u64,
+    pages_fetched: u32,
+    final_cursor: u64,
+    raw_total: Option<u64>,
+) -> Page<Track> {
+    let returned = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+    let consumed = request.offset.saturating_add(returned);
+    let has_more = u64::from(consumed) < total;
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_pc_playlist_detail"));
+    extensions.insert(
+        "upstream_page_size".to_owned(),
+        json!(UPSTREAM_PLAYLIST_PAGE_SIZE),
+    );
+    extensions.insert("upstream_pages_fetched".to_owned(), json!(pages_fetched));
+    extensions.insert("upstream_final_cursor".to_owned(), json!(final_cursor));
+    if let Some(value) = raw_total {
+        extensions.insert("upstream_raw_resource_count".to_owned(), json!(value));
+    }
+    Page {
+        items: tracks,
+        pagination: PageMeta {
+            limit: request.limit,
+            offset: request.offset,
+            total: Some(total),
+            next_offset: (has_more && returned > 0).then_some(consumed),
+            has_more,
+            extensions,
+        },
+    }
+}
+
+fn parse_playlist_id(id: &str) -> Result<&str> {
+    let parsed = id.parse::<u64>().map_err(|_| {
+        soda_invalid_request("Soda playlist ID must be a canonical positive integer")
+    })?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(soda_invalid_request(
+            "Soda playlist ID must be a canonical positive integer",
+        ));
+    }
+    Ok(id)
+}
+
+fn validate_playlist_page(request: &PageRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public playlists do not accept an account",
+        ));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(soda_invalid_request(
+            "Soda playlist limit must be between 1 and 100",
+        ));
+    }
+    Ok(())
 }
 
 fn canonical_media_identity(track: &Track) -> Result<SodaTrackIdentity> {
@@ -437,6 +605,7 @@ mod tests {
             BTreeSet::from([
                 Capability::AudioDownload,
                 Capability::AudioStream,
+                Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::TrackDetail,
                 Capability::Lyrics,
@@ -448,6 +617,7 @@ mod tests {
         assert!(provider.supports(Capability::TrackAvailability));
         assert!(provider.supports(Capability::AudioStream));
         assert!(provider.supports(Capability::AudioDownload));
+        assert!(provider.supports(Capability::PlaylistRead));
     }
 
     #[test]
@@ -559,5 +729,34 @@ mod tests {
             ..StreamRequest::default()
         };
         assert!(validate_media_request(&account).is_err());
+    }
+
+    #[test]
+    fn public_playlists_require_canonical_ids_and_bounded_anonymous_pages() {
+        assert_eq!(
+            parse_playlist_id("7200303561195061287").expect("playlist ID"),
+            "7200303561195061287"
+        );
+        for value in ["", "0", "01", "-1", "playlist:1", "1/path", " 1"] {
+            assert!(parse_playlist_id(value).is_err(), "{value:?} must fail");
+        }
+
+        assert!(validate_playlist_page(&PageRequest::new(100, 0)).is_ok());
+        assert!(validate_playlist_page(&PageRequest::new(0, 0)).is_err());
+        assert!(validate_playlist_page(&PageRequest::new(101, 0)).is_err());
+        let account = PageRequest {
+            account: Some("default".to_owned()),
+            ..PageRequest::new(20, 0)
+        };
+        assert!(validate_playlist_page(&account).is_err());
+
+        let page = soda_playlist_page(Vec::new(), &PageRequest::new(20, 398), 398, 1, 0, Some(506));
+        assert_eq!(page.pagination.total, Some(398));
+        assert!(!page.pagination.has_more);
+        assert_eq!(page.pagination.next_offset, None);
+        assert_eq!(
+            page.pagination.extensions["upstream_raw_resource_count"],
+            506
+        );
     }
 }

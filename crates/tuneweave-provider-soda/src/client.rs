@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor, Lyrics,
-    Platform, Quality, ResourceRef, Result, Track, TrackAvailability, TrackAvailabilityRequest,
-    TuneWeaveError,
+    Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
+    TrackAvailabilityRequest, TuneWeaveError,
 };
 use url::Url;
 
@@ -22,6 +22,7 @@ use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decr
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
+const PLAYLIST_DETAIL_ENDPOINT: &str = "https://api.qishui.com/luna/pc/playlist/detail";
 const SODA_APP_ID: &str = "386088";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_MEDIA_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
@@ -65,6 +66,17 @@ pub(crate) struct SodaSearchPage {
     pub has_more: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct SodaPlaylistPage {
+    pub playlist: Playlist,
+    pub tracks: Vec<Track>,
+    pub total: u64,
+    pub raw_total: Option<u64>,
+    pub updated_at: u64,
+    pub next_cursor: Option<u64>,
+    pub has_more: bool,
+}
+
 #[derive(Serialize)]
 struct SodaSearchQuery<'a> {
     q: &'a str,
@@ -76,6 +88,16 @@ struct SodaSearchQuery<'a> {
 struct SodaTrackDetailQuery<'a> {
     track_id: &'a str,
     media_type: &'static str,
+    aid: &'static str,
+    device_platform: &'static str,
+    channel: &'static str,
+}
+
+#[derive(Serialize)]
+struct SodaPlaylistDetailQuery<'a> {
+    playlist_id: &'a str,
+    cursor: u64,
+    count: u32,
     aid: &'static str,
     device_platform: &'static str,
     channel: &'static str,
@@ -221,6 +243,82 @@ struct SodaStatusInfo {
 #[serde(default)]
 struct SodaSearchExtra {
     empty_search: Option<u8>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistEnvelope {
+    status_code: Option<i64>,
+    status_info: SodaStatusInfo,
+    has_more: Option<bool>,
+    next_cursor: FlexibleText,
+    playlist: Option<SodaPlaylistMetadata>,
+    media_resources: Vec<SodaPlaylistResource>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistMetadata {
+    id: String,
+    title: String,
+    public_title: String,
+    desc: String,
+    url_cover: SodaImage,
+    count_tracks: u64,
+    owner: SodaPlaylistOwner,
+    stats: SodaPlaylistStats,
+    resource_cnt: SodaPlaylistResourceCount,
+    create_time: u64,
+    update_time: u64,
+    review_status: String,
+    #[serde(rename = "type")]
+    playlist_type: i64,
+    current_sort_type: i64,
+    all_sort_types: Vec<i64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistOwner {
+    id: String,
+    nickname: String,
+    public_name: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+struct SodaPlaylistStats {
+    count_collected: u64,
+    count_shared: u64,
+    count_commented: u64,
+    count_played: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistResourceCount {
+    track_cnt: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistResource {
+    id: String,
+    #[serde(rename = "type")]
+    resource_type: String,
+    entity: SodaPlaylistResourceEntity,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistResourceEntity {
+    track_wrapper: SodaPlaylistTrackWrapper,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaPlaylistTrackWrapper {
+    track: SodaTrack,
 }
 
 #[derive(Default, Deserialize)]
@@ -420,6 +518,17 @@ impl FlexibleText {
             Self::Null => None,
         }
     }
+
+    fn to_u64(&self) -> Option<u64> {
+        match self {
+            Self::Text(value) => {
+                canonical_nonnegative_decimal(value).and_then(|value| value.parse::<u64>().ok())
+            }
+            Self::Unsigned(value) => Some(*value),
+            Self::Signed(value) => u64::try_from(*value).ok(),
+            Self::Null => None,
+        }
+    }
 }
 
 impl SodaClient {
@@ -465,6 +574,30 @@ impl SodaClient {
             .map_err(soda_network_error)?;
         let body = read_bounded_response(response, "Soda track search").await?;
         parse_search_response(&body, cursor)
+    }
+
+    pub(crate) async fn playlist_page(
+        &self,
+        playlist_id: &str,
+        cursor: u64,
+        count: u32,
+    ) -> Result<SodaPlaylistPage> {
+        let response = self
+            .http
+            .get(PLAYLIST_DETAIL_ENDPOINT)
+            .query(&SodaPlaylistDetailQuery {
+                playlist_id,
+                cursor,
+                count,
+                aid: SODA_APP_ID,
+                device_platform: "web",
+                channel: "pc_web",
+            })
+            .send()
+            .await
+            .map_err(soda_network_error)?;
+        let body = read_bounded_response(response, "Soda playlist detail").await?;
+        parse_playlist_response(&body, playlist_id, cursor, count)
     }
 
     async fn fetch_track_v2_body(
@@ -720,6 +853,200 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
         next_cursor,
         has_more: group.has_more,
     })
+}
+
+fn parse_playlist_response(
+    body: &[u8],
+    expected_id: &str,
+    requested_cursor: u64,
+    requested_count: u32,
+) -> Result<SodaPlaylistPage> {
+    let envelope: SodaPlaylistEnvelope = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda playlist detail returned malformed JSON"))?;
+    validate_status_metadata(&envelope.status_info, "Soda playlist detail")?;
+    if let Some(code) = envelope.status_code.filter(|code| *code != 0) {
+        if code == 1_000_005 {
+            return Err(TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Soda playlist was not found or is not public",
+            )
+            .with_platform(Platform::Soda));
+        }
+        return Err(soda_upstream_error(format!(
+            "Soda playlist detail returned platform code {code}"
+        )));
+    }
+    if requested_count == 0
+        || requested_count > 100
+        || envelope.media_resources.len() > usize::try_from(requested_count).unwrap_or(usize::MAX)
+    {
+        return Err(soda_upstream_error(
+            "Soda playlist detail returned an invalid physical page",
+        ));
+    }
+    let source = envelope
+        .playlist
+        .ok_or_else(|| soda_upstream_error("Soda playlist detail omitted its playlist metadata"))?;
+    let (playlist, total, raw_total, updated_at) = map_playlist(source, expected_id)?;
+
+    let mut tracks = Vec::with_capacity(envelope.media_resources.len());
+    for resource in envelope.media_resources {
+        if resource.resource_type != "track" {
+            continue;
+        }
+        let source = resource.entity.track_wrapper.track;
+        if !resource.id.trim().is_empty() && resource.id.trim() != source.id.trim() {
+            return Err(soda_upstream_error(
+                "Soda playlist item returned a mismatched track identity",
+            ));
+        }
+        let mut track = map_track(source, "official_pc_playlist_detail")?;
+        if !resource.id.trim().is_empty() {
+            track
+                .extensions
+                .insert("playlist_item_id".to_owned(), json!(resource.id));
+        }
+        tracks.push(track);
+    }
+    if u64::try_from(tracks.len()).unwrap_or(u64::MAX) > total {
+        return Err(soda_upstream_error(
+            "Soda playlist page exceeded its visible track total",
+        ));
+    }
+
+    let has_more = envelope.has_more == Some(true);
+    let next_cursor = if has_more {
+        let cursor = envelope.next_cursor.to_u64().ok_or_else(|| {
+            soda_upstream_error("Soda playlist detail omitted a valid continuation cursor")
+        })?;
+        if cursor <= requested_cursor || cursor > 10_000_000 {
+            return Err(soda_upstream_error(
+                "Soda playlist continuation cursor did not advance safely",
+            ));
+        }
+        Some(cursor)
+    } else {
+        None
+    };
+
+    Ok(SodaPlaylistPage {
+        playlist,
+        tracks,
+        total,
+        raw_total,
+        updated_at,
+        next_cursor,
+        has_more,
+    })
+}
+
+fn map_playlist(
+    source: SodaPlaylistMetadata,
+    expected_id: &str,
+) -> Result<(Playlist, u64, Option<u64>, u64)> {
+    let playlist_id = canonical_positive_decimal(&source.id)
+        .filter(|id| *id == expected_id)
+        .ok_or_else(|| {
+            soda_upstream_error("Soda playlist detail returned a mismatched playlist identity")
+        })?;
+    let title = source.title.trim();
+    if title.is_empty()
+        || title.len() > 2_000
+        || source.public_title.len() > 2_000
+        || source.desc.len() > 64 * 1024
+        || source.owner.id.len() > 256
+        || source.owner.nickname.len() > 1_000
+        || source.owner.public_name.len() > 1_000
+        || source.review_status.len() > 128
+        || source.all_sort_types.len() > 32
+        || source.count_tracks > 1_000_000
+        || source.resource_cnt.track_cnt > 10_000_000
+        || source.create_time > 4_102_444_800
+        || source.update_time > 4_102_444_800
+        || (source.create_time > 0
+            && source.update_time > 0
+            && source.update_time < source.create_time)
+    {
+        return Err(soda_upstream_error(
+            "Soda playlist detail returned invalid playlist metadata",
+        ));
+    }
+    if !source.owner.id.is_empty()
+        && (canonical_positive_decimal(&source.owner.id).is_none() || source.owner.id.len() > 64)
+    {
+        return Err(soda_upstream_error(
+            "Soda playlist detail returned an invalid owner identity",
+        ));
+    }
+    let resource_ref = ResourceRef::new(Platform::Soda, playlist_id)
+        .map_err(|_| soda_upstream_error("Soda playlist identity could not be normalized"))?;
+    let creator_name = bounded_text(&source.owner.public_name, 1_000)
+        .or_else(|| bounded_text(&source.owner.nickname, 1_000));
+    let raw_total = (source.resource_cnt.track_cnt > 0).then_some(source.resource_cnt.track_cnt);
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_pc_playlist_detail"));
+    extensions.insert(
+        "canonical_share_url".to_owned(),
+        json!(format!("https://www.qishui.com/playlist/{playlist_id}")),
+    );
+    extensions.insert("stats".to_owned(), json!(source.stats));
+    extensions.insert("review_status".to_owned(), json!(source.review_status));
+    extensions.insert("playlist_type".to_owned(), json!(source.playlist_type));
+    extensions.insert(
+        "current_sort_type".to_owned(),
+        json!(source.current_sort_type),
+    );
+    extensions.insert(
+        "available_sort_types".to_owned(),
+        json!(source.all_sort_types),
+    );
+    if let Some(total) = raw_total {
+        extensions.insert("raw_resource_count".to_owned(), json!(total));
+    }
+    if source.create_time > 0 {
+        extensions.insert(
+            "created_at_epoch_seconds".to_owned(),
+            json!(source.create_time),
+        );
+    }
+    if source.update_time > 0 {
+        extensions.insert(
+            "updated_at_epoch_seconds".to_owned(),
+            json!(source.update_time),
+        );
+    }
+    if !source.owner.id.is_empty() {
+        extensions.insert("owner_id".to_owned(), json!(source.owner.id));
+    }
+    if let Some(public_title) = bounded_text(&source.public_title, 2_000)
+        && public_title != title
+    {
+        extensions.insert("public_title".to_owned(), json!(public_title));
+    }
+    let total = source.count_tracks;
+    Ok((
+        Playlist {
+            resource_ref,
+            platform: Platform::Soda,
+            id: playlist_id.to_owned(),
+            name: title.to_owned(),
+            description: source.desc.trim().to_owned(),
+            cover_url: normalize_image(&source.url_cover),
+            creator: creator_name.map(|name| ArtistSummary {
+                resource_ref: None,
+                name,
+            }),
+            track_count: Some(total),
+            tags: Vec::new(),
+            subscribed: None,
+            created_at: None,
+            updated_at: None,
+            extensions,
+        },
+        total,
+        raw_total,
+        source.update_time,
+    ))
 }
 
 fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Track> {
@@ -2088,6 +2415,59 @@ mod tests {
         serde_json::to_vec(&response).expect("serialize changed availability")
     }
 
+    fn playlist_fixture(has_more: bool) -> Vec<u8> {
+        let detail: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        let track = detail["track"].clone();
+        serde_json::to_vec(&json!({
+            "status_info": {
+                "log_id": "playlist-log",
+                "now": 1_785_333_200_u64,
+                "now_ts_ms": 1_785_333_200_123_u64
+            },
+            "has_more": has_more,
+            "next_cursor": if has_more { "100" } else { "2" },
+            "playlist": {
+                "id": "7200303561195061287",
+                "title": "公开歌单",
+                "public_title": "公开歌单",
+                "desc": "保持顺序和重复项",
+                "url_cover": track["album"]["url_cover"].clone(),
+                "count_tracks": 2,
+                "owner": {
+                    "id": "2186250840705864",
+                    "nickname": "创建者",
+                    "public_name": "公开创建者"
+                },
+                "stats": {
+                    "count_collected": 100,
+                    "count_shared": 20,
+                    "count_commented": 3
+                },
+                "resource_cnt": { "track_cnt": 3 },
+                "create_time": 1_676_561_486,
+                "update_time": 1_785_333_243,
+                "review_status": "Accept",
+                "type": 2,
+                "current_sort_type": 1,
+                "all_sort_types": [1, 4, 5]
+            },
+            "media_resources": [
+                {
+                    "id": track["id"].clone(),
+                    "type": "track",
+                    "entity": { "track_wrapper": { "track": track.clone() } }
+                },
+                {
+                    "id": track["id"].clone(),
+                    "type": "track",
+                    "entity": { "track_wrapper": { "track": track } }
+                }
+            ]
+        }))
+        .expect("serialize playlist fixture")
+    }
+
     #[test]
     fn availability_distinguishes_full_media_from_preview_and_hides_crypto_material() {
         let identity =
@@ -2122,6 +2502,69 @@ mod tests {
         ] {
             assert!(!serialized.contains(secret), "must hide {secret}");
         }
+    }
+
+    #[test]
+    fn playlist_page_preserves_metadata_order_duplicates_and_opaque_cursor() {
+        let page = parse_playlist_response(&playlist_fixture(true), "7200303561195061287", 0, 100)
+            .expect("parse Soda playlist page");
+        assert_eq!(
+            page.playlist.resource_ref.to_string(),
+            "soda:7200303561195061287"
+        );
+        assert_eq!(page.playlist.name, "公开歌单");
+        assert_eq!(page.playlist.track_count, Some(2));
+        assert_eq!(
+            page.playlist
+                .creator
+                .as_ref()
+                .map(|value| value.name.as_str()),
+            Some("公开创建者")
+        );
+        assert_eq!(page.playlist.extensions["raw_resource_count"], 3);
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(page.tracks[0].resource_ref, page.tracks[1].resource_ref);
+        assert_eq!(page.next_cursor, Some(100));
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn playlist_page_rejects_identity_cursor_page_and_platform_error_drift() {
+        assert!(parse_playlist_response(&playlist_fixture(true), "1", 0, 100).is_err());
+
+        let mut cursor: serde_json::Value =
+            serde_json::from_slice(&playlist_fixture(true)).expect("playlist fixture JSON");
+        cursor["next_cursor"] = json!("0");
+        assert!(
+            parse_playlist_response(
+                &serde_json::to_vec(&cursor).expect("cursor fixture"),
+                "7200303561195061287",
+                0,
+                100,
+            )
+            .is_err()
+        );
+
+        let mut item: serde_json::Value =
+            serde_json::from_slice(&playlist_fixture(false)).expect("playlist fixture JSON");
+        item["media_resources"][0]["id"] = json!("1");
+        assert!(
+            parse_playlist_response(
+                &serde_json::to_vec(&item).expect("item fixture"),
+                "7200303561195061287",
+                0,
+                100,
+            )
+            .is_err()
+        );
+
+        let missing = br#"{
+            "status_code":1000005,
+            "status_info":{"log_id":"missing","now":1,"now_ts_ms":1000}
+        }"#;
+        let error =
+            parse_playlist_response(missing, "1", 0, 100).expect_err("missing Soda playlist");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
     }
 
     #[test]
@@ -2444,5 +2887,35 @@ mod tests {
             assert!(content.bytes.len() > 100_000);
             assert!(content.filename.ends_with(".m4a"));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_public_playlist_traverses_sparse_raw_pages_without_losing_visible_tracks() {
+        let client = SodaClient::test_client();
+        let playlist_id = "7200303561195061287";
+        let mut cursor = 0_u64;
+        let mut visible = 0_u64;
+        let mut expected = None;
+        for page_number in 0..8 {
+            let page = client
+                .playlist_page(playlist_id, cursor, 100)
+                .await
+                .expect("live Soda playlist page");
+            let snapshot = (page.total, page.raw_total, page.updated_at);
+            assert!(expected.is_none_or(|value| value == snapshot));
+            expected = Some(snapshot);
+            visible = visible
+                .checked_add(u64::try_from(page.tracks.len()).expect("track count"))
+                .expect("visible count");
+            if !page.has_more {
+                assert_eq!(visible, page.total);
+                assert!(page.raw_total.is_some_and(|raw| raw >= page.total));
+                assert!(page_number >= 3);
+                return;
+            }
+            cursor = page.next_cursor.expect("live continuation cursor");
+        }
+        panic!("live Soda playlist exceeded the expected page count");
     }
 }
