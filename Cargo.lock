@@ -1938,11 +1938,14 @@ dependencies = [
 name = "tuneweave-provider-kugou"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "async-trait",
  "base64",
+ "cbc",
  "flate2",
  "hex",
  "md-5",
+ "num-bigint",
  "rand",
  "reqwest",
  "serde",

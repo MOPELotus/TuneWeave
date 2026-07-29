@@ -2,12 +2,19 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::Read,
+    path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aes::{
+    Aes128,
+    cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7},
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flate2::read::ZlibDecoder;
 use md5::{Digest, Md5};
+use num_bigint::BigUint;
 use reqwest::{
     Client, Proxy, StatusCode,
     header::{CONTENT_LENGTH, CONTENT_TYPE, REFERER},
@@ -15,6 +22,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::Mutex as AsyncMutex;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, MediaDownload,
     MediaStream, Page, PageMeta, PageRequest, Platform, Playlist, Quality, ResourceRef, Result,
@@ -22,8 +30,11 @@ use tuneweave_core::{
 };
 use url::Url;
 
+use crate::device::{DeviceStore, KugouDeviceIdentity};
+
 const SEARCH_ENDPOINT: &str = "https://songsearch.kugou.com/song_search_v2";
 const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
+const DEVICE_REGISTRATION_ENDPOINT: &str = "https://userservice.kugou.com/risk/v2/r_register_dev";
 const LYRIC_SEARCH_ENDPOINT: &str = "https://lyrics.kugou.com/v1/search";
 const LYRIC_DOWNLOAD_ENDPOINT: &str = "https://lyrics.kugou.com/download";
 const TRACKER_ENDPOINT: &str = "https://gateway.kugou.com/v5/url";
@@ -34,6 +45,9 @@ const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb
                              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const ANDROID_USER_AGENT: &str = "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi";
 const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
+const DEVICE_RSA_MODULUS: &str = "c8006ed03842d2628209bd314984ca5ed6cfe06e30c95f9d4704d9c49791d7a935ba950ecb0bc8ebf5f5994f0bac927a7eb151b3c1de343303fa539c83136eccfd7d7e511e2dbce18eaa9f784c9b50d443e75865979e0a5e216e46c684066a8d6b998580bbaa22d73f5790286bb14742e83244e44db6d707ffe162c5c7002d45";
+const DEVICE_RSA_EXPONENT: u32 = 65_537;
+const DEVICE_RSA_BYTES: usize = 128;
 const TRACKER_KEY_SALT: &str = "57ae12eb6890223e355ccfcb74edf70d";
 const ANDROID_APP_ID: u16 = 1005;
 const ANDROID_CLIENT_VERSION: u32 = 20489;
@@ -46,6 +60,7 @@ const KRC_XOR_KEY: [u8; 16] = [
 #[derive(Clone, Default)]
 pub struct KugouConfig {
     pub proxy_url: Option<String>,
+    pub device_path: Option<PathBuf>,
 }
 
 impl fmt::Debug for KugouConfig {
@@ -56,6 +71,7 @@ impl fmt::Debug for KugouConfig {
                 "proxy_url",
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
+            .field("device_path", &self.device_path)
             .finish()
     }
 }
@@ -63,8 +79,8 @@ impl fmt::Debug for KugouConfig {
 #[derive(Clone)]
 pub struct KugouClient {
     http: Client,
-    mid: String,
-    uuid: String,
+    device: Arc<Mutex<DeviceStore>>,
+    registration_refresh: Arc<AsyncMutex<()>>,
 }
 
 impl fmt::Debug for KugouClient {
@@ -74,6 +90,124 @@ impl fmt::Debug for KugouClient {
             .field("device_identity", &"[redacted]")
             .finish_non_exhaustive()
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceRegistrationProfile<'a> {
+    available_ram_size: u64,
+    available_rom_size: u64,
+    available_sd_size: u64,
+    baseband_ver: &'static str,
+    battery_level: u8,
+    battery_status: u8,
+    brand: &'static str,
+    build_serial: &'static str,
+    device: &'static str,
+    imei: &'a str,
+    imsi: &'static str,
+    manufacturer: &'static str,
+    uuid: &'a str,
+    accelerometer: bool,
+    accelerometer_value: &'static str,
+    gravity: bool,
+    gravity_value: &'static str,
+    gyroscope: bool,
+    gyroscope_value: &'static str,
+    light: bool,
+    light_value: &'static str,
+    magnetic: bool,
+    magnetic_value: &'static str,
+    orientation: bool,
+    orientation_value: &'static str,
+    pressure: bool,
+    pressure_value: &'static str,
+    #[serde(rename = "step_counter")]
+    step_counter: bool,
+    #[serde(rename = "step_counterValue")]
+    step_counter_value: &'static str,
+    temperature: bool,
+    temperature_value: &'static str,
+}
+
+impl<'a> DeviceRegistrationProfile<'a> {
+    const fn anonymous(guid: &'a str) -> Self {
+        Self {
+            available_ram_size: 4_983_533_568,
+            available_rom_size: 48_114_719,
+            available_sd_size: 48_114_717,
+            baseband_ver: "",
+            battery_level: 100,
+            battery_status: 3,
+            brand: "Redmi",
+            build_serial: "unknown",
+            device: "marble",
+            imei: guid,
+            imsi: "",
+            manufacturer: "Xiaomi",
+            uuid: guid,
+            accelerometer: false,
+            accelerometer_value: "",
+            gravity: false,
+            gravity_value: "",
+            gyroscope: false,
+            gyroscope_value: "",
+            light: false,
+            light_value: "",
+            magnetic: false,
+            magnetic_value: "",
+            orientation: false,
+            orientation_value: "",
+            pressure: false,
+            pressure_value: "",
+            step_counter: false,
+            step_counter_value: "",
+            temperature: false,
+            temperature_value: "",
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DeviceRegistrationSecret<'a> {
+    aes: &'a str,
+    uid: u8,
+    token: &'static str,
+}
+
+#[derive(Serialize)]
+struct DeviceRegistrationQuery<'a> {
+    dfid: &'static str,
+    mid: &'a str,
+    uuid: &'static str,
+    appid: u16,
+    clientver: u32,
+    clienttime: u64,
+    part: u8,
+    platid: u8,
+    p: String,
+    signature: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct DeviceRegistrationEnvelope {
+    status: i64,
+    error_code: i64,
+    error_msg: String,
+    msg: String,
+    data: Option<DeviceRegistrationData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct DeviceRegistrationData {
+    dfid: String,
+}
+
+enum DeviceRegistrationOutcome {
+    Registered(String),
+    ExistingIdentityWithoutDfid,
 }
 
 #[derive(Debug)]
@@ -146,7 +280,7 @@ impl AndroidEndpoint {
 
 #[derive(Serialize)]
 struct AndroidQuery<'a> {
-    dfid: &'static str,
+    dfid: &'a str,
     mid: &'a str,
     uuid: &'static str,
     appid: u16,
@@ -262,7 +396,7 @@ struct AudioMetadataRequest<'a> {
     clienttime: u64,
     clientver: u32,
     data: [AudioMetadataIdentity<'a>; 1],
-    dfid: &'static str,
+    dfid: &'a str,
     key: String,
     mid: &'a str,
 }
@@ -385,7 +519,7 @@ struct LyricDownloadQuery<'a> {
     client: &'static str,
     clienttime: u64,
     clientver: u32,
-    dfid: &'static str,
+    dfid: &'a str,
     fmt: &'static str,
     id: &'a str,
     mid: &'a str,
@@ -559,7 +693,7 @@ struct TrackerQuery<'a> {
     clienttime: u64,
     clientver: u32,
     cmd: u8,
-    dfid: &'static str,
+    dfid: &'a str,
     hash: &'a str,
     key: String,
     mid: &'a str,
@@ -799,7 +933,7 @@ struct PlaylistCollectionIdentity<'a> {
 
 #[derive(Serialize)]
 struct PlaylistTracksQuery<'a> {
-    dfid: &'static str,
+    dfid: &'a str,
     mid: &'a str,
     uuid: &'static str,
     appid: u16,
@@ -969,12 +1103,142 @@ impl KugouClient {
             )
             .with_platform(Platform::Kugou)
         })?;
-        let identity = u128::from_be_bytes(rand::random::<[u8; 16]>()).to_string();
         Ok(Self {
             http,
-            mid: identity.clone(),
-            uuid: identity,
+            device: Arc::new(Mutex::new(DeviceStore::open(config.device_path.clone())?)),
+            registration_refresh: Arc::new(AsyncMutex::new(())),
         })
+    }
+
+    fn lock_device(&self) -> Result<MutexGuard<'_, DeviceStore>> {
+        self.device.lock().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "KuGou device state lock was poisoned",
+            )
+            .with_platform(Platform::Kugou)
+        })
+    }
+
+    fn device_identity(&self) -> Result<KugouDeviceIdentity> {
+        Ok(self.lock_device()?.device().identity())
+    }
+
+    async fn registered_device(&self) -> Result<KugouDeviceIdentity> {
+        {
+            let store = self.lock_device()?;
+            if !store.device().requires_registration() {
+                return Ok(store.device().identity());
+            }
+        }
+
+        let _refresh = self.registration_refresh.lock().await;
+        let pending = {
+            let store = self.lock_device()?;
+            if !store.device().requires_registration() {
+                return Ok(store.device().identity());
+            }
+            store.device().identity()
+        };
+        let registered_at = unix_seconds_now();
+        let outcome = self.register_anonymous_device(&pending).await?;
+        let (identity, dfid) = match outcome {
+            DeviceRegistrationOutcome::Registered(dfid) => (pending, dfid),
+            DeviceRegistrationOutcome::ExistingIdentityWithoutDfid => {
+                let rotated = self.lock_device()?.rotate()?;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                match self.register_anonymous_device(&rotated).await? {
+                    DeviceRegistrationOutcome::Registered(dfid) => (rotated, dfid),
+                    DeviceRegistrationOutcome::ExistingIdentityWithoutDfid => {
+                        return Err(kugou_upstream_error(
+                            "KuGou device registration omitted dfid after one identity refresh",
+                        ));
+                    }
+                }
+            }
+        };
+        let mut store = self.lock_device()?;
+        if store.device().identity().guid != identity.guid {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "KuGou device identity changed during registration",
+            )
+            .with_platform(Platform::Kugou));
+        }
+        store.register(dfid, registered_at)?;
+        Ok(store.device().identity())
+    }
+
+    async fn register_anonymous_device(
+        &self,
+        identity: &KugouDeviceIdentity,
+    ) -> Result<DeviceRegistrationOutcome> {
+        let profile = DeviceRegistrationProfile::anonymous(&identity.guid);
+        let profile = serde_json::to_vec(&profile).map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to serialize KuGou device registration profile",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+        let aes_seed = random_registration_seed();
+        let encrypted_profile = encrypt_device_profile(&profile, &aes_seed)?;
+        let secret = serde_json::to_vec(&DeviceRegistrationSecret {
+            aes: &aes_seed,
+            uid: 0,
+            token: "",
+        })
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to serialize KuGou device registration secret",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+        let encrypted_secret = rsa_pkcs1_v15_encrypt_hex(&secret)?;
+        let clienttime = unix_seconds_now();
+        let parameters = BTreeMap::from([
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("clienttime", clienttime.to_string()),
+            ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+            ("dfid", "-".to_owned()),
+            ("mid", identity.mid.clone()),
+            ("p", encrypted_secret.clone()),
+            ("part", "1".to_owned()),
+            ("platid", "1".to_owned()),
+            ("uuid", "-".to_owned()),
+        ]);
+        let query = DeviceRegistrationQuery {
+            dfid: "-",
+            mid: &identity.mid,
+            uuid: "-",
+            appid: ANDROID_APP_ID,
+            clientver: ANDROID_CLIENT_VERSION,
+            clienttime,
+            part: 1,
+            platid: 1,
+            p: encrypted_secret,
+            signature: android_signature_for_parameters(&parameters, encrypted_profile.as_bytes()),
+        };
+        let response = self
+            .http
+            .post(DEVICE_REGISTRATION_ENDPOINT)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("dfid", "-")
+            .header("clienttime", clienttime)
+            .header("mid", &identity.mid)
+            .header("kg-rc", "1")
+            .header("kg-thash", "5d816a0")
+            .header("kg-rec", "1")
+            .header("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F")
+            .header("user-agent", ANDROID_USER_AGENT)
+            .query(&query)
+            .body(encrypted_profile)
+            .send()
+            .await
+            .map_err(kugou_network_error)?;
+        let bytes = read_bounded_response(response, "KuGou device registration").await?;
+        parse_device_registration_response(&bytes, &aes_seed)
     }
 
     pub(crate) async fn search_tracks_page(
@@ -983,6 +1247,7 @@ impl KugouClient {
         page: u32,
         page_size: u32,
     ) -> Result<KugouSearchPage> {
+        let identity = self.device_identity()?;
         let request = KugouSearchRequest {
             keyword,
             page,
@@ -995,8 +1260,8 @@ impl KugouClient {
             privilege_filter: 0,
             srcappid: 2919,
             clienttime: unix_seconds_now(),
-            mid: &self.mid,
-            uuid: &self.uuid,
+            mid: &identity.mid,
+            uuid: &identity.mid,
             dfid: "-",
         };
         let response = self
@@ -1012,6 +1277,7 @@ impl KugouClient {
     }
 
     pub(crate) async fn track_detail(&self, album_audio_id: u64) -> Result<Track> {
+        let identity = self.registered_device().await?;
         let metadata_request = TrackMetadataRequest {
             data: [TrackMetadataIdentity {
                 entity_id: album_audio_id,
@@ -1019,7 +1285,7 @@ impl KugouClient {
             fields: "base,album_info,authors.base,class",
         };
         let metadata_bytes = self
-            .post_android(AndroidEndpoint::TrackMetadata, &metadata_request)
+            .post_android(AndroidEndpoint::TrackMetadata, &metadata_request, &identity)
             .await?;
         let metadata = parse_track_metadata(&metadata_bytes, album_audio_id)?;
         let audio_id = metadata
@@ -1038,14 +1304,14 @@ impl KugouClient {
                 hash: "",
                 audio_id: &audio_id,
             }],
-            dfid: "-",
+            dfid: identity.dfid(),
             key: md5_hex(format!(
                 "{ANDROID_APP_ID}{ANDROID_SIGNATURE_SALT}{ANDROID_CLIENT_VERSION}{clienttime}"
             )),
-            mid: &self.mid,
+            mid: &identity.mid,
         };
         let audio_bytes = self
-            .post_android(AndroidEndpoint::AudioMetadata, &audio_request)
+            .post_android(AndroidEndpoint::AudioMetadata, &audio_request, &identity)
             .await?;
         let audio = parse_audio_metadata(&audio_bytes, &audio_id)?;
         map_track_detail(album_audio_id, metadata, audio)
@@ -1053,6 +1319,7 @@ impl KugouClient {
 
     pub(crate) async fn playlist_detail(&self, collection_id: &str) -> Result<Playlist> {
         let collection_id = validate_collection_id(collection_id)?;
+        let identity = self.registered_device().await?;
         let request = PlaylistDetailRequest {
             data: [PlaylistCollectionIdentity {
                 global_collection_id: collection_id,
@@ -1061,7 +1328,7 @@ impl KugouClient {
             token: "",
         };
         let bytes = self
-            .post_android(AndroidEndpoint::PlaylistDetail, &request)
+            .post_android(AndroidEndpoint::PlaylistDetail, &request, &identity)
             .await?;
         parse_playlist_detail_response(&bytes, collection_id)
     }
@@ -1073,6 +1340,7 @@ impl KugouClient {
     ) -> Result<Page<Track>> {
         let collection_id = validate_collection_id(collection_id)?;
         validate_public_playlist_page(request)?;
+        let identity = self.registered_device().await?;
         let clienttime = unix_seconds_now();
         let parameters = BTreeMap::from([
             ("appid", ANDROID_APP_ID.to_string()),
@@ -1080,10 +1348,10 @@ impl KugouClient {
             ("begin_idx", request.offset.to_string()),
             ("clienttime", clienttime.to_string()),
             ("clientver", ANDROID_CLIENT_VERSION.to_string()),
-            ("dfid", "-".to_owned()),
+            ("dfid", identity.dfid().to_owned()),
             ("extend_fields", "abtags,hot_cmt,popularization".to_owned()),
             ("global_collection_id", collection_id.to_owned()),
-            ("mid", self.mid.clone()),
+            ("mid", identity.mid.clone()),
             ("mode", "1".to_owned()),
             ("pagesize", request.limit.to_string()),
             ("personal_switch", "1".to_owned()),
@@ -1092,8 +1360,8 @@ impl KugouClient {
             ("uuid", "-".to_owned()),
         ]);
         let query = PlaylistTracksQuery {
-            dfid: "-",
-            mid: &self.mid,
+            dfid: identity.dfid(),
+            mid: &identity.mid,
             uuid: "-",
             appid: ANDROID_APP_ID,
             clientver: ANDROID_CLIENT_VERSION,
@@ -1110,7 +1378,7 @@ impl KugouClient {
             global_collection_id: collection_id,
         };
         let response = self
-            .android_get(PLAYLIST_TRACKS_ENDPOINT, clienttime)
+            .android_get(PLAYLIST_TRACKS_ENDPOINT, clienttime, &identity)
             .query(&query)
             .send()
             .await
@@ -1319,6 +1587,7 @@ impl KugouClient {
         album_id: u64,
         hash: &str,
     ) -> Result<PrivilegeResource> {
+        let identity = self.registered_device().await?;
         let request = PrivilegeRequest {
             appid: ANDROID_APP_ID,
             area_code: 1,
@@ -1346,7 +1615,7 @@ impl KugouClient {
             ],
         };
         let bytes = self
-            .post_android(AndroidEndpoint::Privilege, &request)
+            .post_android(AndroidEndpoint::Privilege, &request, &identity)
             .await?;
         parse_privilege_response(&bytes, album_audio_id, album_id, hash)
     }
@@ -1358,11 +1627,12 @@ impl KugouClient {
         spec: &SelectedMediaSpec,
         free_part: bool,
     ) -> Result<TrackerEnvelope> {
+        let identity = self.registered_device().await?;
         let clienttime = unix_seconds_now();
         let hash = spec.hash.to_ascii_lowercase();
         let key = md5_hex(format!(
             "{hash}{TRACKER_KEY_SALT}{ANDROID_APP_ID}{}0",
-            self.mid
+            identity.mid
         ));
         let parameters = BTreeMap::from([
             ("IsFreePart", u8::from(free_part).to_string()),
@@ -1375,10 +1645,10 @@ impl KugouClient {
             ("clienttime", clienttime.to_string()),
             ("clientver", "11430".to_owned()),
             ("cmd", "26".to_owned()),
-            ("dfid", "-".to_owned()),
+            ("dfid", identity.dfid().to_owned()),
             ("hash", hash.clone()),
             ("key", key.clone()),
-            ("mid", self.mid.clone()),
+            ("mid", identity.mid.clone()),
             ("module", String::new()),
             ("page_id", "151369488".to_owned()),
             ("pid", "2".to_owned()),
@@ -1400,10 +1670,10 @@ impl KugouClient {
             clienttime,
             clientver: 11430,
             cmd: 26,
-            dfid: "-",
+            dfid: identity.dfid(),
             hash: &hash,
             key,
-            mid: &self.mid,
+            mid: &identity.mid,
             module: "",
             page_id: 151_369_488,
             pid: 2,
@@ -1416,7 +1686,7 @@ impl KugouClient {
             signature: android_signature_for_parameters(&parameters, &[]),
         };
         let response = self
-            .android_get(TRACKER_ENDPOINT, clienttime)
+            .android_get(TRACKER_ENDPOINT, clienttime, &identity)
             .header("x-router", "trackercdn.kugou.com")
             .query(&query)
             .send()
@@ -1441,6 +1711,7 @@ impl KugouClient {
         duration: u64,
         keyword: &str,
     ) -> Result<(LyricCandidate, Value)> {
+        let identity = self.registered_device().await?;
         let parameters = BTreeMap::from([
             ("album_audio_id", album_audio_id.to_string()),
             ("appid", ANDROID_APP_ID.to_string()),
@@ -1463,7 +1734,7 @@ impl KugouClient {
             signature: android_signature_for_parameters(&parameters, &[]),
         };
         let response = self
-            .android_get(LYRIC_SEARCH_ENDPOINT, unix_seconds_now())
+            .android_get(LYRIC_SEARCH_ENDPOINT, unix_seconds_now(), &identity)
             .query(&query)
             .send()
             .await
@@ -1477,6 +1748,7 @@ impl KugouClient {
         candidate: &LyricCandidate,
         format: RequestedLyricFormat,
     ) -> Result<DecodedLyric> {
+        let identity = self.registered_device().await?;
         let clienttime = unix_seconds_now();
         let parameters = BTreeMap::from([
             ("accesskey", candidate.accesskey.clone()),
@@ -1485,10 +1757,10 @@ impl KugouClient {
             ("client", "android".to_owned()),
             ("clienttime", clienttime.to_string()),
             ("clientver", ANDROID_CLIENT_VERSION.to_string()),
-            ("dfid", "-".to_owned()),
+            ("dfid", identity.dfid().to_owned()),
             ("fmt", format.as_str().to_owned()),
             ("id", candidate.id.clone()),
-            ("mid", self.mid.clone()),
+            ("mid", identity.mid.clone()),
             ("uuid", "-".to_owned()),
             ("ver", "1".to_owned()),
         ]);
@@ -1499,16 +1771,16 @@ impl KugouClient {
             client: "android",
             clienttime,
             clientver: ANDROID_CLIENT_VERSION,
-            dfid: "-",
+            dfid: identity.dfid(),
             fmt: format.as_str(),
             id: &candidate.id,
-            mid: &self.mid,
+            mid: &identity.mid,
             uuid: "-",
             ver: 1,
             signature: android_signature_for_parameters(&parameters, &[]),
         };
         let response = self
-            .android_get(LYRIC_DOWNLOAD_ENDPOINT, clienttime)
+            .android_get(LYRIC_DOWNLOAD_ENDPOINT, clienttime, &identity)
             .query(&query)
             .send()
             .await
@@ -1517,12 +1789,17 @@ impl KugouClient {
         parse_lyric_download_response(&bytes, candidate, format)
     }
 
-    fn android_get(&self, endpoint: &'static str, clienttime: u64) -> reqwest::RequestBuilder {
+    fn android_get(
+        &self,
+        endpoint: &'static str,
+        clienttime: u64,
+        identity: &KugouDeviceIdentity,
+    ) -> reqwest::RequestBuilder {
         self.http
             .get(endpoint)
-            .header("dfid", "-")
+            .header("dfid", identity.dfid())
             .header("clienttime", clienttime)
-            .header("mid", &self.mid)
+            .header("mid", &identity.mid)
             .header("kg-rc", "1")
             .header("kg-thash", "5d816a0")
             .header("kg-rec", "1")
@@ -1534,6 +1811,7 @@ impl KugouClient {
         &self,
         endpoint: AndroidEndpoint,
         body: &T,
+        identity: &KugouDeviceIdentity,
     ) -> Result<Vec<u8>> {
         let body = serde_json::to_vec(body).map_err(|_| {
             TuneWeaveError::new(
@@ -1543,10 +1821,11 @@ impl KugouClient {
             .with_platform(Platform::Kugou)
         })?;
         let clienttime = unix_seconds_now();
-        let signature = android_signature(&self.mid, clienttime, &body);
+        let signature =
+            android_signature_with_identity(identity.dfid(), &identity.mid, clienttime, &body);
         let query = AndroidQuery {
-            dfid: "-",
-            mid: &self.mid,
+            dfid: identity.dfid(),
+            mid: &identity.mid,
             uuid: "-",
             appid: ANDROID_APP_ID,
             clientver: ANDROID_CLIENT_VERSION,
@@ -1558,9 +1837,9 @@ impl KugouClient {
             .post(format!("{ANDROID_GATEWAY}{}", endpoint.path()))
             .header("x-router", endpoint.router())
             .header(CONTENT_TYPE, "application/json")
-            .header("dfid", "-")
+            .header("dfid", identity.dfid())
             .header("clienttime", clienttime)
-            .header("mid", &self.mid)
+            .header("mid", &identity.mid)
             .header("kg-rc", "1")
             .header("kg-thash", "5d816a0")
             .header("kg-rec", "1")
@@ -3773,12 +4052,17 @@ fn unix_milliseconds_now() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
 fn android_signature(mid: &str, clienttime: u64, body: &[u8]) -> String {
+    android_signature_with_identity("-", mid, clienttime, body)
+}
+
+fn android_signature_with_identity(dfid: &str, mid: &str, clienttime: u64, body: &[u8]) -> String {
     let parameters = BTreeMap::from([
         ("appid", ANDROID_APP_ID.to_string()),
         ("clienttime", clienttime.to_string()),
         ("clientver", ANDROID_CLIENT_VERSION.to_string()),
-        ("dfid", "-".to_owned()),
+        ("dfid", dfid.to_owned()),
         ("mid", mid.to_owned()),
         ("uuid", "-".to_owned()),
     ]);
@@ -3800,6 +4084,131 @@ fn android_signature_for_parameters(parameters: &BTreeMap<&str, String>, body: &
 
 fn md5_hex(value: impl AsRef<[u8]>) -> String {
     hex::encode(Md5::digest(value.as_ref()))
+}
+
+fn random_registration_seed() -> String {
+    const CHARACTERS: &[u8] = b"1234567890abcdefghijklmnopqrstuvwxyz";
+    (0..6)
+        .map(|_| char::from(CHARACTERS[rand::random_range(0..CHARACTERS.len())]))
+        .collect()
+}
+
+fn device_profile_key_and_iv(seed: &str) -> ([u8; 16], [u8; 16]) {
+    let digest = md5_hex(seed);
+    let mut key = [0_u8; 16];
+    let mut iv = [0_u8; 16];
+    key.copy_from_slice(&digest.as_bytes()[..16]);
+    iv.copy_from_slice(&digest.as_bytes()[16..]);
+    (key, iv)
+}
+
+fn encrypt_device_profile(plaintext: &[u8], seed: &str) -> Result<String> {
+    let (key, iv) = device_profile_key_and_iv(seed);
+    let message_len = plaintext.len();
+    let padded_len = message_len
+        .checked_div(16)
+        .and_then(|blocks| blocks.checked_add(1))
+        .and_then(|blocks| blocks.checked_mul(16))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "KuGou device registration profile was too large",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+    let mut buffer = vec![0_u8; padded_len];
+    buffer[..message_len].copy_from_slice(plaintext);
+    let encrypted = cbc::Encryptor::<Aes128>::new(&key.into(), &iv.into())
+        .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to encrypt KuGou device registration profile",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+    Ok(BASE64.encode(encrypted))
+}
+
+fn decrypt_device_registration_response(ciphertext: &[u8], seed: &str) -> Result<Vec<u8>> {
+    let (key, iv) = device_profile_key_and_iv(seed);
+    let mut buffer = ciphertext.to_vec();
+    cbc::Decryptor::<Aes128>::new(&key.into(), &iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .map(<[u8]>::to_vec)
+        .map_err(|_| {
+            kugou_upstream_error("KuGou device registration returned invalid encrypted data")
+        })
+}
+
+fn rsa_pkcs1_v15_encrypt_hex(plaintext: &[u8]) -> Result<String> {
+    let padding_len = DEVICE_RSA_BYTES
+        .checked_sub(plaintext.len())
+        .and_then(|remaining| remaining.checked_sub(3))
+        .filter(|padding_len| *padding_len >= 8)
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "KuGou device registration secret was too large",
+            )
+            .with_platform(Platform::Kugou)
+        })?;
+    let mut encoded = vec![0_u8; DEVICE_RSA_BYTES];
+    encoded[1] = 2;
+    for byte in &mut encoded[2..2 + padding_len] {
+        *byte = rand::random_range(1..=u8::MAX);
+    }
+    let separator = 2 + padding_len;
+    encoded[separator] = 0;
+    encoded[separator + 1..].copy_from_slice(plaintext);
+
+    let modulus = BigUint::parse_bytes(DEVICE_RSA_MODULUS.as_bytes(), 16).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "KuGou device registration public key is invalid",
+        )
+        .with_platform(Platform::Kugou)
+    })?;
+    let encrypted = BigUint::from_bytes_be(&encoded)
+        .modpow(&BigUint::from(DEVICE_RSA_EXPONENT), &modulus)
+        .to_bytes_be();
+    if encrypted.len() > DEVICE_RSA_BYTES {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "KuGou device registration encryption overflowed",
+        )
+        .with_platform(Platform::Kugou));
+    }
+    let mut output = vec![0_u8; DEVICE_RSA_BYTES];
+    let start = DEVICE_RSA_BYTES - encrypted.len();
+    output[start..].copy_from_slice(&encrypted);
+    Ok(hex::encode(output))
+}
+
+fn parse_device_registration_response(
+    ciphertext: &[u8],
+    seed: &str,
+) -> Result<DeviceRegistrationOutcome> {
+    let plaintext = decrypt_device_registration_response(ciphertext, seed)?;
+    let envelope: DeviceRegistrationEnvelope = serde_json::from_slice(&plaintext)
+        .map_err(|_| kugou_upstream_error("KuGou device registration returned malformed JSON"))?;
+    if envelope.status != 1 || envelope.error_code != 0 {
+        let message = nonempty(&envelope.error_msg).or_else(|| nonempty(&envelope.msg));
+        return Err(
+            kugou_upstream_error("KuGou device registration rejected the request").with_details(
+                json!({
+                    "platform_code": envelope.error_code,
+                    "platform_message": message.map(safe_upstream_message),
+                }),
+            ),
+        );
+    }
+    Ok(envelope
+        .data
+        .map(|data| data.dfid)
+        .filter(|dfid| !dfid.is_empty())
+        .map(DeviceRegistrationOutcome::Registered)
+        .unwrap_or(DeviceRegistrationOutcome::ExistingIdentityWithoutDfid))
 }
 
 async fn read_bounded_response(
@@ -3905,6 +4314,7 @@ mod tests {
     fn configuration_debug_does_not_expose_proxy_credentials() {
         let config = KugouConfig {
             proxy_url: Some("http://secret:password@127.0.0.1:8080".to_owned()),
+            ..KugouConfig::default()
         };
         let rendered = format!("{config:?}");
         assert!(rendered.contains("[configured]"));
@@ -4242,6 +4652,30 @@ mod tests {
             android_signature("12345678901234567890", 1_722_222_222, body),
             "da07c52ea6737d8c77b29f75628d55b2"
         );
+    }
+
+    #[test]
+    fn device_registration_crypto_matches_the_reference_aes_and_rsa_shape() {
+        assert_eq!(
+            encrypt_device_profile(b"hello", "abc123").expect("encrypt profile"),
+            "9371O8ftz4w++8+js6Dd0Q=="
+        );
+        let ciphertext = BASE64
+            .decode("9371O8ftz4w++8+js6Dd0Q==")
+            .expect("decode reference ciphertext");
+        assert_eq!(
+            decrypt_device_registration_response(&ciphertext, "abc123").expect("decrypt profile"),
+            b"hello"
+        );
+
+        let encrypted = rsa_pkcs1_v15_encrypt_hex(br#"{"aes":"abc123","uid":0,"token":""}"#)
+            .expect("encrypt registration secret");
+        assert_eq!(encrypted.len(), DEVICE_RSA_BYTES * 2);
+        let value = BigUint::parse_bytes(encrypted.as_bytes(), 16).expect("parse encrypted secret");
+        let modulus =
+            BigUint::parse_bytes(DEVICE_RSA_MODULUS.as_bytes(), 16).expect("parse modulus");
+        assert!(value > BigUint::from(0_u8));
+        assert!(value < modulus);
     }
 
     #[test]
@@ -4603,6 +5037,70 @@ mod tests {
         assert_eq!(page.pagination.offset, 1);
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].extensions["playlist_position"], 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live KuGou network access"]
+    async fn live_anonymous_device_registration_persists_and_refreshes_invalid_dfid() {
+        let path = std::env::temp_dir().join(format!(
+            "tuneweave-kugou-live-device-{}-{}.json",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = KugouConfig {
+            device_path: Some(path.clone()),
+            ..KugouConfig::default()
+        };
+        let first_client = KugouClient::new(&config).expect("create first client");
+        let first = first_client
+            .registered_device()
+            .await
+            .expect("register live device");
+        assert_eq!(first.dfid().len(), 24);
+        drop(first_client);
+
+        let second_client = KugouClient::new(&config).expect("reopen client");
+        let cached = second_client
+            .device_identity()
+            .expect("read cached identity");
+        assert_eq!(cached.guid, first.guid);
+        assert_eq!(cached.mid, first.mid);
+        assert_eq!(cached.dfid, first.dfid);
+        drop(second_client);
+
+        let mut stored: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read device state"))
+                .expect("decode device state");
+        stored["dfid"] = json!("invalid");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&stored).expect("encode invalid device state"),
+        )
+        .expect("write invalid device state");
+
+        let refreshed_client = KugouClient::new(&config).expect("reopen invalid client");
+        let refreshed = refreshed_client
+            .registered_device()
+            .await
+            .expect("refresh live device registration");
+        assert_ne!(refreshed.guid, first.guid);
+        assert_ne!(refreshed.mid, first.mid);
+        assert_eq!(refreshed.dfid().len(), 24);
+        assert_ne!(refreshed.dfid(), "invalid");
+
+        let track = refreshed_client
+            .track_detail(100_063_739)
+            .await
+            .expect("load track with refreshed device");
+        let stream = refreshed_client
+            .stream(&track, &StreamRequest::default())
+            .await
+            .expect("resolve media with refreshed device");
+        assert_eq!(stream.resolved_track.to_string(), "kugou:100063739");
+        assert!(stream.url.starts_with("https://"));
+        assert!(stream.trial.is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

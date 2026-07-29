@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         proxy_url: env::var("TUNEWEAVE_KUGOU_PROXY")
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
+        device_path: Some(data_dir.join("kugou-device.json")),
     })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);

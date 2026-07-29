@@ -1,4 +1,5 @@
 mod client;
+mod device;
 mod provider;
 
 pub use client::{KugouClient, KugouConfig};

@@ -1453,6 +1453,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷狗公开歌单使用 `GET /v1/playlists/kugou:<global_collection_id>` 与 `/tracks`，只接受以 `collection_` 开头的规范公开集合身份且不接受账户。元数据固定访问 Android `/v3/get_list_info`，歌曲固定访问公开 `/pubsongs/v2/get_other_list_file_nofilt`；统一 `offset` 直接传递为平台 `begin_idx`，因此任意 offset 都形成连续窗口，不受参考项目页码换算和页宽对齐限制。平台只在首段返回完整 `list_info`，实现会在字段存在时严格复核集合身份，同时接受后续段有意返回的空对象。歌曲当前身份使用 `mixsongid` 对应的 `album_audio_id`，与其不同的历史 `add_mixsongid` 仅作为诊断保留；标准、高品、无损与 Hi-Res 规格均映射为强类型歌曲能力。歌单封面仅接受官方 `*.kugou.com` 与 `*.kgimg.com` HTTPS 地址，HTTP 地址只在同一受信主机上升级。Uni Playlist 可用 `{ "platform": "kugou", "type": "playlist", "id": "<global_collection_id>" }` 导入该来源；服务端托管导入和客户端托管来源展开共用同一 provider 契约，完整遍历保持平台顺序与重复项。真实 HTTP 已验证任意非对齐分页，并将一份 91 首公开歌单完整导入后成功播放首项。
 
+酷狗设备身份属于 provider 内部状态，不是账户或调用方凭证。全新部署在 `TUNEWEAVE_DATA_DIR/kugou-device.json` 创建匿名 GUID，并以其 MD5 的无符号 128 位十进制值确定性派生 MID；Web 搜索只复用稳定 MID，不为此提前注册。首次歌曲详情、歌单、歌词、权益或播放等移动端请求会固定访问 `https://userservice.kugou.com/risk/v2/r_register_dev`，以内部 AES-CBC 档案、RSA PKCS#1 v1.5 密钥包和完整 Android 签名取得 24 位 `dfid`，随后将 GUID、MID、`dfid` 和注册时间原子保存并在重启后复用。并发首次请求只执行一次注册。若本地 `dfid` 已损坏，或平台对已经注册但本地遗失 `dfid` 的旧 GUID 返回成功空数据，provider 会使该注册失效；后一分支等待 1 秒冷却，轮换整套匿名身份并只重试一次，第二次仍无 `dfid` 时明确失败，不无限重试。GUID/MID 派生关系损坏时拒绝启动，API 请求不能覆盖设备文件、设备字段、注册地址、签名、请求头或代理。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。
