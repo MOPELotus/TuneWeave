@@ -2139,23 +2139,38 @@ impl BilibiliClient {
     }
 
     pub(crate) async fn create_qr_login(&self) -> Result<BilibiliQrStart> {
-        let response = self
-            .http
-            .get(PASSPORT_QR_GENERATE_ENDPOINT)
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(PASSPORT_QR_GENERATE_ENDPOINT)
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili QR response exceeded the size limit",
+                ));
+            }
+            parse_qr_generate_response(&bytes)
         }
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili QR response exceeded the size limit",
-            ));
-        }
-        parse_qr_generate_response(&bytes)
+        .await;
+        self.log_upstream_request(
+            "qr_login_start",
+            "passport.bilibili.com",
+            "/x/passport-login/web/qrcode/generate",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn poll_qr_login(&self, qrcode_key: &str) -> Result<BilibiliQrPoll> {
@@ -2171,24 +2186,39 @@ impl BilibiliClient {
             .query_pairs_mut()
             .append_pair("qrcode_key", qrcode_key)
             .append_pair("source", "main-fe-header");
-        let response = self
-            .http
-            .get(endpoint)
-            .send()
-            .await
-            .map_err(passport_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(passport_http_error(status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = self
+                .http
+                .get(endpoint)
+                .send()
+                .await
+                .map_err(passport_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(passport_http_error(status));
+            }
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.map_err(passport_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili QR poll response exceeded the size limit",
+                ));
+            }
+            parse_qr_poll_response(&bytes, &headers)
         }
-        let headers = response.headers().clone();
-        let bytes = response.bytes().await.map_err(passport_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili QR poll response exceeded the size limit",
-            ));
-        }
-        parse_qr_poll_response(&bytes, &headers)
+        .await;
+        self.log_upstream_request(
+            "qr_login_poll",
+            "passport.bilibili.com",
+            "/x/passport-login/web/qrcode/poll",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn session_status(
@@ -2199,18 +2229,33 @@ impl BilibiliClient {
         if let Some(credential) = credential {
             request = request.header(COOKIE, credential.cookie_header());
         }
-        let response = request.send().await.map_err(bilibili_network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(bilibili_http_error("Bilibili session endpoint", status));
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili session endpoint", status));
+            }
+            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
+            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
+                return Err(bilibili_upstream_error(
+                    "Bilibili session response exceeded the size limit",
+                ));
+            }
+            parse_session_response(&bytes, credential.map(BilibiliCredential::user_id))
         }
-        let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-        if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-            return Err(bilibili_upstream_error(
-                "Bilibili session response exceeded the size limit",
-            ));
-        }
-        parse_session_response(&bytes, credential.map(BilibiliCredential::user_id))
+        .await;
+        self.log_upstream_request(
+            "session_status",
+            "api.bilibili.com",
+            "/x/web-interface/nav",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub(crate) async fn refresh_credential(
