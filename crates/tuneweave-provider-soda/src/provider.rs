@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, fmt};
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, MusicProvider, Page, PageMeta, Platform, Result, SearchKind,
-    SearchQuery, SearchVariant, Track, TuneWeaveError,
+    Capability, Extensions, Lyrics, LyricsRequest, MusicProvider, Page, PageMeta, Platform, Result,
+    SearchKind, SearchQuery, SearchVariant, Track, TuneWeaveError,
 };
 
 use crate::client::{SodaClient, SodaConfig, UPSTREAM_SEARCH_PAGE_SIZE};
@@ -48,7 +48,11 @@ impl MusicProvider for SodaProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+        BTreeSet::from([
+            Capability::SearchTracks,
+            Capability::TrackDetail,
+            Capability::Lyrics,
+        ])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -130,6 +134,22 @@ impl MusicProvider for SodaProvider {
         let identity = self.client.resolve_track_identity(id).await?;
         self.client.track_detail(&identity).await
     }
+
+    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+        validate_lyrics_request(account, None, false)?;
+        let identity = self.client.resolve_track_identity(id).await?;
+        self.client.lyrics(&identity).await
+    }
+
+    async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        validate_lyrics_request(
+            request.account.as_deref(),
+            request.song_type,
+            request.singing_annotations,
+        )?;
+        let identity = self.client.resolve_track_identity(id).await?;
+        self.client.lyrics(&identity).await
+    }
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -172,6 +192,24 @@ fn validate_search_query(query: &SearchQuery) -> Result<()> {
     Ok(())
 }
 
+fn validate_lyrics_request(
+    account: Option<&str>,
+    song_type: Option<i64>,
+    singing_annotations: bool,
+) -> Result<()> {
+    if account.is_some() {
+        return Err(soda_invalid_request(
+            "Soda public lyrics do not accept an account",
+        ));
+    }
+    if song_type.is_some() || singing_annotations {
+        return Err(soda_invalid_request(
+            "Soda lyrics do not accept song_type or singing annotations",
+        ));
+    }
+    Ok(())
+}
+
 fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Soda)
 }
@@ -192,9 +230,14 @@ mod tests {
         assert_eq!(provider.name(), "Soda Music");
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
+            BTreeSet::from([
+                Capability::SearchTracks,
+                Capability::TrackDetail,
+                Capability::Lyrics,
+            ])
         );
         assert!(provider.supports(Capability::TrackDetail));
+        assert!(provider.supports(Capability::Lyrics));
         assert!(!provider.supports(Capability::AudioStream));
     }
 
@@ -227,5 +270,21 @@ mod tests {
             .expect_err("Soda public detail must reject accounts");
         assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
         assert_eq!(error.platform, Some(Platform::Soda));
+
+        let error = provider
+            .lyrics("7304719759323564095", Some("default"))
+            .await
+            .expect_err("Soda public lyrics must reject accounts");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
+
+        let request = LyricsRequest {
+            singing_annotations: true,
+            ..LyricsRequest::default()
+        };
+        let error = provider
+            .lyrics_with_options("7304719759323564095", &request)
+            .await
+            .expect_err("Soda lyrics must reject foreign lyric controls");
+        assert_eq!(error.code, tuneweave_core::ErrorCode::InvalidRequest);
     }
 }

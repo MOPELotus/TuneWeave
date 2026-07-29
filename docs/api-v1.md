@@ -1491,6 +1491,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 汽水歌曲详情使用 `GET /v1/tracks/soda:<track_id>`，公开层不接受账户。Provider 固定调用官方 HTTPS 匿名 `track_v2`，只提交规范歌曲 ID、`media_type=track`、固定 `aid=386088`、`device_platform=web` 和 `channel=pc_web`；真实消融确认无需 Cookie、设备或签名。响应必须回配同一歌曲 ID 和媒体类型，并以强类型映射歌曲、歌手、专辑、可信封面、时长、目录音质、统计、词曲作者、高潮及首唱时间片、语言、标签、分享平台和卡拉 OK 状态；结构数量和文本长度均受限。`canonical_share_url` 只由已验证 ID 构造，详情只在平台明确离线时设置 `playable=false`，目录权益仍不能冒充实时播放授权。上游同一响应携带的歌词留给独立歌词能力处理，`url_player_info`、`video_model`、临时媒体主机和令牌不会进入详情、扩展或日志，播放链接入后也必须按请求实时刷新。
 
+汽水歌词使用 `GET /v1/tracks/soda:<track_id>/lyrics`，公开层不接受账户、`song_type` 或助唱标注参数。Provider 刷新同一匿名 `track_v2` 并严格回配歌曲 ID 与媒体类型，把平台 `[行起点,行时长]<相对字偏移,字时长,保留字段>` 毫秒格式保存在 `word_synced`，同时从相同已验证行派生带三位毫秒时间戳的 `plain`；`format=krc` 始终由逐字轨决定，普通歌词不能覆盖或截断高级轨。每一行、每个字标签、顺序和相对时间范围都会验证，正文限制 4 MiB、最多 20,000 行且每行最多 2,000 个时序单元；任一逐字结构损坏会返回明确上游错误，不会静默降级为普通文本。与官方分享页 `lyrics.sentences` 的真实差分确认 26 行正文和 214 个字的文本、绝对起止时间完全一致；页面额外两行前置信息不混进演唱正文，词作者通过独立 contributor 表达，页面末句的 `Number.MAX_SAFE_INTEGER` 展示哨兵也不会污染真实末字结束时间。当前公开响应没有独立翻译或音译，因此对应字段保持 `null`；扩展只记录计数和时间单位，不含歌词请求中的临时 player 数据。真实统一 HTTP 已确认普通与逐字轨同时存在，非法账户和平台外参数均在联网前返回 400。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

@@ -8,8 +8,8 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    AlbumSummary, ArtistSummary, ErrorCode, Extensions, Platform, Quality, ResourceRef, Result,
-    Track, TuneWeaveError,
+    AlbumSummary, ArtistSummary, ErrorCode, Extensions, LyricContributor, Lyrics, Platform,
+    Quality, ResourceRef, Result, Track, TuneWeaveError,
 };
 use url::Url;
 
@@ -22,6 +22,9 @@ pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
 const SODA_APP_ID: &str = "386088";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LYRIC_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_LYRIC_LINES: usize = 20_000;
+const MAX_WORDS_PER_LINE: usize = 2_000;
 const USER_AGENT: &str = "TuneWeave/0.1 (Soda public music provider)";
 
 #[derive(Clone, Default)]
@@ -81,6 +84,13 @@ struct SodaTrackDetailEnvelope {
     status_info: SodaStatusInfo,
     track: Option<SodaTrack>,
     risk_result: Option<i64>,
+    lyric: SodaLyricPayload,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaLyricPayload {
+    content: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -349,7 +359,11 @@ impl SodaClient {
         parse_search_response(&body, cursor)
     }
 
-    pub(crate) async fn track_detail(&self, identity: &SodaTrackIdentity) -> Result<Track> {
+    async fn fetch_track_v2_body(
+        &self,
+        identity: &SodaTrackIdentity,
+        operation: &str,
+    ) -> Result<Vec<u8>> {
         let response = self
             .http
             .get("https://api.qishui.com/luna/pc/track_v2")
@@ -363,8 +377,19 @@ impl SodaClient {
             .send()
             .await
             .map_err(soda_network_error)?;
-        let body = read_bounded_response(response, "Soda track detail").await?;
+        read_bounded_response(response, operation).await
+    }
+
+    pub(crate) async fn track_detail(&self, identity: &SodaTrackIdentity) -> Result<Track> {
+        let body = self
+            .fetch_track_v2_body(identity, "Soda track detail")
+            .await?;
         parse_track_detail_response(&body, identity)
+    }
+
+    pub(crate) async fn lyrics(&self, identity: &SodaTrackIdentity) -> Result<Lyrics> {
+        let body = self.fetch_track_v2_body(identity, "Soda lyrics").await?;
+        parse_lyrics_response(&body, identity)
     }
 
     pub async fn resolve_track_identity(&self, input: &str) -> Result<SodaTrackIdentity> {
@@ -489,6 +514,239 @@ fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Res
         json!(identity.canonical_url()),
     );
     Ok(mapped)
+}
+
+fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Lyrics> {
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda lyrics returned malformed JSON"))?;
+    validate_status_metadata(&envelope.status_info, "Soda lyrics")?;
+    if envelope.risk_result.is_some_and(|value| value != 0) {
+        return Err(soda_upstream_error(
+            "Soda lyrics were rejected by platform risk control",
+        ));
+    }
+    let track = envelope
+        .track
+        .ok_or_else(|| soda_upstream_error("Soda lyrics omitted the track payload"))?;
+    if track.id.trim() != identity.id() {
+        return Err(soda_upstream_error(
+            "Soda lyrics returned a mismatched track identity",
+        ));
+    }
+    if !track.media_type.trim().is_empty() && track.media_type.trim() != "track" {
+        return Err(soda_upstream_error(
+            "Soda lyrics returned a non-track media type",
+        ));
+    }
+    let parsed = parse_word_synced_lyrics(&envelope.lyric.content)?;
+    let contributors = track
+        .song_maker_team
+        .lyricists
+        .into_iter()
+        .filter_map(|credit| bounded_text(&credit.name, 1_000))
+        .map(|name| LyricContributor {
+            role: "lyricist".to_owned(),
+            resource_ref: None,
+            name,
+        })
+        .collect();
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_pc_track_v2"));
+    extensions.insert("line_count".to_owned(), json!(parsed.line_count));
+    extensions.insert("word_count".to_owned(), json!(parsed.word_count));
+    extensions.insert("line_time_unit".to_owned(), json!("milliseconds"));
+    extensions.insert(
+        "word_offset_origin".to_owned(),
+        json!("relative_to_line_start"),
+    );
+    extensions.insert("plain_derived_from_word_synced".to_owned(), json!(true));
+    extensions.insert("unknown_word_tag_field_preserved".to_owned(), json!(true));
+    Ok(Lyrics {
+        track_ref: identity.resource_ref()?,
+        plain: Some(parsed.plain),
+        translated: None,
+        romanized: None,
+        word_synced: Some(parsed.word_synced),
+        singing_annotations: None,
+        singing_annotations_timestamp: None,
+        format: "krc".to_owned(),
+        contributors,
+        extensions,
+    })
+}
+
+struct ParsedSodaLyrics {
+    plain: String,
+    word_synced: String,
+    line_count: usize,
+    word_count: usize,
+}
+
+fn parse_word_synced_lyrics(raw: &str) -> Result<ParsedSodaLyrics> {
+    if raw.is_empty() || raw.len() > MAX_LYRIC_CONTENT_BYTES {
+        return Err(soda_upstream_error(
+            "Soda lyrics contained no bounded lyric content",
+        ));
+    }
+    if raw
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(soda_upstream_error(
+            "Soda lyrics contained unsupported control characters",
+        ));
+    }
+
+    let mut plain = String::with_capacity(raw.len());
+    let mut normalized = String::with_capacity(raw.len());
+    let mut line_count = 0_usize;
+    let mut word_count = 0_usize;
+    for source_line in raw.lines() {
+        let line = source_line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        line_count = line_count.saturating_add(1);
+        if line_count > MAX_LYRIC_LINES {
+            return Err(soda_upstream_error(
+                "Soda lyrics exceeded the line count limit",
+            ));
+        }
+        let close = line
+            .find(']')
+            .filter(|_| line.starts_with('['))
+            .ok_or_else(|| soda_upstream_error("Soda lyrics contained a malformed line header"))?;
+        let (line_start, line_duration) = parse_pair(&line[1..close], "line header")?;
+        if line_duration == 0
+            || line_start > 24 * 60 * 60 * 1_000
+            || line_duration > 24 * 60 * 60 * 1_000
+        {
+            return Err(soda_upstream_error(
+                "Soda lyrics contained an invalid line time range",
+            ));
+        }
+        let payload = &line[close + 1..];
+        let text = parse_word_payload(payload, line_duration, &mut word_count)?;
+        if text.is_empty() {
+            return Err(soda_upstream_error(
+                "Soda lyrics contained an empty timed line",
+            ));
+        }
+        if !normalized.is_empty() {
+            normalized.push('\n');
+            plain.push('\n');
+        }
+        normalized.push_str(line);
+        plain.push_str(&format_lrc_timestamp(line_start));
+        plain.push_str(&text);
+    }
+    if line_count == 0 || word_count == 0 {
+        return Err(soda_upstream_error(
+            "Soda lyrics did not contain word-synchronized lines",
+        ));
+    }
+    Ok(ParsedSodaLyrics {
+        plain,
+        word_synced: normalized,
+        line_count,
+        word_count,
+    })
+}
+
+fn parse_word_payload(
+    payload: &str,
+    line_duration: u64,
+    total_words: &mut usize,
+) -> Result<String> {
+    let mut remaining = payload;
+    let mut text = String::new();
+    let mut previous_offset = 0_u64;
+    let mut words_in_line = 0_usize;
+    while !remaining.is_empty() {
+        if !remaining.starts_with('<') {
+            return Err(soda_upstream_error(
+                "Soda lyrics contained text without a word timing tag",
+            ));
+        }
+        let close = remaining
+            .find('>')
+            .ok_or_else(|| soda_upstream_error("Soda lyrics contained an open word timing tag"))?;
+        let (offset, duration, _unknown) = parse_triplet(&remaining[1..close], "word tag")?;
+        if duration == 0
+            || offset < previous_offset
+            || offset.saturating_add(duration) > line_duration
+        {
+            return Err(soda_upstream_error(
+                "Soda lyrics contained an invalid word time range",
+            ));
+        }
+        previous_offset = offset;
+        remaining = &remaining[close + 1..];
+        let next = remaining.find('<').unwrap_or(remaining.len());
+        let word = &remaining[..next];
+        if word.is_empty() {
+            return Err(soda_upstream_error(
+                "Soda lyrics contained an empty timed word",
+            ));
+        }
+        text.push_str(word);
+        words_in_line = words_in_line.saturating_add(1);
+        *total_words = total_words.saturating_add(1);
+        if words_in_line > MAX_WORDS_PER_LINE {
+            return Err(soda_upstream_error(
+                "Soda lyrics exceeded the per-line word limit",
+            ));
+        }
+        remaining = &remaining[next..];
+    }
+    Ok(text)
+}
+
+fn parse_pair(value: &str, context: &str) -> Result<(u64, u64)> {
+    let mut fields = value.split(',');
+    let first = parse_lyric_u64(fields.next(), context)?;
+    let second = parse_lyric_u64(fields.next(), context)?;
+    if fields.next().is_some() {
+        return Err(soda_upstream_error(format!(
+            "Soda lyrics contained a malformed {context}"
+        )));
+    }
+    Ok((first, second))
+}
+
+fn parse_triplet(value: &str, context: &str) -> Result<(u64, u64, i64)> {
+    let mut fields = value.split(',');
+    let first = parse_lyric_u64(fields.next(), context)?;
+    let second = parse_lyric_u64(fields.next(), context)?;
+    let third = fields
+        .next()
+        .and_then(|field| field.parse::<i64>().ok())
+        .ok_or_else(|| {
+            soda_upstream_error(format!("Soda lyrics contained a malformed {context}"))
+        })?;
+    if fields.next().is_some() {
+        return Err(soda_upstream_error(format!(
+            "Soda lyrics contained a malformed {context}"
+        )));
+    }
+    Ok((first, second, third))
+}
+
+fn parse_lyric_u64(value: Option<&str>, context: &str) -> Result<u64> {
+    let value = value
+        .filter(|value| canonical_nonnegative_decimal(value).is_some())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| {
+            soda_upstream_error(format!("Soda lyrics contained a malformed {context}"))
+        })?;
+    Ok(value)
+}
+
+fn format_lrc_timestamp(milliseconds: u64) -> String {
+    let minutes = milliseconds / 60_000;
+    let seconds = milliseconds % 60_000 / 1_000;
+    let millis = milliseconds % 1_000;
+    format!("[{minutes:02}:{seconds:02}.{millis:03}]")
 }
 
 fn validate_status_metadata(status: &SodaStatusInfo, operation: &str) -> Result<()> {
@@ -938,6 +1196,48 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_keep_word_sync_primary_and_derive_plain_without_overwriting_it() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let raw = "[3150,1000]<0,400,0>你<400,600,0>好\n[5000,500]<0,500,7>！";
+        let mut response: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        response["lyric"]["content"] = json!(raw);
+        let body = serde_json::to_vec(&response).expect("serialize lyric fixture");
+        let lyrics = parse_lyrics_response(&body, &identity).expect("parse Soda lyrics");
+        assert_eq!(lyrics.track_ref.to_string(), "soda:7304719759323564095");
+        assert_eq!(lyrics.format, "krc");
+        assert_eq!(lyrics.word_synced.as_deref(), Some(raw));
+        assert_eq!(
+            lyrics.plain.as_deref(),
+            Some("[00:03.150]你好\n[00:05.000]！")
+        );
+        assert_eq!(lyrics.translated, None);
+        assert_eq!(lyrics.romanized, None);
+        assert_eq!(lyrics.extensions["line_count"], 2);
+        assert_eq!(lyrics.extensions["word_count"], 3);
+        assert_eq!(lyrics.extensions["plain_derived_from_word_synced"], true);
+        assert_eq!(lyrics.contributors[0].role, "lyricist");
+        assert_eq!(lyrics.contributors[0].name, "堇临|刘涛");
+    }
+
+    #[test]
+    fn lyrics_reject_malformed_or_lossy_word_timing_instead_of_downgrading() {
+        for raw in [
+            "plain text only",
+            "[0,1000]text without tag",
+            "[0,1000]<0,0,0>zero duration",
+            "[0,1000]<900,200,0>past line end",
+            "[0,1000]<0,500,0>",
+            "[0,1000]<0,500>missing field",
+            "[0,1000]<500,200,0>后<100,200,0>前",
+        ] {
+            assert!(parse_word_synced_lyrics(raw).is_err(), "{raw}");
+        }
+        assert!(parse_word_synced_lyrics("[0,1000]<0,500,0>好\0").is_err());
+    }
+
+    #[test]
     fn explicit_empty_search_is_a_stable_empty_page() {
         let page = parse_search_response(
             br#"{"status_info":{"log_id":"x","now":1,"now_ts_ms":1000},"result_groups":[],"extra":{"empty_search":1}}"#,
@@ -1116,5 +1416,35 @@ mod tests {
         assert!(!serialized.contains("url_player_info"));
         assert!(!serialized.contains("video_model"));
         assert!(!serialized.contains("vod-luna.douyin.com"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Soda network access"]
+    async fn live_anonymous_lyrics_keep_word_and_plain_tracks_separate() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let lyrics = SodaClient::test_client()
+            .lyrics(&identity)
+            .await
+            .expect("live Soda lyrics");
+        let plain = lyrics.plain.expect("derived plain Soda lyrics");
+        let word_synced = lyrics.word_synced.expect("word-synchronized Soda lyrics");
+        assert_eq!(lyrics.format, "krc");
+        assert!(plain.contains("[00:"));
+        assert!(!plain.contains('<'));
+        assert!(word_synced.contains('<'));
+        assert!(word_synced.len() > plain.len());
+        assert!(
+            lyrics.extensions["line_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert!(
+            lyrics.extensions["word_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert_eq!(lyrics.translated, None);
+        assert_eq!(lyrics.romanized, None);
     }
 }
