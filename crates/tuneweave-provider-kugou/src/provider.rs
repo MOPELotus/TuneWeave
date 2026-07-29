@@ -48,7 +48,7 @@ impl MusicProvider for KugouProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks])
+        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -96,6 +96,28 @@ impl MusicProvider for KugouProvider {
             },
         })
     }
+
+    async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+        if account.is_some() {
+            return Err(kugou_invalid_request(
+                "KuGou public track detail does not accept an account",
+            ));
+        }
+        let album_audio_id = parse_album_audio_id(id)?;
+        self.client.track_detail(album_audio_id).await
+    }
+}
+
+fn parse_album_audio_id(id: &str) -> Result<u64> {
+    let parsed = id.parse::<u64>().map_err(|_| {
+        kugou_invalid_request("KuGou track ID must be a canonical positive album_audio_id")
+    })?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(kugou_invalid_request(
+            "KuGou track ID must be a canonical positive album_audio_id",
+        ));
+    }
+    Ok(parsed)
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -170,13 +192,24 @@ mod tests {
     }
 
     #[test]
-    fn provider_advertises_only_implemented_public_search() {
+    fn provider_advertises_only_implemented_public_capabilities() {
         let provider = KugouProvider::new(KugouConfig::default()).expect("create KuGou provider");
         assert_eq!(provider.platform(), Platform::Kugou);
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks])
+            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
         );
+    }
+
+    #[test]
+    fn track_detail_requires_a_canonical_album_audio_identity() {
+        assert_eq!(
+            parse_album_audio_id("32100650").expect("valid ID"),
+            32100650
+        );
+        for id in ["", "0", "032100650", " 32100650", "+32100650", "-1", "hash"] {
+            assert!(parse_album_audio_id(id).is_err(), "{id:?} must fail");
+        }
     }
 
     #[test]
