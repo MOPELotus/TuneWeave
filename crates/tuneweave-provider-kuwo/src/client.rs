@@ -20,8 +20,8 @@ use serde_json::{Number, json};
 use tokio::sync::Mutex;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
-    Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track, TrackAvailability,
-    TrackAvailabilityRequest, TuneWeaveError,
+    Platform, Playlist, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
+    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
 };
 use url::Url;
 
@@ -29,6 +29,7 @@ const HOME_ENDPOINT: &str = "https://www.kuwo.cn/";
 const SEARCH_ENDPOINT: &str = "https://www.kuwo.cn/search/searchMusicBykeyWord";
 const TRACK_DETAIL_ENDPOINT: &str = "https://www.kuwo.cn/api/www/music/musicInfo";
 const PLAYBACK_ENDPOINT: &str = "https://www.kuwo.cn/api/v1/www/music/playUrl";
+const PLAYLIST_ENDPOINT: &str = "https://www.kuwo.cn/api/www/playlist/playListInfo";
 const WORD_LYRIC_ENDPOINT: &str = "https://newlyric.kuwo.cn/newlyric.lrc";
 const MOBILE_LYRIC_ENDPOINT: &str = "https://m.kuwo.cn/newh5/singles/songinfoandlrc";
 const SEARCH_REFERER: &str = "https://www.kuwo.cn/search/list";
@@ -48,6 +49,7 @@ const EIGHT_DIGIT_FOLDED_SEED: u64 = 59_910_100;
 const LYRIC_XOR_KEY: &[u8] = b"yeelion";
 const PUBLIC_AUDIO_BITRATE: u64 = 128_000;
 const PUBLIC_AUDIO_BR: &str = "128kmp3";
+const PLAYLIST_TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Default)]
 pub struct KuwoConfig {
@@ -80,6 +82,13 @@ impl fmt::Debug for KuwoClient {
 
 #[derive(Debug)]
 pub(crate) struct KuwoSearchPage {
+    pub tracks: Vec<Track>,
+    pub total: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct KuwoPlaylistPage {
+    pub playlist: Playlist,
     pub tracks: Vec<Track>,
     pub total: u64,
 }
@@ -140,6 +149,19 @@ struct KuwoPlaybackQuery<'a> {
     br: &'static str,
     #[serde(rename = "reqId")]
     request_id: String,
+}
+
+#[derive(Serialize)]
+struct KuwoPlaylistQuery<'a> {
+    pid: &'a str,
+    pn: u32,
+    rn: u32,
+    #[serde(rename = "httpsStatus")]
+    https_status: u8,
+    #[serde(rename = "reqId")]
+    request_id: String,
+    plat: &'static str,
+    from: &'static str,
 }
 
 #[derive(Serialize)]
@@ -280,6 +302,39 @@ struct KuwoPlaybackEnvelope {
 #[serde(default)]
 struct KuwoPlaybackData {
     url: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoPlaylistEnvelope {
+    code: FlexibleText,
+    msg: String,
+    data: Option<KuwoPlaylistData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoPlaylistData {
+    img: String,
+    #[serde(rename = "uPic")]
+    user_picture: String,
+    uname: String,
+    img700: String,
+    img300: String,
+    #[serde(rename = "userName")]
+    user_name: String,
+    img500: String,
+    #[serde(rename = "isOfficial")]
+    official: FlexibleBoolean,
+    total: FlexibleText,
+    name: String,
+    listencnt: FlexibleText,
+    id: FlexibleText,
+    tag: String,
+    #[serde(rename = "musicList")]
+    music_list: Vec<KuwoTrackDetail>,
+    desc: String,
+    info: String,
 }
 
 struct KuwoPublicMedia {
@@ -559,6 +614,50 @@ impl KuwoClient {
         }
         Err(kuwo_upstream_error(
             "Kuwo track detail exhausted its bounded session refresh",
+        ))
+    }
+
+    pub(crate) async fn playlist_detail(&self, playlist_id: &str) -> Result<Playlist> {
+        Ok(self.playlist_page(playlist_id, 1, 1).await?.playlist)
+    }
+
+    pub(crate) async fn playlist_page(
+        &self,
+        playlist_id: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<KuwoPlaylistPage> {
+        let mut transient_retry_available = true;
+        for force_refresh in [false, true] {
+            let response = loop {
+                match self
+                    .signed_get_playlist(playlist_id, page, page_size, force_refresh)
+                    .await
+                {
+                    Err(error) if error.retryable && transient_retry_available => {
+                        transient_retry_available = false;
+                        tokio::time::sleep(PLAYLIST_TRANSIENT_RETRY_DELAY).await;
+                    }
+                    result => break result?,
+                }
+            };
+            let bytes = match response {
+                KuwoSignedResponse::Body(bytes) => bytes,
+                KuwoSignedResponse::SessionRejected if !force_refresh => continue,
+                KuwoSignedResponse::SessionRejected => {
+                    return Err(kuwo_upstream_error(
+                        "Kuwo rejected a freshly established web session",
+                    ));
+                }
+            };
+            match parse_playlist_response(&bytes, playlist_id, page, page_size) {
+                Ok(page) => return Ok(page),
+                Err(_) if !force_refresh && is_signed_session_rejection(&bytes) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(kuwo_upstream_error(
+            "Kuwo public playlist exhausted its bounded session refresh",
         ))
     }
 
@@ -904,6 +1003,7 @@ impl KuwoClient {
                 plat: "web_www",
                 from: "",
             },
+            WEB_REFERER,
             "Kuwo track detail",
             force_refresh,
         )
@@ -926,7 +1026,34 @@ impl KuwoClient {
                 br: PUBLIC_AUDIO_BR,
                 request_id: new_request_id(),
             },
+            WEB_REFERER,
             "Kuwo public playback",
+            force_refresh,
+        )
+        .await
+    }
+
+    async fn signed_get_playlist(
+        &self,
+        playlist_id: &str,
+        page: u32,
+        page_size: u32,
+        force_refresh: bool,
+    ) -> Result<KuwoSignedResponse> {
+        let referer = format!("https://www.kuwo.cn/playlist_detail/{playlist_id}");
+        self.signed_get(
+            PLAYLIST_ENDPOINT,
+            &KuwoPlaylistQuery {
+                pid: playlist_id,
+                pn: page,
+                rn: page_size,
+                https_status: 1,
+                request_id: new_request_id(),
+                plat: "web_www",
+                from: "",
+            },
+            &referer,
+            "Kuwo public playlist",
             force_refresh,
         )
         .await
@@ -936,6 +1063,7 @@ impl KuwoClient {
         &self,
         endpoint: &'static str,
         query: &Q,
+        referer: &str,
         operation: &'static str,
         force_refresh: bool,
     ) -> Result<KuwoSignedResponse>
@@ -948,7 +1076,7 @@ impl KuwoClient {
             .http
             .get(endpoint)
             .header(ACCEPT, "application/json")
-            .header(REFERER, WEB_REFERER)
+            .header(REFERER, referer)
             .header(
                 COOKIE,
                 format!("{WEB_SESSION_COOKIE}={}", session.cookie_value),
@@ -1314,6 +1442,14 @@ fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result
     let detail = envelope
         .data
         .ok_or_else(|| kuwo_upstream_error("Kuwo track detail omitted data"))?;
+    map_track_detail(detail, requested_music_id, "current_web_music_info")
+}
+
+fn map_track_detail(
+    detail: KuwoTrackDetail,
+    requested_music_id: &str,
+    backend: &'static str,
+) -> Result<Track> {
     let musicrid = detail
         .musicrid
         .strip_prefix("MUSIC_")
@@ -1365,7 +1501,7 @@ fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result
 
     track
         .extensions
-        .insert("backend".to_owned(), json!("current_web_music_info"));
+        .insert("backend".to_owned(), json!(backend));
     insert_flexible(&mut track.extensions, "track_number", &detail.track);
     insert_optional_text(
         &mut track.extensions,
@@ -1423,6 +1559,155 @@ fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result
         );
     }
     Ok(track)
+}
+
+fn parse_playlist_response(
+    bytes: &[u8],
+    requested_playlist_id: &str,
+    requested_page: u32,
+    requested_size: u32,
+) -> Result<KuwoPlaylistPage> {
+    if requested_page == 0 || !(1..=100).contains(&requested_size) {
+        return Err(kuwo_invalid_request(
+            "Kuwo playlist pages are one-based with a size between 1 and 100",
+        ));
+    }
+    let envelope: KuwoPlaylistEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kuwo_upstream_error("Kuwo public playlist returned malformed JSON"))?;
+    if envelope.code.as_i64() != Some(200) {
+        if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Kuwo playlist was not found or is not public",
+            )
+            .with_platform(Platform::Kuwo));
+        }
+        return Err(
+            kuwo_upstream_error("Kuwo public playlist rejected the request").with_details(json!({
+                "platform_code": envelope.code.as_text().map(|value| bounded_text(&value, 64)),
+                "platform_message": bounded_text(&envelope.msg, 256),
+            })),
+        );
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playlist omitted data"))?;
+    let returned_id = data
+        .id
+        .as_text()
+        .and_then(|id| canonical_positive_decimal(&id).map(str::to_owned))
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playlist omitted a stable identity"))?;
+    if returned_id != requested_playlist_id {
+        return Err(kuwo_upstream_error(
+            "Kuwo public playlist returned a mismatched identity",
+        ));
+    }
+    let total = data
+        .total
+        .as_u64()
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playlist omitted a valid track total"))?;
+    if total > 1_000_000 {
+        return Err(kuwo_upstream_error(
+            "Kuwo public playlist returned an excessive track total",
+        ));
+    }
+    let page_start = u64::from(requested_page.saturating_sub(1))
+        .checked_mul(u64::from(requested_size))
+        .ok_or_else(|| kuwo_invalid_request("Kuwo playlist page exceeds the supported range"))?;
+    let expected_count = total
+        .saturating_sub(page_start)
+        .min(u64::from(requested_size));
+    if u64::try_from(data.music_list.len()).unwrap_or(u64::MAX) != expected_count {
+        return Err(kuwo_upstream_error(
+            "Kuwo public playlist returned an incomplete page",
+        ));
+    }
+    let playlist = map_playlist(&data, requested_playlist_id, total)?;
+    let mut tracks = Vec::with_capacity(data.music_list.len());
+    for (index, detail) in data.music_list.into_iter().enumerate() {
+        let music_id = detail
+            .rid
+            .as_text()
+            .and_then(|id| canonical_positive_decimal(&id).map(str::to_owned))
+            .ok_or_else(|| {
+                kuwo_upstream_error("Kuwo public playlist track omitted a stable identity")
+            })?;
+        let mut track = map_track_detail(detail, &music_id, "current_web_playlist_info")?;
+        let position = page_start
+            .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
+            .ok_or_else(|| kuwo_upstream_error("Kuwo playlist position overflowed"))?;
+        track
+            .extensions
+            .insert("playlist_position".to_owned(), json!(position));
+        tracks.push(track);
+    }
+    Ok(KuwoPlaylistPage {
+        playlist,
+        tracks,
+        total,
+    })
+}
+
+fn map_playlist(
+    data: &KuwoPlaylistData,
+    requested_playlist_id: &str,
+    total: u64,
+) -> Result<Playlist> {
+    let name = nonempty(&data.name)
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playlist omitted a name"))?;
+    let description = nonempty(&data.desc)
+        .or_else(|| nonempty(&data.info))
+        .map(|value| bounded_text(value, 8_000))
+        .unwrap_or_default();
+    let cover_url = [
+        data.img700.as_str(),
+        data.img500.as_str(),
+        data.img300.as_str(),
+        data.img.as_str(),
+    ]
+    .into_iter()
+    .find_map(normalize_playlist_image_url);
+    let creator_name = nonempty(&data.user_name)
+        .or_else(|| nonempty(&data.uname))
+        .map(|value| bounded_text(value, 512));
+    let official = data
+        .official
+        .get()
+        .ok_or_else(|| kuwo_upstream_error("Kuwo public playlist omitted a valid official flag"))?;
+    let resource_ref = ResourceRef::new(Platform::Kuwo, requested_playlist_id.to_owned())
+        .map_err(|_| kuwo_upstream_error("Kuwo public playlist returned an invalid identity"))?;
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("current_web_playlist_info"));
+    extensions.insert("official".to_owned(), json!(official));
+    if let Some(listen_count) = data.listencnt.as_u64() {
+        extensions.insert("listen_count".to_owned(), json!(listen_count));
+    }
+    if let Some(info) = nonempty(&data.info) {
+        extensions.insert("info".to_owned(), json!(bounded_text(info, 8_000)));
+    }
+    if let Some(user_picture) = normalize_playlist_image_url(&data.user_picture) {
+        extensions.insert("creator_image_url".to_owned(), json!(user_picture));
+    }
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Kuwo,
+        id: requested_playlist_id.to_owned(),
+        name: bounded_text(name, 512),
+        description,
+        cover_url,
+        creator: creator_name.map(|name| ArtistSummary {
+            resource_ref: None,
+            name,
+        }),
+        track_count: Some(total),
+        tags: nonempty(&data.tag)
+            .map(|tag| vec![bounded_text(tag, 512)])
+            .unwrap_or_default(),
+        subscribed: None,
+        created_at: None,
+        updated_at: None,
+        extensions,
+    })
 }
 
 fn is_signed_session_rejection(bytes: &[u8]) -> bool {
@@ -1785,6 +2070,27 @@ fn normalize_official_image_url(value: &str) -> Option<String> {
             Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn")
         )
         || !["/star/albumcover/", "/star/starheads/", "/wmvpic/"]
+            .iter()
+            .any(|prefix| url.path().starts_with(prefix))
+    {
+        return None;
+    }
+    Some(url.into())
+}
+
+fn normalize_playlist_image_url(value: &str) -> Option<String> {
+    let url = Url::parse(value.trim()).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(
+            url.host_str(),
+            Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn")
+        )
+        || !["/star/userpl/", "/star/userpl2015/", "/star/userhead/"]
             .iter()
             .any(|prefix| url.path().starts_with(prefix))
     {
@@ -2170,6 +2476,52 @@ mod tests {
       }
     }"#;
 
+    const PLAYLIST_RESPONSE: &str = r#"{
+      "code":200,
+      "msg":"success",
+      "data":{
+        "img":"https://img1.kuwo.cn/star/userpl2015/10/13/fixture_150.jpg",
+        "uPic":"https://img1.kuwo.cn/star/userhead/10/13/creator.jpg",
+        "uname":"创建者",
+        "img700":"https://img1.kuwo.cn/star/userpl2015/10/13/fixture_700.jpg",
+        "img300":"https://img1.kuwo.cn/star/userpl2015/10/13/fixture_300.jpg",
+        "userName":"创建者",
+        "img500":"https://img1.kuwo.cn/star/userpl2015/10/13/fixture_500.jpg",
+        "isOfficial":0,
+        "total":3,
+        "name":"公开歌单",
+        "listencnt":42,
+        "id":2952464073,
+        "tag":"华语",
+        "musicList":[
+          {
+            "musicrid":"MUSIC_215257",
+            "rid":215257,
+            "name":"反方向的钟",
+            "artist":"周杰伦",
+            "artistid":336,
+            "album":"Jay",
+            "albumid":123,
+            "duration":258,
+            "online":1
+          },
+          {
+            "musicrid":"MUSIC_215257",
+            "rid":215257,
+            "name":"反方向的钟",
+            "artist":"周杰伦",
+            "artistid":336,
+            "album":"Jay",
+            "albumid":123,
+            "duration":258,
+            "online":1
+          }
+        ],
+        "desc":"用户描述",
+        "info":"平台补充信息"
+      }
+    }"#;
+
     #[test]
     fn search_maps_stable_identity_metadata_rights_and_known_quality_tiers() {
         let page =
@@ -2352,6 +2704,80 @@ mod tests {
         assert!(!is_signed_session_rejection(
             br#"{"success":false,"message":"another error"}"#
         ));
+    }
+
+    #[test]
+    fn playlist_maps_metadata_tracks_positions_and_duplicate_entries() {
+        let page = parse_playlist_response(PLAYLIST_RESPONSE.as_bytes(), "2952464073", 1, 2)
+            .expect("parse Kuwo playlist");
+        assert_eq!(page.playlist.resource_ref.to_string(), "kuwo:2952464073");
+        assert_eq!(page.playlist.name, "公开歌单");
+        assert_eq!(page.playlist.description, "用户描述");
+        assert_eq!(page.playlist.track_count, Some(3));
+        assert_eq!(page.playlist.tags, ["华语"]);
+        assert_eq!(
+            page.playlist.cover_url.as_deref(),
+            Some("https://img1.kuwo.cn/star/userpl2015/10/13/fixture_700.jpg")
+        );
+        assert_eq!(
+            page.playlist
+                .creator
+                .as_ref()
+                .map(|creator| creator.name.as_str()),
+            Some("创建者")
+        );
+        assert_eq!(page.total, 3);
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(
+            page.tracks
+                .iter()
+                .map(|track| track.resource_ref.to_string())
+                .collect::<Vec<_>>(),
+            ["kuwo:215257", "kuwo:215257"]
+        );
+        assert_eq!(
+            page.tracks[0].extensions.get("playlist_position"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            page.tracks[1].extensions.get("playlist_position"),
+            Some(&json!(1))
+        );
+    }
+
+    #[test]
+    fn playlist_rejects_identity_page_and_visibility_drift() {
+        let wrong_id = PLAYLIST_RESPONSE.replace("\"id\":2952464073", "\"id\":2952464074");
+        assert!(parse_playlist_response(wrong_id.as_bytes(), "2952464073", 1, 2).is_err());
+        assert!(parse_playlist_response(PLAYLIST_RESPONSE.as_bytes(), "2952464073", 1, 3).is_err());
+        let invalid_official = PLAYLIST_RESPONSE.replace("\"isOfficial\":0", "\"isOfficial\":2");
+        assert!(parse_playlist_response(invalid_official.as_bytes(), "2952464073", 1, 2).is_err());
+        let missing = br#"{"code":-1,"msg":"not public","data":null}"#;
+        let error = parse_playlist_response(missing, "999999999999999999", 1, 1)
+            .expect_err("missing Kuwo playlist");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+    }
+
+    #[test]
+    fn playlist_images_accept_only_fixed_https_kuwo_user_paths() {
+        assert!(
+            normalize_playlist_image_url("https://img1.kuwo.cn/star/userpl2015/10/13/fixture.jpg")
+                .is_some()
+        );
+        assert!(
+            normalize_playlist_image_url("https://img1.kuwo.cn/star/userhead/10/13/creator.jpg")
+                .is_some()
+        );
+        for invalid in [
+            "http://img1.kuwo.cn/star/userpl2015/a.jpg",
+            "https://user@img1.kuwo.cn/star/userpl2015/a.jpg",
+            "https://img1.kuwo.cn:444/star/userpl2015/a.jpg",
+            "https://example.com/star/userpl2015/a.jpg",
+            "https://img1.kuwo.cn/star/albumcover/a.jpg",
+            "https://img1.kuwo.cn/star/userpl2015/a.jpg?token=x",
+        ] {
+            assert!(normalize_playlist_image_url(invalid).is_none());
+        }
     }
 
     #[test]
@@ -2635,5 +3061,35 @@ mod tests {
         assert!(!paid_download.available);
         assert!(paid_download.url.is_none());
         assert_eq!(paid_download.platform_code, Some(-1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kuwo network access"]
+    async fn live_public_playlist_keeps_identity_pagination_and_metadata() {
+        let client = KuwoClient::test_client();
+        let first = client
+            .playlist_page("2952464073", 1, 3)
+            .await
+            .expect("live Kuwo playlist first page");
+        assert_eq!(first.playlist.resource_ref.to_string(), "kuwo:2952464073");
+        assert_eq!(first.playlist.track_count, Some(first.total));
+        assert_eq!(first.tracks.len(), 3);
+        assert!(first.total >= 3);
+        assert!(first.tracks.iter().enumerate().all(|(index, track)| {
+            track.platform == Platform::Kuwo
+                && track.resource_ref.platform() == Platform::Kuwo
+                && track.extensions.get("playlist_position") == Some(&json!(index))
+        }));
+
+        let second = client
+            .playlist_page("2952464073", 2, 3)
+            .await
+            .expect("live Kuwo playlist second page");
+        assert_eq!(second.total, first.total);
+        assert_eq!(second.playlist.resource_ref, first.playlist.resource_ref);
+        assert_eq!(
+            second.tracks[0].extensions.get("playlist_position"),
+            Some(&json!(3))
+        );
     }
 }

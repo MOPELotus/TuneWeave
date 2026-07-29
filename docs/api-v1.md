@@ -1481,6 +1481,10 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷我已参与统一 resolver、歌曲播放、Uni Playlist 播放和媒体跳转。默认跨平台顺序为网易、QQ、酷狗、酷我、咪咕；调用方也可用 `playback_platform=kuwo`、`source=kuwo` 或 `fallback_platforms` 显式指定。跨平台搜索候选继续以标题、歌手、专辑、时长和版本标签严格评分，成功流保留原始引用、实际酷我引用、匹配分数、每次尝试以及平台真实音质。调用方托管的 `kuwo:` Uni 项可经 `/v1/uni/items/stream` 无状态播放，不创建服务器歌单。完整流和下载可从相应 `/redirect` 获得 provider 已验证的无缓存 302；付费拒绝不会产生 `Location`。真实统一 HTTP 已将网易“好运来”精确匹配为酷我免费全曲，验证显式来源、Uni Client 模式、两个 HTTPS CDN 跳转和付费下载 403；服务器测试固定覆盖默认顺序和同一契约。
 
+酷我公开歌单使用 `GET /v1/playlists/kuwo:<pid>` 与 `/tracks`，只接受规范正整数 PID 且不接受账户。Provider 固定调用当前官网动态签名后的 HTTPS `/api/www/playlist/playListInfo`，成功响应必须回配同一歌单 ID，并把标题、描述、可信官方封面、创建者、曲数、标签、收听数和官方标志映射到统一字段或类型化扩展；`code=-1` 且没有 data 表示不存在或不公开。歌曲页固定使用 100 首物理页，以最多两个连续请求实现统一 `limit=1..100` 与任意 offset，跨页复核歌单身份和总数；每首歌曲必须同时回配 `MUSIC_<rid>` 与数字 `rid`，并记录全局歌单位置，顺序和重复项均不折叠。官网大页偶发 504，因此同一页只允许对可重试的传输、429 或 5xx 等待 250 ms 后补发一次；业务拒绝、身份漂移和结构错误不重试，也不使用参考项目的递归或共享计数。
+
+公开酷我歌单可通过 `{ "platform":"kuwo", "type":"playlist", "id":"<pid>" }` 导入 Uni Playlist。Server 模式完整遍历后原子保存，Client 模式同样先验证完整来源再按统一 offset/limit 返回无状态项目，且不会创建服务器记录；两者都保持来源顺序、重复项和每项稳定身份。真实统一 HTTP 已完整导入一份 69 首用户公开歌单，Client 模式只返回所请求的位置 68 且服务器目录仍为空；另一份 318 首官方歌单以 `offset=99&limit=3` 跨两个物理页返回连续位置 99–101。服务端防回归测试另以重复来源确认两个 Uni 项拥有不同 item ID。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

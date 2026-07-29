@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
-    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
-    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
+    PageMeta, PageRequest, Platform, Playlist, Result, SearchKind, SearchQuery, SearchVariant,
+    StreamRequest, Track, TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
 };
 
 use crate::client::{KuwoClient, KuwoConfig};
 
 const UPSTREAM_PAGE_SIZE: u32 = 100;
+const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
 
 #[derive(Clone)]
 pub struct KuwoProvider {
@@ -53,6 +54,7 @@ impl MusicProvider for KuwoProvider {
             Capability::AudioDownload,
             Capability::AudioStream,
             Capability::Lyrics,
+            Capability::PlaylistRead,
             Capability::SearchTracks,
             Capability::TrackAvailability,
             Capability::TrackDetail,
@@ -164,6 +166,79 @@ impl MusicProvider for KuwoProvider {
     async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
         self.client.download(track, request).await
     }
+
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        if account.is_some() {
+            return Err(kuwo_invalid_request(
+                "Kuwo public playlists do not accept an account",
+            ));
+        }
+        let playlist_id = parse_playlist_id(id)?;
+        self.client.playlist_detail(playlist_id).await
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let playlist_id = parse_playlist_id(id)?;
+        validate_playlist_page(request)?;
+        let start_page = request.offset / UPSTREAM_PLAYLIST_PAGE_SIZE + 1;
+        let first_skip = usize::try_from(request.offset % UPSTREAM_PLAYLIST_PAGE_SIZE)
+            .map_err(|_| kuwo_invalid_request("Kuwo playlist offset is too large"))?;
+        let requested = usize::try_from(request.limit)
+            .map_err(|_| kuwo_invalid_request("Kuwo playlist limit is too large"))?;
+        let first = self
+            .client
+            .playlist_page(playlist_id, start_page, UPSTREAM_PLAYLIST_PAGE_SIZE)
+            .await?;
+        let total = first.total;
+        let playlist_ref = first.playlist.resource_ref;
+        let mut tracks = first
+            .tracks
+            .into_iter()
+            .skip(first_skip)
+            .collect::<Vec<_>>();
+        let mut fetched_pages = 1_u32;
+        let consumed_after_first = u64::from(request.offset)
+            .saturating_add(u64::try_from(tracks.len()).unwrap_or(u64::MAX));
+        if tracks.len() < requested && consumed_after_first < total {
+            let next_page = start_page.checked_add(1).ok_or_else(|| {
+                kuwo_invalid_request("Kuwo playlist offset exceeds the upstream page range")
+            })?;
+            let second = self
+                .client
+                .playlist_page(playlist_id, next_page, UPSTREAM_PLAYLIST_PAGE_SIZE)
+                .await?;
+            if second.total != total || second.playlist.resource_ref != playlist_ref {
+                return Err(kuwo_upstream_error(
+                    "Kuwo playlist changed during pagination",
+                ));
+            }
+            fetched_pages = fetched_pages.saturating_add(1);
+            tracks.extend(second.tracks);
+        }
+        tracks.truncate(requested);
+
+        let returned = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+        let consumed = request.offset.saturating_add(returned);
+        let has_more = u64::from(consumed) < total;
+        let mut extensions = Extensions::new();
+        extensions.insert("backend".to_owned(), json!("current_web_playlist_info"));
+        extensions.insert(
+            "upstream_page_size".to_owned(),
+            json!(UPSTREAM_PLAYLIST_PAGE_SIZE),
+        );
+        extensions.insert("upstream_pages_fetched".to_owned(), json!(fetched_pages));
+        Ok(Page {
+            items: tracks,
+            pagination: PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: Some(total),
+                next_offset: (has_more && returned > 0).then_some(consumed),
+                has_more,
+                extensions,
+            },
+        })
+    }
 }
 
 fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<()> {
@@ -204,6 +279,32 @@ fn parse_music_id(id: &str) -> Result<&str> {
         ));
     }
     Ok(id)
+}
+
+fn parse_playlist_id(id: &str) -> Result<&str> {
+    let parsed = id
+        .parse::<u64>()
+        .map_err(|_| kuwo_invalid_request("Kuwo playlist ID must be a canonical positive PID"))?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(kuwo_invalid_request(
+            "Kuwo playlist ID must be a canonical positive PID",
+        ));
+    }
+    Ok(id)
+}
+
+fn validate_playlist_page(request: &PageRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(kuwo_invalid_request(
+            "Kuwo public playlists do not accept an account",
+        ));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(kuwo_invalid_request(
+            "Kuwo playlist limit must be between 1 and 100",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -292,6 +393,7 @@ mod tests {
                 Capability::AudioDownload,
                 Capability::AudioStream,
                 Capability::Lyrics,
+                Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::TrackAvailability,
                 Capability::TrackDetail
@@ -343,6 +445,26 @@ mod tests {
             account: Some("default".to_owned()),
         };
         assert!(validate_availability_request(&account).is_err());
+    }
+
+    #[test]
+    fn public_playlist_inputs_require_canonical_ids_and_bounded_pages() {
+        assert_eq!(
+            parse_playlist_id("1082685104").expect("valid Kuwo playlist ID"),
+            "1082685104"
+        );
+        for invalid in ["", "0", "01", "-1", "playlist_1082685104", "abc"] {
+            assert!(parse_playlist_id(invalid).is_err());
+        }
+        assert!(validate_playlist_page(&PageRequest::new(100, 99)).is_ok());
+        assert!(validate_playlist_page(&PageRequest::new(0, 0)).is_err());
+        assert!(validate_playlist_page(&PageRequest::new(101, 0)).is_err());
+        let account = PageRequest {
+            limit: 30,
+            offset: 0,
+            account: Some("default".to_owned()),
+        };
+        assert!(validate_playlist_page(&account).is_err());
     }
 
     #[test]
