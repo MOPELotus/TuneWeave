@@ -24,6 +24,57 @@ const UNI_PLAYLIST_RECORD_VERSION: u32 = 1;
 const UNI_PLAYLIST_STORE_MANIFEST: &str = "store.json";
 static UNI_PLAYLIST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy)]
+enum UniPlaylistStoreLayout {
+    SingleFile,
+    Directory,
+}
+
+impl UniPlaylistStoreLayout {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SingleFile => "single_file",
+            Self::Directory => "directory",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UniPlaylistStoreOperation {
+    Open,
+    PersistDatabase,
+    PersistRecord,
+    EnsureManifest,
+    RemoveRecord,
+}
+
+impl UniPlaylistStoreOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::PersistDatabase => "persist_database",
+            Self::PersistRecord => "persist_record",
+            Self::EnsureManifest => "ensure_manifest",
+            Self::RemoveRecord => "remove_record",
+        }
+    }
+}
+
+fn log_uni_playlist_store_failure(
+    layout: UniPlaylistStoreLayout,
+    operation: UniPlaylistStoreOperation,
+    error: &TuneWeaveError,
+) {
+    tracing::error!(
+        event = "uni_playlist_store_failure",
+        layout = layout.name(),
+        operation = operation.name(),
+        error_code = error.code.as_str(),
+        retryable = error.retryable,
+        "TuneWeave Uni Playlist persistence failed"
+    );
+}
+
 pub trait UniPlaylistStore: Send + Sync {
     fn create(&self, playlist: &UniPlaylist) -> Result<()>;
     fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()>;
@@ -209,12 +260,22 @@ pub struct FileUniPlaylistStore {
 impl FileUniPlaylistStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        recover_interrupted_publish(&path)?;
-        let database = load_database(&path)?;
-        Ok(Self {
-            path,
-            database: Arc::new(RwLock::new(database)),
-        })
+        let result = (|| {
+            recover_interrupted_publish(&path)?;
+            let database = load_database(&path)?;
+            Ok(Self {
+                path,
+                database: Arc::new(RwLock::new(database)),
+            })
+        })();
+        if let Err(error) = &result {
+            log_uni_playlist_store_failure(
+                UniPlaylistStoreLayout::SingleFile,
+                UniPlaylistStoreOperation::Open,
+                error,
+            );
+        }
+        result
     }
 
     #[must_use]
@@ -395,11 +456,21 @@ pub struct DirectoryUniPlaylistStore {
 impl DirectoryUniPlaylistStore {
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self> {
         let directory = directory.into();
-        let database = load_record_directory(&directory)?;
-        Ok(Self {
-            directory,
-            database: Arc::new(RwLock::new(database)),
-        })
+        let result = (|| {
+            let database = load_record_directory(&directory)?;
+            Ok(Self {
+                directory,
+                database: Arc::new(RwLock::new(database)),
+            })
+        })();
+        if let Err(error) = &result {
+            log_uni_playlist_store_failure(
+                UniPlaylistStoreLayout::Directory,
+                UniPlaylistStoreOperation::Open,
+                error,
+            );
+        }
+        result
     }
 
     #[must_use]
@@ -1257,41 +1328,71 @@ fn recover_record_directory(directory: &Path) -> Result<()> {
 }
 
 fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
-    let encoded = serde_json::to_vec(database).map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            format!("failed to serialize Uni Playlist database: {error}"),
-        )
-    })?;
-    persist_encoded_file(path, &encoded)
+    let result = (|| {
+        let encoded = serde_json::to_vec(database).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to serialize Uni Playlist database: {error}"),
+            )
+        })?;
+        persist_encoded_file(path, &encoded)
+    })();
+    if let Err(error) = &result {
+        log_uni_playlist_store_failure(
+            UniPlaylistStoreLayout::SingleFile,
+            UniPlaylistStoreOperation::PersistDatabase,
+            error,
+        );
+    }
+    result
 }
 
 fn persist_playlist_record(path: &Path, record: &UniPlaylistRecord) -> Result<()> {
-    let encoded = serde_json::to_vec(record).map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            format!("failed to serialize Uni Playlist record: {error}"),
-        )
-    })?;
-    persist_encoded_file(path, &encoded)
+    let result = (|| {
+        let encoded = serde_json::to_vec(record).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to serialize Uni Playlist record: {error}"),
+            )
+        })?;
+        persist_encoded_file(path, &encoded)
+    })();
+    if let Err(error) = &result {
+        log_uni_playlist_store_failure(
+            UniPlaylistStoreLayout::Directory,
+            UniPlaylistStoreOperation::PersistRecord,
+            error,
+        );
+    }
+    result
 }
 
 fn ensure_store_manifest(directory: &Path) -> Result<()> {
-    let path = directory.join(UNI_PLAYLIST_STORE_MANIFEST);
-    if path.exists() {
-        load_store_manifest(&path)?;
-        return Ok(());
+    let result = (|| {
+        let path = directory.join(UNI_PLAYLIST_STORE_MANIFEST);
+        if path.exists() {
+            load_store_manifest(&path)?;
+            return Ok(());
+        }
+        let encoded = serde_json::to_vec(&UniPlaylistStoreManifest {
+            version: UNI_PLAYLIST_RECORD_VERSION,
+        })
+        .map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("failed to serialize Uni Playlist store manifest: {error}"),
+            )
+        })?;
+        persist_encoded_file(&path, &encoded)
+    })();
+    if let Err(error) = &result {
+        log_uni_playlist_store_failure(
+            UniPlaylistStoreLayout::Directory,
+            UniPlaylistStoreOperation::EnsureManifest,
+            error,
+        );
     }
-    let encoded = serde_json::to_vec(&UniPlaylistStoreManifest {
-        version: UNI_PLAYLIST_RECORD_VERSION,
-    })
-    .map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            format!("failed to serialize Uni Playlist store manifest: {error}"),
-        )
-    })?;
-    persist_encoded_file(&path, &encoded)
+    result
 }
 
 fn persist_encoded_file(path: &Path, encoded: &[u8]) -> Result<()> {
@@ -1321,8 +1422,18 @@ fn persist_encoded_file(path: &Path, encoded: &[u8]) -> Result<()> {
 }
 
 fn remove_playlist_record(path: &Path) -> Result<()> {
-    recover_interrupted_publish(path)?;
-    fs::remove_file(path).map_err(|error| store_io_error("delete Uni Playlist record", error))
+    let result = (|| {
+        recover_interrupted_publish(path)?;
+        fs::remove_file(path).map_err(|error| store_io_error("delete Uni Playlist record", error))
+    })();
+    if let Err(error) = &result {
+        log_uni_playlist_store_failure(
+            UniPlaylistStoreLayout::Directory,
+            UniPlaylistStoreOperation::RemoveRecord,
+            error,
+        );
+    }
+    result
 }
 
 fn write_private_file(path: &Path, encoded: &[u8]) -> Result<()> {
@@ -1586,6 +1697,29 @@ mod tests {
 
     use super::*;
     use crate::{ResourceRef, UniPlaylistItemKind, UniPlaylistItemSnapshot};
+
+    #[test]
+    fn uni_playlist_store_summary_names_are_stable() {
+        assert_eq!(UniPlaylistStoreLayout::SingleFile.name(), "single_file");
+        assert_eq!(UniPlaylistStoreLayout::Directory.name(), "directory");
+        assert_eq!(UniPlaylistStoreOperation::Open.name(), "open");
+        assert_eq!(
+            UniPlaylistStoreOperation::PersistDatabase.name(),
+            "persist_database"
+        );
+        assert_eq!(
+            UniPlaylistStoreOperation::PersistRecord.name(),
+            "persist_record"
+        );
+        assert_eq!(
+            UniPlaylistStoreOperation::EnsureManifest.name(),
+            "ensure_manifest"
+        );
+        assert_eq!(
+            UniPlaylistStoreOperation::RemoveRecord.name(),
+            "remove_record"
+        );
+    }
 
     struct TempDirectory(PathBuf);
 
