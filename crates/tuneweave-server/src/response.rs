@@ -71,8 +71,12 @@ pub struct ResponseMeta {
 impl ResponseMeta {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_request_id(current_request_id())
+    }
+
+    fn with_request_id(request_id: String) -> Self {
         Self {
-            request_id: current_request_id(),
+            request_id,
             platform: None,
             account: None,
             pagination: None,
@@ -270,6 +274,7 @@ impl From<TuneWeaveError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let request_id = current_request_id();
         let status = match self.0.code {
             ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
             ErrorCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
@@ -285,6 +290,7 @@ impl IntoResponse for ApiError {
             ErrorCode::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        log_api_error(&self.0, status, &request_id);
         let error = ErrorBody {
             code: self.0.code,
             message: self.0.message,
@@ -297,9 +303,59 @@ impl IntoResponse for ApiError {
             Json(ErrorEnvelope {
                 ok: false,
                 error,
-                meta: ResponseMeta::new(),
+                meta: ResponseMeta::with_request_id(request_id),
             }),
         )
             .into_response()
+    }
+}
+
+fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
+    let error_code = error_code_name(error.code);
+    let platform = error.platform.map_or("none", Platform::as_str);
+    let status = status.as_u16();
+    if matches!(
+        error.code,
+        ErrorCode::UpstreamError
+            | ErrorCode::PlatformUnavailable
+            | ErrorCode::UpstreamTimeout
+            | ErrorCode::InternalError
+    ) {
+        tracing::error!(
+            request_id,
+            stage = "api_response",
+            error_code,
+            platform,
+            status,
+            retryable = error.retryable,
+            "TuneWeave request failed"
+        );
+    } else {
+        tracing::warn!(
+            request_id,
+            stage = "api_response",
+            error_code,
+            platform,
+            status,
+            retryable = error.retryable,
+            "TuneWeave request failed"
+        );
+    }
+}
+
+const fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::InvalidRequest => "invalid_request",
+        ErrorCode::AuthenticationRequired => "authentication_required",
+        ErrorCode::PermissionDenied => "permission_denied",
+        ErrorCode::ResourceNotFound => "resource_not_found",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::CapabilityNotSupported => "capability_not_supported",
+        ErrorCode::RateLimited => "rate_limited",
+        ErrorCode::UpstreamError => "upstream_error",
+        ErrorCode::PlatformUnavailable => "platform_unavailable",
+        ErrorCode::UpstreamTimeout => "upstream_timeout",
+        ErrorCode::MatchRejected => "match_rejected",
+        ErrorCode::InternalError => "internal_error",
     }
 }
