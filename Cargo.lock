@@ -1966,6 +1966,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tuneweave-core",
+ "url",
 ]
 
 [[package]]

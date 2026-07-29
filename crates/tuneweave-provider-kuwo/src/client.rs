@@ -1,23 +1,40 @@
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    fmt::Write as _,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{ACCEPT, CONTENT_LENGTH, REFERER},
+    header::{ACCEPT, CONTENT_LENGTH, COOKIE, REFERER, SET_COOKIE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, json};
+use tokio::sync::Mutex;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Platform, Quality, ResourceRef, Result, Track,
     TuneWeaveError,
 };
+use url::Url;
 
+const HOME_ENDPOINT: &str = "https://www.kuwo.cn/";
 const SEARCH_ENDPOINT: &str = "https://www.kuwo.cn/search/searchMusicBykeyWord";
+const TRACK_DETAIL_ENDPOINT: &str = "https://www.kuwo.cn/api/www/music/musicInfo";
 const SEARCH_REFERER: &str = "https://www.kuwo.cn/search/list";
+const WEB_REFERER: &str = "https://www.kuwo.cn/";
+const WEB_SESSION_COOKIE: &str = "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324";
 const ALBUM_IMAGE_PREFIX: &str = "https://img2.kuwo.cn/star/albumcover/";
 const ARTIST_IMAGE_PREFIX: &str = "https://img1.kuwo.cn/star/starheads/";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const USER_AGENT: &str = "TuneWeave/0.1 (Kuwo public music provider)";
+const WEB_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const SECRET_MULTIPLIER: u64 = 9_253;
+const SECRET_INCREMENT: u64 = 23;
+const SECRET_MODULUS: u64 = 2_147_483_647;
+const EIGHT_DIGIT_FOLDED_SEED: u64 = 59_910_100;
 
 #[derive(Clone, Default)]
 pub struct KuwoConfig {
@@ -39,6 +56,7 @@ impl fmt::Debug for KuwoConfig {
 #[derive(Clone)]
 pub struct KuwoClient {
     http: Client,
+    web_session: Arc<Mutex<Option<KuwoWebSession>>>,
 }
 
 impl fmt::Debug for KuwoClient {
@@ -51,6 +69,17 @@ impl fmt::Debug for KuwoClient {
 pub(crate) struct KuwoSearchPage {
     pub tracks: Vec<Track>,
     pub total: u64,
+}
+
+#[derive(Clone)]
+struct KuwoWebSession {
+    cookie_value: String,
+    refresh_after: Instant,
+}
+
+enum KuwoSignedResponse {
+    Body(Vec<u8>),
+    SessionRejected,
 }
 
 #[derive(Serialize)]
@@ -73,6 +102,17 @@ struct KuwoSearchQuery<'a> {
     #[serde(rename = "reqId")]
     request_id: String,
     plat: &'static str,
+}
+
+#[derive(Serialize)]
+struct KuwoTrackDetailQuery<'a> {
+    mid: &'a str,
+    #[serde(rename = "httpsStatus")]
+    https_status: u8,
+    #[serde(rename = "reqId")]
+    request_id: String,
+    plat: &'static str,
+    from: &'static str,
 }
 
 #[derive(Default, Deserialize)]
@@ -141,6 +181,92 @@ struct KuwoSearchTrack {
     #[serde(rename = "payInfo")]
     pay_info: Option<KuwoPayInfo>,
     mvpayinfo: Option<KuwoMvPayInfo>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoTrackDetailEnvelope {
+    code: FlexibleText,
+    msg: String,
+    data: Option<KuwoTrackDetail>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoTrackDetail {
+    musicrid: String,
+    rid: FlexibleText,
+    name: String,
+    track: FlexibleText,
+    artist: String,
+    artistid: FlexibleText,
+    album: String,
+    albumid: FlexibleText,
+    duration: FlexibleText,
+    #[serde(rename = "songTimeMinutes")]
+    song_time_minutes: String,
+    #[serde(rename = "releaseDate")]
+    release_date: String,
+    pic: String,
+    pic120: String,
+    albumpic: String,
+    #[serde(rename = "hasLossless")]
+    has_lossless: FlexibleBoolean,
+    hasmv: FlexibleText,
+    #[serde(rename = "mvPlayCnt")]
+    mv_play_count: FlexibleText,
+    pay: FlexibleText,
+    #[serde(rename = "isListenFee")]
+    listen_fee: FlexibleBoolean,
+    online: FlexibleText,
+    score100: FlexibleText,
+    originalsongtype: FlexibleText,
+    content_type: FlexibleText,
+    ad_type: String,
+    ad_subtype: FlexibleText,
+    tme_musician_adtype: FlexibleText,
+    isstar: FlexibleText,
+    barrage: FlexibleText,
+    #[serde(rename = "payInfo")]
+    pay_info: Option<KuwoPayInfo>,
+    mvpayinfo: Option<KuwoMvPayInfo>,
+    albuminfo: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(untagged)]
+enum FlexibleBoolean {
+    Boolean(bool),
+    String(String),
+    Number(Number),
+    #[default]
+    Null,
+}
+
+impl FlexibleBoolean {
+    fn get(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(value) => Some(*value),
+            Self::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" => Some(true),
+                "0" | "false" => Some(false),
+                _ => None,
+            },
+            Self::Number(value) => match value.as_i64() {
+                Some(1) => Some(true),
+                Some(0) => Some(false),
+                _ => None,
+            },
+            Self::Null => None,
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KuwoSignedRejection {
+    success: Option<bool>,
+    message: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -216,6 +342,14 @@ impl FlexibleText {
             Self::Boolean(_) | Self::Null => None,
         }
     }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::String(value) => value.parse().ok(),
+            Self::Number(value) => value.as_i64(),
+            Self::Boolean(_) | Self::Null => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -244,7 +378,10 @@ impl KuwoClient {
             TuneWeaveError::new(ErrorCode::InternalError, "failed to build Kuwo HTTP client")
                 .with_platform(Platform::Kuwo)
         })?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            web_session: Arc::new(Mutex::new(None)),
+        })
     }
 
     #[cfg(test)]
@@ -288,6 +425,296 @@ impl KuwoClient {
         let bytes = read_bounded_response(response, "Kuwo search").await?;
         parse_search_response(&bytes, page, page_size)
     }
+
+    pub(crate) async fn track_detail(&self, music_id: &str) -> Result<Track> {
+        for force_refresh in [false, true] {
+            let response = self
+                .signed_get_track_detail(music_id, force_refresh)
+                .await?;
+            let bytes = match response {
+                KuwoSignedResponse::Body(bytes) => bytes,
+                KuwoSignedResponse::SessionRejected if !force_refresh => continue,
+                KuwoSignedResponse::SessionRejected => {
+                    return Err(kuwo_upstream_error(
+                        "Kuwo rejected a freshly established web session",
+                    ));
+                }
+            };
+            match parse_track_detail_response(&bytes, music_id) {
+                Ok(track) => return Ok(track),
+                Err(_) if !force_refresh && is_signed_session_rejection(&bytes) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(kuwo_upstream_error(
+            "Kuwo track detail exhausted its bounded session refresh",
+        ))
+    }
+
+    async fn signed_get_track_detail(
+        &self,
+        music_id: &str,
+        force_refresh: bool,
+    ) -> Result<KuwoSignedResponse> {
+        let session = self.web_session(force_refresh).await?;
+        let secret = new_web_secret(&session.cookie_value)?;
+        let response = self
+            .http
+            .get(TRACK_DETAIL_ENDPOINT)
+            .header(ACCEPT, "application/json")
+            .header(REFERER, WEB_REFERER)
+            .header(
+                COOKIE,
+                format!("{WEB_SESSION_COOKIE}={}", session.cookie_value),
+            )
+            .header("Secret", secret)
+            .query(&KuwoTrackDetailQuery {
+                mid: music_id,
+                https_status: 1,
+                request_id: new_request_id(),
+                plat: "web_www",
+                from: "",
+            })
+            .send()
+            .await
+            .map_err(kuwo_network_error)?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Ok(KuwoSignedResponse::SessionRejected);
+        }
+        let bytes = read_bounded_response(response, "Kuwo track detail").await?;
+        Ok(KuwoSignedResponse::Body(bytes))
+    }
+
+    async fn web_session(&self, force_refresh: bool) -> Result<KuwoWebSession> {
+        let mut current = self.web_session.lock().await;
+        if !force_refresh
+            && let Some(session) = current.as_ref()
+            && session.refresh_after > Instant::now()
+        {
+            return Ok(session.clone());
+        }
+        let response = self
+            .http
+            .get(HOME_ENDPOINT)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .map_err(kuwo_network_error)?;
+        let headers = response.headers().clone();
+        let _body = read_bounded_response(response, "Kuwo web session").await?;
+        let cookie_value = extract_web_session_cookie(&headers)?;
+        let session = KuwoWebSession {
+            cookie_value,
+            refresh_after: Instant::now() + WEB_SESSION_TTL,
+        };
+        *current = Some(session.clone());
+        Ok(session)
+    }
+}
+
+fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result<Track> {
+    let envelope: KuwoTrackDetailEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| kuwo_upstream_error("Kuwo track detail returned malformed JSON"))?;
+    if envelope.code.as_i64() != Some(200) {
+        if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Kuwo track was not found",
+            )
+            .with_platform(Platform::Kuwo));
+        }
+        return Err(
+            kuwo_upstream_error("Kuwo track detail rejected the request").with_details(json!({
+                "platform_code": envelope.code.as_text().map(|value| bounded_text(&value, 64)),
+                "platform_message": bounded_text(&envelope.msg, 256),
+            })),
+        );
+    }
+    let detail = envelope
+        .data
+        .ok_or_else(|| kuwo_upstream_error("Kuwo track detail omitted data"))?;
+    let musicrid = detail
+        .musicrid
+        .strip_prefix("MUSIC_")
+        .and_then(canonical_positive_decimal)
+        .ok_or_else(|| kuwo_upstream_error("Kuwo track detail omitted a stable music ID"))?;
+    let rid_text = detail.rid.as_text();
+    let rid = rid_text
+        .as_deref()
+        .and_then(canonical_positive_decimal)
+        .ok_or_else(|| kuwo_upstream_error("Kuwo track detail omitted its numeric music ID"))?;
+    if musicrid != requested_music_id || rid != requested_music_id {
+        return Err(kuwo_upstream_error(
+            "Kuwo track detail returned a mismatched music ID",
+        ));
+    }
+    let name = nonempty(&detail.name)
+        .ok_or_else(|| kuwo_upstream_error("Kuwo track detail omitted a track name"))?;
+    let resource_ref = ResourceRef::new(Platform::Kuwo, requested_music_id.to_owned())
+        .map_err(|_| kuwo_upstream_error("Kuwo track detail returned an invalid identity"))?;
+    let mut track = Track::new(resource_ref, bounded_text(name, 512));
+    track.artists = map_artists(&detail.artist, &detail.artistid);
+    let cover_url = [
+        detail.pic120.as_str(),
+        detail.pic.as_str(),
+        detail.albumpic.as_str(),
+    ]
+    .into_iter()
+    .find_map(normalize_official_image_url);
+    track.album = map_album(&detail.album, &detail.albumid, cover_url);
+    track.duration_ms = detail
+        .duration
+        .as_u64()
+        .and_then(|seconds| seconds.checked_mul(1_000));
+    track.mv_ref = detail
+        .hasmv
+        .as_u64()
+        .filter(|value| *value > 0)
+        .and(detail.mvpayinfo.as_ref())
+        .and_then(|info| info.vid.as_text())
+        .as_deref()
+        .and_then(canonical_positive_decimal)
+        .and_then(|id| ResourceRef::new(Platform::Kuwo, id.to_owned()).ok());
+    if detail.online.as_text().as_deref() == Some("0") {
+        track.playable = Some(false);
+    }
+    if detail.has_lossless.get() == Some(true) {
+        track.available_qualities.push(Quality::Lossless);
+    }
+
+    track
+        .extensions
+        .insert("backend".to_owned(), json!("current_web_music_info"));
+    insert_flexible(&mut track.extensions, "track_number", &detail.track);
+    insert_optional_text(
+        &mut track.extensions,
+        "song_time_minutes",
+        &detail.song_time_minutes,
+    );
+    insert_optional_text(&mut track.extensions, "release_date", &detail.release_date);
+    insert_flexible(&mut track.extensions, "online", &detail.online);
+    insert_flexible(&mut track.extensions, "pay", &detail.pay);
+    insert_flexible(&mut track.extensions, "score", &detail.score100);
+    insert_flexible(
+        &mut track.extensions,
+        "original_song_type",
+        &detail.originalsongtype,
+    );
+    insert_flexible(&mut track.extensions, "content_type", &detail.content_type);
+    insert_optional_text(&mut track.extensions, "ad_type", &detail.ad_type);
+    insert_flexible(&mut track.extensions, "ad_subtype", &detail.ad_subtype);
+    insert_flexible(
+        &mut track.extensions,
+        "musician_ad_type",
+        &detail.tme_musician_adtype,
+    );
+    insert_flexible(&mut track.extensions, "is_starred", &detail.isstar);
+    insert_flexible(&mut track.extensions, "barrage", &detail.barrage);
+    insert_flexible(
+        &mut track.extensions,
+        "mv_play_count",
+        &detail.mv_play_count,
+    );
+    if let Some(value) = detail.has_lossless.get() {
+        track
+            .extensions
+            .insert("has_lossless".to_owned(), json!(value));
+    }
+    if let Some(value) = detail.listen_fee.get() {
+        track
+            .extensions
+            .insert("listen_fee".to_owned(), json!(value));
+    }
+    if let Some(pay_info) = detail.pay_info {
+        track
+            .extensions
+            .insert("pay_info".to_owned(), json!(pay_info));
+    }
+    if let Some(mv_pay_info) = detail.mvpayinfo {
+        track
+            .extensions
+            .insert("mv_pay_info".to_owned(), json!(mv_pay_info));
+    }
+    if let Some(description) = nonempty(&detail.albuminfo) {
+        track.extensions.insert(
+            "album_description".to_owned(),
+            json!(bounded_text(description, 4_000)),
+        );
+    }
+    Ok(track)
+}
+
+fn is_signed_session_rejection(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<KuwoSignedRejection>(bytes).is_ok_and(|response| {
+        response.success == Some(false) && response.message == "The request is illegal!"
+    })
+}
+
+fn extract_web_session_cookie(headers: &reqwest::header::HeaderMap) -> Result<String> {
+    for header in headers.get_all(SET_COOKIE) {
+        let Ok(header) = header.to_str() else {
+            continue;
+        };
+        let Some(pair) = header.split(';').next() else {
+            continue;
+        };
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if name.trim() == WEB_SESSION_COOKIE
+            && (16..=128).contains(&value.len())
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Ok(value.to_owned());
+        }
+    }
+    Err(kuwo_upstream_error(
+        "Kuwo web session omitted its current tracking cookie",
+    ))
+}
+
+fn new_web_secret(cookie_value: &str) -> Result<String> {
+    let nonce = rand::random_range(10_000_000_u64..=99_999_999);
+    web_secret_for_nonce(cookie_value, nonce)
+}
+
+fn web_secret_for_nonce(cookie_value: &str, nonce: u64) -> Result<String> {
+    if !(16..=128).contains(&cookie_value.len())
+        || !cookie_value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        || !(10_000_000..=99_999_999).contains(&nonce)
+    {
+        return Err(kuwo_upstream_error(
+            "Kuwo web session cannot produce a valid request signature",
+        ));
+    }
+    let mut state =
+        (SECRET_MULTIPLIER * EIGHT_DIGIT_FOLDED_SEED + SECRET_INCREMENT) % SECRET_MODULUS;
+    let mut secret = String::with_capacity(cookie_value.len() * 2 + 8);
+    for byte in cookie_value.bytes() {
+        let mask = state * 255 / SECRET_MODULUS;
+        let encoded = u64::from(byte) ^ mask;
+        write!(&mut secret, "{encoded:02x}").map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to encode Kuwo request signature",
+            )
+            .with_platform(Platform::Kuwo)
+        })?;
+        state = (SECRET_MULTIPLIER * state + SECRET_INCREMENT) % SECRET_MODULUS;
+    }
+    write!(&mut secret, "{nonce:08x}").map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "failed to encode Kuwo request nonce",
+        )
+        .with_platform(Platform::Kuwo)
+    })?;
+    Ok(secret)
 }
 
 fn parse_search_response(
@@ -567,6 +994,27 @@ fn normalize_image_path(value: &str, prefix: &str) -> Option<String> {
     Some(format!("{prefix}{value}"))
 }
 
+fn normalize_official_image_url(value: &str) -> Option<String> {
+    let url = Url::parse(value.trim()).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(
+            url.host_str(),
+            Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn")
+        )
+        || !["/star/albumcover/", "/star/starheads/", "/wmvpic/"]
+            .iter()
+            .any(|prefix| url.path().starts_with(prefix))
+    {
+        return None;
+    }
+    Some(url.into())
+}
+
 fn push_alias(aliases: &mut Vec<String>, name: &str, value: &str) {
     let Some(value) = nonempty(value) else {
         return;
@@ -777,6 +1225,63 @@ mod tests {
       ]
     }"#;
 
+    const TRACK_DETAIL_RESPONSE: &str = r#"{
+      "code":200,
+      "msg":"success",
+      "data":{
+        "musicrid":"MUSIC_228908",
+        "rid":228908,
+        "name":"晴天",
+        "track":3,
+        "artist":"周杰伦",
+        "artistid":336,
+        "album":"叶惠美",
+        "albumid":1293,
+        "duration":269,
+        "songTimeMinutes":"04:29",
+        "releaseDate":"2003-07-31",
+        "pic":"https://img2.kuwo.cn/star/albumcover/500/s3s94/93/211513640.jpg",
+        "pic120":"https://img2.kuwo.cn/star/albumcover/120/s3s94/93/211513640.jpg",
+        "albumpic":"https://img2.kuwo.cn/star/albumcover/500/s3s94/93/211513640.jpg",
+        "hasLossless":true,
+        "hasmv":1,
+        "mvPlayCnt":2199392,
+        "pay":"16711935",
+        "isListenFee":true,
+        "online":1,
+        "score100":"83",
+        "originalsongtype":1,
+        "content_type":"0",
+        "ad_type":"",
+        "ad_subtype":"0",
+        "tme_musician_adtype":"0",
+        "isstar":0,
+        "barrage":"0",
+        "payInfo":{
+          "play":"1111",
+          "nplay":"111111111111",
+          "overseas_nplay":"0",
+          "local_encrypt":"1",
+          "limitfree":0,
+          "refrain_start":84346,
+          "extendAttr":0,
+          "feeType":{"song":"1","vip":"1"},
+          "down":"1111",
+          "ndown":"111111111111",
+          "download":"1111",
+          "cannotDownload":0,
+          "overseas_ndown":"0",
+          "refrain_end":142843,
+          "listen_fragment":"1",
+          "cannotOnlinePlay":0,
+          "paytype":0,
+          "paytagindex":{"S":2,"F":3,"H":1}
+        },
+        "mvpayinfo":{"play":1,"vid":8132306,"down":1},
+        "albuminfo":"专辑简介"
+      }
+    }"#;
+
     #[test]
     fn search_maps_stable_identity_metadata_rights_and_known_quality_tiers() {
         let page =
@@ -871,6 +1376,116 @@ mod tests {
         assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
     }
 
+    #[test]
+    fn current_web_signature_matches_the_browser_algorithm_fixture() {
+        assert_eq!(
+            web_secret_for_nonce("0123456789abcdef0123456789abcdef", 12_345_678)
+                .expect("create deterministic Kuwo signature"),
+            "1361b99125125e1ce61cc1f328ded44b38fec3e403cfaa3031b91afbe5e200ea00bc614e"
+        );
+        assert!(web_secret_for_nonce("too-short", 12_345_678).is_err());
+        assert!(web_secret_for_nonce("0123456789abcdef0123456789abcdef", 9_999_999).is_err());
+    }
+
+    #[test]
+    fn web_session_accepts_only_the_fixed_alphanumeric_cookie() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "unrelated=value; Path=/; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
+            ),
+        );
+        headers.append(
+            SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324=0123456789abcdef0123456789abcdef; Path=/; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
+            ),
+        );
+        assert_eq!(
+            extract_web_session_cookie(&headers).expect("extract current Kuwo cookie"),
+            "0123456789abcdef0123456789abcdef"
+        );
+
+        let mut unsafe_headers = reqwest::header::HeaderMap::new();
+        unsafe_headers.insert(
+            SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324=value%0d%0aInjected; Path=/",
+            ),
+        );
+        assert!(extract_web_session_cookie(&unsafe_headers).is_err());
+    }
+
+    #[test]
+    fn track_detail_requires_both_platform_id_forms_to_match() {
+        let track = parse_track_detail_response(TRACK_DETAIL_RESPONSE.as_bytes(), "228908")
+            .expect("parse Kuwo track detail");
+        assert_eq!(track.resource_ref.to_string(), "kuwo:228908");
+        assert_eq!(track.name, "晴天");
+        assert_eq!(
+            track.artists[0]
+                .resource_ref
+                .as_ref()
+                .map(ToString::to_string),
+            Some("kuwo:336".to_owned())
+        );
+        assert_eq!(
+            track
+                .album
+                .as_ref()
+                .and_then(|album| album.cover_url.as_deref()),
+            Some("https://img2.kuwo.cn/star/albumcover/120/s3s94/93/211513640.jpg")
+        );
+        assert_eq!(track.duration_ms, Some(269_000));
+        assert_eq!(
+            track.mv_ref.as_ref().map(ToString::to_string),
+            Some("kuwo:8132306".to_owned())
+        );
+        assert_eq!(track.available_qualities, [Quality::Lossless]);
+        assert_eq!(track.playable, None);
+        assert_eq!(track.extensions.get("listen_fee"), Some(&json!(true)));
+
+        let mismatched_musicrid = TRACK_DETAIL_RESPONSE.replace("MUSIC_228908", "MUSIC_3195905");
+        assert!(parse_track_detail_response(mismatched_musicrid.as_bytes(), "228908").is_err());
+        let mismatched_rid = TRACK_DETAIL_RESPONSE.replace("\"rid\":228908", "\"rid\":3195905");
+        assert!(parse_track_detail_response(mismatched_rid.as_bytes(), "228908").is_err());
+    }
+
+    #[test]
+    fn track_detail_classifies_not_found_and_signed_session_rejection() {
+        let missing = r#"{"code":-1,"msg":"歌曲不存在"}"#;
+        let error = parse_track_detail_response(missing.as_bytes(), "999999999999999999")
+            .expect_err("missing Kuwo track");
+        assert_eq!(error.code, ErrorCode::ResourceNotFound);
+
+        let rejected = br#"{"success":false,"message":"The request is illegal!","now":"redacted"}"#;
+        assert!(is_signed_session_rejection(rejected));
+        assert!(!is_signed_session_rejection(
+            br#"{"success":false,"message":"another error"}"#
+        ));
+    }
+
+    #[test]
+    fn detail_images_accept_only_fixed_https_kuwo_media_hosts() {
+        assert_eq!(
+            normalize_official_image_url(
+                "https://img2.kuwo.cn/star/albumcover/120/s3s94/93/211513640.jpg"
+            ),
+            Some("https://img2.kuwo.cn/star/albumcover/120/s3s94/93/211513640.jpg".to_owned())
+        );
+        for invalid in [
+            "http://img2.kuwo.cn/star/albumcover/a.jpg",
+            "https://user@img2.kuwo.cn/star/albumcover/a.jpg",
+            "https://img2.kuwo.cn:444/star/albumcover/a.jpg",
+            "https://example.com/star/albumcover/a.jpg",
+            "https://img2.kuwo.cn/other/a.jpg",
+            "https://img2.kuwo.cn/star/albumcover/a.jpg?token=x",
+        ] {
+            assert_eq!(normalize_official_image_url(invalid), None);
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires live Kuwo network access"]
     async fn live_public_track_search_returns_stable_results() {
@@ -887,5 +1502,20 @@ mod tests {
                 && canonical_positive_decimal(track.resource_ref.id()).is_some()
                 && !track.name.trim().is_empty()
         }));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kuwo network access"]
+    async fn live_public_track_detail_uses_a_current_anonymous_web_session() {
+        let client = KuwoClient::test_client();
+        let track = client
+            .track_detail("228908")
+            .await
+            .expect("live Kuwo track detail");
+        assert_eq!(track.resource_ref.to_string(), "kuwo:228908");
+        assert_eq!(track.id, "228908");
+        assert!(!track.name.trim().is_empty());
+        assert!(track.duration_ms.is_some_and(|duration| duration > 0));
+        assert!(track.artists.iter().any(|artist| !artist.name.is_empty()));
     }
 }

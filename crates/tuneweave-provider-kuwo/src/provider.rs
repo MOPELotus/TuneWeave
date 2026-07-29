@@ -48,7 +48,7 @@ impl MusicProvider for KuwoProvider {
     }
 
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::SearchTracks])
+        BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -112,6 +112,28 @@ impl MusicProvider for KuwoProvider {
             },
         })
     }
+
+    async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+        if account.is_some() {
+            return Err(kuwo_invalid_request(
+                "Kuwo public track detail does not accept an account",
+            ));
+        }
+        let music_id = parse_music_id(id)?;
+        self.client.track_detail(music_id).await
+    }
+}
+
+fn parse_music_id(id: &str) -> Result<&str> {
+    let parsed = id
+        .parse::<u64>()
+        .map_err(|_| kuwo_invalid_request("Kuwo track ID must be a canonical positive music ID"))?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(kuwo_invalid_request(
+            "Kuwo track ID must be a canonical positive music ID",
+        ));
+    }
+    Ok(id)
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -196,8 +218,16 @@ mod tests {
         assert_eq!(provider.platform(), Platform::Kuwo);
         assert_eq!(
             provider.capabilities(),
-            BTreeSet::from([Capability::SearchTracks])
+            BTreeSet::from([Capability::SearchTracks, Capability::TrackDetail])
         );
+    }
+
+    #[test]
+    fn track_detail_requires_a_canonical_public_identity_without_an_account() {
+        assert_eq!(parse_music_id("228908").expect("valid music ID"), "228908");
+        for invalid in ["", "0", "01", "-1", "MUSIC_228908", "abc"] {
+            assert!(parse_music_id(invalid).is_err());
+        }
     }
 
     #[test]
