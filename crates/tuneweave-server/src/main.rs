@@ -112,6 +112,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         log_to_stderr = logging_config.to_stderr,
         log_to_file = logging.file_output_active(),
         log_dir = ?logging_config.directory,
+        log_max_files = logging_config.max_files,
+        log_max_file_bytes = logging_config.max_file_bytes,
+        log_max_total_bytes = logging_config.max_total_bytes,
         enabled_platforms = 7,
         "TuneWeave startup completed"
     );

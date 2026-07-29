@@ -39,7 +39,8 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_LOG_LEVEL`：日志级别 `trace|debug|info|warn|error|off`，默认 `info`；显式设置时优先于 `RUST_LOG`。
 - `TUNEWEAVE_LOG_FORMAT`：日志格式 `human|json`，默认 `human`，控制台和文件使用同一格式。
 - `TUNEWEAVE_LOG_DIR` / `TUNEWEAVE_LOG_FILE`：日志目录与可移植文件名前缀，默认 `<TUNEWEAVE_DATA_DIR>/logs/` 和 `tuneweave.log`；目录不能指向账户或 Uni Playlist 数据目录。
-- `TUNEWEAVE_LOG_RETENTION_DAYS` / `TUNEWEAVE_LOG_MAX_FILES`：按日文件的保留天数与最大文件数，默认 `14` 和 `30`。
+- `TUNEWEAVE_LOG_RETENTION_DAYS` / `TUNEWEAVE_LOG_MAX_FILES`：日志的保留天数与最大文件数，默认 `14` 和 `30`。
+- `TUNEWEAVE_LOG_MAX_FILE_BYTES` / `TUNEWEAVE_LOG_MAX_TOTAL_BYTES`：单个日志文件与同前缀全部日志的严格字节上限，默认 `16777216`（16 MiB）和 `268435456`（256 MiB）；总上限不能小于单文件上限。
 - `TUNEWEAVE_LOG_TO_STDERR` / `TUNEWEAVE_LOG_TO_FILE`：分别控制控制台和非阻塞文件输出，默认均开启，不能同时关闭。
 - `TUNEWEAVE_NETEASE_COOKIE`：可选的网易云 `default` 账户启动 Cookie；不会写入响应或日志。服务器托管模式通过登录端点取得的账户凭据进入上述私有数据目录；调用方自管凭证只在支持的请求作用域内使用，不会写入该目录。
 - `TUNEWEAVE_NETEASE_PROXY`：可选的服务端 HTTP(S) 正向代理 URL；仅在启动配置中读取，API 调用方不能覆盖。

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, Write},
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
@@ -9,13 +9,10 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tracing_appender::{
-    non_blocking::{ErrorCounter, NonBlocking, NonBlockingBuilder, WorkerGuard},
-    rolling::{RollingFileAppender, Rotation},
-};
+use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{MakeWriter, writer::MakeWriterExt},
@@ -24,10 +21,15 @@ use tracing_subscriber::{
 const DEFAULT_LOG_FILE: &str = "tuneweave.log";
 const DEFAULT_RETENTION_DAYS: u32 = 14;
 const DEFAULT_MAX_FILES: usize = 30;
+const DEFAULT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RETENTION_DAYS: u32 = 3_650;
 const MAX_LOG_FILES: usize = 10_000;
+const MIN_MAX_FILE_BYTES: u64 = 64 * 1024;
+const MAX_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const LOG_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
-const LOG_ENVIRONMENT_VARIABLES: [&str; 9] = [
+const LOG_ENVIRONMENT_VARIABLES: [&str; 11] = [
     "TUNEWEAVE_LOG_LEVEL",
     "RUST_LOG",
     "TUNEWEAVE_LOG_FORMAT",
@@ -35,6 +37,8 @@ const LOG_ENVIRONMENT_VARIABLES: [&str; 9] = [
     "TUNEWEAVE_LOG_FILE",
     "TUNEWEAVE_LOG_RETENTION_DAYS",
     "TUNEWEAVE_LOG_MAX_FILES",
+    "TUNEWEAVE_LOG_MAX_FILE_BYTES",
+    "TUNEWEAVE_LOG_MAX_TOTAL_BYTES",
     "TUNEWEAVE_LOG_TO_STDERR",
     "TUNEWEAVE_LOG_TO_FILE",
 ];
@@ -83,6 +87,8 @@ pub struct LoggingConfig {
     pub file_name: String,
     pub retention_days: u32,
     pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
     pub to_stderr: bool,
     pub to_file: bool,
 }
@@ -170,6 +176,25 @@ impl LoggingConfig {
             u32::try_from(MAX_LOG_FILES).unwrap_or(u32::MAX),
         )?)
         .map_err(|_| invalid_config("TUNEWEAVE_LOG_MAX_FILES is too large"))?;
+        let max_file_bytes = parse_bounded_u64(
+            values,
+            "TUNEWEAVE_LOG_MAX_FILE_BYTES",
+            DEFAULT_MAX_FILE_BYTES,
+            MIN_MAX_FILE_BYTES,
+            MAX_MAX_FILE_BYTES,
+        )?;
+        let max_total_bytes = parse_bounded_u64(
+            values,
+            "TUNEWEAVE_LOG_MAX_TOTAL_BYTES",
+            DEFAULT_MAX_TOTAL_BYTES,
+            MIN_MAX_FILE_BYTES,
+            MAX_MAX_TOTAL_BYTES,
+        )?;
+        if max_total_bytes < max_file_bytes {
+            return Err(invalid_config(
+                "TUNEWEAVE_LOG_MAX_TOTAL_BYTES must be at least TUNEWEAVE_LOG_MAX_FILE_BYTES",
+            ));
+        }
         let directory = values
             .get("TUNEWEAVE_LOG_DIR")
             .map(|value| value.trim())
@@ -189,6 +214,8 @@ impl LoggingConfig {
             file_name,
             retention_days,
             max_files,
+            max_file_bytes,
+            max_total_bytes,
             to_stderr,
             to_file,
         })
@@ -470,12 +497,7 @@ fn build_file_output(config: &LoggingConfig) -> io::Result<FileOutput> {
     fs::create_dir_all(&config.directory)?;
     validate_canonical_directory_separation(&config.data_directory, &config.directory)?;
     let retention_warnings = prune_expired_files(config)?;
-    let appender = RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(&config.file_name)
-        .max_log_files(config.max_files)
-        .build(&config.directory)
-        .map_err(|error| io::Error::other(format!("failed to open rolling log file: {error}")))?;
+    let appender = BoundedRollingFile::new(config)?;
     let write_error_counter = FileWriteErrorCounter::default();
     let (writer, guard) = NonBlockingBuilder::default()
         .lossy(true)
@@ -489,6 +511,206 @@ fn build_file_output(config: &LoggingConfig) -> io::Result<FileOutput> {
         write_error_counter,
         retention_warnings,
     })
+}
+
+struct BoundedRollingFile {
+    directory: PathBuf,
+    file_name: String,
+    max_files: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    current: Option<fs::File>,
+    current_size: u64,
+}
+
+impl BoundedRollingFile {
+    fn new(config: &LoggingConfig) -> io::Result<Self> {
+        let mut writer = Self {
+            directory: config.directory.clone(),
+            file_name: config.file_name.clone(),
+            max_files: config.max_files,
+            max_file_bytes: config.max_file_bytes,
+            max_total_bytes: config.max_total_bytes,
+            current: None,
+            current_size: 0,
+        };
+        writer.open_new_file()?;
+        Ok(writer)
+    }
+
+    fn prepare_write(&mut self, length: usize) -> io::Result<()> {
+        let length = u64::try_from(length)
+            .map_err(|_| invalid_config("log event length is not supported on this platform"))?;
+        if length > self.max_file_bytes {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "one log event exceeds TUNEWEAVE_LOG_MAX_FILE_BYTES",
+            ));
+        }
+        let next_size = self
+            .current_size
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other("log file size overflowed"))?;
+        if self.current.is_none() || next_size > self.max_file_bytes {
+            self.open_new_file()?;
+        }
+        Ok(())
+    }
+
+    fn open_new_file(&mut self) -> io::Result<()> {
+        if let Some(mut current) = self.current.take() {
+            current.flush()?;
+        }
+        self.current_size = 0;
+        prune_for_new_log_file(
+            &self.directory,
+            &self.file_name,
+            self.max_files,
+            self.max_file_bytes,
+            self.max_total_bytes,
+        )?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| io::Error::other("system clock is before the Unix epoch"))?
+            .as_millis();
+        for sequence in 0_u16..10_000 {
+            let name = format!(
+                "{}.{timestamp}.{}.{sequence:04}",
+                self.file_name,
+                std::process::id()
+            );
+            let path = self.directory.join(name);
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)
+            {
+                Ok(file) => {
+                    self.current = Some(file);
+                    return Ok(());
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "could not allocate a unique rolling log file name",
+        ))
+    }
+
+    fn refresh_current_size(&mut self) {
+        if let Some(current) = &self.current
+            && let Ok(metadata) = current.metadata()
+        {
+            self.current_size = metadata.len();
+        }
+    }
+}
+
+impl Write for BoundedRollingFile {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.prepare_write(buffer.len())?;
+        let result = self
+            .current
+            .as_mut()
+            .ok_or_else(|| io::Error::other("rolling log file is not open"))?
+            .write(buffer);
+        match result {
+            Ok(written) => {
+                self.current_size = self
+                    .current_size
+                    .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+                Ok(written)
+            }
+            Err(error) => {
+                self.refresh_current_size();
+                Err(error)
+            }
+        }
+    }
+
+    fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
+        self.prepare_write(buffer.len())?;
+        let result = self
+            .current
+            .as_mut()
+            .ok_or_else(|| io::Error::other("rolling log file is not open"))?
+            .write_all(buffer);
+        match result {
+            Ok(()) => {
+                self.current_size = self
+                    .current_size
+                    .saturating_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
+                Ok(())
+            }
+            Err(error) => {
+                self.refresh_current_size();
+                Err(error)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.current.as_mut().map_or(Ok(()), Write::flush)
+    }
+}
+
+struct ManagedLogFile {
+    path: PathBuf,
+    file_name: String,
+    size: u64,
+    modified: SystemTime,
+}
+
+fn prune_for_new_log_file(
+    directory: &Path,
+    file_name: &str,
+    max_files: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+) -> io::Result<()> {
+    let mut files = managed_log_files(directory, file_name)?;
+    let mut total_bytes = files
+        .iter()
+        .fold(0_u64, |total, file| total.saturating_add(file.size));
+    let reserved_total = max_total_bytes.saturating_sub(max_file_bytes);
+    while files.len() >= max_files || total_bytes > reserved_total {
+        let oldest = files.remove(0);
+        fs::remove_file(&oldest.path)?;
+        total_bytes = total_bytes.saturating_sub(oldest.size);
+    }
+    Ok(())
+}
+
+fn managed_log_files(directory: &Path, file_name: &str) -> io::Result<Vec<ManagedLogFile>> {
+    let prefix = format!("{file_name}.");
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        files.push(ManagedLogFile {
+            path: entry.path(),
+            file_name: name,
+            size: metadata.len(),
+            modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+        });
+    }
+    files.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    Ok(files)
 }
 
 fn prune_expired_files(config: &LoggingConfig) -> io::Result<Vec<RetentionWarning>> {
@@ -633,6 +855,28 @@ fn parse_bounded_u32(
     Ok(parsed)
 }
 
+fn parse_bounded_u64(
+    values: &BTreeMap<String, String>,
+    name: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> io::Result<u64> {
+    let Some(value) = values.get(name) else {
+        return Ok(default);
+    };
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (*value >= minimum) && (*value <= maximum))
+        .ok_or_else(|| {
+            invalid_config(format!(
+                "{name} must be an integer between {minimum} and {maximum}"
+            ))
+        })
+}
+
 fn invalid_config(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
 }
@@ -652,7 +896,7 @@ mod tests {
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn defaults_enable_human_console_and_daily_file_output() {
+    fn defaults_enable_human_console_and_bounded_file_output() {
         let config = LoggingConfig::from_values(Path::new("private-data"), &BTreeMap::new())
             .expect("default logging config");
         assert_eq!(config.filter, "tuneweave=info");
@@ -664,6 +908,8 @@ mod tests {
         assert_eq!(config.file_name, DEFAULT_LOG_FILE);
         assert_eq!(config.retention_days, DEFAULT_RETENTION_DAYS);
         assert_eq!(config.max_files, DEFAULT_MAX_FILES);
+        assert_eq!(config.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+        assert_eq!(config.max_total_bytes, DEFAULT_MAX_TOTAL_BYTES);
     }
 
     #[test]
@@ -677,6 +923,8 @@ mod tests {
             ("TUNEWEAVE_LOG_FILE", "api.jsonl"),
             ("TUNEWEAVE_LOG_RETENTION_DAYS", "7"),
             ("TUNEWEAVE_LOG_MAX_FILES", "9"),
+            ("TUNEWEAVE_LOG_MAX_FILE_BYTES", "1048576"),
+            ("TUNEWEAVE_LOG_MAX_TOTAL_BYTES", "4194304"),
         ]);
         let config = LoggingConfig::from_values(Path::new("private-data"), &values)
             .expect("explicit logging config");
@@ -688,6 +936,8 @@ mod tests {
         assert_eq!(config.file_name, "api.jsonl");
         assert_eq!(config.retention_days, 7);
         assert_eq!(config.max_files, 9);
+        assert_eq!(config.max_file_bytes, 1_048_576);
+        assert_eq!(config.max_total_bytes, 4_194_304);
     }
 
     #[test]
@@ -703,6 +953,8 @@ mod tests {
             ("TUNEWEAVE_LOG_FILE", "file."),
             ("TUNEWEAVE_LOG_RETENTION_DAYS", "0"),
             ("TUNEWEAVE_LOG_MAX_FILES", "10001"),
+            ("TUNEWEAVE_LOG_MAX_FILE_BYTES", "65535"),
+            ("TUNEWEAVE_LOG_MAX_TOTAL_BYTES", "1099511627777"),
         ] {
             let values = values(&[(name, value)]);
             assert!(
@@ -716,6 +968,12 @@ mod tests {
             ("TUNEWEAVE_LOG_TO_FILE", "false"),
         ]);
         assert!(LoggingConfig::from_values(Path::new("private-data"), &disabled).is_err());
+
+        let inverted_sizes = values(&[
+            ("TUNEWEAVE_LOG_MAX_FILE_BYTES", "4194304"),
+            ("TUNEWEAVE_LOG_MAX_TOTAL_BYTES", "1048576"),
+        ]);
+        assert!(LoggingConfig::from_values(Path::new("private-data"), &inverted_sizes).is_err());
 
         for directory in [
             "private-data",
@@ -739,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn non_blocking_daily_writer_flushes_and_keeps_unrelated_files_separate() {
+    fn non_blocking_bounded_writer_flushes_and_keeps_unrelated_files_separate() {
         let root = temporary_directory("writer");
         let directory = root.join("logs");
         fs::create_dir_all(&directory).expect("create test log directory");
@@ -788,6 +1046,58 @@ mod tests {
             b"keep"
         );
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn bounded_writer_rolls_by_size_and_prunes_only_its_oldest_files() {
+        let root = temporary_directory("bounded");
+        let directory = root.join("logs");
+        fs::create_dir_all(&directory).expect("create bounded log directory");
+        fs::write(directory.join("unrelated.txt"), b"keep").expect("write unrelated file");
+        let values = values(&[
+            (
+                "TUNEWEAVE_LOG_DIR",
+                directory.to_str().expect("UTF-8 test directory"),
+            ),
+            ("TUNEWEAVE_LOG_TO_STDERR", "false"),
+            ("TUNEWEAVE_LOG_FILE", "bounded.log"),
+        ]);
+        let mut config =
+            LoggingConfig::from_values(&root.join("data"), &values).expect("logging config");
+        config.max_files = 2;
+        config.max_file_bytes = 16;
+        config.max_total_bytes = 32;
+
+        let mut writer = BoundedRollingFile::new(&config).expect("open bounded writer");
+        writer.write_all(b"first-record").expect("write first file");
+        writer
+            .write_all(b"second-record")
+            .expect("roll to second file");
+        writer
+            .write_all(b"third-record")
+            .expect("prune and roll to third file");
+        let oversized = writer
+            .write_all(b"one-record-is-larger-than-the-limit")
+            .expect_err("oversized event must fail");
+        assert_eq!(oversized.kind(), ErrorKind::InvalidData);
+        writer.flush().expect("flush bounded writer");
+        drop(writer);
+
+        let logs = managed_log_files(&directory, "bounded.log").expect("list bounded logs");
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().map(|file| file.size).sum::<u64>() <= 32);
+        let contents = logs
+            .iter()
+            .map(|file| fs::read_to_string(&file.path).expect("read bounded log"))
+            .collect::<String>();
+        assert!(!contents.contains("first-record"));
+        assert!(contents.contains("second-record"));
+        assert!(contents.contains("third-record"));
+        assert_eq!(
+            fs::read(directory.join("unrelated.txt")).expect("read unrelated file"),
+            b"keep"
+        );
+        fs::remove_dir_all(root).expect("remove bounded test directory");
     }
 
     #[test]
