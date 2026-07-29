@@ -36,6 +36,7 @@ TuneWeave 采用 `MIT OR Apache-2.0`。项目不复制、翻译、链接、打�
 - [B 站](coverage/bilibili-scope.md)
 - [Uni Playlist](coverage/uni-playlist.md)
 - [酷狗](coverage/kugou-scope.md)
+- [咪咕](coverage/migu-scope.md)
 
 扩展候选池：
 
@@ -74,7 +75,8 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 
 ### 咪咕
 
-- 搜索、资源信息、可听性与多条播放 URL 链使用不同响应结构。
+- 搜索、资源信息、可听性与多条播放 URL 链使用不同响应结构。歌曲搜索当前仍固定返回每页 20 项，参考项目暴露的 `size` 没有进入实际请求；TuneWeave 通过受限多页窗口实现统一 offset/limit，不把无效参数写进契约。
+- 当前 HTTPS 搜索响应以 `contentId` 作为稳定播放身份，同时返回 `songId`、`copyrightId`、`resourceType`、歌词地址、替代版本和平台音频规格。`PQ/HQ/SQ/ZQ24` 已有明确统一映射；`AV3A/Z3D` 等尚未确认的沉浸格式只保留平台原码，不猜测音质名称。
 - `47d2edb` 新增的 `ninan_signInfo` 与 H5/用户接口重构属于后续项目范围，未改变公开音源补充层的实施优先级。
 - 关键资源身份包括 `contentId + copyrightId + resourceType`，登录播放还可能使用 PACM token。
 - 外部歌单匹配只接受经过验证的公开来源，不提供任意 URL 转发。

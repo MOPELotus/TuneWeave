@@ -3,6 +3,7 @@ members = [
     "crates/tuneweave-core",
     "crates/tuneweave-provider-bilibili",
     "crates/tuneweave-provider-kugou",
+    "crates/tuneweave-provider-migu",
     "crates/tuneweave-provider-netease",
     "crates/tuneweave-provider-qq",
     "crates/tuneweave-server",
@@ -50,6 +51,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tuneweave-core = { path = "crates/tuneweave-core" }
 tuneweave-provider-bilibili = { path = "crates/tuneweave-provider-bilibili" }
 tuneweave-provider-kugou = { path = "crates/tuneweave-provider-kugou" }
+tuneweave-provider-migu = { path = "crates/tuneweave-provider-migu" }
 tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
 tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
 url = "2.5.8"

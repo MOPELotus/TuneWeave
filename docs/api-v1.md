@@ -1455,6 +1455,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 酷狗设备身份属于 provider 内部状态，不是账户或调用方凭证。全新部署在 `TUNEWEAVE_DATA_DIR/kugou-device.json` 创建匿名 GUID，并以其 MD5 的无符号 128 位十进制值确定性派生 MID；Web 搜索只复用稳定 MID，不为此提前注册。首次歌曲详情、歌单、歌词、权益或播放等移动端请求会固定访问 `https://userservice.kugou.com/risk/v2/r_register_dev`，以内部 AES-CBC 档案、RSA PKCS#1 v1.5 密钥包和完整 Android 签名取得 24 位 `dfid`，随后将 GUID、MID、`dfid` 和注册时间原子保存并在重启后复用。并发首次请求只执行一次注册。若本地 `dfid` 已损坏，或平台对已经注册但本地遗失 `dfid` 的旧 GUID 返回成功空数据，provider 会使该注册失效；后一分支等待 1 秒冷却，轮换整套匿名身份并只重试一次，第二次仍无 `dfid` 时明确失败，不无限重试。GUID/MID 派生关系损坏时拒绝启动，API 请求不能覆盖设备文件、设备字段、注册地址、签名、请求头或代理。
 
+咪咕公开歌曲搜索使用 `GET /v1/search?platform=migu&kind=track&q=...`。Provider 固定访问官方 HTTPS `bmw/search/song/v1.0`，不接受账户、Cookie、目标 URL、请求头或请求级代理；部署方只能通过 `TUNEWEAVE_MIGU_PROXY` 配置服务端正向代理。统一歌曲引用使用稳定 `migu:<contentId>`，并强类型保留 `songId`、`copyrightId`、`resourceType`、歌手、专辑、时长、官方图片和普通/逐字歌词资源。已确认的 `PQ/HQ/SQ/ZQ24` 分别映射标准、高品、无损和 Hi-Res，`AV3A/Z3D` 等语义尚未验证的格式仅按平台原码保存在有界规格列表，不能伪装为统一沉浸音质。搜索结果中的 `more` 作为独立替代版本记录保留，不扁平为额外命中；搜索权益标志不足以证明当前可播，因此 `playable` 保持 `null`。平台实际页宽固定为 20，统一 offset/limit 通过最多 6 个连续上游页精确切片，既支持非页宽对齐窗口，也不会无限翻页；分页元数据明确返回实际后端、物理页宽和抓取页数。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。

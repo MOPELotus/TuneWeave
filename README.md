@@ -40,6 +40,7 @@ cargo run -p tuneweave-server --bin tuneweave
 - `TUNEWEAVE_QQ_PROXY`：可选的 QQ 音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。QQ Android 设备、QIMEI 和匿名会话自动原子保存到私有数据目录的 `qq-device.json`，服务重启后复用。
 - `TUNEWEAVE_BILIBILI_PROXY`：可选的 B 站服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 - `TUNEWEAVE_KUGOU_PROXY`：可选的酷狗服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。酷狗匿名 GUID、派生 MID 和移动端注册 `dfid` 自动原子保存到私有数据目录的 `kugou-device.json`，服务重启后复用。
+- `TUNEWEAVE_MIGU_PROXY`：可选的咪咕音乐服务端 HTTP(S) 正向代理 URL；仅从启动环境读取，API 调用方不能覆盖。
 
 默认数据目录已由 Git 忽略。账户文件只保存 provider 后续请求所需的会话凭据，不保存密码或验证码；Unix 创建权限为目录 `0700`、文件 `0600`，Windows 继承所选私有目录的 ACL。当前文件后端不执行静态加密，因此不要把该目录放进同步盘、公开目录、镜像或备份仓库；生产部署应显式把 `TUNEWEAVE_DATA_DIR` 指向仅服务账户可读写的位置。
 

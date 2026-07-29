@@ -16,6 +16,7 @@ use tuneweave_core::{
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
 use tuneweave_provider_kugou::{KugouConfig, KugouProvider};
+use tuneweave_provider_migu::{MiguConfig, MiguProvider};
 use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_server::{AppState, build_router};
@@ -75,6 +76,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .ok()
             .filter(|proxy| !proxy.trim().is_empty()),
         device_path: Some(data_dir.join("kugou-device.json")),
+    })?)?;
+    registry.register(MiguProvider::new(MiguConfig {
+        proxy_url: env::var("TUNEWEAVE_MIGU_PROXY")
+            .ok()
+            .filter(|proxy| !proxy.trim().is_empty()),
     })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);

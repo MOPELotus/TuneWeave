@@ -1956,6 +1956,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuneweave-provider-migu"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tuneweave-core",
+ "url",
+]
+
+[[package]]
 name = "tuneweave-provider-netease"
 version = "0.1.0"
 dependencies = [
@@ -2025,6 +2038,7 @@ dependencies = [
  "tuneweave-core",
  "tuneweave-provider-bilibili",
  "tuneweave-provider-kugou",
+ "tuneweave-provider-migu",
  "tuneweave-provider-netease",
  "tuneweave-provider-qq",
 ]
