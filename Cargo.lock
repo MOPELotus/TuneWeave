@@ -2049,7 +2049,10 @@ dependencies = [
 name = "tuneweave-provider-soda"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "async-trait",
+ "base64",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",

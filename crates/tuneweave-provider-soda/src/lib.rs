@@ -1,5 +1,6 @@
 mod client;
 mod identity;
+pub mod media;
 mod provider;
 
 pub use client::{SodaClient, SodaConfig};
