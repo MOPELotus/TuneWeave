@@ -21,7 +21,7 @@ use tuneweave_provider_netease::{NeteaseConfig, NeteaseProvider};
 use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_provider_soda::{SodaConfig, SodaProvider};
 use tuneweave_server::{
-    AppState, build_router,
+    AppState, ShutdownSnapshot, build_router,
     logging::{LoggingConfig, init_logging},
 };
 
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     })?)?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let listener = TcpListener::bind(address).await?;
 
     info!(
@@ -137,13 +137,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         "TuneWeave startup completed"
     );
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await;
     if let Err(error) = &serve_result {
         error!(%error, "TuneWeave server exited with an error");
     }
     let dropped_lines = logging.dropped_lines();
     let file_write_errors = logging.file_write_errors();
+    let shutdown_snapshot = read_shutdown_snapshot(&state, "shutdown_completed");
     if dropped_lines > 0 || file_write_errors > 0 {
         error!(
             dropped_lines,
@@ -152,7 +153,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     info!(
         dropped_lines,
-        file_write_errors, "TuneWeave shutdown completed"
+        file_write_errors,
+        snapshot_available = shutdown_snapshot.is_some(),
+        active_requests = shutdown_snapshot.map_or(0, |snapshot| snapshot.active_requests),
+        auth_transactions = shutdown_snapshot.map_or(0, |snapshot| snapshot.auth_transactions),
+        qr_auth_transactions =
+            shutdown_snapshot.map_or(0, |snapshot| snapshot.qr_auth_transactions),
+        sms_auth_transactions =
+            shutdown_snapshot.map_or(0, |snapshot| snapshot.sms_auth_transactions),
+        "TuneWeave shutdown completed"
     );
     drop(logging);
     serve_result?;
@@ -180,10 +189,30 @@ fn nonempty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-async fn shutdown_signal() {
+fn read_shutdown_snapshot(state: &AppState, stage: &'static str) -> Option<ShutdownSnapshot> {
+    match state.shutdown_snapshot() {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            error!(
+                stage,
+                error_code = error.code.as_str(),
+                "TuneWeave shutdown snapshot failed"
+            );
+            None
+        }
+    }
+}
+
+async fn shutdown_signal(state: AppState) {
     let reason = wait_for_shutdown_reason().await;
+    let snapshot = read_shutdown_snapshot(&state, "shutdown_requested");
     info!(
         shutdown_reason = reason.as_str(),
+        snapshot_available = snapshot.is_some(),
+        active_requests = snapshot.map_or(0, |snapshot| snapshot.active_requests),
+        auth_transactions = snapshot.map_or(0, |snapshot| snapshot.auth_transactions),
+        qr_auth_transactions = snapshot.map_or(0, |snapshot| snapshot.qr_auth_transactions),
+        sms_auth_transactions = snapshot.map_or(0, |snapshot| snapshot.sms_auth_transactions),
         "TuneWeave shutdown requested"
     );
 }

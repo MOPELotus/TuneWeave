@@ -1,8 +1,15 @@
-use std::{cell::RefCell, time::Instant};
+use std::{
+    cell::RefCell,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
 use axum::{
     Json,
-    extract::{MatchedPath, Request},
+    extract::{MatchedPath, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -15,6 +22,35 @@ use tuneweave_core::{ErrorCode, PageMeta, Platform, TuneWeaveError};
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 const MAX_REQUEST_ID_LENGTH: usize = 64;
+
+#[derive(Clone, Default)]
+pub(crate) struct RequestActivity {
+    active: Arc<AtomicUsize>,
+}
+
+impl RequestActivity {
+    fn begin(&self) -> RequestActivityGuard {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        RequestActivityGuard {
+            activity: self.clone(),
+        }
+    }
+
+    pub(crate) fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct RequestActivityGuard {
+    activity: RequestActivity,
+}
+
+impl Drop for RequestActivityGuard {
+    fn drop(&mut self) {
+        let previous = self.activity.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "request activity counter underflow");
+    }
+}
 
 tokio::task_local! {
     static CURRENT_REQUEST_ID: String;
@@ -223,7 +259,12 @@ impl ResponseMeta {
     }
 }
 
-pub(crate) async fn request_context_middleware(request: Request, next: Next) -> Response {
+pub(crate) async fn request_context_middleware(
+    State(activity): State<RequestActivity>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let _activity_guard = activity.begin();
     let started = Instant::now();
     let method = request.method().clone();
     let route = request
@@ -522,6 +563,22 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_activity_counts_only_live_guards() {
+        let activity = RequestActivity::default();
+        assert_eq!(activity.active(), 0);
+        {
+            let _first = activity.begin();
+            assert_eq!(activity.active(), 1);
+            {
+                let _second = activity.begin();
+                assert_eq!(activity.active(), 2);
+            }
+            assert_eq!(activity.active(), 1);
+        }
+        assert_eq!(activity.active(), 0);
+    }
 
     #[tokio::test]
     async fn response_summary_merges_platform_credential_and_pagination_without_identifiers() {

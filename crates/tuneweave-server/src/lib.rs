@@ -134,6 +134,13 @@ struct AuthTransactions {
     entries: Arc<RwLock<HashMap<String, StoredAuthTransaction>>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AuthTransactionCounts {
+    total: usize,
+    qr: usize,
+    sms: usize,
+}
+
 #[derive(Clone)]
 struct StoredAuthTransaction {
     created_at: Instant,
@@ -469,6 +476,29 @@ impl AuthTransactions {
             .map_err(|_| auth_store_error())?
             .remove(transaction_id))
     }
+
+    fn counts(&self) -> Result<AuthTransactionCounts, TuneWeaveError> {
+        let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
+        let expired = Self::take_expired(&mut entries, Instant::now());
+        let mut counts = AuthTransactionCounts::default();
+        for transaction in entries.values() {
+            counts.total += 1;
+            match transaction.kind {
+                StoredAuthKind::Qr { .. } => counts.qr += 1,
+                StoredAuthKind::Challenge {
+                    request:
+                        AuthChallengeRequest {
+                            method: ChallengeMethod::Sms,
+                            ..
+                        },
+                    ..
+                } => counts.sms += 1,
+            }
+        }
+        drop(entries);
+        Self::log_expired(expired);
+        Ok(counts)
+    }
 }
 
 fn auth_store_error() -> TuneWeaveError {
@@ -484,9 +514,18 @@ pub struct AppState {
     resolver: StreamResolver,
     fallback_platforms: Vec<Platform>,
     auth_transactions: AuthTransactions,
+    request_activity: response::RequestActivity,
     uni_playlists: Arc<dyn UniPlaylistStore>,
     default_platform: Platform,
     started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShutdownSnapshot {
+    pub active_requests: usize,
+    pub auth_transactions: usize,
+    pub qr_auth_transactions: usize,
+    pub sms_auth_transactions: usize,
 }
 
 #[derive(Clone, Default)]
@@ -712,6 +751,7 @@ impl AppState {
             resolver: StreamResolver::new(registry.clone(), fallback_platforms.clone()),
             fallback_platforms,
             auth_transactions: AuthTransactions::default(),
+            request_activity: response::RequestActivity::default(),
             uni_playlists: Arc::new(MemoryUniPlaylistStore::default()),
             registry,
             default_platform,
@@ -731,14 +771,26 @@ impl AppState {
             registry,
             fallback_platforms: self.fallback_platforms.clone(),
             auth_transactions: self.auth_transactions.clone(),
+            request_activity: self.request_activity.clone(),
             uni_playlists: Arc::clone(&self.uni_playlists),
             default_platform: self.default_platform,
             started_at: self.started_at,
         }
     }
+
+    pub fn shutdown_snapshot(&self) -> Result<ShutdownSnapshot, TuneWeaveError> {
+        let transactions = self.auth_transactions.counts()?;
+        Ok(ShutdownSnapshot {
+            active_requests: self.request_activity.active(),
+            auth_transactions: transactions.total,
+            qr_auth_transactions: transactions.qr,
+            sms_auth_transactions: transactions.sms,
+        })
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let request_activity = state.request_activity.clone();
     let versioned = Router::new()
         .route("/platforms", get(platforms))
         .route("/capabilities", get(capabilities))
@@ -1258,7 +1310,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .nest("/v1", versioned)
         .with_state(state)
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            request_activity,
             response::request_context_middleware,
         ))
 }
@@ -17498,6 +17551,53 @@ mod tests {
         assert_eq!(AuthOperation::PasswordLogin.name(), "password_login");
         assert_eq!(AuthOperation::SessionRefresh.name(), "session_refresh");
         assert_eq!(AuthOperation::SessionLogout.name(), "session_logout");
+    }
+
+    #[test]
+    fn shutdown_snapshot_counts_authentication_methods_without_identifiers() {
+        let state = AppState::new(ProviderRegistry::new(), Platform::Netease);
+        let qr_id = state
+            .auth_transactions
+            .insert(StoredAuthKind::Qr {
+                platform: Platform::Qq,
+                account: "private-qr-account".to_owned(),
+                credential_mode: CredentialMode::Server,
+                provider_transaction_id: "private-provider-key".to_owned(),
+            })
+            .expect("insert QR transaction");
+        let sms_id = state
+            .auth_transactions
+            .insert(StoredAuthKind::Challenge {
+                platform: Platform::Netease,
+                credential_mode: CredentialMode::Client,
+                request: AuthChallengeRequest {
+                    account: "private-sms-account".to_owned(),
+                    method: ChallengeMethod::Sms,
+                    principal: "private-principal".to_owned(),
+                    country_code: Some("86".to_owned()),
+                },
+            })
+            .expect("insert SMS transaction");
+
+        let snapshot = state.shutdown_snapshot().expect("shutdown snapshot");
+        assert_eq!(
+            snapshot,
+            ShutdownSnapshot {
+                active_requests: 0,
+                auth_transactions: 2,
+                qr_auth_transactions: 1,
+                sms_auth_transactions: 1,
+            }
+        );
+
+        state
+            .auth_transactions
+            .remove(&qr_id)
+            .expect("remove QR transaction");
+        state
+            .auth_transactions
+            .remove(&sms_id)
+            .expect("remove SMS transaction");
     }
 
     #[async_trait]
