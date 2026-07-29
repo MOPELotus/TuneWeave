@@ -129,6 +129,38 @@ const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_AUDIO_CONTENT_BYTES: usize = 512 * 1024 * 1024;
 
+fn background_task_failure_kind(error: &tokio::task::JoinError) -> &'static str {
+    if error.is_panic() {
+        "panic"
+    } else if error.is_cancelled() {
+        "cancelled"
+    } else {
+        "unknown"
+    }
+}
+
+async fn await_uni_playlist_task<T>(
+    operation: &'static str,
+    task: tokio::task::JoinHandle<Result<T, TuneWeaveError>>,
+) -> Result<T, TuneWeaveError> {
+    match task.await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(
+                event = "background_task_failure",
+                task = "uni_playlist_storage",
+                operation,
+                failure_kind = background_task_failure_kind(&error),
+                "TuneWeave background task exited abnormally"
+            );
+            Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist background task failed",
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct AuthTransactions {
     entries: Arc<RwLock<HashMap<String, StoredAuthTransaction>>>,
@@ -6510,14 +6542,11 @@ async fn uni_playlist_create(
         );
         let store = Arc::clone(&state.uni_playlists);
         let candidate = playlist.clone();
-        let result = tokio::task::spawn_blocking(move || store.create(&candidate))
-            .await
-            .map_err(|_| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    "Uni Playlist persistence task failed",
-                )
-            })?;
+        let result = await_uni_playlist_task(
+            "create",
+            tokio::task::spawn_blocking(move || store.create(&candidate)),
+        )
+        .await;
         match result {
             Ok(()) => {
                 return Ok(Json(
@@ -6562,15 +6591,11 @@ async fn uni_playlist_document_import(
         let (playlist, items) = document.to_server_snapshot(&target_id)?;
         let store = Arc::clone(&state.uni_playlists);
         let candidate = playlist.clone();
-        let result =
-            tokio::task::spawn_blocking(move || store.create_with_items(&candidate, &items))
-                .await
-                .map_err(|_| {
-                    TuneWeaveError::new(
-                        ErrorCode::InternalError,
-                        "Uni Playlist persistence task failed",
-                    )
-                })?;
+        let result = await_uni_playlist_task(
+            "document_import",
+            tokio::task::spawn_blocking(move || store.create_with_items(&candidate, &items)),
+        )
+        .await;
         match result {
             Ok(()) => {
                 let result = UniPlaylistDocumentImportResult {
@@ -6676,15 +6701,11 @@ async fn uni_playlist_import(
         let store = Arc::clone(&state.uni_playlists);
         let candidate = playlist.clone();
         let items = imported_items.clone();
-        let result =
-            tokio::task::spawn_blocking(move || store.create_with_items(&candidate, &items))
-                .await
-                .map_err(|_| {
-                    TuneWeaveError::new(
-                        ErrorCode::InternalError,
-                        "Uni Playlist persistence task failed",
-                    )
-                })?;
+        let result = await_uni_playlist_task(
+            "source_import",
+            tokio::task::spawn_blocking(move || store.create_with_items(&candidate, &items)),
+        )
+        .await;
         match result {
             Ok(()) => {
                 let result = UniPlaylistImportResult {
@@ -7134,15 +7155,11 @@ async fn uni_playlist_update(
     let updated_at_ms = unix_time_millis()?;
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
-    let playlist =
-        tokio::task::spawn_blocking(move || store.update(&playlist_id, &request, updated_at_ms))
-            .await
-            .map_err(|_| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    "Uni Playlist persistence task failed",
-                )
-            })??;
+    let playlist = await_uni_playlist_task(
+        "update",
+        tokio::task::spawn_blocking(move || store.update(&playlist_id, &request, updated_at_ms)),
+    )
+    .await?;
     Ok(Json(
         ApiResponse::new(playlist).with_platform(Platform::Uni),
     ))
@@ -7157,14 +7174,11 @@ async fn uni_playlist_delete(
     let reference = parse_uni_playlist_reference(reference)?;
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
-    let result = tokio::task::spawn_blocking(move || store.delete(&playlist_id))
-        .await
-        .map_err(|_| {
-            TuneWeaveError::new(
-                ErrorCode::InternalError,
-                "Uni Playlist persistence task failed",
-            )
-        })??;
+    let result = await_uni_playlist_task(
+        "delete",
+        tokio::task::spawn_blocking(move || store.delete(&playlist_id)),
+    )
+    .await?;
     Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
 }
 
@@ -7179,15 +7193,15 @@ async fn uni_playlist_export(
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
     let gzip = accepts_gzip_encoding(&headers);
-    let encoded = tokio::task::spawn_blocking(move || {
-        let document = store.export_document(&playlist_id)?;
-        let response = ApiResponse::new(document).with_platform(Platform::Uni);
-        encode_uni_playlist_export(&response, gzip)
-    })
-    .await
-    .map_err(|_| {
-        TuneWeaveError::new(ErrorCode::InternalError, "Uni Playlist export task failed")
-    })??;
+    let encoded = await_uni_playlist_task(
+        "export",
+        tokio::task::spawn_blocking(move || {
+            let document = store.export_document(&playlist_id)?;
+            let response = ApiResponse::new(document).with_platform(Platform::Uni);
+            encode_uni_playlist_export(&response, gzip)
+        }),
+    )
+    .await?;
     let mut response = Response::new(Body::from(encoded));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -7581,14 +7595,11 @@ async fn uni_playlist_items_add(
         let items = allocate_materialized_uni_playlist_items(&resolved, added_at_ms)?;
         let store = Arc::clone(&state.uni_playlists);
         let playlist_id = reference.id().to_owned();
-        let result = tokio::task::spawn_blocking(move || store.append_items(&playlist_id, &items))
-            .await
-            .map_err(|_| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    "Uni Playlist persistence task failed",
-                )
-            })?;
+        let result = await_uni_playlist_task(
+            "append_items",
+            tokio::task::spawn_blocking(move || store.append_items(&playlist_id, &items)),
+        )
+        .await;
         match result {
             Ok(mut result) => {
                 result
@@ -7728,16 +7739,13 @@ async fn uni_playlist_item_delete(
     let updated_at_ms = unix_time_millis()?;
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
-    let result = tokio::task::spawn_blocking(move || {
-        store.remove_item(&playlist_id, &item_id, updated_at_ms)
-    })
-    .await
-    .map_err(|_| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            "Uni Playlist persistence task failed",
-        )
-    })??;
+    let result = await_uni_playlist_task(
+        "remove_item",
+        tokio::task::spawn_blocking(move || {
+            store.remove_item(&playlist_id, &item_id, updated_at_ms)
+        }),
+    )
+    .await?;
     Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
 }
 
@@ -7758,16 +7766,13 @@ async fn uni_playlist_items_reorder(
     let updated_at_ms = unix_time_millis()?;
     let store = Arc::clone(&state.uni_playlists);
     let playlist_id = reference.id().to_owned();
-    let result = tokio::task::spawn_blocking(move || {
-        store.reorder_items(&playlist_id, &request.item_ids, updated_at_ms)
-    })
-    .await
-    .map_err(|_| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            "Uni Playlist persistence task failed",
-        )
-    })??;
+    let result = await_uni_playlist_task(
+        "reorder_items",
+        tokio::task::spawn_blocking(move || {
+            store.reorder_items(&playlist_id, &request.item_ids, updated_at_ms)
+        }),
+    )
+    .await?;
     Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
 }
 
@@ -17598,6 +17603,23 @@ mod tests {
             .auth_transactions
             .remove(&sms_id)
             .expect("remove SMS transaction");
+    }
+
+    #[tokio::test]
+    async fn background_task_failure_kinds_do_not_format_panic_payloads() {
+        let panicked = tokio::spawn(async {
+            panic!("synthetic private panic payload");
+        })
+        .await
+        .expect_err("task must panic");
+        assert_eq!(background_task_failure_kind(&panicked), "panic");
+
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let cancelled = task.await.expect_err("task must be cancelled");
+        assert_eq!(background_task_failure_kind(&cancelled), "cancelled");
     }
 
     #[async_trait]

@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .unwrap_or_else(|| PathBuf::from(".local").join("data"));
     let logging_config = LoggingConfig::from_env(&data_dir)?;
     let logging = init_logging(&logging_config)?;
+    install_panic_observer();
     for warning in &logging.retention_warnings {
         error!(
             error_kind = ?warning.error_kind,
@@ -187,6 +188,22 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn install_panic_observer() {
+    std::panic::set_hook(Box::new(|panic| {
+        if let Some(location) = panic.location() {
+            error!(
+                event = "panic",
+                source_file = location.file(),
+                source_line = location.line(),
+                source_column = location.column(),
+                "TuneWeave task panicked"
+            );
+        } else {
+            error!(event = "panic", "TuneWeave task panicked");
+        }
+    }));
 }
 
 fn read_shutdown_snapshot(state: &AppState, stage: &'static str) -> Option<ShutdownSnapshot> {
