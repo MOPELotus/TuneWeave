@@ -1625,6 +1625,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 | GET | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | 持久化的 `UniPlaylist` 元数据 |
 | PATCH | `/v1/uni/playlists/{ref}` | JSON `{name?, description?}`，至少一个字段 | 修改后的 `UniPlaylist` 元数据 |
 | DELETE | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | `UniPlaylistDeleteResult`，原子删除元数据与全部项目 |
+| GET | `/v1/uni/playlists/{ref}/export` | 完整 `uni:<opaque-id>` 引用 | 完整安全的 `UniPlaylistDocument` V1 副本 |
 | GET | `/v1/uni/playlists/{ref}/items` | `limit?`、`offset?` | 分页 `UniPlaylistItem[]`，严格保留位置和重复来源项 |
 | POST | `/v1/uni/playlists/{ref}/items` | JSON `{items:[{ref,kind}], accounts?}` | `UniPlaylistItemAddResult`，原子追加类型化混合项目 |
 | DELETE | `/v1/uni/playlists/{ref}/items/{item_id}` | 稳定的单次出现项目 ID | `UniPlaylistItemDeleteResult`，仅删除该项目并重编号后续位置 |
@@ -1635,6 +1636,8 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 客户端托管和显式迁移共用固定格式 `tuneweave_uni_playlist_v1`。`UniPlaylistDocument` 顶层包含 `format/id/name/description/item_count/created_at_ms/updated_at_ms/items/extensions`；每个项目包含稳定 `id`、零基 `position`、`kind`、外部平台 `source_ref`、紧凑 `snapshot`、`added_at_ms` 和用途受限的导入来源扩展。文档必须保留同一来源的重复出现，项目 ID 唯一且位置连续，声明数量与数组一致，项目时间不得晚于文档更新时间；结构上限为 100,000 项，具体 HTTP 端点仍可采用更低的请求和响应限制。
 
 V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目只允许成组的 `import_source_index/import_source_ref/import_source_type` 和可选 `imported_from_item_id`，快照只允许规范引用、可播放性、音质档位、视频/播客/电台静态展示摘要。所有层级拒绝未知字段，因此不存在 Cookie、token、密码、验证码、设备身份、临时媒体 URL、签名、账户别名或任意请求头的合法槽位。快照 `cover_url` 只接受受限 HTTPS 展示地址，服务端不得根据它发起媒体或资源请求；真正播放仍按 `source_ref` 重新进入 provider、账户权益检查和统一回退链。
+
+服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store`；它是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。当前 JSON 文档受 V1 的 100,000 项结构上限约束；针对超大响应的流式或压缩传输仍属于迁移单元的收口条件。
 
 生产服务把数据保存到 `TUNEWEAVE_DATA_DIR/uni-playlists.json`，与 `accounts` 凭据目录分离。文件后端在内存维护已验证快照，创建时在同目录写入并同步临时文件后发布；Unix 使用原子替换，Windows 使用可在下次启动恢复的同目录备份切换。未知数据库版本或畸形记录会阻止启动而不会被静默覆盖。该文件只保存歌单结构与后续的必要元数据快照，不保存媒体字节或平台凭据。
 

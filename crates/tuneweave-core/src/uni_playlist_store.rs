@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::{
     ErrorCode, Extensions, Page, PageMeta, Platform, Result, TuneWeaveError, UniPlaylist,
-    UniPlaylistDeleteResult, UniPlaylistItem, UniPlaylistItemAddResult,
+    UniPlaylistDeleteResult, UniPlaylistDocument, UniPlaylistItem, UniPlaylistItemAddResult,
     UniPlaylistItemDeleteResult, UniPlaylistItemOrderResult, UniPlaylistUpdateRequest,
 };
 
@@ -34,6 +34,7 @@ pub trait UniPlaylistStore: Send + Sync {
         updated_at_ms: u64,
     ) -> Result<UniPlaylist>;
     fn delete(&self, id: &str) -> Result<UniPlaylistDeleteResult>;
+    fn export_document(&self, id: &str) -> Result<UniPlaylistDocument>;
     fn append_items(
         &self,
         playlist_id: &str,
@@ -132,6 +133,14 @@ impl UniPlaylistStore for MemoryUniPlaylistStore {
             .write()
             .map_err(|_| uni_playlist_lock_error())?;
         delete_playlist_from_database(&mut database, id)
+    }
+
+    fn export_document(&self, id: &str) -> Result<UniPlaylistDocument> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        export_playlist_document(&database, id)
     }
 
     fn append_items(
@@ -296,6 +305,14 @@ impl UniPlaylistStore for FileUniPlaylistStore {
         persist_database(&self.path, &next)?;
         *database = next;
         Ok(result)
+    }
+
+    fn export_document(&self, id: &str) -> Result<UniPlaylistDocument> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        export_playlist_document(&database, id)
     }
 
     fn append_items(
@@ -514,6 +531,23 @@ fn delete_playlist_from_database(
             ("items_returned".to_owned(), json!(false)),
         ]),
     })
+}
+
+fn export_playlist_document(
+    database: &UniPlaylistDatabase,
+    playlist_id: &str,
+) -> Result<UniPlaylistDocument> {
+    validate_uni_playlist_id(playlist_id)?;
+    let playlist = database
+        .playlists
+        .get(playlist_id)
+        .ok_or_else(|| uni_playlist_not_found(playlist_id))?;
+    let items = database
+        .items
+        .get(playlist_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    UniPlaylistDocument::from_server_snapshot(playlist, items)
 }
 
 fn append_items_to_database(

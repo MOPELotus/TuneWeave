@@ -1,14 +1,50 @@
 use std::collections::BTreeSet;
 
+use serde::de::DeserializeOwned;
+
 use crate::{
-    ErrorCode, Platform, Result, TuneWeaveError, UniPlaylistDocument, UniPlaylistDocumentItem,
-    UniPlaylistDocumentSnapshot, UniPlaylistDocumentSnapshotExtensions,
+    ErrorCode, Extensions, Platform, Quality, Result, TuneWeaveError, UniPlaylist,
+    UniPlaylistDocument, UniPlaylistDocumentExtensions, UniPlaylistDocumentFormat,
+    UniPlaylistDocumentItem, UniPlaylistDocumentItemExtensions, UniPlaylistDocumentSnapshot,
+    UniPlaylistDocumentSnapshotExtensions, UniPlaylistItem,
 };
 
 pub const UNI_PLAYLIST_DOCUMENT_FORMAT: &str = "tuneweave_uni_playlist_v1";
 const MAX_DOCUMENT_ITEMS: usize = 100_000;
 
 impl UniPlaylistDocument {
+    pub fn from_server_snapshot(playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<Self> {
+        if playlist.item_count != u64::try_from(items.len()).unwrap_or(u64::MAX) {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "stored Uni Playlist item count does not match its item sequence",
+            ));
+        }
+        let document = Self {
+            format: UniPlaylistDocumentFormat::V1,
+            id: playlist.id.clone(),
+            name: playlist.name.trim().to_owned(),
+            description: playlist.description.trim().to_owned(),
+            item_count: u64::try_from(items.len()).unwrap_or(u64::MAX),
+            created_at_ms: playlist.created_at_ms,
+            updated_at_ms: playlist.updated_at_ms,
+            items: items
+                .iter()
+                .map(document_item_from_server)
+                .collect::<Result<Vec<_>>>()?,
+            extensions: UniPlaylistDocumentExtensions {
+                duplicates_preserved: true,
+            },
+        };
+        document.validate().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "stored Uni Playlist cannot be exported as a safe V1 document",
+            )
+        })?;
+        Ok(document)
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_document_id(&self.id, "Uni Playlist document id")?;
         validate_trimmed_text(&self.name, 200, false, "Uni Playlist document name")?;
@@ -51,6 +87,116 @@ impl UniPlaylistDocument {
         }
         Ok(())
     }
+}
+
+fn document_item_from_server(item: &UniPlaylistItem) -> Result<UniPlaylistDocumentItem> {
+    let import_source_index = decode_extension(&item.extensions, "import_source_index")?;
+    let import_source_ref = decode_extension(&item.extensions, "import_source_ref")?;
+    let import_source_type = decode_extension(&item.extensions, "import_source_type")?;
+    let imported_from_item_id = decode_extension(&item.extensions, "imported_from_item_id")?;
+    let provenance_count = [
+        import_source_index.is_some(),
+        import_source_ref.is_some(),
+        import_source_type.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if !matches!(provenance_count, 0 | 3) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "stored Uni Playlist contains incomplete import provenance",
+        ));
+    }
+    Ok(UniPlaylistDocumentItem {
+        id: item.id.clone(),
+        position: item.position,
+        kind: item.kind,
+        source_ref: item.source_ref.clone(),
+        snapshot: document_snapshot_from_server(&item.snapshot)?,
+        added_at_ms: item.added_at_ms,
+        extensions: UniPlaylistDocumentItemExtensions {
+            import_source_index,
+            import_source_ref,
+            import_source_type,
+            imported_from_item_id,
+        },
+    })
+}
+
+fn document_snapshot_from_server(
+    snapshot: &crate::UniPlaylistItemSnapshot,
+) -> Result<UniPlaylistDocumentSnapshot> {
+    let available_qualities =
+        decode_extension::<Vec<Quality>>(&snapshot.extensions, "available_qualities")?
+            .unwrap_or_default();
+    let cover_url = snapshot
+        .cover_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| {
+            url.len() <= 4_096 && url.starts_with("https://") && !url.chars().any(char::is_control)
+        })
+        .map(str::to_owned);
+    Ok(UniPlaylistDocumentSnapshot {
+        title: snapshot.title.trim().to_owned(),
+        artists: snapshot
+            .artists
+            .iter()
+            .map(|artist| artist.trim().to_owned())
+            .collect(),
+        album: normalized_optional_text(snapshot.album.as_deref()),
+        duration_ms: snapshot.duration_ms,
+        isrc: normalized_optional_text(snapshot.isrc.as_deref()).filter(|value| !value.is_empty()),
+        cover_url,
+        version_tags: snapshot
+            .version_tags
+            .iter()
+            .map(|tag| tag.trim().to_owned())
+            .collect(),
+        extensions: UniPlaylistDocumentSnapshotExtensions {
+            canonical_ref: decode_extension(&snapshot.extensions, "canonical_ref")?,
+            playable: decode_extension(&snapshot.extensions, "playable")?,
+            available_qualities,
+            mv_ref: decode_extension(&snapshot.extensions, "mv_ref")?,
+            video_kind: decode_extension(&snapshot.extensions, "video_kind")?,
+            published_at: decode_extension::<String>(&snapshot.extensions, "published_at")?
+                .and_then(|value| normalized_optional_text(Some(&value))),
+            podcast_ref: decode_extension(&snapshot.extensions, "podcast_ref")?,
+            audio_ref: decode_extension(&snapshot.extensions, "audio_ref")?,
+            serial_number: decode_extension(&snapshot.extensions, "serial_number")?,
+            description: decode_extension::<String>(&snapshot.extensions, "description")?
+                .and_then(|value| normalized_optional_text(Some(&value))),
+            category: decode_extension::<String>(&snapshot.extensions, "category")?
+                .and_then(|value| normalized_optional_text(Some(&value))),
+            region: decode_extension::<String>(&snapshot.extensions, "region")?
+                .and_then(|value| normalized_optional_text(Some(&value))),
+            current_program: decode_extension::<String>(&snapshot.extensions, "current_program")?
+                .and_then(|value| normalized_optional_text(Some(&value))),
+            has_direct_stream: decode_extension(&snapshot.extensions, "has_direct_stream")?,
+        },
+    })
+}
+
+fn decode_extension<T: DeserializeOwned>(extensions: &Extensions, key: &str) -> Result<Option<T>> {
+    let Some(value) = extensions.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                format!("stored Uni Playlist extension {key} has an invalid shape"),
+            )
+        })
+}
+
+fn normalized_optional_text(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).map(str::to_owned)
 }
 
 fn validate_document_item(
@@ -262,9 +408,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        Quality, ResourceRef, UniPlaylistDocumentExtensions, UniPlaylistDocumentFormat,
-        UniPlaylistDocumentItemExtensions, UniPlaylistDocumentSnapshotExtensions,
-        UniPlaylistItemKind,
+        Extensions, Quality, ResourceRef, UniPlaylist, UniPlaylistDocumentExtensions,
+        UniPlaylistDocumentFormat, UniPlaylistDocumentItemExtensions,
+        UniPlaylistDocumentSnapshotExtensions, UniPlaylistItem, UniPlaylistItemKind,
+        UniPlaylistItemSnapshot,
     };
 
     fn sample_document() -> UniPlaylistDocument {
@@ -333,6 +480,99 @@ mod tests {
         let decoded =
             serde_json::from_str::<UniPlaylistDocument>(&encoded).expect("deserialize document");
         assert_eq!(decoded, document);
+    }
+
+    #[test]
+    fn server_snapshot_export_selects_only_safe_typed_fields() {
+        let mut playlist = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_01abcdefghijklmnop").expect("playlist ref"),
+            "跨平台收藏",
+            "安全导出",
+            1_753_137_600_000,
+        );
+        playlist.item_count = 1;
+        playlist.updated_at_ms = 1_753_137_600_100;
+        playlist
+            .extensions
+            .insert("cookie".to_owned(), json!("MUSIC_U=secret"));
+        let mut snapshot = UniPlaylistItemSnapshot::new("反方向的钟");
+        snapshot.artists = vec!["周杰伦".to_owned()];
+        snapshot.cover_url = Some("http://127.0.0.1/private-cover".to_owned());
+        snapshot.extensions.insert(
+            "canonical_ref".to_owned(),
+            json!(ResourceRef::new(Platform::Netease, "185809").expect("canonical ref")),
+        );
+        snapshot
+            .extensions
+            .insert("playable".to_owned(), json!(true));
+        snapshot
+            .extensions
+            .insert("cookie".to_owned(), json!("MUSIC_U=secret"));
+        snapshot.extensions.insert(
+            "stream_url".to_owned(),
+            json!("https://media.example.test/temporary"),
+        );
+        let item = UniPlaylistItem {
+            id: "item_01abcdefghijklmnop".to_owned(),
+            position: 0,
+            kind: UniPlaylistItemKind::Track,
+            source_ref: ResourceRef::new(Platform::Netease, "185809").expect("source ref"),
+            snapshot,
+            added_at_ms: 1_753_137_600_100,
+            extensions: Extensions::from([
+                ("import_source_index".to_owned(), json!(0)),
+                (
+                    "import_source_ref".to_owned(),
+                    json!(
+                        ResourceRef::new(Platform::Netease, "3778678").expect("import source ref")
+                    ),
+                ),
+                ("import_source_type".to_owned(), json!("playlist")),
+                ("token".to_owned(), json!("secret")),
+            ]),
+        };
+
+        let document =
+            UniPlaylistDocument::from_server_snapshot(&playlist, &[item]).expect("safe export");
+        assert_eq!(document.items[0].snapshot.cover_url, None);
+        assert_eq!(
+            document.items[0].snapshot.extensions.canonical_ref,
+            Some(ResourceRef::new(Platform::Netease, "185809").expect("expected canonical ref"))
+        );
+        assert_eq!(
+            document.items[0].extensions.import_source_type.as_deref(),
+            Some("playlist")
+        );
+        let encoded = serde_json::to_string(&document).expect("serialize safe export");
+        for forbidden in ["cookie", "token", "stream_url", "secret", "127.0.0.1"] {
+            assert!(!encoded.to_ascii_lowercase().contains(forbidden));
+        }
+
+        let mut malformed = document.items[0].clone();
+        malformed.snapshot.extensions.playable = None;
+        let mut stored_snapshot = UniPlaylistItemSnapshot::new("反方向的钟");
+        stored_snapshot
+            .extensions
+            .insert("playable".to_owned(), json!("yes"));
+        let malformed_item = UniPlaylistItem {
+            snapshot: stored_snapshot,
+            extensions: Extensions::new(),
+            ..UniPlaylistItem {
+                id: malformed.id,
+                position: malformed.position,
+                kind: malformed.kind,
+                source_ref: malformed.source_ref,
+                snapshot: UniPlaylistItemSnapshot::new("unused"),
+                added_at_ms: malformed.added_at_ms,
+                extensions: Extensions::new(),
+            }
+        };
+        assert_eq!(
+            UniPlaylistDocument::from_server_snapshot(&playlist, &[malformed_item])
+                .expect_err("reject malformed known extension")
+                .code,
+            ErrorCode::InternalError
+        );
     }
 
     #[test]

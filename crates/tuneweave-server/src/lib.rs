@@ -653,6 +653,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/uni/playlists/imports", post(uni_playlist_import))
         .route(
+            "/uni/playlists/{reference}/export",
+            get(uni_playlist_export),
+        )
+        .route(
             "/uni/playlists/{reference}/items",
             get(uni_playlist_items).post(uni_playlist_items_add),
         )
@@ -6466,6 +6470,29 @@ async fn uni_playlist_delete(
             )
         })??;
     Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
+}
+
+async fn uni_playlist_export(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let _ = query_params(params)?;
+    let reference = parse_uni_playlist_reference(reference)?;
+    let store = Arc::clone(&state.uni_playlists);
+    let playlist_id = reference.id().to_owned();
+    let document = tokio::task::spawn_blocking(move || store.export_document(&playlist_id))
+        .await
+        .map_err(|_| {
+            TuneWeaveError::new(ErrorCode::InternalError, "Uni Playlist export task failed")
+        })??;
+    let mut response =
+        Json(ApiResponse::new(document).with_platform(Platform::Uni)).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 async fn uni_playlists(
@@ -29970,6 +29997,114 @@ mod tests {
         let (status, repeated) = json_request_from(app, Method::DELETE, &path, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(repeated["error"]["code"], "resource_not_found");
+    }
+
+    #[tokio::test]
+    async fn uni_playlist_export_returns_a_safe_complete_v1_document() {
+        let store = Arc::new(MemoryUniPlaylistStore::default());
+        let mut playlist = UniPlaylist::new(
+            ResourceRef::new(Platform::Uni, "pl_01abcdefghijklmnop").expect("export playlist ref"),
+            "跨平台导出",
+            "保留顺序与重复项",
+            1_753_137_600_000,
+        );
+        playlist.item_count = 2;
+        playlist.updated_at_ms = 1_753_137_600_200;
+        playlist
+            .extensions
+            .insert("cookie".to_owned(), json!("MUSIC_U=server-secret"));
+        let mut snapshot = UniPlaylistItemSnapshot::new("反方向的钟");
+        snapshot.artists = vec!["周杰伦".to_owned()];
+        snapshot.cover_url = Some("http://127.0.0.1/private-cover".to_owned());
+        snapshot.extensions.insert(
+            "canonical_ref".to_owned(),
+            json!(ResourceRef::new(Platform::Netease, "185809").expect("canonical ref")),
+        );
+        snapshot
+            .extensions
+            .insert("playable".to_owned(), json!(true));
+        snapshot.extensions.insert(
+            "stream_url".to_owned(),
+            json!("https://media.example.test/temporary"),
+        );
+        let source_ref = ResourceRef::new(Platform::Netease, "185809").expect("source track ref");
+        let first = UniPlaylistItem {
+            id: "item_01abcdefghijklmnop".to_owned(),
+            position: 0,
+            kind: UniPlaylistItemKind::Track,
+            source_ref: source_ref.clone(),
+            snapshot: snapshot.clone(),
+            added_at_ms: 1_753_137_600_100,
+            extensions: Extensions::from([
+                ("import_source_index".to_owned(), json!(0)),
+                (
+                    "import_source_ref".to_owned(),
+                    json!(
+                        ResourceRef::new(Platform::Netease, "3778678").expect("import source ref")
+                    ),
+                ),
+                ("import_source_type".to_owned(), json!("playlist")),
+                ("token".to_owned(), json!("server-secret")),
+            ]),
+        };
+        let second = UniPlaylistItem {
+            id: "item_02abcdefghijklmnop".to_owned(),
+            position: 1,
+            kind: UniPlaylistItemKind::Track,
+            source_ref,
+            snapshot,
+            added_at_ms: 1_753_137_600_200,
+            extensions: Extensions::new(),
+        };
+        store
+            .create_with_items(&playlist, &[first.clone(), second.clone()])
+            .expect("create export playlist");
+        let mut registry = ProviderRegistry::new();
+        registry.register(TestProvider).expect("register provider");
+        let app =
+            build_router(AppState::new(registry, Platform::Netease).with_uni_playlist_store(store));
+        let path = format!("/v1/uni/playlists/{}/export", playlist.resource_ref);
+
+        let (status, headers, exported) =
+            json_request_with_headers(app.clone(), Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
+        assert_eq!(exported["data"]["format"], "tuneweave_uni_playlist_v1");
+        assert_eq!(exported["data"]["id"], playlist.id);
+        assert_eq!(exported["data"]["item_count"], 2);
+        assert_eq!(exported["data"]["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(exported["data"]["items"][0]["id"], first.id);
+        assert_eq!(exported["data"]["items"][1]["id"], second.id);
+        assert_eq!(
+            exported["data"]["items"][0]["source_ref"],
+            exported["data"]["items"][1]["source_ref"]
+        );
+        assert_eq!(
+            exported["data"]["items"][0]["extensions"]["import_source_type"],
+            "playlist"
+        );
+        assert!(exported["data"]["items"][0]["snapshot"]["cover_url"].is_null());
+        assert_eq!(exported["data"]["extensions"]["duplicates_preserved"], true);
+        assert_eq!(exported["meta"]["platform"], "uni");
+        let encoded = serde_json::to_string(&exported).expect("serialize response");
+        for forbidden in [
+            "cookie",
+            "token",
+            "server-secret",
+            "stream_url",
+            "127.0.0.1",
+        ] {
+            assert!(!encoded.to_ascii_lowercase().contains(forbidden));
+        }
+
+        let (status, unknown_query) =
+            json_response_from(app.clone(), &format!("{path}?unknown=true")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(unknown_query["error"]["code"], "invalid_request");
+        let (status, missing) =
+            json_response_from(app, "/v1/uni/playlists/uni:pl_missing_abcdefghijkl/export").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(missing["error"]["code"], "resource_not_found");
     }
 
     #[tokio::test]
