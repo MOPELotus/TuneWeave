@@ -10,7 +10,7 @@ TuneWeave 将参考项目作为协议资料，用于理解请求参数、默认�
 | 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `004bbff438bc811f0f28a9ddf4181e8b77a510ba` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
 | QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | MIT |
-| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `7759dae9b0364d969060961d319415e836c0b506` | Apache-2.0 |
+| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `47d2edb7175cf2874882273ed14be0fdfe7db796` | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | Apache-2.0；README 与根许可证优先于过时的包元数据 |
 | B 站 | `MOPELotus/BBDown` | `259a5558cee0a349a7ebb60bd31e40c88e5bc1ed` | MIT |
 | B 站接口文档 | `bilibili-plugins/bilibili-api-collect` | `cfc5fddcc8a94b74d91970bb5b4eaeb349addc47` | CC BY-NC 4.0 |
@@ -67,12 +67,14 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 ### 酷狗
 
 - 公开搜索覆盖歌曲、歌单、歌词、专辑、歌手和 MV。
+- 当前 Android 歌曲搜索即使刚取得匿名 `dfid` 仍会返回业务码 152；官方 `songsearch.kugou.com/song_search_v2` Web 搜索实测可匿名返回歌曲、音质哈希和权益字段，公开音源层优先采用该真实可用分支。匿名设备注册保留给后续确实依赖移动端身份的接口，不把失效前置条件扩散到公开搜索。
 - 播放链保留 `hash`、`album_audio_id`、设备身份、普通 token、VIP token、实际音质和试听状态。
 - KRC/LRC 搜索与下载所需的 `id + accesskey` 作为强类型平台扩展保存。
 
 ### 咪咕
 
 - 搜索、资源信息、可听性与多条播放 URL 链使用不同响应结构。
+- `47d2edb` 新增的 `ninan_signInfo` 与 H5/用户接口重构属于后续项目范围，未改变公开音源补充层的实施优先级。
 - 关键资源身份包括 `contentId + copyrightId + resourceType`，登录播放还可能使用 PACM token。
 - 外部歌单匹配只接受经过验证的公开来源，不提供任意 URL 转发。
 

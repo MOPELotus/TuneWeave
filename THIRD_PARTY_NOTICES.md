@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `7759dae9b0364d969060961d319415e836c0b506`
+- Reviewed commit: `47d2edb7175cf2874882273ed14be0fdfe7db796`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.
