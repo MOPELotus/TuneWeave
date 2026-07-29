@@ -1627,6 +1627,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 | DELETE | `/v1/uni/playlists/{ref}` | 完整 `uni:<opaque-id>` 引用 | `UniPlaylistDeleteResult`，原子删除元数据与全部项目 |
 | GET | `/v1/uni/playlists/{ref}/export` | 完整 `uni:<opaque-id>` 引用 | 完整安全的 `UniPlaylistDocument` V1 副本 |
 | POST | `/v1/uni/playlists/import-document` | JSON `{document, preserve_id?=false}` | `UniPlaylistDocumentImportResult`，完整验证后原子创建服务端副本 |
+| POST | `/v1/uni/materialize/imports` | 查询 `limit?=200`、`offset?=0`；JSON `{name?, description?, sources:[{ref?, platform?, type?, id?, account?}]}` | 分页 `UniPlaylistMaterializeImportsResult`，完整展开来源但不持久化 |
 | POST | `/v1/uni/materialize/items` | JSON `{items:[{ref,kind}], accounts?}` | `UniPlaylistMaterializeItemsResult`，不持久化的 V1 客户端项目 |
 | POST | `/v1/uni/items/stream` | JSON `{item, quality?, variant?, bitrate?, immersive_type?, playback_platform?, fallback?, fallback_platforms?, unblock?, source?, account?, accounts?, resolution?}` | `UniPlaylistClientItemStream`，客户端托管单项的无状态播放结果 |
 | GET | `/v1/uni/playlists/{ref}/items` | `limit?`、`offset?` | 分页 `UniPlaylistItem[]`，严格保留位置和重复来源项 |
@@ -1643,6 +1644,8 @@ V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目
 服务端导出在同一存储读快照中取得歌单元数据和完整项目序列，避免并发编辑产生数量或顺序撕裂；未知的存储扩展不会穿透，白名单字段形状错误则明确失败，不会把原始 JSON 退回客户端。不安全的旧封面地址会从交换快照中删除。响应使用 `Cache-Control: private, no-store`；它是调用时刻的独立副本，不建立 Server 与 Client 自动同步关系。当前 JSON 文档受 V1 的 100,000 项结构上限约束；针对超大响应的流式或压缩传输仍属于迁移单元的收口条件。
 
 文档导入请求体上限为 16 MiB，并在任何写入前完成格式、身份、数量、时间、连续顺序、唯一项目 ID、来源引用、快照及扩展白名单校验。默认生成与文档 ID 不同的新服务端 `uni:<id>`，但保留全部项目稳定 ID；`preserve_id=true` 才尝试把文档 ID 用作服务端 ID，已有资源会返回 `conflict`，绝不覆盖。验证、转换或持久化任一阶段失败都不会产生目标记录。成功结果明确返回源文档 ID、是否保留歌单 ID，以及 `atomic=true/item_ids_preserved=true/automatic_sync=false`；导入仅复制一次，不建立后续同步。
+
+无状态来源展开与服务端导入共用来源语法、账户选择、provider 能力和完整上游分页状态机，可合并公开、账户可见、本地 Uni、B 站合集/收藏夹及 provider 后续扩展的可播放集合。服务端先完整读取所有来源并保持“来源顺序 → 来源内部顺序”和重复项，再以 `limit=1..500/offset=0..100000` 只返回客户端当前需要的一页；统一总量上限为 100,000 个可播放项目，单来源分页最多 2,000 页，非推进游标、缺失下一页游标和越界集合会明确失败。返回项目使用全局零基位置和由来源索引、来源内位置、集合引用及资源引用派生的确定性 ID，因此同一来源快照的分页重试可以安全拼接；上游集合变化后位置和 ID 可以相应变化，客户端需要重新 materialize。响应包含建议名称、描述、全部来源摘要、真实总数和标准分页元数据，但会清除来源结果中的服务器账户别名，并声明 `persisted=false/source_pagination_complete=true/response_paginated=true`。该端点不创建 `uni:<id>`、不发布文件，也不建立后续同步关系。
 
 无状态项目标准化一次接受 1–100 个歌曲、MV、视频、播客节目或广播引用，与服务端项目追加共用同一份类型、来源平台和 `accounts` 校验，再逐项调用对应 Provider 获取真实元数据。返回项目按输入顺序从零编号，每次出现都分配独立稳定项目 ID，因此重复来源不会折叠；快照经过 V1 安全字段转换，不信任调用方提交标题、封面或播放能力。`accounts` 只在本次请求中选择各来源平台的账户，不进入客户端项目或响应扩展。成功与失败都不创建 `uni:<id>`、不读取或写入 Uni Playlist 存储；响应明确返回 `persisted=false/provider_validated=true`。
 

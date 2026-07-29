@@ -6,9 +6,9 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 - `implemented`：代码及局部测试已完成，仍缺完整 HTTP、持久化或播放链验收。
 - `verified`：核心契约、存储/路由和异常边界均已自动化验证；涉及外部 provider 时还需真实网络验证。
 
-当前统计：`pending=3`、`implemented=1`、`verified=15`。
+当前统计：`pending=2`、`implemented=1`、`verified=16`。
 
-当前服务端托管模式支持多个独立 Uni Playlist，并可通过分页目录重新发现，但仍共同保存于一个 `uni-playlists.json`。客户端 V1 文档、单项标准化和无状态播放已经接入；无状态集合展开、超大迁移传输和服务端存储改造继续实施。完整边界见 [Uni Playlist 客户端托管与存储设计](../uni-playlist-ownership.md)。
+当前服务端托管模式支持多个独立 Uni Playlist，并可通过分页目录重新发现，但仍共同保存于一个 `uni-playlists.json`。客户端 V1 文档、来源展开、单项标准化和无状态播放已经接入；超大迁移传输和服务端存储改造继续实施。完整边界见 [Uni Playlist 客户端托管与存储设计](../uni-playlist-ownership.md)。
 
 | 能力 | 状态 | 当前实现/缺口 |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ Uni Playlist 是 TuneWeave 自有的跨平台歌单层，使用 `uni:<opaque-id>
 | `/v1/playlists` 统一读取适配 | `verified` | `GET /v1/playlists/{ref}` 已把本地元数据映射为现有 `Playlist`，`GET .../items` 以同一 `PlaylistPlayableEntry` 分页返回外部或 Uni 的歌曲、MV/视频音频、播客节目和广播电台，Uni 项保留稳定 `item_id`；`GET .../tracks` 对混合 Uni 内容仅筛选歌曲并返回筛选后的真实分页总数。外部 provider 的账户选择和分页不变，本地 `uni:` 明确拒绝无意义的 `account`；混合项目、重复歌曲、兼容视图、重启恢复与错误边界均已验证。 |
 | Uni Playlist 播放与跨平台回退 | `verified` | `GET /v1/playlists/{ref}/items/{item_id}/stream` 以稳定项目 ID 播放，所有类型统一返回 `UniPlaylistItemStream` 内的 `MediaStream`，并提供 `/redirect`。歌曲使用持久化快照作为严格来源身份；播客先解析承载音频；普通 MV/视频在原生视频流与其他平台严格匹配音频之间按 `playback_platform/fallback_platforms/fallback/unblock` 的精确顺序切换。B 站 `video` 默认先选择原生音轨，只有原音轨失败且允许回退时才严格匹配其他音乐平台；显式 `resolution` 保留原生视频轨语义。默认音乐回退列表不含 B 站，避免歌曲误配翻唱、现场或二创，但 B 站视频作为原始项目时仍排在首位。广播刷新原平台直播 URL。`accounts` 支持列表或 JSON 对象并与兼容 `account` 的首目标语义隔离，全部尝试、账户、候选、分数及失败状态均保留；原平台播放、跨平台命中、降级音质、广播、302、重复项目和重启恢复均已验证，B 站原生音轨另完成真实 Uni HTTP 验收。 |
 | `tuneweave_uni_playlist_v1` 客户端交换文档 | `verified` | 已定义可往返的强类型 V1 文档，包含歌单稳定 ID、时间、真实项目数、有序项目、来源引用、类型、添加时间及紧凑快照；连续位置、唯一项目 ID、重复项保留、外部平台引用、时间及 10 万项上限均有校验。文档和嵌套扩展使用拒绝未知字段的用途白名单，不存在账户、Cookie、token、设备身份、临时媒体 URL、签名或任意请求头槽位。已自动化验证 Server 导出→默认新 ID 导入→再次导出只有歌单 ID 改变，项目身份、顺序、重复项和快照完全一致；危险字段、非 HTTPS 封面、未知字段和结构漂移均被拒绝或清除。JSON 只用于导入、导出、备份和交换，不规定客户端内部存储。 |
-| 无状态平台来源展开 | `pending` | 规划 `POST /v1/uni/materialize/imports`：完整分页展开一个或多个可播放集合，保留来源与内部顺序及重复项，把结果返回客户端但不创建 `uni:<id>`、不写服务端存储；大型结果需要受控分页、流式或压缩传输。 |
+| 无状态平台来源展开 | `verified` | `POST /v1/uni/materialize/imports` 与 Server 导入共用来源规范、账户隔离、provider 能力及完整分页状态机，按“来源顺序→来源内位置”合并并保留重复项。来源完整读取后以 `limit=1..500/offset=0..100000` 返回 V1 客户端项目页，统一限制最多 100,000 项和单来源 2,000 页；项目使用全局位置及确定性 ID，重复请求可拼接同一来源快照。响应返回建议元数据、全部来源摘要和真实总数但清除来源账户字段，并声明零持久化。已用文件后端验证跨网易云/QQ 来源、页边界、稳定 ID、输入失败及未知查询均不创建数据文件或服务端歌单；原有 Server 原子导入回归通过。 |
 | 无状态资源标准化 | `verified` | `POST /v1/uni/materialize/items` 一次接受 1–100 个歌曲、MV、视频、播客节目或广播引用，与服务端追加共用输入、来源平台和分平台账户校验，逐项经真实 Provider 解析后按输入顺序返回 V1 安全客户端项目。重复来源分配独立稳定项目 ID，不回显账户别名；响应声明 `persisted=false/provider_validated=true`。已用文件后端验证成功、空批、`uni:` 来源、无关账户、未知字段和未知查询均不创建数据文件或服务端歌单。 |
 | 客户端托管项目播放 | `verified` | `POST /v1/uni/items/stream` 只接收一个完整 V1 客户端项目及播放控制，不要求上传整份歌单。项目先经过身份、外部来源、快照和扩展白名单校验，再与 Server 项目共用歌曲、MV/视频、播客、广播及严格跨平台回退链；音质、后端、码率、沉浸音频、播放平台、回退顺序、`unblock`、视频清晰度、分平台账户和调用方凭据语义保持一致。响应不虚构歌单身份并声明 `client_hosted=true/persisted=false`；文件后端已验证成功播放、输入失败和未知查询均不创建数据文件。GET/302 短期内存票据仍是可选后续能力。 |
 | 服务端多歌单目录与元数据管理 | `verified` | 分页 `GET /v1/uni/playlists` 按不可变创建时间降序、同时间 ID 升序稳定列出服务端歌单，只返回元数据和项目数而不内联项目；`PATCH /v1/uni/playlists/{ref}` 原子修改名称/描述，保留身份、创建时间和项目序列，相同值幂等且不重写文件；`DELETE` 在一次发布中移除指定歌单及全部项目索引，报告真实移除数且不影响其他歌单。范围、长度、空字段、未知输入、缺失资源、重复删除及文件重启均已验证。 |

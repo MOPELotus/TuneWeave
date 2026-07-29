@@ -20,6 +20,7 @@ use axum::{
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use tuneweave_core::{
     AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest,
     AccountDislikeMutationRequest, AccountDislikeMutationResult, AccountProfile, AiLyricDictionary,
@@ -93,15 +94,15 @@ use tuneweave_core::{
     UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
     UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
     UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream,
-    UniPlaylistMaterializeItemsResult, UniPlaylistStore, UniPlaylistUpdateRequest, User,
-    UserMusicGene, UserProfile, UserProfileBackend, Video, VideoAudioStream,
-    VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest,
-    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
-    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
-    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
-    VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
-    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest, VideoTrackQuality,
-    VideoTrackStream, VideoTrackStreamRequest,
+    UniPlaylistMaterializeImportsResult, UniPlaylistMaterializeItemsResult, UniPlaylistStore,
+    UniPlaylistUpdateRequest, User, UserMusicGene, UserProfile, UserProfileBackend, Video,
+    VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail,
+    VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest,
+    VideoPlaybackRequest, VideoRecommendationKind, VideoRecommendationRequest,
+    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
+    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
+    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
+    VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -111,6 +112,9 @@ const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_UNI_PLAYLIST_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_UNI_PLAYLIST_IMPORT_ITEMS: usize = 100_000;
+const MAX_UNI_PLAYLIST_MATERIALIZE_PAGE_ITEMS: u32 = 500;
+const MAX_UNI_PLAYLIST_SOURCE_PAGES: usize = 2_000;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
@@ -651,6 +655,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/uni/materialize/items", post(uni_materialize_items))
+        .route("/uni/materialize/imports", post(uni_materialize_imports))
         .route("/uni/items/stream", post(uni_client_item_stream))
         .route(
             "/uni/playlists",
@@ -5888,6 +5893,13 @@ struct UniPlaylistImportBody {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UniPlaylistMaterializeImportsQuery {
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UniPlaylistDocumentImportBody {
     document: Option<UniPlaylistDocument>,
     preserve_id: Option<bool>,
@@ -6095,79 +6107,11 @@ async fn uni_playlist_import(
     let _ = query_params(params)?;
     let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let body = json_body(payload)?;
-    let name = body
-        .name
-        .map(|name| required_trimmed("name", Some(name)))
-        .transpose()?;
-    if name.as_ref().is_some_and(|name| name.len() > 200) {
-        return Err(
-            TuneWeaveError::invalid_request("Uni Playlist name cannot exceed 200 bytes").into(),
-        );
-    }
-    let description = body
-        .description
-        .map(|description| description.trim().to_owned());
-    if description
-        .as_ref()
-        .is_some_and(|description| description.len() > 4_000)
-    {
-        return Err(TuneWeaveError::invalid_request(
-            "Uni Playlist description cannot exceed 4000 bytes",
-        )
-        .into());
-    }
-    let source_bodies = body
-        .sources
-        .ok_or_else(|| TuneWeaveError::invalid_request("sources must be provided"))?;
-    if source_bodies.is_empty() || source_bodies.len() > 100 {
-        return Err(TuneWeaveError::invalid_request(
-            "sources must contain between 1 and 100 playlist sources",
-        )
-        .into());
-    }
-    let request = UniPlaylistImportRequest {
-        name,
-        description,
-        sources: source_bodies
-            .into_iter()
-            .map(normalize_uni_playlist_import_source)
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-
-    let source_accesses = request
-        .sources
-        .iter()
-        .map(|source| {
-            (source.playlist_ref.platform() != Platform::Uni)
-                .then(|| {
-                    credentials.select_provider(
-                        &state,
-                        source.playlist_ref.platform(),
-                        source.account.as_deref(),
-                        AccountSelection::Optional,
-                    )
-                })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut loaded_sources = Vec::with_capacity(request.sources.len());
-    for (source, access) in request.sources.iter().zip(source_accesses) {
-        loaded_sources.push(load_uni_playlist_import_source(&state, source, access).await?);
-    }
-    let playlist_name = request.name.clone().unwrap_or_else(|| {
-        derive_uni_playlist_import_name(
-            loaded_sources
-                .iter()
-                .map(|source| source.result.name.as_str()),
-        )
-    });
-    let playlist_description = request.description.clone().unwrap_or_else(|| {
-        if loaded_sources.len() == 1 {
-            truncate_utf8_bytes(loaded_sources[0].description.trim(), 4_000)
-        } else {
-            String::new()
-        }
-    });
+    let request = normalize_uni_playlist_import_request(body)?;
+    let loaded_sources =
+        load_uni_playlist_import_sources(&state, &credentials, &request.sources).await?;
+    let (playlist_name, playlist_description) =
+        derive_uni_playlist_import_metadata(&request, &loaded_sources);
     let created_at_ms = unix_time_millis()?;
     let mut item_ids = BTreeSet::new();
     let mut imported_items = Vec::new();
@@ -6268,6 +6212,106 @@ async fn uni_playlist_import(
     .into())
 }
 
+fn normalize_uni_playlist_import_request(
+    body: UniPlaylistImportBody,
+) -> Result<UniPlaylistImportRequest, TuneWeaveError> {
+    let name = body
+        .name
+        .map(|name| required_trimmed("name", Some(name)))
+        .transpose()?;
+    if name.as_ref().is_some_and(|name| name.len() > 200) {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist name cannot exceed 200 bytes",
+        ));
+    }
+    let description = body
+        .description
+        .map(|description| description.trim().to_owned());
+    if description
+        .as_ref()
+        .is_some_and(|description| description.len() > 4_000)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "Uni Playlist description cannot exceed 4000 bytes",
+        ));
+    }
+    let source_bodies = body
+        .sources
+        .ok_or_else(|| TuneWeaveError::invalid_request("sources must be provided"))?;
+    if source_bodies.is_empty() || source_bodies.len() > 100 {
+        return Err(TuneWeaveError::invalid_request(
+            "sources must contain between 1 and 100 playlist sources",
+        ));
+    }
+    Ok(UniPlaylistImportRequest {
+        name,
+        description,
+        sources: source_bodies
+            .into_iter()
+            .map(normalize_uni_playlist_import_source)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+async fn load_uni_playlist_import_sources(
+    state: &AppState,
+    credentials: &CallerCredentialSet,
+    sources: &[UniPlaylistImportSourceRequest],
+) -> Result<Vec<LoadedUniPlaylistImportSource>, TuneWeaveError> {
+    let source_accesses = sources
+        .iter()
+        .map(|source| {
+            (source.playlist_ref.platform() != Platform::Uni)
+                .then(|| {
+                    credentials.select_provider(
+                        state,
+                        source.playlist_ref.platform(),
+                        source.account.as_deref(),
+                        AccountSelection::Optional,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut loaded_sources = Vec::with_capacity(sources.len());
+    let mut loaded_item_count = 0usize;
+    for (source, access) in sources.iter().zip(source_accesses) {
+        let remaining_items = MAX_UNI_PLAYLIST_IMPORT_ITEMS.saturating_sub(loaded_item_count);
+        let loaded =
+            load_uni_playlist_import_source(state, source, access, remaining_items).await?;
+        loaded_item_count = loaded_item_count
+            .checked_add(loaded.items.len())
+            .ok_or_else(|| {
+                TuneWeaveError::invalid_request(
+                    "playlist sources exceed the Uni Playlist item limit",
+                )
+            })?;
+        loaded_sources.push(loaded);
+    }
+    Ok(loaded_sources)
+}
+
+fn derive_uni_playlist_import_metadata(
+    request: &UniPlaylistImportRequest,
+    loaded_sources: &[LoadedUniPlaylistImportSource],
+) -> (String, String) {
+    let name = request.name.clone().unwrap_or_else(|| {
+        derive_uni_playlist_import_name(
+            loaded_sources
+                .iter()
+                .map(|source| source.result.name.as_str()),
+        )
+    });
+    let description = request.description.clone().unwrap_or_else(|| {
+        if loaded_sources.len() == 1 {
+            truncate_utf8_bytes(loaded_sources[0].description.trim(), 4_000)
+        } else {
+            String::new()
+        }
+    });
+    (name, description)
+}
+
 fn normalize_uni_playlist_import_source(
     source: UniPlaylistImportSourceBody,
 ) -> Result<UniPlaylistImportSourceRequest, TuneWeaveError> {
@@ -6340,9 +6384,10 @@ async fn load_uni_playlist_import_source(
     state: &AppState,
     source: &UniPlaylistImportSourceRequest,
     access: Option<ProviderAccess>,
+    max_items: usize,
 ) -> Result<LoadedUniPlaylistImportSource, TuneWeaveError> {
     if source.playlist_ref.platform() == Platform::Uni {
-        return load_local_uni_playlist_import_source(state, source);
+        return load_local_uni_playlist_import_source(state, source, max_items);
     }
     let platform = source.playlist_ref.platform();
     let access = access.expect("remote import source always has provider access");
@@ -6368,12 +6413,28 @@ async fn load_uni_playlist_import_source(
     let mut offset = 0;
     let mut visited_offsets = BTreeSet::from([offset]);
     let mut items = Vec::new();
+    let mut page_count = 0usize;
     loop {
+        if page_count >= MAX_UNI_PLAYLIST_SOURCE_PAGES {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "playlist source exceeded the pagination safety limit",
+            )
+            .with_platform(platform)
+            .with_details(json!({ "maximum_pages": MAX_UNI_PLAYLIST_SOURCE_PAGES })));
+        }
+        page_count += 1;
         let mut page_request = PageRequest::new(100, offset);
         page_request.account.clone_from(&provider_account);
         let page = provider
             .playlist_source_items(source.playlist_ref.id(), &source.source_type, &page_request)
             .await?;
+        if page.items.len() > max_items.saturating_sub(items.len()) {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "playlist sources cannot expand to more than {MAX_UNI_PLAYLIST_IMPORT_ITEMS} playable items"
+            ))
+            .with_details(json!({ "maximum_items": MAX_UNI_PLAYLIST_IMPORT_ITEMS })));
+        }
         items.extend(
             page.items
                 .into_iter()
@@ -6418,6 +6479,7 @@ async fn load_uni_playlist_import_source(
 fn load_local_uni_playlist_import_source(
     state: &AppState,
     source: &UniPlaylistImportSourceRequest,
+    max_items: usize,
 ) -> Result<LoadedUniPlaylistImportSource, TuneWeaveError> {
     let playlist = state
         .uni_playlists
@@ -6428,8 +6490,23 @@ fn load_local_uni_playlist_import_source(
         })?;
     let mut offset = 0;
     let mut items = Vec::new();
+    let mut page_count = 0usize;
     loop {
+        if page_count >= MAX_UNI_PLAYLIST_SOURCE_PAGES {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "local Uni Playlist exceeded the pagination safety limit",
+            )
+            .with_details(json!({ "maximum_pages": MAX_UNI_PLAYLIST_SOURCE_PAGES })));
+        }
+        page_count += 1;
         let page = state.uni_playlists.items(&playlist.id, 100, offset)?;
+        if page.items.len() > max_items.saturating_sub(items.len()) {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "playlist sources cannot expand to more than {MAX_UNI_PLAYLIST_IMPORT_ITEMS} playable items"
+            ))
+            .with_details(json!({ "maximum_items": MAX_UNI_PLAYLIST_IMPORT_ITEMS })));
+        }
         items.extend(page.items.into_iter().map(|item| {
             let mut extensions = item.extensions;
             extensions.insert("imported_from_item_id".to_owned(), json!(item.id));
@@ -6629,6 +6706,173 @@ async fn uni_playlists(
             .with_platform(Platform::Uni)
             .with_pagination(page.pagination),
     ))
+}
+
+async fn uni_materialize_imports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<UniPlaylistMaterializeImportsQuery>, QueryRejection>,
+    payload: Result<Json<UniPlaylistImportBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistMaterializeImportsResult>>, ApiError> {
+    let params = query_params(params)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 200)?;
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    if !(1..=MAX_UNI_PLAYLIST_MATERIALIZE_PAGE_ITEMS).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "limit must be between 1 and {MAX_UNI_PLAYLIST_MATERIALIZE_PAGE_ITEMS}"
+        ))
+        .into());
+    }
+    if usize::try_from(offset).unwrap_or(usize::MAX) > MAX_UNI_PLAYLIST_IMPORT_ITEMS {
+        return Err(TuneWeaveError::invalid_request(format!(
+            "offset cannot exceed {MAX_UNI_PLAYLIST_IMPORT_ITEMS}"
+        ))
+        .into());
+    }
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let request = normalize_uni_playlist_import_request(json_body(payload)?)?;
+    let loaded_sources =
+        load_uni_playlist_import_sources(&state, &credentials, &request.sources).await?;
+    let (name, description) = derive_uni_playlist_import_metadata(&request, &loaded_sources);
+    let item_count = loaded_sources
+        .iter()
+        .map(|source| source.items.len())
+        .sum::<usize>();
+    let items = materialize_uni_playlist_import_page(
+        &loaded_sources,
+        usize::try_from(offset).unwrap_or(usize::MAX),
+        usize::try_from(limit).unwrap_or(usize::MAX),
+        unix_time_millis()?,
+    )?;
+    let page_end = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .saturating_add(items.len())
+        .min(item_count);
+    let has_more = page_end < item_count;
+    let sources = loaded_sources
+        .iter()
+        .map(|source| {
+            let mut result = source.result.clone();
+            result.account = None;
+            result
+        })
+        .collect();
+    let result = UniPlaylistMaterializeImportsResult {
+        name,
+        description,
+        item_count: u64::try_from(item_count).unwrap_or(u64::MAX),
+        sources,
+        items,
+        extensions: Extensions::from([
+            ("persisted".to_owned(), json!(false)),
+            ("source_pagination_complete".to_owned(), json!(true)),
+            ("response_paginated".to_owned(), json!(true)),
+            ("merge_order".to_owned(), json!("source_then_position")),
+            ("duplicates_preserved".to_owned(), json!(true)),
+            ("deterministic_item_ids".to_owned(), json!(true)),
+            ("account_aliases_redacted".to_owned(), json!(true)),
+        ]),
+    };
+    let pagination = PageMeta {
+        limit,
+        offset,
+        total: Some(u64::try_from(item_count).unwrap_or(u64::MAX)),
+        next_offset: has_more.then_some(u32::try_from(page_end).unwrap_or(u32::MAX)),
+        has_more,
+        extensions: Extensions::from([
+            ("global_positions".to_owned(), json!(true)),
+            (
+                "maximum_items".to_owned(),
+                json!(MAX_UNI_PLAYLIST_IMPORT_ITEMS),
+            ),
+        ]),
+    };
+    Ok(Json(
+        ApiResponse::new(result)
+            .with_platform(Platform::Uni)
+            .with_pagination(pagination),
+    ))
+}
+
+fn materialize_uni_playlist_import_page(
+    loaded_sources: &[LoadedUniPlaylistImportSource],
+    offset: usize,
+    limit: usize,
+    added_at_ms: u64,
+) -> Result<Vec<UniPlaylistDocumentItem>, TuneWeaveError> {
+    let page_end = offset.saturating_add(limit);
+    let mut position = 0usize;
+    let mut page = Vec::with_capacity(limit);
+    for (source_index, source) in loaded_sources.iter().enumerate() {
+        for (source_position, imported) in source.items.iter().enumerate() {
+            if position >= offset && position < page_end {
+                let mut extensions = imported.extensions.clone();
+                extensions.insert("import_source_index".to_owned(), json!(source_index));
+                extensions.insert(
+                    "import_source_ref".to_owned(),
+                    json!(source.result.playlist_ref),
+                );
+                extensions.insert(
+                    "import_source_type".to_owned(),
+                    json!(source.result.source_type),
+                );
+                let item = UniPlaylistItem {
+                    id: deterministic_uni_playlist_import_item_id(
+                        source_index,
+                        source_position,
+                        source,
+                        imported,
+                    ),
+                    position: u64::try_from(position).unwrap_or(u64::MAX),
+                    kind: imported.kind,
+                    source_ref: imported.source_ref.clone(),
+                    snapshot: imported.snapshot.clone(),
+                    added_at_ms,
+                    extensions,
+                };
+                page.push(UniPlaylistDocumentItem::from_server_item(&item)?);
+            }
+            position = position.saturating_add(1);
+            if position >= page_end {
+                return Ok(page);
+            }
+        }
+    }
+    Ok(page)
+}
+
+fn deterministic_uni_playlist_import_item_id(
+    source_index: usize,
+    source_position: usize,
+    source: &LoadedUniPlaylistImportSource,
+    imported: &UniPlaylistImportedItem,
+) -> String {
+    let mut digest = Sha1::new();
+    digest.update(b"tuneweave_uni_materialized_import_v1");
+    digest.update(
+        u64::try_from(source_index)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(
+        u64::try_from(source_position)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(source.result.playlist_ref.to_string().as_bytes());
+    digest.update([0]);
+    digest.update(source.result.source_type.as_bytes());
+    digest.update([0]);
+    digest.update(imported.source_ref.to_string().as_bytes());
+    digest.update([match imported.kind {
+        UniPlaylistItemKind::Track => 0,
+        UniPlaylistItemKind::Mv => 1,
+        UniPlaylistItemKind::Video => 2,
+        UniPlaylistItemKind::PodcastEpisode => 3,
+        UniPlaylistItemKind::RadioStation => 4,
+    }]);
+    let encoded = hex::encode(digest.finalize());
+    format!("item_{encoded}")
 }
 
 async fn uni_materialize_items(
@@ -30628,6 +30872,129 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(unknown_query["error"]["code"], "invalid_request");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn uni_materialize_imports_pages_complete_sources_without_persisting() {
+        let path = std::env::temp_dir().join(format!(
+            "tuneweave-materialize-imports-{}-{}.json",
+            std::process::id(),
+            allocate_uni_playlist_id()
+        ));
+        let store = Arc::new(
+            tuneweave_core::FileUniPlaylistStore::open(&path)
+                .expect("open non-creating file store"),
+        );
+        assert!(!path.exists());
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(TestProvider)
+            .expect("register NetEase provider");
+        registry
+            .register(TestQqProvider)
+            .expect("register QQ provider");
+        let app =
+            build_router(AppState::new(registry, Platform::Netease).with_uni_playlist_store(store));
+        let body = json!({
+            "sources": [
+                { "ref": "netease:3778678", "type": "playlist" },
+                {
+                    "platform": "qq",
+                    "type": "playlist",
+                    "id": 42,
+                    "account": "premium"
+                }
+            ]
+        });
+
+        let path_with_page = "/v1/uni/materialize/imports?limit=2&offset=1";
+        let (status, first) = json_request_from(
+            app.clone(),
+            Method::POST,
+            path_with_page,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["data"]["name"], "云音乐热歌榜 + QQ 收藏");
+        assert_eq!(first["data"]["item_count"], 4);
+        assert_eq!(first["data"]["sources"].as_array().map(Vec::len), Some(2));
+        assert_eq!(first["data"]["sources"][0]["item_count"], 1);
+        assert_eq!(first["data"]["sources"][1]["item_count"], 3);
+        assert_eq!(first["data"]["sources"][1]["account"], Value::Null);
+        assert_eq!(first["data"]["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(first["data"]["items"][0]["position"], 1);
+        assert_eq!(first["data"]["items"][1]["position"], 2);
+        assert_eq!(
+            first["data"]["items"][0]["extensions"]["import_source_index"],
+            1
+        );
+        assert_eq!(
+            first["data"]["items"][0]["extensions"]["import_source_ref"],
+            "qq:42"
+        );
+        assert_eq!(first["data"]["extensions"]["persisted"], false);
+        assert_eq!(
+            first["data"]["extensions"]["source_pagination_complete"],
+            true
+        );
+        assert_eq!(first["data"]["extensions"]["deterministic_item_ids"], true);
+        assert_eq!(first["meta"]["pagination"]["limit"], 2);
+        assert_eq!(first["meta"]["pagination"]["offset"], 1);
+        assert_eq!(first["meta"]["pagination"]["total"], 4);
+        assert_eq!(first["meta"]["pagination"]["next_offset"], 3);
+        assert_eq!(first["meta"]["pagination"]["has_more"], true);
+        assert_eq!(first["meta"]["platform"], "uni");
+        assert!(!path.exists());
+
+        let (status, repeated) = json_request_from(
+            app.clone(),
+            Method::POST,
+            path_with_page,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            repeated["data"]["items"][0]["id"],
+            first["data"]["items"][0]["id"]
+        );
+        assert_eq!(
+            repeated["data"]["items"][1]["id"],
+            first["data"]["items"][1]["id"]
+        );
+        assert!(!path.exists());
+        let (status, directory) = json_response_from(app.clone(), "/v1/uni/playlists").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(directory["data"].as_array().map(Vec::len), Some(0));
+        assert!(!path.exists());
+
+        for (request_path, invalid_body) in [
+            ("/v1/uni/materialize/imports", json!({})),
+            (
+                "/v1/uni/materialize/imports",
+                json!({ "sources": [], "unknown": true }),
+            ),
+            ("/v1/uni/materialize/imports?limit=501", body.clone()),
+            ("/v1/uni/materialize/imports?offset=100001", body.clone()),
+            (
+                "/v1/uni/materialize/imports",
+                json!({
+                    "sources": [{
+                        "ref": "uni:pl_01abcdefghijklmnop",
+                        "account": "default"
+                    }]
+                }),
+            ),
+            ("/v1/uni/materialize/imports?unknown=true", body),
+        ] {
+            let (status, response) =
+                json_request_from(app.clone(), Method::POST, request_path, Some(invalid_body))
+                    .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+            assert!(!path.exists());
+        }
     }
 
     #[tokio::test]

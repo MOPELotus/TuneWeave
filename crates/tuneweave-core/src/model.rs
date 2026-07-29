@@ -4455,6 +4455,16 @@ pub struct UniPlaylistMaterializeItemsResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistMaterializeImportsResult {
+    pub name: String,
+    pub description: String,
+    pub item_count: u64,
+    pub sources: Vec<UniPlaylistImportSourceResult>,
+    pub items: Vec<UniPlaylistDocumentItem>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UniPlaylistClientItemStream {
     pub item_id: String,
     pub source_ref: ResourceRef,
