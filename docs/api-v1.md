@@ -1628,6 +1628,7 @@ QQ 关注歌手也同时提供当前账户与指定用户视图：`GET /v1/accou
 | GET | `/v1/uni/playlists/{ref}/export` | 完整 `uni:<opaque-id>` 引用 | 完整安全的 `UniPlaylistDocument` V1 副本 |
 | POST | `/v1/uni/playlists/import-document` | JSON `{document, preserve_id?=false}` | `UniPlaylistDocumentImportResult`，完整验证后原子创建服务端副本 |
 | POST | `/v1/uni/materialize/items` | JSON `{items:[{ref,kind}], accounts?}` | `UniPlaylistMaterializeItemsResult`，不持久化的 V1 客户端项目 |
+| POST | `/v1/uni/items/stream` | JSON `{item, quality?, variant?, bitrate?, immersive_type?, playback_platform?, fallback?, fallback_platforms?, unblock?, source?, account?, accounts?, resolution?}` | `UniPlaylistClientItemStream`，客户端托管单项的无状态播放结果 |
 | GET | `/v1/uni/playlists/{ref}/items` | `limit?`、`offset?` | 分页 `UniPlaylistItem[]`，严格保留位置和重复来源项 |
 | POST | `/v1/uni/playlists/{ref}/items` | JSON `{items:[{ref,kind}], accounts?}` | `UniPlaylistItemAddResult`，原子追加类型化混合项目 |
 | DELETE | `/v1/uni/playlists/{ref}/items/{item_id}` | 稳定的单次出现项目 ID | `UniPlaylistItemDeleteResult`，仅删除该项目并重编号后续位置 |
@@ -1644,6 +1645,8 @@ V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目
 文档导入请求体上限为 16 MiB，并在任何写入前完成格式、身份、数量、时间、连续顺序、唯一项目 ID、来源引用、快照及扩展白名单校验。默认生成与文档 ID 不同的新服务端 `uni:<id>`，但保留全部项目稳定 ID；`preserve_id=true` 才尝试把文档 ID 用作服务端 ID，已有资源会返回 `conflict`，绝不覆盖。验证、转换或持久化任一阶段失败都不会产生目标记录。成功结果明确返回源文档 ID、是否保留歌单 ID，以及 `atomic=true/item_ids_preserved=true/automatic_sync=false`；导入仅复制一次，不建立后续同步。
 
 无状态项目标准化一次接受 1–100 个歌曲、MV、视频、播客节目或广播引用，与服务端项目追加共用同一份类型、来源平台和 `accounts` 校验，再逐项调用对应 Provider 获取真实元数据。返回项目按输入顺序从零编号，每次出现都分配独立稳定项目 ID，因此重复来源不会折叠；快照经过 V1 安全字段转换，不信任调用方提交标题、封面或播放能力。`accounts` 只在本次请求中选择各来源平台的账户，不进入客户端项目或响应扩展。成功与失败都不创建 `uni:<id>`、不读取或写入 Uni Playlist 存储；响应明确返回 `persisted=false/provider_validated=true`。
+
+客户端托管项目播放只接受一个完整 V1 `item`，不会接收完整歌单、任意媒体 URL、请求头或 provider 原文。服务端先验证项目身份、外部来源、快照和用途受限扩展，再与 Server 模式项目共用同一条歌曲、MV/视频、播客和广播解析链；`playback_platform/fallback_platforms/fallback/unblock`、音质、码率、沉浸音频、视频清晰度、分平台账户别名和 `X-TuneWeave-Credential` 调用方凭据语义保持一致。`accounts` 在 JSON 中使用按平台键控的对象，`fallback_platforms` 使用逗号分隔的平台顺序；`resolution` 只允许 MV 或视频。响应不虚构 `playlist_ref`，而是返回项目 ID、来源、类型和统一 `MediaStream`，并声明 `client_hosted=true/persisted=false`。该端点不会读取或写入 Uni Playlist 存储；需要 GET/302 的客户端后续可使用独立的短期内存票据，而不能提交可篡改的目标 URL。
 
 生产服务把数据保存到 `TUNEWEAVE_DATA_DIR/uni-playlists.json`，与 `accounts` 凭据目录分离。文件后端在内存维护已验证快照，创建时在同目录写入并同步临时文件后发布；Unix 使用原子替换，Windows 使用可在下次启动恢复的同目录备份切换。未知数据库版本或畸形记录会阻止启动而不会被静默覆盖。该文件只保存歌单结构与后续的必要元数据快照，不保存媒体字节或平台凭据。
 

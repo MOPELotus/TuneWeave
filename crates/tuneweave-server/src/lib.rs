@@ -86,21 +86,22 @@ use tuneweave_core::{
     StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
-    TuneWeaveError, UniPlaylist, UniPlaylistCreateRequest, UniPlaylistDeleteResult,
-    UniPlaylistDocument, UniPlaylistDocumentImportResult, UniPlaylistImportRequest,
-    UniPlaylistImportResult, UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult,
-    UniPlaylistItem, UniPlaylistItemAddRequest, UniPlaylistItemAddResult,
-    UniPlaylistItemDeleteResult, UniPlaylistItemInput, UniPlaylistItemKind,
-    UniPlaylistItemOrderRequest, UniPlaylistItemOrderResult, UniPlaylistItemSnapshot,
-    UniPlaylistItemStream, UniPlaylistMaterializeItemsResult, UniPlaylistStore,
-    UniPlaylistUpdateRequest, User, UserMusicGene, UserProfile, UserProfileBackend, Video,
-    VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest,
-    VideoPlaybackRequest, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
-    VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
+    TuneWeaveError, UniPlaylist, UniPlaylistClientItemStream, UniPlaylistCreateRequest,
+    UniPlaylistDeleteResult, UniPlaylistDocument, UniPlaylistDocumentImportResult,
+    UniPlaylistDocumentItem, UniPlaylistImportRequest, UniPlaylistImportResult,
+    UniPlaylistImportSourceRequest, UniPlaylistImportSourceResult, UniPlaylistItem,
+    UniPlaylistItemAddRequest, UniPlaylistItemAddResult, UniPlaylistItemDeleteResult,
+    UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
+    UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream,
+    UniPlaylistMaterializeItemsResult, UniPlaylistStore, UniPlaylistUpdateRequest, User,
+    UserMusicGene, UserProfile, UserProfileBackend, Video, VideoAudioStream,
+    VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
+    VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest, VideoTrackQuality,
+    VideoTrackStream, VideoTrackStreamRequest,
 };
 
 pub use response::{ApiError, ApiResponse, ResponseMeta};
@@ -650,6 +651,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{reference}/lyrics", get(track_lyrics))
         .route("/tracks/{reference}/stream", get(track_stream))
         .route("/uni/materialize/items", post(uni_materialize_items))
+        .route("/uni/items/stream", post(uni_client_item_stream))
         .route(
             "/uni/playlists",
             get(uni_playlists).post(uni_playlist_create),
@@ -4290,6 +4292,20 @@ fn parse_stream_accounts(
     let mut accounts = BTreeMap::new();
     for (platform, account) in pairs {
         let platform = parse_platform_parameter(&platform)?;
+        if accounts.insert(platform, account).is_some() {
+            return Err(TuneWeaveError::invalid_request(format!(
+                "accounts contains duplicate platform {platform}"
+            )));
+        }
+    }
+    normalize_stream_accounts(accounts)
+}
+
+fn normalize_stream_accounts(
+    accounts: BTreeMap<Platform, String>,
+) -> Result<BTreeMap<Platform, String>, TuneWeaveError> {
+    let mut normalized = BTreeMap::new();
+    for (platform, account) in accounts {
         if platform == Platform::Uni {
             return Err(TuneWeaveError::invalid_request(
                 "accounts cannot select the local uni platform",
@@ -4302,13 +4318,9 @@ fn parse_stream_accounts(
             )
             .with_details(json!({ "platform": platform })));
         }
-        if accounts.insert(platform, account.to_owned()).is_some() {
-            return Err(TuneWeaveError::invalid_request(format!(
-                "accounts contains duplicate platform {platform}"
-            )));
-        }
+        normalized.insert(platform, account.to_owned());
     }
-    Ok(accounts)
+    Ok(normalized)
 }
 
 fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls, TuneWeaveError> {
@@ -4434,6 +4446,29 @@ async fn resolve_uni_playlist_item_request(
 ) -> Result<(UniPlaylistItemStream, Option<String>), TuneWeaveError> {
     let reference = parse_uni_playlist_reference(reference)?;
     let item = state.uni_playlists.item(reference.id(), &item_id)?;
+    let accounts = parse_stream_accounts(params.accounts.as_deref())?;
+    let (stream, extensions, legacy_account) =
+        resolve_uni_playlist_item_playback(state, credentials, &item, &params, accounts).await?;
+    Ok((
+        UniPlaylistItemStream {
+            playlist_ref: reference,
+            item_id: item.id,
+            source_ref: item.source_ref,
+            kind: item.kind,
+            stream,
+            extensions,
+        },
+        legacy_account,
+    ))
+}
+
+async fn resolve_uni_playlist_item_playback(
+    state: &AppState,
+    credentials: &CallerCredentialSet,
+    item: &UniPlaylistItem,
+    params: &UniPlaylistItemStreamParams,
+    accounts: BTreeMap<Platform, String>,
+) -> Result<(MediaStream, Extensions, Option<String>), TuneWeaveError> {
     let controls = parse_stream_controls(StreamControlInput {
         quality: params.quality.as_deref(),
         variant: params.variant.as_deref(),
@@ -4466,10 +4501,8 @@ async fn resolve_uni_playlist_item_request(
             "resolution is only available for MV or video playlist items",
         ));
     }
-    let mut request = controls.resolve_request_with_accounts(
-        item.source_ref.platform(),
-        parse_stream_accounts(params.accounts.as_deref())?,
-    )?;
+    let mut request =
+        controls.resolve_request_with_accounts(item.source_ref.platform(), accounts)?;
     credentials.apply_stream_accounts(&mut request.accounts)?;
     let state = credentials.scoped_state(state)?;
     let legacy_account = controls.account.clone();
@@ -4482,17 +4515,17 @@ async fn resolve_uni_playlist_item_request(
             )
         }
         UniPlaylistItemKind::PodcastEpisode => {
-            resolve_uni_podcast_episode_stream(&state, &item, &request).await?
+            resolve_uni_podcast_episode_stream(&state, item, &request).await?
         }
         UniPlaylistItemKind::Mv | UniPlaylistItemKind::Video => {
             let prefer_native_audio = item.kind == UniPlaylistItemKind::Video
                 && item.source_ref.platform() == Platform::Bilibili
                 && params.resolution.is_none();
-            resolve_uni_video_stream(&state, &item, &request, resolution, prefer_native_audio)
+            resolve_uni_video_stream(&state, item, &request, resolution, prefer_native_audio)
                 .await?
         }
         UniPlaylistItemKind::RadioStation => {
-            resolve_uni_radio_stream(&state, &item, &request).await?
+            resolve_uni_radio_stream(&state, item, &request).await?
         }
     };
     let (stream, mut extensions) = stream_extensions;
@@ -4501,17 +4534,7 @@ async fn resolve_uni_playlist_item_request(
         "account_platforms".to_owned(),
         json!(request.accounts.keys().copied().collect::<Vec<_>>()),
     );
-    Ok((
-        UniPlaylistItemStream {
-            playlist_ref: reference,
-            item_id: item.id,
-            source_ref: item.source_ref,
-            kind: item.kind,
-            stream,
-            extensions,
-        },
-        legacy_account,
-    ))
+    Ok((stream, extensions, legacy_account))
 }
 
 async fn resolve_uni_podcast_episode_stream(
@@ -5885,6 +5908,28 @@ struct UniPlaylistItemAddBody {
     accounts: Option<BTreeMap<Platform, String>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistClientItemStreamBody {
+    item: UniPlaylistDocumentItem,
+    #[serde(alias = "level")]
+    quality: Option<String>,
+    #[serde(alias = "backend")]
+    variant: Option<String>,
+    #[serde(alias = "br")]
+    bitrate: Option<StreamUnsignedInput>,
+    #[serde(alias = "immerseType", alias = "immerse_type")]
+    immersive_type: Option<String>,
+    playback_platform: Option<String>,
+    fallback: Option<StreamBooleanInput>,
+    fallback_platforms: Option<String>,
+    unblock: Option<StreamBooleanInput>,
+    source: Option<String>,
+    account: Option<String>,
+    accounts: Option<BTreeMap<Platform, String>>,
+    resolution: Option<StreamUnsignedInput>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UniPlaylistItemsQuery {
@@ -6610,6 +6655,69 @@ async fn uni_materialize_items(
         ]),
     };
     Ok(Json(ApiResponse::new(result).with_platform(Platform::Uni)))
+}
+
+async fn uni_client_item_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<NoQueryParams>, QueryRejection>,
+    payload: Result<Json<UniPlaylistClientItemStreamBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<UniPlaylistClientItemStream>>, ApiError> {
+    let _ = query_params(params)?;
+    let body = json_body(payload)?;
+    let UniPlaylistClientItemStreamBody {
+        item,
+        quality,
+        variant,
+        bitrate,
+        immersive_type,
+        playback_platform,
+        fallback,
+        fallback_platforms,
+        unblock,
+        source,
+        account,
+        accounts,
+        resolution,
+    } = body;
+    let item = item.to_runtime_item()?;
+    let bitrate = bitrate.map(StreamUnsignedInput::into_parameter);
+    let fallback = fallback.map(StreamBooleanInput::into_parameter);
+    let unblock = unblock.map(StreamBooleanInput::into_parameter);
+    let resolution = resolution.map(StreamUnsignedInput::into_parameter);
+    let params = UniPlaylistItemStreamParams {
+        quality,
+        variant,
+        bitrate,
+        immersive_type,
+        playback_platform,
+        fallback,
+        fallback_platforms,
+        unblock,
+        source,
+        account,
+        accounts: None,
+        resolution,
+    };
+    let accounts = normalize_stream_accounts(accounts.unwrap_or_default())?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let (stream, mut extensions, legacy_account) =
+        resolve_uni_playlist_item_playback(&state, &credentials, &item, &params, accounts).await?;
+    extensions.insert("client_hosted".to_owned(), json!(true));
+    extensions.insert("persisted".to_owned(), json!(false));
+    let resolved_platform = stream.resolved_platform;
+    let result = UniPlaylistClientItemStream {
+        item_id: item.id,
+        source_ref: item.source_ref,
+        kind: item.kind,
+        stream,
+        extensions,
+    };
+    let mut response = ApiResponse::new(result).with_platform(resolved_platform);
+    if let Some(account) = legacy_account {
+        response = response.with_account(account);
+    }
+    Ok(Json(response))
 }
 
 async fn uni_playlist_items_add(
@@ -30520,6 +30628,121 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(unknown_query["error"]["code"], "invalid_request");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn uni_client_item_stream_uses_v1_item_without_creating_server_state() {
+        let path = std::env::temp_dir().join(format!(
+            "tuneweave-client-item-stream-{}-{}.json",
+            std::process::id(),
+            allocate_uni_playlist_id()
+        ));
+        let store = Arc::new(
+            tuneweave_core::FileUniPlaylistStore::open(&path)
+                .expect("open non-creating file store"),
+        );
+        assert!(!path.exists());
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(TestProvider)
+            .expect("register NetEase provider");
+        registry
+            .register(TestQqProvider)
+            .expect("register QQ provider");
+        let app =
+            build_router(AppState::new(registry, Platform::Netease).with_uni_playlist_store(store));
+
+        let (status, materialized) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/materialize/items",
+            Some(json!({
+                "items": [{ "ref": "netease:185809", "kind": "track" }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let item = materialized["data"]["items"][0].clone();
+        let (status, playback) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/items/stream",
+            Some(json!({
+                "item": item,
+                "quality": "lossless",
+                "playback_platform": "qq",
+                "fallback": false,
+                "accounts": { "qq": "green" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{playback}");
+        assert_eq!(
+            playback["data"]["item_id"],
+            materialized["data"]["items"][0]["id"]
+        );
+        assert_eq!(playback["data"]["source_ref"], "netease:185809");
+        assert_eq!(playback["data"]["kind"], "track");
+        assert_eq!(playback["data"]["stream"]["resolved_platform"], "qq");
+        assert_eq!(playback["data"]["stream"]["resolved_track"], "qq:qq-clock");
+        assert_eq!(
+            playback["data"]["stream"]["attempts"][0]["account"],
+            "green"
+        );
+        assert_eq!(playback["data"]["extensions"]["transport"], "audio");
+        assert_eq!(playback["data"]["extensions"]["strict_match"], true);
+        assert_eq!(playback["data"]["extensions"]["client_hosted"], true);
+        assert_eq!(playback["data"]["extensions"]["persisted"], false);
+        assert!(playback["data"].get("playlist_ref").is_none());
+        assert_eq!(playback["meta"]["platform"], "qq");
+        assert!(!path.exists());
+
+        let mut local_source = materialized["data"]["items"][0].clone();
+        local_source["source_ref"] = json!("uni:pl_01abcdefghijklmnop");
+        let mut empty_title = materialized["data"]["items"][0].clone();
+        empty_title["snapshot"]["title"] = json!("");
+        let mut unknown_item_field = materialized["data"]["items"][0].clone();
+        unknown_item_field["cookie"] = json!("secret");
+        for (request_path, body) in [
+            (
+                "/v1/uni/items/stream",
+                json!({
+                    "item": materialized["data"]["items"][0],
+                    "resolution": 1080
+                }),
+            ),
+            (
+                "/v1/uni/items/stream",
+                json!({
+                    "item": materialized["data"]["items"][0],
+                    "accounts": { "uni": "local" }
+                }),
+            ),
+            ("/v1/uni/items/stream", json!({ "item": local_source })),
+            ("/v1/uni/items/stream", json!({ "item": empty_title })),
+            (
+                "/v1/uni/items/stream",
+                json!({ "item": unknown_item_field }),
+            ),
+            (
+                "/v1/uni/items/stream",
+                json!({
+                    "item": materialized["data"]["items"][0],
+                    "account": "legacy",
+                    "accounts": { "netease": "origin" }
+                }),
+            ),
+            (
+                "/v1/uni/items/stream?unknown=true",
+                json!({ "item": materialized["data"]["items"][0] }),
+            ),
+        ] {
+            let (status, response) =
+                json_request_from(app.clone(), Method::POST, request_path, Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+            assert!(!path.exists());
+        }
     }
 
     #[tokio::test]

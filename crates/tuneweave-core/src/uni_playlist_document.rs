@@ -110,7 +110,11 @@ impl UniPlaylistDocument {
         }
         let mut item_ids = BTreeSet::new();
         for (position, item) in self.items.iter().enumerate() {
-            validate_document_item(item, position, self.updated_at_ms)?;
+            validate_document_item(
+                item,
+                u64::try_from(position).unwrap_or(u64::MAX),
+                self.updated_at_ms,
+            )?;
             if !item_ids.insert(item.id.as_str()) {
                 return Err(TuneWeaveError::new(
                     ErrorCode::Conflict,
@@ -125,6 +129,11 @@ impl UniPlaylistDocument {
 impl UniPlaylistDocumentItem {
     pub fn from_server_item(item: &UniPlaylistItem) -> Result<Self> {
         document_item_from_server(item)
+    }
+
+    pub fn to_runtime_item(&self) -> Result<UniPlaylistItem> {
+        validate_document_item(self, self.position, self.added_at_ms)?;
+        server_item_from_document(self)
     }
 }
 
@@ -378,11 +387,11 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
 
 fn validate_document_item(
     item: &UniPlaylistDocumentItem,
-    position: usize,
+    position: u64,
     updated_at_ms: u64,
 ) -> Result<()> {
     validate_document_id(&item.id, "Uni Playlist document item id")?;
-    if item.position != u64::try_from(position).unwrap_or(u64::MAX) {
+    if item.position != position {
         return Err(TuneWeaveError::invalid_request(
             "Uni Playlist document item positions must be zero-based and contiguous",
         ));
@@ -755,6 +764,15 @@ mod tests {
     #[test]
     fn v1_document_import_preserves_items_and_only_replaces_playlist_identity() {
         let document = sample_document();
+        let runtime_item = document.items[0]
+            .to_runtime_item()
+            .expect("convert standalone client item");
+        assert_eq!(runtime_item.id, document.items[0].id);
+        assert_eq!(runtime_item.source_ref, document.items[0].source_ref);
+        assert_eq!(
+            runtime_item.snapshot.title,
+            document.items[0].snapshot.title
+        );
         let target_id = "pl_02abcdefghijklmnop";
         let (playlist, items) = document
             .to_server_snapshot(target_id)

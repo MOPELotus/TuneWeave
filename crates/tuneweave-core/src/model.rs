@@ -4454,6 +4454,15 @@ pub struct UniPlaylistMaterializeItemsResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UniPlaylistClientItemStream {
+    pub item_id: String,
+    pub source_ref: ResourceRef,
+    pub kind: UniPlaylistItemKind,
+    pub stream: MediaStream,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UniPlaylistItemKind {

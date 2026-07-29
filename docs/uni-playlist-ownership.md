@@ -117,7 +117,7 @@ POST /v1/uni/materialize/items
 POST /v1/uni/items/stream
 ```
 
-客户端只提交当前播放的一个 `UniPlaylistItem`，可以同时选择播放平台、回退顺序、音质、清晰度和账户。TuneWeave 使用来源引用和快照执行原平台播放或严格跨平台匹配，不要求知道该项目属于哪个客户端歌单，也不保存提交内容。
+该接口已实现。客户端只提交当前播放的一个 V1 `UniPlaylistDocumentItem`，可以同时选择播放平台、回退顺序、音质、清晰度和账户。TuneWeave 完整验证项目安全边界后，与 Server 模式共用原平台播放和严格跨平台匹配链；不要求知道该项目属于哪个客户端歌单，不读取或写入 Uni Playlist 存储，响应也不会虚构歌单引用。
 
 需要 GET 或 302 流程时，可以增加：
 
