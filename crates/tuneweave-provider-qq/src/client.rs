@@ -866,7 +866,7 @@ impl QqClient {
         .emit();
     }
 
-    fn log_simple_upstream_request<T>(
+    pub(crate) fn log_simple_upstream_request<T>(
         &self,
         operation: &'static str,
         upstream_host: &'static str,

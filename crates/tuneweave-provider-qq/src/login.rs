@@ -212,32 +212,45 @@ async fn create_qq_qr(client: &QqClient) -> Result<CreatedQr> {
         ("daid", "383"),
         ("pt_3rd_aid", "100497308"),
     ]);
-    let response = client
+    let request = client
         .login_http()
         .get(endpoint)
         .header(header::REFERER, QQ_LOGIN_REFERER)
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_login_http_status(response.status(), "QQ QR image")?;
-    let cookies = response_cookies(&response)?;
-    let identifier = cookies
-        .get("qrsig")
-        .cloned()
-        .ok_or_else(|| login_data_error("QQ QR image response is missing qrsig"))?;
-    let image = response
-        .bytes()
-        .await
-        .map_err(login_network_error)?
-        .to_vec();
-    ensure_png(&image, "QQ QR image")?;
-    Ok(CreatedQr {
-        identifier,
-        image_mime: "image/png",
-        image,
-        cookies,
-    })
+        .timeout(LOGIN_REQUEST_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let outcome = async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        ensure_login_http_status(response.status(), "QQ QR image")?;
+        let cookies = response_cookies(&response)?;
+        let identifier = cookies
+            .get("qrsig")
+            .cloned()
+            .ok_or_else(|| login_data_error("QQ QR image response is missing qrsig"))?;
+        let image = response
+            .bytes()
+            .await
+            .map_err(login_network_error)?
+            .to_vec();
+        ensure_png(&image, "QQ QR image")?;
+        Ok(CreatedQr {
+            identifier,
+            image_mime: "image/png",
+            image,
+            cookies,
+        })
+    }
+    .await;
+    client.log_simple_upstream_request(
+        "qq_qr_create",
+        "ssl.ptlogin2.qq.com",
+        "/ptqrshow",
+        http_status,
+        started,
+        &outcome,
+    );
+    outcome
 }
 
 async fn create_wechat_qr(client: &QqClient) -> Result<CreatedQr> {
@@ -256,39 +269,66 @@ async fn create_wechat_qr(client: &QqClient) -> Result<CreatedQr> {
             "https://y.qq.com/mediastyle/music_v17/src/css/popup_wechat.css#wechat_redirect",
         ),
     ]);
-    let response = client
+    let request = client
         .login_http()
         .get(endpoint)
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_login_http_status(response.status(), "WeChat QR bootstrap")?;
-    let mut cookies = response_cookies(&response)?;
-    let html = response.text().await.map_err(login_network_error)?;
-    let identifier = parse_wechat_uuid(&html)?;
+        .timeout(LOGIN_REQUEST_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let bootstrap_outcome = async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        ensure_login_http_status(response.status(), "WeChat QR bootstrap")?;
+        let cookies = response_cookies(&response)?;
+        let html = response.text().await.map_err(login_network_error)?;
+        let identifier = parse_wechat_uuid(&html)?;
+        Ok((identifier, cookies))
+    }
+    .await;
+    client.log_simple_upstream_request(
+        "wechat_qr_bootstrap",
+        "open.weixin.qq.com",
+        "/connect/qrconnect",
+        http_status,
+        started,
+        &bootstrap_outcome,
+    );
+    let (identifier, mut cookies) = bootstrap_outcome?;
     let image_endpoint = fixed_url(&format!("{WECHAT_QR_IMAGE_ROOT}{identifier}"))?;
-    let response = client
+    let request = client
         .login_http()
         .get(image_endpoint)
         .header(header::REFERER, WECHAT_QR_CONNECT_ENDPOINT)
         .header(header::COOKIE, cookie_header(&cookies)?)
-        .timeout(LOGIN_REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(login_network_error)?;
-    ensure_login_http_status(response.status(), "WeChat QR image")?;
-    merge_response_cookies(&mut cookies, &response)?;
-    let image = response
-        .bytes()
-        .await
-        .map_err(login_network_error)?
-        .to_vec();
-    ensure_jpeg(&image, "WeChat QR image")?;
+        .timeout(LOGIN_REQUEST_TIMEOUT);
+    let started = Instant::now();
+    let mut http_status = None;
+    let image_outcome = async {
+        let response = request.send().await.map_err(login_network_error)?;
+        http_status = Some(response.status());
+        ensure_login_http_status(response.status(), "WeChat QR image")?;
+        merge_response_cookies(&mut cookies, &response)?;
+        let image = response
+            .bytes()
+            .await
+            .map_err(login_network_error)?
+            .to_vec();
+        ensure_jpeg(&image, "WeChat QR image")?;
+        Ok(image)
+    }
+    .await;
+    client.log_simple_upstream_request(
+        "wechat_qr_image",
+        "open.weixin.qq.com",
+        "/connect/qrcode/{uuid}",
+        http_status,
+        started,
+        &image_outcome,
+    );
     Ok(CreatedQr {
         identifier,
         image_mime: "image/jpeg",
-        image,
+        image: image_outcome?,
         cookies,
     })
 }
