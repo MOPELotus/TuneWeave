@@ -83,8 +83,9 @@ impl StreamResolver {
         };
         let mut attempts = Vec::new();
         let mut last_error = None;
+        let mut deferred_trial = None;
 
-        for platform in platforms.iter().copied() {
+        for (platform_index, platform) in platforms.iter().copied().enumerate() {
             let account = request.accounts.get(&platform).cloned();
             let Some(provider) = self.registry.get(platform) else {
                 attempts.push(ResolutionAttempt {
@@ -207,6 +208,37 @@ impl StreamResolver {
             };
             match provider.stream(&candidate, &stream_request).await {
                 Ok(mut stream) => {
+                    if stream.trial.is_some() && platform_index + 1 < platforms.len() {
+                        stream.origin_track = Some(origin.resource_ref.clone());
+                        stream.resolved_track = candidate.resource_ref.clone();
+                        stream.resolved_platform = platform;
+                        stream.match_score = Some(match_score);
+                        let error = TuneWeaveError::new(
+                            ErrorCode::PermissionDenied,
+                            format!(
+                                "{platform} authorized only a trial stream; trying the next playback platform"
+                            ),
+                        )
+                        .with_platform(platform)
+                        .with_details(json!({
+                            "origin_track": origin.resource_ref,
+                            "candidate": candidate.resource_ref,
+                            "trial": stream.trial,
+                            "actual_quality": stream.actual_quality
+                        }));
+                        attempts.push(failed_attempt(
+                            platform,
+                            account,
+                            Some(candidate.resource_ref.clone()),
+                            Some(match_score),
+                            &error,
+                        ));
+                        if deferred_trial.is_none() {
+                            deferred_trial = Some((stream, attempts.len() - 1));
+                        }
+                        last_error = Some(error);
+                        continue;
+                    }
                     attempts.push(ResolutionAttempt {
                         platform,
                         account,
@@ -233,6 +265,16 @@ impl StreamResolver {
                     last_error = Some(error);
                 }
             }
+        }
+
+        if let Some((mut stream, attempt_index)) = deferred_trial {
+            let attempt = attempts
+                .get_mut(attempt_index)
+                .expect("deferred trial attempt index remains valid");
+            attempt.status = ResolutionStatus::Success;
+            attempt.error = None;
+            stream.attempts = attempts;
+            return Ok(stream);
         }
 
         let mut error = last_error.unwrap_or_else(|| {
@@ -359,6 +401,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum StreamBehavior {
         Success,
+        Trial,
         AuthenticationRequired,
     }
 
@@ -399,6 +442,14 @@ mod tests {
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             match self.stream_behavior {
                 StreamBehavior::Success => Ok(fake_stream(track, request)),
+                StreamBehavior::Trial => {
+                    let mut stream = fake_stream(track, request);
+                    stream.trial = Some(TrialWindow {
+                        start_ms: 30_000,
+                        end_ms: 90_000,
+                    });
+                    Ok(stream)
+                }
                 StreamBehavior::AuthenticationRequired => Err(TuneWeaveError::new(
                     ErrorCode::AuthenticationRequired,
                     "account is required",
@@ -495,6 +546,68 @@ mod tests {
         );
         assert_eq!(stream.attempts[1].status, ResolutionStatus::Success);
         assert_eq!(stream.attempts[1].account.as_deref(), Some("green-diamond"));
+    }
+
+    #[tokio::test]
+    async fn trial_stream_yields_to_a_full_fallback_and_remains_last_resort() {
+        let origin = track(Platform::Netease, "185809", "反方向的钟", "周杰伦");
+        let qq_track = track(Platform::Qq, "0039mid", "反方向的钟", "周杰伦");
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(FakeProvider {
+                platform: Platform::Netease,
+                search_results: Vec::new(),
+                stream_behavior: StreamBehavior::Trial,
+            })
+            .expect("register NetEase");
+        registry
+            .register(FakeProvider {
+                platform: Platform::Qq,
+                search_results: vec![qq_track.clone()],
+                stream_behavior: StreamBehavior::Success,
+            })
+            .expect("register QQ");
+        let resolver = StreamResolver::new(registry, vec![Platform::Qq]);
+
+        let full = resolver
+            .resolve(&origin, &ResolveRequest::default())
+            .await
+            .expect("full fallback");
+        assert_eq!(full.resolved_platform, Platform::Qq);
+        assert!(full.trial.is_none());
+        assert_eq!(full.attempts.len(), 2);
+        assert_eq!(full.attempts[0].status, ResolutionStatus::PermissionDenied);
+        assert_eq!(full.attempts[1].status, ResolutionStatus::Success);
+
+        let mut fallback_registry = ProviderRegistry::new();
+        fallback_registry
+            .register(FakeProvider {
+                platform: Platform::Netease,
+                search_results: Vec::new(),
+                stream_behavior: StreamBehavior::Trial,
+            })
+            .expect("register NetEase");
+        fallback_registry
+            .register(FakeProvider {
+                platform: Platform::Qq,
+                search_results: vec![qq_track],
+                stream_behavior: StreamBehavior::AuthenticationRequired,
+            })
+            .expect("register QQ");
+        let fallback_resolver = StreamResolver::new(fallback_registry, vec![Platform::Qq]);
+
+        let trial = fallback_resolver
+            .resolve(&origin, &ResolveRequest::default())
+            .await
+            .expect("trial last resort");
+        assert_eq!(trial.resolved_platform, Platform::Netease);
+        assert!(trial.trial.is_some());
+        assert_eq!(trial.attempts.len(), 2);
+        assert_eq!(trial.attempts[0].status, ResolutionStatus::Success);
+        assert_eq!(
+            trial.attempts[1].status,
+            ResolutionStatus::AuthenticationRequired
+        );
     }
 
     #[tokio::test]
