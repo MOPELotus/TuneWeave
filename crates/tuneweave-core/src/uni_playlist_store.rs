@@ -20,6 +20,7 @@ use crate::{
 };
 
 const UNI_PLAYLIST_FILE_VERSION: u32 = 1;
+const UNI_PLAYLIST_RECORD_VERSION: u32 = 1;
 static UNI_PLAYLIST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub trait UniPlaylistStore: Send + Sync {
@@ -384,12 +385,220 @@ impl UniPlaylistStore for FileUniPlaylistStore {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct DirectoryUniPlaylistStore {
+    directory: PathBuf,
+    database: Arc<RwLock<UniPlaylistDatabase>>,
+}
+
+impl DirectoryUniPlaylistStore {
+    pub fn open(directory: impl Into<PathBuf>) -> Result<Self> {
+        let directory = directory.into();
+        let database = load_record_directory(&directory)?;
+        Ok(Self {
+            directory,
+            database: Arc::new(RwLock::new(database)),
+        })
+    }
+
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    fn record_path(&self, playlist_id: &str) -> Result<PathBuf> {
+        validate_uni_playlist_id(playlist_id)?;
+        Ok(self.directory.join(format!("{playlist_id}.json")))
+    }
+
+    fn persist_record(&self, database: &UniPlaylistDatabase, playlist_id: &str) -> Result<()> {
+        let playlist = database
+            .playlists
+            .get(playlist_id)
+            .cloned()
+            .ok_or_else(|| uni_playlist_not_found(playlist_id))?;
+        let items = database.items.get(playlist_id).cloned().unwrap_or_default();
+        persist_playlist_record(
+            &self.record_path(playlist_id)?,
+            &UniPlaylistRecord {
+                version: UNI_PLAYLIST_RECORD_VERSION,
+                playlist,
+                items,
+            },
+        )
+    }
+}
+
+impl UniPlaylistStore for DirectoryUniPlaylistStore {
+    fn create(&self, playlist: &UniPlaylist) -> Result<()> {
+        self.create_with_items(playlist, &[])
+    }
+
+    fn create_with_items(&self, playlist: &UniPlaylist, items: &[UniPlaylistItem]) -> Result<()> {
+        validate_new_playlist(playlist, items)?;
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        if database.playlists.contains_key(&playlist.id) {
+            return Err(uni_playlist_conflict(&playlist.id));
+        }
+        let mut record = UniPlaylistDatabase::default();
+        record
+            .playlists
+            .insert(playlist.id.clone(), playlist.clone());
+        record.items.insert(playlist.id.clone(), items.to_vec());
+        self.persist_record(&record, &playlist.id)?;
+        database
+            .playlists
+            .insert(playlist.id.clone(), playlist.clone());
+        database.items.insert(playlist.id.clone(), items.to_vec());
+        Ok(())
+    }
+
+    fn get(&self, id: &str) -> Result<Option<UniPlaylist>> {
+        validate_uni_playlist_id(id)?;
+        Ok(self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?
+            .playlists
+            .get(id)
+            .cloned())
+    }
+
+    fn playlists(&self, limit: u32, offset: u32) -> Result<Page<UniPlaylist>> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_page(&database, limit, offset)
+    }
+
+    fn update(
+        &self,
+        id: &str,
+        request: &UniPlaylistUpdateRequest,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylist> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut record = record_database(&database, id)?;
+        let (playlist, changed) =
+            update_playlist_in_database(&mut record, id, request, updated_at_ms)?;
+        if changed {
+            self.persist_record(&record, id)?;
+            replace_database_record(&mut database, &record, id)?;
+        }
+        Ok(playlist)
+    }
+
+    fn delete(&self, id: &str) -> Result<UniPlaylistDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut record = record_database(&database, id)?;
+        let result = delete_playlist_from_database(&mut record, id)?;
+        remove_playlist_record(&self.record_path(id)?)?;
+        database.playlists.remove(id);
+        database.items.remove(id);
+        Ok(result)
+    }
+
+    fn export_document(&self, id: &str) -> Result<UniPlaylistDocument> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        export_playlist_document(&database, id)
+    }
+
+    fn append_items(
+        &self,
+        playlist_id: &str,
+        items: &[UniPlaylistItem],
+    ) -> Result<UniPlaylistItemAddResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut record = record_database(&database, playlist_id)?;
+        let result = append_items_to_database(&mut record, playlist_id, items)?;
+        self.persist_record(&record, playlist_id)?;
+        replace_database_record(&mut database, &record, playlist_id)?;
+        Ok(result)
+    }
+
+    fn item(&self, playlist_id: &str, item_id: &str) -> Result<UniPlaylistItem> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_item(&database, playlist_id, item_id)
+    }
+
+    fn items(&self, playlist_id: &str, limit: u32, offset: u32) -> Result<Page<UniPlaylistItem>> {
+        let database = self
+            .database
+            .read()
+            .map_err(|_| uni_playlist_lock_error())?;
+        playlist_items_page(&database, playlist_id, limit, offset)
+    }
+
+    fn remove_item(
+        &self,
+        playlist_id: &str,
+        item_id: &str,
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemDeleteResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut record = record_database(&database, playlist_id)?;
+        let result = remove_item_from_database(&mut record, playlist_id, item_id, updated_at_ms)?;
+        self.persist_record(&record, playlist_id)?;
+        replace_database_record(&mut database, &record, playlist_id)?;
+        Ok(result)
+    }
+
+    fn reorder_items(
+        &self,
+        playlist_id: &str,
+        item_ids: &[String],
+        updated_at_ms: u64,
+    ) -> Result<UniPlaylistItemOrderResult> {
+        let mut database = self
+            .database
+            .write()
+            .map_err(|_| uni_playlist_lock_error())?;
+        let mut record = record_database(&database, playlist_id)?;
+        let result = reorder_items_in_database(&mut record, playlist_id, item_ids, updated_at_ms)?;
+        if result.changed {
+            self.persist_record(&record, playlist_id)?;
+            replace_database_record(&mut database, &record, playlist_id)?;
+        }
+        Ok(result)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UniPlaylistDatabase {
     version: u32,
     playlists: BTreeMap<String, UniPlaylist>,
     #[serde(default)]
     items: BTreeMap<String, Vec<UniPlaylistItem>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniPlaylistRecord {
+    version: u32,
+    playlist: UniPlaylist,
+    items: Vec<UniPlaylistItem>,
 }
 
 impl Default for UniPlaylistDatabase {
@@ -400,6 +609,40 @@ impl Default for UniPlaylistDatabase {
             items: BTreeMap::new(),
         }
     }
+}
+
+fn record_database(
+    database: &UniPlaylistDatabase,
+    playlist_id: &str,
+) -> Result<UniPlaylistDatabase> {
+    validate_uni_playlist_id(playlist_id)?;
+    let playlist = database
+        .playlists
+        .get(playlist_id)
+        .cloned()
+        .ok_or_else(|| uni_playlist_not_found(playlist_id))?;
+    let items = database.items.get(playlist_id).cloned().unwrap_or_default();
+    let mut record = UniPlaylistDatabase::default();
+    record.playlists.insert(playlist_id.to_owned(), playlist);
+    record.items.insert(playlist_id.to_owned(), items);
+    Ok(record)
+}
+
+fn replace_database_record(
+    database: &mut UniPlaylistDatabase,
+    record: &UniPlaylistDatabase,
+    playlist_id: &str,
+) -> Result<()> {
+    let playlist = record.playlists.get(playlist_id).cloned().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "updated Uni Playlist record lost its playlist metadata",
+        )
+    })?;
+    let items = record.items.get(playlist_id).cloned().unwrap_or_default();
+    database.playlists.insert(playlist_id.to_owned(), playlist);
+    database.items.insert(playlist_id.to_owned(), items);
+    Ok(())
 }
 
 fn playlist_page(
@@ -846,7 +1089,159 @@ fn load_database(path: &Path) -> Result<UniPlaylistDatabase> {
     Ok(database)
 }
 
+fn load_record_directory(directory: &Path) -> Result<UniPlaylistDatabase> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => {
+            return Err(store_io_error("read Uni Playlist record directory", error));
+        }
+    };
+    if !directory.is_dir() {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Uni Playlist record path is not a directory",
+        ));
+    }
+    drop(entries);
+    recover_record_directory(directory)?;
+    let mut database = UniPlaylistDatabase::default();
+    for entry in fs::read_dir(directory)
+        .map_err(|error| store_io_error("read Uni Playlist record directory", error))?
+    {
+        let entry =
+            entry.map_err(|error| store_io_error("read Uni Playlist record entry", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| store_io_error("inspect Uni Playlist record entry", error))?;
+        if !file_type.is_file() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record directory contains a non-file entry",
+            ));
+        }
+        let file_name = entry.file_name().into_string().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record filename is not valid UTF-8",
+            )
+        })?;
+        let playlist_id = file_name.strip_suffix(".json").ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record directory contains an unexpected file",
+            )
+            .with_details(json!({ "file_name": file_name }))
+        })?;
+        validate_uni_playlist_id(playlist_id).map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record filename contains an invalid playlist id",
+            )
+            .with_details(json!({ "file_name": file_name }))
+        })?;
+        let record = load_playlist_record(&entry.path())?;
+        if record.playlist.id != playlist_id {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record filename does not match its playlist id",
+            )
+            .with_details(json!({
+                "file_name": file_name,
+                "playlist_id": record.playlist.id
+            })));
+        }
+        if database
+            .playlists
+            .insert(playlist_id.to_owned(), record.playlist)
+            .is_some()
+        {
+            return Err(TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "Uni Playlist record directory contains a duplicate playlist id",
+            ));
+        }
+        database.items.insert(playlist_id.to_owned(), record.items);
+    }
+    Ok(database)
+}
+
+fn load_playlist_record(path: &Path) -> Result<UniPlaylistRecord> {
+    let encoded =
+        fs::read(path).map_err(|error| store_io_error("read Uni Playlist record", error))?;
+    let record = serde_json::from_slice::<UniPlaylistRecord>(&encoded).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to decode Uni Playlist record: {error}"),
+        )
+    })?;
+    if record.version != UNI_PLAYLIST_RECORD_VERSION {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!(
+                "unsupported Uni Playlist record version: {}",
+                record.version
+            ),
+        ));
+    }
+    validate_new_playlist(&record.playlist, &record.items).map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Uni Playlist record contains invalid playlist data",
+        )
+    })?;
+    Ok(record)
+}
+
+fn recover_record_directory(directory: &Path) -> Result<()> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| store_io_error("read Uni Playlist record directory", error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| store_io_error("read Uni Playlist record entry", error))?;
+    for entry in entries {
+        let file_name = match entry.file_name().into_string() {
+            Ok(file_name) => file_name,
+            Err(_) => continue,
+        };
+        #[cfg(windows)]
+        if let Some(record_name) = file_name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".backup"))
+        {
+            recover_interrupted_publish(&directory.join(record_name))?;
+            continue;
+        }
+        if file_name.starts_with('.') && file_name.ends_with(".tmp") && file_name.contains(".json.")
+        {
+            fs::remove_file(entry.path()).map_err(|error| {
+                store_io_error("remove stale Uni Playlist temporary file", error)
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
+    let encoded = serde_json::to_vec(database).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize Uni Playlist database: {error}"),
+        )
+    })?;
+    persist_encoded_file(path, &encoded)
+}
+
+fn persist_playlist_record(path: &Path, record: &UniPlaylistRecord) -> Result<()> {
+    let encoded = serde_json::to_vec(record).map_err(|error| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            format!("failed to serialize Uni Playlist record: {error}"),
+        )
+    })?;
+    persist_encoded_file(path, &encoded)
+}
+
+fn persist_encoded_file(path: &Path, encoded: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
@@ -854,12 +1249,6 @@ fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
         fs::create_dir_all(parent)
             .map_err(|error| store_io_error("create Uni Playlist data directory", error))?;
     }
-    let encoded = serde_json::to_vec(database).map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            format!("failed to serialize Uni Playlist database: {error}"),
-        )
-    })?;
     let sequence = UNI_PLAYLIST_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
@@ -867,7 +1256,7 @@ fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
         .unwrap_or("uni-playlists.json");
     let temporary_path =
         path.with_file_name(format!(".{file_name}.{}.{}.tmp", process::id(), sequence));
-    if let Err(error) = write_private_file(&temporary_path, &encoded) {
+    if let Err(error) = write_private_file(&temporary_path, encoded) {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
@@ -876,6 +1265,11 @@ fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+fn remove_playlist_record(path: &Path) -> Result<()> {
+    recover_interrupted_publish(path)?;
+    fs::remove_file(path).map_err(|error| store_io_error("delete Uni Playlist record", error))
 }
 
 fn write_private_file(path: &Path, encoded: &[u8]) -> Result<()> {
@@ -1574,6 +1968,124 @@ mod tests {
             .expect("accept explicit no-op order");
         assert!(!unchanged.changed);
         assert_eq!(unchanged.playlist.updated_at_ms, 1_753_137_600_400);
+    }
+
+    #[test]
+    fn directory_store_persists_each_playlist_independently() {
+        let directory = TempDirectory::new();
+        let records = directory.0.join("uni-playlists");
+        let store = DirectoryUniPlaylistStore::open(&records).expect("open record store");
+        assert!(!records.exists());
+
+        let first = sample_playlist("pl_01abcdefghijklmnop");
+        let second = sample_playlist("pl_02abcdefghijklmnop");
+        store.create(&first).expect("persist first playlist");
+        store.create(&second).expect("persist second playlist");
+        let first_path = records.join(format!("{}.json", first.id));
+        let second_path = records.join(format!("{}.json", second.id));
+        assert!(first_path.is_file());
+        assert!(second_path.is_file());
+        assert_eq!(
+            fs::read_dir(&records)
+                .expect("read record directory")
+                .filter_map(std::result::Result::ok)
+                .count(),
+            2
+        );
+
+        let untouched_second = fs::read(&second_path).expect("read second record");
+        let first_item = sample_item("item_01abcdefghijklmnop", "185809", 1_753_137_600_100);
+        let second_item = sample_item("item_02abcdefghijklmnop", "200001", 1_753_137_600_200);
+        store
+            .append_items(&first.id, &[first_item.clone(), second_item.clone()])
+            .expect("persist first playlist items");
+        store
+            .reorder_items(
+                &first.id,
+                &[second_item.id.clone(), first_item.id.clone()],
+                1_753_137_600_300,
+            )
+            .expect("persist first playlist order");
+        store
+            .update(
+                &first.id,
+                &UniPlaylistUpdateRequest {
+                    name: Some("Split favorites".to_owned()),
+                    description: None,
+                },
+                1_753_137_600_400,
+            )
+            .expect("persist first playlist metadata");
+        assert_eq!(
+            fs::read(&second_path).expect("re-read untouched second record"),
+            untouched_second
+        );
+
+        let reopened = DirectoryUniPlaylistStore::open(&records).expect("reopen record directory");
+        assert_eq!(
+            reopened
+                .playlists(100, 0)
+                .expect("reloaded playlist directory")
+                .pagination
+                .total,
+            Some(2)
+        );
+        let reloaded_first = reopened
+            .get(&first.id)
+            .expect("read first playlist")
+            .expect("stored first playlist");
+        assert_eq!(reloaded_first.name, "Split favorites");
+        assert_eq!(reloaded_first.item_count, 2);
+        assert_eq!(
+            reopened
+                .items(&first.id, 100, 0)
+                .expect("read first items")
+                .items,
+            vec![
+                UniPlaylistItem {
+                    position: 0,
+                    ..second_item
+                },
+                UniPlaylistItem {
+                    position: 1,
+                    ..first_item
+                },
+            ]
+        );
+
+        let deleted = reopened
+            .delete(&first.id)
+            .expect("delete first playlist record");
+        assert_eq!(deleted.removed_item_count, 2);
+        assert!(!first_path.exists());
+        assert!(second_path.is_file());
+        let reopened = DirectoryUniPlaylistStore::open(&records).expect("reopen after deletion");
+        assert_eq!(reopened.get(&first.id).expect("deleted lookup"), None);
+        assert_eq!(
+            reopened.get(&second.id).expect("retained lookup"),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn directory_store_refuses_invalid_records_without_overwriting_them() {
+        let directory = TempDirectory::new();
+        let records = directory.0.join("uni-playlists");
+        fs::create_dir_all(&records).expect("create record directory");
+        let playlist = sample_playlist("pl_01abcdefghijklmnop");
+        let path = records.join(format!("{}.json", playlist.id));
+        let encoded = serde_json::to_vec(&json!({
+            "version": 2,
+            "playlist": playlist,
+            "items": []
+        }))
+        .expect("encode future record");
+        fs::write(&path, &encoded).expect("write future record");
+
+        let error =
+            DirectoryUniPlaylistStore::open(&records).expect_err("reject future record version");
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert_eq!(fs::read(path).expect("future record remains"), encoded);
     }
 
     #[test]

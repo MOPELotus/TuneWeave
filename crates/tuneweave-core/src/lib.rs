@@ -133,4 +133,6 @@ pub use provider::MusicProvider;
 pub use registry::ProviderRegistry;
 pub use resolver::StreamResolver;
 pub use uni_playlist_document::UNI_PLAYLIST_DOCUMENT_FORMAT;
-pub use uni_playlist_store::{FileUniPlaylistStore, MemoryUniPlaylistStore, UniPlaylistStore};
+pub use uni_playlist_store::{
+    DirectoryUniPlaylistStore, FileUniPlaylistStore, MemoryUniPlaylistStore, UniPlaylistStore,
+};

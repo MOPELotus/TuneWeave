@@ -44,7 +44,7 @@ cargo run -p tuneweave-server --bin tuneweave
 
 Uni Playlist 当前以 Server 模式使用同一私有数据目录下的 `uni-playlists.json` 单文件数据库：它已支持多个独立歌单，但这些歌单共同存放在一个文件中。创建、批量导入和编辑都先同步临时文件再发布，进程重启后会恢复歌单元数据及类型化项目。导入可用 `ref+type` 或 `platform+type+id` 合并多个公开/账户可见平台集合，账户别名按来源可选且彼此隔离。客户端可继续通过统一 `/v1/playlists/{ref}`、`/items` 和 `/tracks` 读取平台或 Uni 歌单，并通过稳定 `item_id` 的 `/stream` 以分平台账户执行原平台播放、指定平台播放及严格跨平台回退。
 
-服务端多歌单目录已可通过 `GET /v1/uni/playlists` 分页读取，不再要求调用方自行记住全部 `uni:<id>`；`PATCH /v1/uni/playlists/{ref}` 可独立修改名称或描述，`DELETE` 可原子删除整份歌单及其项目。Client 托管使用强类型 `tuneweave_uni_playlist_v1` 交换文档，格式、身份、顺序、重复项、来源、快照及安全扩展边界已经固定；服务端歌单可通过 `/export` 取得不含凭据和临时传输信息的完整客户端副本，客户端文档也可通过 `/import-document` 完整验证后原子复制回 Server。`/v1/uni/materialize/imports` 可完整展开并受控分页任意平台可播放集合，`/materialize/items` 可无状态标准化单独资源，`/v1/uni/items/stream` 可直接播放客户端托管项目并执行统一跨平台回退。超大导出传输和存储分片/嵌入式数据库改造仍在本阶段继续实施。两种所有权模式只通过显式导入/导出复制，不提供自动 `both` 同步。详细边界见 [Uni Playlist 客户端托管与存储设计](docs/uni-playlist-ownership.md)。
+服务端多歌单目录已可通过 `GET /v1/uni/playlists` 分页读取，不再要求调用方自行记住全部 `uni:<id>`；`PATCH /v1/uni/playlists/{ref}` 可独立修改名称或描述，`DELETE` 可原子删除整份歌单及其项目。Client 托管使用强类型 `tuneweave_uni_playlist_v1` 交换文档，格式、身份、顺序、重复项、来源、快照及安全扩展边界已经固定；服务端歌单可通过 `/export` 取得完整客户端副本，客户端文档也可通过 `/import-document` 原子复制回 Server。`/v1/uni/materialize/imports`、`/materialize/items` 与 `/v1/uni/items/stream` 已组成不持久化的来源展开、资源标准化和播放回退链。无外部数据库依赖的按歌单拆分目录后端已经实现，待旧单文件安全迁移后切换生产；超大导出传输也仍在本阶段继续收口。两种所有权模式只通过显式导入/导出复制，不提供自动 `both` 同步。详细边界见 [Uni Playlist 客户端托管与存储设计](docs/uni-playlist-ownership.md)。
 
 当前可直接调用 `/healthz`、`/v1/platforms`、`/v1/capabilities`、
 `/v1/search`、`/v1/tracks/{ref}`、`/v1/albums/{ref}`、

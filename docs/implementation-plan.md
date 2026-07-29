@@ -48,7 +48,7 @@ TuneWeave 为六个媒体平台提供统一、可扩展的 Rust HTTP API。“�
 - 保留现有 `server` 模式；分页目录、元数据修改和明确删除已经完成；
 - 新增不持久化歌单或项目的 `client` 模式；版本化 `tuneweave_uni_playlist_v1` 强类型文档、无状态来源展开、批量项目标准化和单项目播放/跨平台回退已经完成；
 - 提供 Server 导出与 Client 文档原子导入，迁移是显式复制，不提供 `both` 自动同步；
-- 把全局单文件整体重写改造为按歌单拆分文件或嵌入式数据库，并安全迁移旧数据。
+- 按歌单拆分、无额外数据库依赖的目录后端已经实现；继续安全迁移旧单文件并切换生产入口。
 
 完整所有权、接口候选、文档安全边界、存储方案与验收标准见 [Uni Playlist 客户端托管与存储设计](uni-playlist-ownership.md)。完成状态以 [Uni Playlist 实施账本](coverage/uni-playlist.md) 为准。
 
