@@ -2,7 +2,7 @@
 
 协议基线为 `Domdkw/miguMusic-api-enhanced@47d2edb7175cf2874882273ed14be0fdfe7db796`，并以当前咪咕平台真实响应校正参考项目中的无效参数和过时传输方式。状态沿用其他平台账本：`pending` 尚未实现，`implemented` 已完成代码和离线验证但缺真实成功态，`verified` 已完成统一 HTTP 与真实上游验收。
 
-当前公开音源补充层共 7 个验收单元：`pending=2`、`implemented=0`、`verified=5`，完成度 `5/7 = 71.43%`。登录、账户和写操作属于后续咪咕完整项目范围，不阻塞本层。
+当前公开音源补充层共 7 个验收单元：`pending=1`、`implemented=0`、`verified=6`，完成度 `6/7 = 85.71%`。登录、账户和写操作属于后续咪咕完整项目范围，不阻塞本层。
 
 | ID | 验收单元 | 状态 | 实施与验收边界 |
 | --- | --- | --- | --- |
@@ -11,7 +11,7 @@
 | MG03 | 普通与逐字歌词 | `verified` | `GET /v1/tracks/migu:<contentId>/lyrics` 复用严格歌曲详情，分别下载普通 LRC、加密 MRC 逐字歌词和可选 TRC 翻译。资源地址只接受固定咪咕 HTTPS 媒体域名及 `/data/oss/` 路径，三种格式并发但独立失败，单个响应限制为 4 MiB。MRC 按平台 64 位有符号分组算法解密并严格解码 UTF-16LE，保留原始逐字时间；有 MRC 时统一格式始终为 `mrc`，同时保留独立 LRC，LRC 缺失或失败时才从 MRC 派生行级歌词，不以低级格式覆盖高级格式。真实 MRC/LRC 和统一 HTTP 已验证。 |
 | MG04 | 公开播放、下载与权益 | `verified` | `GET /v1/tracks/migu:<contentId>/availability` 固定调用 `can-listen/v1.0`，严格回配唯一 `contentId` 并分别返回完整可听和限时试听标志。播放与下载先刷新严格资源详情，再调用加密 H5 v2.4 链；参考项目的 v1 只返回权益数据，匿名 v2 当前成功但无 URL，均不冒充可用备用源。H5 的 `AB CD 01` 信封解密为强类型响应，`auto` 从目录最高规格起请求，`PQ/HQ/SQ/ZQ24` 分别承接标准、高品、无损和 Hi-Res 目标，平台实际降档必须通过 `actual_quality` 与原始 tone 如实返回。媒体只接受 `freetyst.nf.migu.cn` 的 HTTPS `product8th/product` 或 `product9th/product` 路径，且 `Tim/Key/playSessionId` 各恰好一次；不把 `Tim` 猜成到期时间。真实免费歌曲确认完整 PQ 流和可下载文件；真实会员歌曲确认 65–125 秒试听，下载保持 `available=false`、隐藏试听 URL，统一 HTTP 验收通过。 |
 | MG05 | 统一播放回退与 302 | `verified` | 咪咕已进入默认 resolver 与显式 `playback_platform/source/fallback_platforms` 顺序，跨平台候选仍按标题、歌手、专辑、时长和版本严格评分，不因能取得 URL 放宽阈值。真实统一 HTTP 已将网易云歌曲以 `match_score=1.0` 解析为咪咕来源，并保留匿名链实际降为 PQ 的音质及 65–125 秒试听窗口；调用方托管 Uni 项可无持久化播放同一来源。完整流和下载的 `/redirect` 只返回 provider 已校验的可信 CDN、`private, no-store` 与 `no-referrer`；受限试听的下载跳转返回 403 且不携带 `Location`。默认顺序、显式咪咕优先、Uni 无状态播放及两类 302 均有服务端回归覆盖。 |
-| MG06 | 公开歌单与 Uni 导入 | `pending` | 验证无需登录的公开歌单、用户公开收藏或其他可播放集合，使用稳定类型化来源身份支持完整分页、Server 导入和 Client 无状态展开；保持顺序与重复项。 |
+| MG06 | 公开歌单与 Uni 导入 | `verified` | `GET /v1/playlists/migu:<musicListId>` 与 `/tracks` 只接受规范正整数公开歌单身份，不接受账户。详情固定访问 `resource/playlist/v2.0` 并严格回配 `resourceType=2021 + musicListId`，保留创建者、标签、曲数、统计和经过安全过滤的沉浸展示；歌曲固定访问 `MIGUM3.0/resource/playlist/song/v2.0`。平台把过大的 `pageSize` 静默压为 50，因此 Provider 固定 50 首物理页并用最多 3 页实现任意统一 `offset` 和 `limit<=100`，复核跨页总数与发布时间，保持顺序、重复项和全局位置。真实统一 HTTP 已读取 195 首公开歌单、验证 `offset=49` 跨页窗口，将全部 195 项原子导入 Server Uni 后播放首项，并在 Client 模式完整展开来源后仅返回请求页且不持久化。 |
 | MG07 | 协议、安全与真实权益验收 | `pending` | 收口公开端点的签名、设备或匿名会话需求、错误码、限流、固定域名、响应大小、链接安全与权益差分测试；完成全新部署和真实媒体探测。 |
 
 后续完整项目范围将在公开音源层收口后扩展移动统一账号、短信登录、多业务身份、多账户、调用方凭证、账户资料与会员状态、个人歌单/喜欢、登录权益播放及仍直接增强媒体体验的目录能力；纯社交、直播互动、商城和营销活动不纳入。

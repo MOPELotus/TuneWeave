@@ -22415,6 +22415,7 @@ mod tests {
             BTreeSet::from([
                 Capability::AudioDownload,
                 Capability::AudioStream,
+                Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::TrackDetail,
             ])
@@ -22489,6 +22490,65 @@ mod tests {
                 extensions: Extensions::new(),
             })
         }
+
+        async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+            if account.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "test Migu public playlist does not accept an account",
+                ));
+            }
+            if id != "231760782" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::ResourceNotFound,
+                    "test Migu playlist was not found",
+                ));
+            }
+            Ok(test_migu_playlist())
+        }
+
+        async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+            if request.account.is_some() {
+                return Err(TuneWeaveError::invalid_request(
+                    "test Migu public playlist does not accept an account",
+                ));
+            }
+            if id != "231760782" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::ResourceNotFound,
+                    "test Migu playlist was not found",
+                ));
+            }
+            let mut all = vec![
+                test_migu_track("600913000000358395"),
+                test_migu_track("600908000007288315"),
+                test_migu_track("600913000000358395"),
+            ];
+            for (position, track) in all.iter_mut().enumerate() {
+                track
+                    .extensions
+                    .insert("playlist_position".to_owned(), json!(position));
+            }
+            let start = usize::try_from(request.offset).unwrap_or(usize::MAX);
+            let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+            let items = all.into_iter().skip(start).take(limit).collect::<Vec<_>>();
+            let consumed = request
+                .offset
+                .saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
+            Ok(Page {
+                items,
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: request.offset,
+                    total: Some(3),
+                    next_offset: (consumed < 3).then_some(consumed),
+                    has_more: consumed < 3,
+                    extensions: Extensions::from([(
+                        "backend".to_owned(),
+                        json!("playlist_song_v2"),
+                    )]),
+                },
+            })
+        }
     }
 
     fn test_migu_track(id: &str) -> Track {
@@ -22502,6 +22562,32 @@ mod tests {
         });
         track.duration_ms = Some(258_000);
         track
+    }
+
+    fn test_migu_playlist() -> Playlist {
+        Playlist {
+            resource_ref: ResourceRef::new(Platform::Migu, "231760782")
+                .expect("valid Migu playlist reference"),
+            platform: Platform::Migu,
+            id: "231760782".to_owned(),
+            name: "周杰伦正序：青春从 Jay 开始".to_owned(),
+            description: "公开歌单".to_owned(),
+            cover_url: Some("https://d.musicapp.migu.cn/data/oss/public/playlist.png".to_owned()),
+            creator: Some(ArtistSummary {
+                resource_ref: ResourceRef::new(
+                    Platform::Migu,
+                    "051c8f0f-c349-43b0-b0e1-7c1150593db9",
+                )
+                .ok(),
+                name: "白云".to_owned(),
+            }),
+            track_count: Some(3),
+            tags: vec!["流行".to_owned(), "国语".to_owned()],
+            subscribed: None,
+            created_at: Some("20260602194138".to_owned()),
+            updated_at: None,
+            extensions: Extensions::from([("backend".to_owned(), json!("playlist_v2"))]),
+        }
     }
 
     fn sample_track(id: &str) -> Track {
@@ -33762,6 +33848,79 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn migu_public_playlist_supports_server_and_client_uni_imports() {
+        let app = test_app_with_migu();
+        let (status, playlist) =
+            json_response_from(app.clone(), "/v1/playlists/migu:231760782").await;
+        assert_eq!(status, StatusCode::OK, "{playlist}");
+        assert_eq!(playlist["data"]["ref"], "migu:231760782");
+        assert_eq!(playlist["data"]["track_count"], 3);
+
+        let (status, page) = json_response_from(
+            app.clone(),
+            "/v1/playlists/migu:231760782/tracks?limit=2&offset=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["data"].as_array().map(Vec::len), Some(2));
+        assert_eq!(page["data"][0]["ref"], "migu:600908000007288315");
+        assert_eq!(page["data"][1]["ref"], "migu:600913000000358395");
+        assert_eq!(page["meta"]["pagination"]["total"], 3);
+        assert_eq!(page["meta"]["pagination"]["has_more"], false);
+
+        let source = json!({
+            "platform": "migu",
+            "type": "playlist",
+            "id": "231760782"
+        });
+        let (status, imported) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/uni/playlists/imports",
+            Some(json!({ "sources": [source.clone()] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{imported}");
+        assert_eq!(imported["data"]["playlist"]["item_count"], 3);
+        assert_eq!(imported["data"]["sources"][0]["ref"], "migu:231760782");
+        assert_eq!(imported["data"]["sources"][0]["item_count"], 3);
+        let reference = imported["data"]["playlist"]["ref"]
+            .as_str()
+            .expect("imported Migu Uni reference");
+        let (status, items) = json_response_from(
+            app.clone(),
+            &format!("/v1/uni/playlists/{reference}/items?limit=100&offset=0"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{items}");
+        assert_eq!(items["data"].as_array().map(Vec::len), Some(3));
+        assert_eq!(items["data"][0]["source_ref"], "migu:600913000000358395");
+        assert_eq!(items["data"][2]["source_ref"], "migu:600913000000358395");
+        assert_ne!(items["data"][0]["id"], items["data"][2]["id"]);
+
+        let (status, materialized) = json_request_from(
+            app,
+            Method::POST,
+            "/v1/uni/materialize/imports?limit=2&offset=1",
+            Some(json!({ "sources": [source] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{materialized}");
+        assert_eq!(materialized["data"]["item_count"], 3);
+        assert_eq!(
+            materialized["data"]["items"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(materialized["data"]["items"][0]["position"], 1);
+        assert_eq!(materialized["data"]["items"][1]["position"], 2);
+        assert_eq!(materialized["data"]["extensions"]["persisted"], false);
+        assert_eq!(
+            materialized["data"]["extensions"]["source_pagination_complete"],
+            true
+        );
     }
 
     #[tokio::test]

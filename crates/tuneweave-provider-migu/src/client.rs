@@ -9,12 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
-    Platform, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track, TrackAvailability,
-    TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
+    Platform, Playlist, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
+    TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 use url::Url;
 
 const SEARCH_ENDPOINT: &str = "https://app.c.nf.migu.cn/bmw/search/song/v1.0";
+const PLAYLIST_DETAIL_ENDPOINT: &str = "https://app.c.nf.migu.cn/resource/playlist/v2.0";
+const PLAYLIST_TRACKS_ENDPOINT: &str =
+    "https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0";
 const RESOURCE_INFO_ENDPOINT: &str =
     "https://app.u.nf.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do";
 const LISTENING_RIGHTS_ENDPOINT: &str = "https://app.c.nf.migu.cn/strategy/pc/can-listen/v1.0";
@@ -67,6 +70,13 @@ pub(crate) struct MiguSearchPage {
     pub has_next: bool,
     pub sequence: Option<String>,
     pub conditions: Vec<MiguSearchCondition>,
+}
+
+#[derive(Debug)]
+pub(crate) struct MiguPlaylistTrackPage {
+    pub tracks: Vec<Track>,
+    pub total: u64,
+    pub publish_time: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -255,6 +265,97 @@ struct MiguSearchData {
 #[serde(default)]
 struct MiguSearchItem {
     song: Option<MiguSong>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MiguPlaylistDetailQuery<'a> {
+    playlist_id: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MiguPlaylistTracksQuery<'a> {
+    page_no: u32,
+    page_size: u32,
+    playlist_id: &'a str,
+}
+
+#[derive(Deserialize)]
+struct MiguPlaylistEnvelope {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    info: String,
+    data: Option<MiguPlaylistInfo>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaylistInfo {
+    resource_type: String,
+    title: String,
+    music_list_id: String,
+    publish_time: String,
+    summary: String,
+    img_item: MiguImage,
+    original_img_url: String,
+    owner_id: String,
+    owner_name: String,
+    music_num: Option<FlexibleU64>,
+    op_num_item: Option<MiguResourceStatistics>,
+    have_private_pic: String,
+    tags: Vec<MiguPlaylistTag>,
+    #[serde(rename = "type")]
+    kind: String,
+    status: Option<i64>,
+    channel: String,
+    official_config: Option<MiguPlaylistOfficialConfig>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaylistTag {
+    tag_id: String,
+    tag_name: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaylistOfficialConfig {
+    immersive: Option<bool>,
+    top_config: String,
+    top_config_type: String,
+    action_url: String,
+    list_text_color: String,
+    list_bg_color: String,
+}
+
+#[derive(Serialize)]
+struct MiguPlaylistPresentation {
+    immersive: Option<bool>,
+    top_image_url: Option<String>,
+    top_image_type: Option<String>,
+    action_url: Option<String>,
+    list_text_color: Option<String>,
+    list_background_color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MiguPlaylistTracksEnvelope {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    info: String,
+    data: Option<MiguPlaylistTracksData>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct MiguPlaylistTracksData {
+    total_count: Option<FlexibleU64>,
+    publish_time: String,
+    song_list: Vec<MiguSong>,
 }
 
 #[derive(Serialize)]
@@ -645,6 +746,41 @@ impl MiguClient {
         parse_search_response(&bytes)
     }
 
+    pub(crate) async fn playlist_detail(&self, playlist_id: &str) -> Result<Playlist> {
+        let response = self
+            .http
+            .get(PLAYLIST_DETAIL_ENDPOINT)
+            .header(ACCEPT, "application/json")
+            .query(&MiguPlaylistDetailQuery { playlist_id })
+            .send()
+            .await
+            .map_err(migu_network_error)?;
+        let bytes = read_bounded_response(response, "Migu playlist detail").await?;
+        parse_playlist_detail_response(&bytes, playlist_id)
+    }
+
+    pub(crate) async fn playlist_tracks_page(
+        &self,
+        playlist_id: &str,
+        page_no: u32,
+        page_size: u32,
+    ) -> Result<MiguPlaylistTrackPage> {
+        let response = self
+            .http
+            .get(PLAYLIST_TRACKS_ENDPOINT)
+            .header(ACCEPT, "application/json")
+            .query(&MiguPlaylistTracksQuery {
+                page_no,
+                page_size,
+                playlist_id,
+            })
+            .send()
+            .await
+            .map_err(migu_network_error)?;
+        let bytes = read_bounded_response(response, "Migu playlist tracks").await?;
+        parse_playlist_tracks_response(&bytes, page_no, page_size)
+    }
+
     pub(crate) async fn track_detail(&self, content_id: &str) -> Result<Track> {
         let resource = self.resource_info(content_id).await?;
         map_resource_track(resource)
@@ -960,6 +1096,175 @@ fn parse_search_response(bytes: &[u8]) -> Result<MiguSearchPage> {
         sequence: nonempty(&data.seq).map(|value| bounded_text(value, 512)),
         conditions: bounded_conditions(data.conditions),
     })
+}
+
+fn parse_playlist_detail_response(bytes: &[u8], requested_playlist_id: &str) -> Result<Playlist> {
+    let envelope: MiguPlaylistEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| migu_upstream_error("Migu playlist detail returned malformed JSON"))?;
+    if envelope.code != "000000" {
+        return Err(
+            migu_upstream_error("Migu playlist detail rejected the request").with_details(json!({
+                "platform_code": bounded_text(&envelope.code, 64),
+                "platform_message": bounded_text(&envelope.info, 256),
+            })),
+        );
+    }
+    let info = envelope.data.ok_or_else(|| {
+        TuneWeaveError::new(ErrorCode::ResourceNotFound, "Migu playlist was not found")
+            .with_platform(Platform::Migu)
+    })?;
+    if info.resource_type != "2021" {
+        return Err(migu_upstream_error(
+            "Migu playlist detail returned an incompatible resource type",
+        ));
+    }
+    if info.music_list_id != requested_playlist_id {
+        return Err(migu_upstream_error(
+            "Migu playlist detail returned a mismatched playlist ID",
+        ));
+    }
+    let name = validated_name(&info.title)
+        .ok_or_else(|| migu_upstream_error("Migu playlist detail omitted a title"))?;
+    let resource_ref = ResourceRef::new(Platform::Migu, requested_playlist_id.to_owned())
+        .map_err(|_| migu_upstream_error("Migu playlist detail returned an invalid identity"))?;
+    let creator = validated_name(&info.owner_name).map(|owner_name| ArtistSummary {
+        resource_ref: canonical_playlist_owner_id(&info.owner_id)
+            .and_then(|id| ResourceRef::new(Platform::Migu, id.to_owned()).ok()),
+        name: owner_name.to_owned(),
+    });
+    let tags = info
+        .tags
+        .iter()
+        .take(128)
+        .filter_map(|tag| validated_name(&tag.tag_name).map(str::to_owned))
+        .collect::<Vec<_>>();
+    let tag_items = info
+        .tags
+        .iter()
+        .take(128)
+        .filter_map(|tag| {
+            Some(MiguPlaylistTag {
+                tag_id: canonical_platform_id(&tag.tag_id)?.to_owned(),
+                tag_name: validated_name(&tag.tag_name)?.to_owned(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("playlist_v2"));
+    extensions.insert("resource_type".to_owned(), json!("2021"));
+    insert_nonempty(&mut extensions, "owner_id", &info.owner_id);
+    insert_nonempty(&mut extensions, "owner_name", &info.owner_name);
+    insert_nonempty(&mut extensions, "playlist_type", &info.kind);
+    insert_nonempty(&mut extensions, "channel", &info.channel);
+    insert_nonempty(
+        &mut extensions,
+        "have_private_picture",
+        &info.have_private_pic,
+    );
+    insert_optional(&mut extensions, "status", info.status);
+    if !tag_items.is_empty() {
+        extensions.insert("tag_items".to_owned(), json!(tag_items));
+    }
+    if let Some(statistics) = info.op_num_item.as_ref().map(bounded_statistics) {
+        extensions.insert("statistics".to_owned(), json!(statistics));
+    }
+    if let Some(config) = info.official_config.as_ref() {
+        let presentation = map_playlist_presentation(config);
+        if presentation.immersive.is_some()
+            || presentation.top_image_url.is_some()
+            || presentation.top_image_type.is_some()
+            || presentation.action_url.is_some()
+            || presentation.list_text_color.is_some()
+            || presentation.list_background_color.is_some()
+        {
+            extensions.insert("presentation".to_owned(), json!(presentation));
+        }
+    }
+    Ok(Playlist {
+        resource_ref,
+        platform: Platform::Migu,
+        id: requested_playlist_id.to_owned(),
+        name: name.to_owned(),
+        description: bounded_text(&info.summary, 4_000),
+        cover_url: normalized_image(&info.img_item)
+            .or_else(|| normalize_media_url(&info.original_img_url)),
+        creator,
+        track_count: info.music_num.as_ref().and_then(FlexibleU64::get),
+        tags,
+        subscribed: None,
+        created_at: bounded_optional(&info.publish_time, 64),
+        updated_at: None,
+        extensions,
+    })
+}
+
+fn parse_playlist_tracks_response(
+    bytes: &[u8],
+    page_no: u32,
+    page_size: u32,
+) -> Result<MiguPlaylistTrackPage> {
+    if page_no == 0 || page_size == 0 {
+        return Err(migu_invalid_request(
+            "Migu playlist page number and size must be positive",
+        ));
+    }
+    let envelope: MiguPlaylistTracksEnvelope = serde_json::from_slice(bytes)
+        .map_err(|_| migu_upstream_error("Migu playlist tracks returned malformed JSON"))?;
+    if envelope.code != "000000" {
+        return Err(
+            migu_upstream_error("Migu playlist tracks rejected the request").with_details(json!({
+                "platform_code": bounded_text(&envelope.code, 64),
+                "platform_message": bounded_text(&envelope.info, 256),
+            })),
+        );
+    }
+    let data = envelope.data.ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Migu playlist tracks were not found",
+        )
+        .with_platform(Platform::Migu)
+    })?;
+    let total = data
+        .total_count
+        .as_ref()
+        .and_then(FlexibleU64::get)
+        .ok_or_else(|| migu_upstream_error("Migu playlist tracks omitted a valid total count"))?;
+    let returned = u64::try_from(data.song_list.len()).unwrap_or(u64::MAX);
+    if returned > u64::from(page_size) {
+        return Err(migu_upstream_error(
+            "Migu playlist tracks exceeded the requested page size",
+        ));
+    }
+    let page_start = u64::from(page_no.saturating_sub(1))
+        .checked_mul(u64::from(page_size))
+        .ok_or_else(|| migu_upstream_error("Migu playlist page position overflowed"))?;
+    if (returned == 0 && page_start < total) || page_start.saturating_add(returned) > total {
+        return Err(migu_upstream_error(
+            "Migu playlist tracks returned inconsistent pagination",
+        ));
+    }
+    let tracks = data
+        .song_list
+        .into_iter()
+        .map(map_song)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(MiguPlaylistTrackPage {
+        tracks,
+        total,
+        publish_time: bounded_optional(&data.publish_time, 64),
+    })
+}
+
+fn map_playlist_presentation(config: &MiguPlaylistOfficialConfig) -> MiguPlaylistPresentation {
+    MiguPlaylistPresentation {
+        immersive: config.immersive,
+        top_image_url: normalize_media_url(&config.top_config),
+        top_image_type: bounded_optional(&config.top_config_type, 32),
+        action_url: normalize_playlist_action_url(&config.action_url),
+        list_text_color: canonical_hex_color(&config.list_text_color),
+        list_background_color: canonical_hex_color(&config.list_bg_color),
+    }
 }
 
 #[cfg(test)]
@@ -1975,16 +2280,16 @@ fn mapped_rate_qualities<'a>(
 
 fn map_song(song: MiguSong) -> Result<Track> {
     let content_id = canonical_platform_id(&song.content_id)
-        .ok_or_else(|| migu_upstream_error("Migu search result omitted a stable content ID"))?;
+        .ok_or_else(|| migu_upstream_error("Migu song result omitted a stable content ID"))?;
     if song.resource_type != "2" {
         return Err(migu_upstream_error(
-            "Migu song search returned an incompatible resource type",
+            "Migu song result returned an incompatible resource type",
         ));
     }
     let name = validated_name(&song.song_name)
-        .ok_or_else(|| migu_upstream_error("Migu search result omitted a track name"))?;
+        .ok_or_else(|| migu_upstream_error("Migu song result omitted a track name"))?;
     let resource_ref = ResourceRef::new(Platform::Migu, content_id.to_owned())
-        .map_err(|_| migu_upstream_error("Migu search returned an invalid track identity"))?;
+        .map_err(|_| migu_upstream_error("Migu song result returned an invalid track identity"))?;
     let mut track = Track::new(resource_ref, name);
     track.artists = song.singer_list.iter().filter_map(map_artist).collect();
     track.album = map_album(&song);
@@ -2201,6 +2506,43 @@ fn canonical_platform_id(value: &str) -> Option<&str> {
         && value.len() <= 64
         && value.bytes().all(|byte| byte.is_ascii_alphanumeric()))
     .then_some(value)
+}
+
+fn canonical_playlist_owner_id(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(value)
+}
+
+fn canonical_hex_color(value: &str) -> Option<String> {
+    let value = value.trim().trim_start_matches('#');
+    (matches!(value.len(), 6 | 8) && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_uppercase())
+}
+
+fn normalize_playlist_action_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 2_048 {
+        return None;
+    }
+    let url = Url::parse(value).ok()?;
+    if url.scheme() != "https"
+        || !matches!(
+            url.host_str(),
+            Some("app.c.nf.migu.cn" | "music.migu.cn" | "m.music.migu.cn")
+        )
+        || url.username() != ""
+        || url.password().is_some()
+        || !matches!(url.port(), None | Some(443))
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url.into())
 }
 
 fn validated_name(value: &str) -> Option<&str> {
@@ -2695,6 +3037,79 @@ mod tests {
       }]
     }"#;
 
+    const PLAYLIST_RESPONSE: &str = r##"{
+      "code":"000000",
+      "info":"操作成功",
+      "data":{
+        "resourceType":"2021",
+        "title":"周杰伦正序：青春从 Jay 开始",
+        "musicListId":"231760782",
+        "publishTime":"20260602194138",
+        "summary":"公开歌单简介",
+        "imgItem":{"img":"https://d.musicapp.migu.cn/data/oss/service98/cover.png"},
+        "originalImgUrl":"https://evil.example/cover.png",
+        "ownerId":"051c8f0f-c349-43b0-b0e1-7c1150593db9",
+        "ownerName":"白云",
+        "musicNum":"195",
+        "opNumItem":{"playNum":3034737,"playNumDesc":"303.5万","keepNum":2087,"keepNumDesc":"2087"},
+        "havePrivatePic":"01",
+        "tags":[
+          {"tagId":"1000001672","tagName":"流行"},
+          {"tagId":"1000001762","tagName":"国语"}
+        ],
+        "type":"0",
+        "status":1,
+        "channel":"1",
+        "officialConfig":{
+          "immersive":true,
+          "topConfig":"https://d.musicapp.migu.cn/data/oss/service64/header.png",
+          "topConfigType":"gif",
+          "actionUrl":"https://evil.example/action",
+          "listTextColor":"e6b379",
+          "listBgColor":"#131125"
+        }
+      }
+    }"##;
+
+    const PLAYLIST_TRACKS_RESPONSE: &str = r#"{
+      "code":"000000",
+      "info":"操作成功",
+      "data":{
+        "totalCount":3,
+        "publishTime":"2026-06-02 19:41:38",
+        "songList":[
+          {
+            "resourceType":"2",
+            "contentId":"600919000004116161",
+            "songId":"488",
+            "songName":"可爱女人",
+            "duration":239,
+            "copyrightId":"60054704394",
+            "albumId":"1000001899",
+            "album":"Jay",
+            "img3":"/data/oss/resource/cover.webp",
+            "singerList":[{"id":"112","name":"周杰伦"}],
+            "audioFormats":[{"resourceType":"2","formatType":"PQ","aformat":"020007"}]
+          },
+          {
+            "resourceType":"2",
+            "contentId":"600902000006889502",
+            "songId":"2994",
+            "songName":"完美主义",
+            "duration":"244",
+            "copyrightId":"60054701889",
+            "albumId":"1000001899",
+            "album":"Jay",
+            "singerList":[{"id":"112","name":"周杰伦"}],
+            "audioFormats":[
+              {"resourceType":"2","formatType":"PQ","aformat":"020007"},
+              {"resourceType":"2","formatType":"HQ","aformat":"020010"}
+            ]
+          }
+        ]
+      }
+    }"#;
+
     #[test]
     fn search_mapping_preserves_stable_identity_metadata_and_exact_formats() {
         let page = parse_search_response(SEARCH_RESPONSE.as_bytes()).expect("parse search");
@@ -2756,6 +3171,106 @@ mod tests {
         ] {
             assert!(parse_search_response(bad).is_err());
         }
+    }
+
+    #[test]
+    fn playlist_detail_preserves_public_identity_metadata_and_safe_presentation() {
+        let playlist = parse_playlist_detail_response(PLAYLIST_RESPONSE.as_bytes(), "231760782")
+            .expect("parse playlist detail");
+        assert_eq!(playlist.resource_ref.to_string(), "migu:231760782");
+        assert_eq!(playlist.name, "周杰伦正序：青春从 Jay 开始");
+        assert_eq!(playlist.description, "公开歌单简介");
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://d.musicapp.migu.cn/data/oss/service98/cover.png")
+        );
+        assert_eq!(
+            playlist
+                .creator
+                .as_ref()
+                .and_then(|creator| creator.resource_ref.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("migu:051c8f0f-c349-43b0-b0e1-7c1150593db9")
+        );
+        assert_eq!(playlist.track_count, Some(195));
+        assert_eq!(playlist.tags, ["流行", "国语"]);
+        assert_eq!(playlist.created_at.as_deref(), Some("20260602194138"));
+        assert_eq!(playlist.extensions["statistics"]["playNum"], 3_034_737);
+        assert_eq!(
+            playlist.extensions["presentation"]["top_image_url"],
+            "https://d.musicapp.migu.cn/data/oss/service64/header.png"
+        );
+        assert_eq!(
+            playlist.extensions["presentation"]["list_text_color"],
+            "E6B379"
+        );
+        assert_eq!(
+            playlist.extensions["presentation"]["list_background_color"],
+            "131125"
+        );
+        assert_eq!(
+            playlist.extensions["presentation"]["action_url"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn playlist_detail_rejects_business_identity_and_resource_drift() {
+        let rejected = br#"{"code":"100001","info":"failed","data":null}"#;
+        let error =
+            parse_playlist_detail_response(rejected, "231760782").expect_err("business error");
+        assert_eq!(error.details["platform_code"], "100001");
+        assert_eq!(
+            parse_playlist_detail_response(br#"{"code":"000000","data":null}"#, "231760782")
+                .expect_err("missing playlist")
+                .code,
+            ErrorCode::ResourceNotFound
+        );
+        for bad in [
+            PLAYLIST_RESPONSE.replace("\"231760782\"", "\"231760783\""),
+            PLAYLIST_RESPONSE.replace("\"2021\"", "\"2\""),
+            PLAYLIST_RESPONSE.replace(
+                "\"title\":\"周杰伦正序：青春从 Jay 开始\"",
+                "\"title\":\"\"",
+            ),
+        ] {
+            assert!(parse_playlist_detail_response(bad.as_bytes(), "231760782").is_err());
+        }
+    }
+
+    #[test]
+    fn playlist_tracks_preserve_order_total_and_platform_song_metadata() {
+        let page = parse_playlist_tracks_response(PLAYLIST_TRACKS_RESPONSE.as_bytes(), 1, 2)
+            .expect("parse playlist tracks");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.publish_time.as_deref(), Some("2026-06-02 19:41:38"));
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(
+            page.tracks[0].resource_ref.to_string(),
+            "migu:600919000004116161"
+        );
+        assert_eq!(page.tracks[0].name, "可爱女人");
+        assert_eq!(page.tracks[0].duration_ms, Some(239_000));
+        assert_eq!(
+            page.tracks[1].available_qualities,
+            [Quality::Standard, Quality::High]
+        );
+    }
+
+    #[test]
+    fn playlist_tracks_reject_invalid_pagination_and_song_shapes() {
+        for bad in [
+            PLAYLIST_TRACKS_RESPONSE.replace("\"totalCount\":3", "\"totalCount\":1"),
+            PLAYLIST_TRACKS_RESPONSE.replace("\"totalCount\":3", "\"totalCount\":\"bad\""),
+            PLAYLIST_TRACKS_RESPONSE.replace("\"resourceType\":\"2\"", "\"resourceType\":\"2021\""),
+        ] {
+            assert!(parse_playlist_tracks_response(bad.as_bytes(), 1, 2).is_err());
+        }
+        let empty_before_end = br#"{"code":"000000","data":{"totalCount":3,"songList":[]}}"#;
+        assert!(parse_playlist_tracks_response(empty_before_end, 1, 2).is_err());
+        assert!(parse_playlist_tracks_response(PLAYLIST_TRACKS_RESPONSE.as_bytes(), 2, 2).is_err());
+        assert!(parse_playlist_tracks_response(PLAYLIST_TRACKS_RESPONSE.as_bytes(), 0, 2).is_err());
     }
 
     #[test]
@@ -3177,5 +3692,33 @@ mod tests {
         assert_eq!(track.resource_ref.to_string(), "migu:600908000007288315");
         assert_eq!(track.extensions["copyright_id"], "60054704028");
         assert!(!track.available_qualities.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Migu network access"]
+    async fn live_public_playlist_supports_stable_detail_and_physical_pages() {
+        let client = MiguClient::test_client();
+        let playlist = client
+            .playlist_detail("231760782")
+            .await
+            .expect("live Migu playlist detail");
+        assert_eq!(playlist.resource_ref.to_string(), "migu:231760782");
+        assert!(playlist.track_count.is_some_and(|count| count > 50));
+
+        let first = client
+            .playlist_tracks_page("231760782", 1, 50)
+            .await
+            .expect("live Migu playlist first page");
+        let second = client
+            .playlist_tracks_page("231760782", 2, 50)
+            .await
+            .expect("live Migu playlist second page");
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.tracks.len(), 50);
+        assert_eq!(second.tracks.len(), 50);
+        assert_ne!(
+            first.tracks.last().map(|track| &track.resource_ref),
+            second.tracks.first().map(|track| &track.resource_ref)
+        );
     }
 }

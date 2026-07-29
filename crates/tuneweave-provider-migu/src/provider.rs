@@ -4,14 +4,16 @@ use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
     Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
-    PageMeta, Platform, Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, Track,
-    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
+    PageMeta, PageRequest, Platform, Playlist, Result, SearchKind, SearchQuery, SearchVariant,
+    StreamRequest, Track, TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
 };
 
 use crate::client::{MiguClient, MiguConfig, MiguSearchCondition};
 
 const UPSTREAM_PAGE_SIZE: u32 = 20;
 const MAX_UPSTREAM_PAGES: u32 = 6;
+const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 50;
+const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 3;
 
 #[derive(Clone)]
 pub struct MiguProvider {
@@ -54,6 +56,7 @@ impl MusicProvider for MiguProvider {
             Capability::AudioDownload,
             Capability::AudioStream,
             Capability::Lyrics,
+            Capability::PlaylistRead,
             Capability::SearchTracks,
             Capability::TrackAvailability,
             Capability::TrackDetail,
@@ -182,6 +185,127 @@ impl MusicProvider for MiguProvider {
     async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
         self.client.download(track, request).await
     }
+
+    async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        if account.is_some() {
+            return Err(migu_invalid_request(
+                "Migu public playlists do not accept an account",
+            ));
+        }
+        let playlist_id = parse_playlist_id(id)?;
+        self.client.playlist_detail(playlist_id).await
+    }
+
+    async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        let playlist_id = parse_playlist_id(id)?;
+        validate_playlist_page(request)?;
+        let start_page = request.offset / UPSTREAM_PLAYLIST_PAGE_SIZE + 1;
+        let first_skip = usize::try_from(request.offset % UPSTREAM_PLAYLIST_PAGE_SIZE)
+            .map_err(|_| migu_invalid_request("Migu playlist offset is too large"))?;
+        let requested = usize::try_from(request.limit)
+            .map_err(|_| migu_invalid_request("Migu playlist limit is too large"))?;
+        let required = u32::try_from(first_skip.saturating_add(requested)).unwrap_or(u32::MAX);
+        let page_budget = required
+            .saturating_add(UPSTREAM_PLAYLIST_PAGE_SIZE - 1)
+            .checked_div(UPSTREAM_PLAYLIST_PAGE_SIZE)
+            .unwrap_or(MAX_UPSTREAM_PLAYLIST_PAGES)
+            .clamp(1, MAX_UPSTREAM_PLAYLIST_PAGES);
+
+        let mut tracks = Vec::with_capacity(requested);
+        let mut total = None;
+        let mut publish_time = None;
+        let mut fetched_pages = 0_u32;
+        for page_index in 0..page_budget {
+            let page_number = start_page.checked_add(page_index).ok_or_else(|| {
+                migu_invalid_request("Migu playlist offset exceeds the upstream page range")
+            })?;
+            let page = self
+                .client
+                .playlist_tracks_page(playlist_id, page_number, UPSTREAM_PLAYLIST_PAGE_SIZE)
+                .await?;
+            fetched_pages = fetched_pages.saturating_add(1);
+            if let Some(expected) = total {
+                if page.total != expected {
+                    return Err(migu_upstream_error(
+                        "Migu playlist total changed during pagination",
+                    ));
+                }
+            } else {
+                total = Some(page.total);
+            }
+            if let (Some(expected), Some(actual)) =
+                (publish_time.as_deref(), page.publish_time.as_deref())
+                && expected != actual
+            {
+                return Err(migu_upstream_error(
+                    "Migu playlist publication time changed during pagination",
+                ));
+            }
+            if publish_time.is_none() {
+                publish_time = page.publish_time;
+            }
+
+            let skip = if page_index == 0 { first_skip } else { 0 };
+            for track in page.tracks.into_iter().skip(skip) {
+                if tracks.len() == requested {
+                    break;
+                }
+                tracks.push(track);
+            }
+            if tracks.len() == requested {
+                break;
+            }
+            let returned = u64::try_from(tracks.len()).unwrap_or(u64::MAX);
+            let consumed = u64::from(request.offset).saturating_add(returned);
+            if consumed >= total.unwrap_or_default() {
+                break;
+            }
+        }
+
+        let total = total.unwrap_or_default();
+        if total > u64::from(u32::MAX) {
+            return Err(migu_upstream_error(
+                "Migu playlist total exceeded the unified offset range",
+            ));
+        }
+        let returned = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+        let consumed = request.offset.saturating_add(returned);
+        if tracks.len() < requested && u64::from(consumed) < total {
+            return Err(migu_upstream_error(
+                "Migu playlist pagination ended before the requested window",
+            ));
+        }
+        for (index, track) in tracks.iter_mut().enumerate() {
+            let position = u64::from(request.offset)
+                .checked_add(u64::try_from(index).unwrap_or(u64::MAX))
+                .ok_or_else(|| migu_upstream_error("Migu playlist position overflowed"))?;
+            track
+                .extensions
+                .insert("playlist_position".to_owned(), json!(position));
+        }
+        let has_more = u64::from(consumed) < total;
+        let mut extensions = Extensions::new();
+        extensions.insert("backend".to_owned(), json!("playlist_song_v2"));
+        extensions.insert(
+            "upstream_page_size".to_owned(),
+            json!(UPSTREAM_PLAYLIST_PAGE_SIZE),
+        );
+        extensions.insert("upstream_pages_fetched".to_owned(), json!(fetched_pages));
+        if let Some(value) = publish_time {
+            extensions.insert("publish_time".to_owned(), json!(value));
+        }
+        Ok(Page {
+            items: tracks,
+            pagination: PageMeta {
+                limit: request.limit,
+                offset: request.offset,
+                total: Some(total),
+                next_offset: (has_more && returned > 0).then_some(consumed),
+                has_more,
+                extensions,
+            },
+        })
+    }
 }
 
 fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<()> {
@@ -219,6 +343,32 @@ fn parse_content_id(id: &str) -> Result<&str> {
         ));
     }
     Ok(id)
+}
+
+fn parse_playlist_id(id: &str) -> Result<&str> {
+    let parsed = id.parse::<u64>().map_err(|_| {
+        migu_invalid_request("Migu playlist ID must be a canonical positive musicListId")
+    })?;
+    if parsed == 0 || parsed.to_string() != id {
+        return Err(migu_invalid_request(
+            "Migu playlist ID must be a canonical positive musicListId",
+        ));
+    }
+    Ok(id)
+}
+
+fn validate_playlist_page(request: &PageRequest) -> Result<()> {
+    if request.account.is_some() {
+        return Err(migu_invalid_request(
+            "Migu public playlists do not accept an account",
+        ));
+    }
+    if !(1..=100).contains(&request.limit) {
+        return Err(migu_invalid_request(
+            "Migu playlist limit must be between 1 and 100",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_search_query(query: &SearchQuery) -> Result<()> {
@@ -307,6 +457,7 @@ mod tests {
                 Capability::AudioDownload,
                 Capability::AudioStream,
                 Capability::Lyrics,
+                Capability::PlaylistRead,
                 Capability::SearchTracks,
                 Capability::TrackAvailability,
                 Capability::TrackDetail
@@ -371,6 +522,26 @@ mod tests {
     }
 
     #[test]
+    fn public_playlists_require_canonical_ids_and_bounded_anonymous_pages() {
+        assert_eq!(
+            parse_playlist_id("231760782").expect("valid playlist ID"),
+            "231760782"
+        );
+        for id in ["", "0", "01", "-1", "1.0", "migu:231760782", " playlist "] {
+            assert!(parse_playlist_id(id).is_err(), "{id:?} must fail");
+        }
+        assert!(validate_playlist_page(&PageRequest::new(1, 0)).is_ok());
+        assert!(validate_playlist_page(&PageRequest::new(100, 0)).is_ok());
+        assert!(validate_playlist_page(&PageRequest::new(0, 0)).is_err());
+        assert!(validate_playlist_page(&PageRequest::new(101, 0)).is_err());
+        let account = PageRequest {
+            account: Some("default".to_owned()),
+            ..PageRequest::new(20, 0)
+        };
+        assert!(validate_playlist_page(&account).is_err());
+    }
+
+    #[test]
     fn public_search_rejects_unimplemented_or_silently_ignored_options() {
         let mut account = search_query();
         account.account = Some("default".to_owned());
@@ -422,6 +593,32 @@ mod tests {
             .expect("live cross-page search");
         assert_eq!(page.items.len(), 3);
         assert_eq!(page.pagination.offset, 19);
+        assert!(
+            page.items
+                .iter()
+                .all(|track| track.resource_ref.platform() == Platform::Migu)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Migu network access"]
+    async fn live_public_playlist_supports_non_aligned_unified_offsets() {
+        let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
+        let playlist = provider
+            .playlist("231760782", None)
+            .await
+            .expect("live Migu playlist detail");
+        assert_eq!(playlist.resource_ref.to_string(), "migu:231760782");
+
+        let page = provider
+            .playlist_tracks("231760782", &PageRequest::new(3, 49))
+            .await
+            .expect("live cross-page Migu playlist");
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.pagination.offset, 49);
+        assert_eq!(page.pagination.extensions["upstream_pages_fetched"], 2);
+        assert_eq!(page.items[0].extensions["playlist_position"], 49);
+        assert_eq!(page.items[2].extensions["playlist_position"], 51);
         assert!(
             page.items
                 .iter()

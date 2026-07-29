@@ -1467,6 +1467,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 咪咕已参与统一 resolver、歌曲播放、Uni Playlist 播放和媒体跳转。调用方可用 `playback_platform=migu`、`source=migu` 或 `fallback_platforms` 明确选择顺序；默认回退也会在前序来源失败后尝试咪咕。跨平台解析仍使用标题、歌手、专辑、时长和版本标签的严格评分，成功响应保留原始引用、实际咪咕引用、全部尝试、匹配分数、平台真实音质及试听窗口。调用方托管的 `migu:` Uni 项经 `/v1/uni/items/stream` 无状态验证和播放，不需要先写入服务器。完整流和下载可经对应 `/redirect` 得到无缓存 302；试听资源只能用于 stream，下载跳转返回 403 且不包含 `Location`。真实统一 HTTP 已验证网易云歌曲精确回退到咪咕、调用方托管 Uni 播放、完整媒体跳转和受限试听拒绝下载。
 
+咪咕公开歌单使用 `GET /v1/playlists/migu:<musicListId>` 与 `/tracks`，只接受规范正整数 `musicListId` 且不接受账户。元数据固定访问 `resource/playlist/v2.0`，要求 `resourceType=2021` 和返回 ID 与请求完全一致；标题、简介、可信官方封面、创建者、曲数、发布时间、标签、核心统计及安全过滤后的沉浸展示分别进入稳定字段或类型化扩展。歌曲固定访问 `MIGUM3.0/resource/playlist/song/v2.0`；真实上游会把大于 50 的 `pageSize` 静默压为 50，因此 Provider 固定使用 50 首物理页，以最多 3 个连续页实现统一 `limit=1..100` 与任意 `offset`，并在跨页时复核总数和发布时间。每首歌仍使用稳定 `contentId`，保存真实音质、版权和展示元数据，额外标记全局歌单位置；顺序与重复出现均不折叠。Uni Playlist 可用 `{ "platform":"migu", "type":"playlist", "id":"<musicListId>" }` 完整导入 Server 模式，或经 `/v1/uni/materialize/imports` 在 Client 模式完整展开后只返回请求页。真实统一 HTTP 已将一份 195 首公开歌单完整导入并播放首项，同时验证 Client 模式不创建服务器歌单。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。
