@@ -1465,6 +1465,8 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 
 咪咕媒体 URL 只接受 `freetyst.nf.migu.cn` 的 HTTPS 标准端口、`/public/product8th/product` 或 `/public/product9th/product` 路径，并要求 `Tim`、`Key`、`playSessionId` 三个授权字段各恰好出现一次；不接受凭据、片段、其他主机、端口或目录。平台没有给出可验证的过期语义，`Tim` 不能被猜成 `expires_at`，所以当前保持 `null`。完整授权的流可用于统一下载；当 `canListen=false`、`limitLength=true` 且平台返回完整起止窗口时，stream 明确携带 `TrialWindow`，download 则返回 `available=false`、`url=null` 并记录已隐藏试听 URL，`/download/redirect` 也不会把试听流冒充完整文件。
 
+咪咕已参与统一 resolver、歌曲播放、Uni Playlist 播放和媒体跳转。调用方可用 `playback_platform=migu`、`source=migu` 或 `fallback_platforms` 明确选择顺序；默认回退也会在前序来源失败后尝试咪咕。跨平台解析仍使用标题、歌手、专辑、时长和版本标签的严格评分，成功响应保留原始引用、实际咪咕引用、全部尝试、匹配分数、平台真实音质及试听窗口。调用方托管的 `migu:` Uni 项经 `/v1/uni/items/stream` 无状态验证和播放，不需要先写入服务器。完整流和下载可经对应 `/redirect` 得到无缓存 302；试听资源只能用于 stream，下载跳转返回 403 且不包含 `Location`。真实统一 HTTP 已验证网易云歌曲精确回退到咪咕、调用方托管 Uni 播放、完整媒体跳转和受限试听拒绝下载。
+
 为兼容参考项目调用方，音频识别请求也接受 `audio_fp`/`audioFP` 作为 `fingerprint` 的别名、`duration` 作为 `duration_seconds` 的别名；响应只使用统一字段名。
 
 助唱标注存在性是与歌词正文分离的目录能力。QQ 数字歌曲 ID 直接提交；MID 先通过歌曲详情解析真实数值 ID，再固定调用 `GetSingingAnnotationsInfo` 的 `needNum=false` 布尔分支。响应保留请求引用作为 `track_ref`，并在扩展中提供 `numeric_id` 和平台原始数据；省略平台标志时按上游语义返回 `available=false`，畸形标志不会被当作不存在。
