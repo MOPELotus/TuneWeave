@@ -16,20 +16,19 @@ use std::{
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{
-    EnvFilter, Registry,
+    EnvFilter,
     fmt::{
         FmtContext,
         format::{FormatEvent, FormatFields, Writer},
         time::{ChronoLocal, FormatTime},
-        writer::BoxMakeWriter,
     },
-    layer::{Layer, SubscriberExt},
+    layer::SubscriberExt,
     registry::LookupSpan,
     util::SubscriberInitExt,
 };
 
 #[cfg(test)]
-use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::{Layer, fmt::MakeWriter};
 
 const DEFAULT_LOG_FILE: &str = "tuneweave.log";
 const DEFAULT_RETENTION_DAYS: u32 = 14;
@@ -573,52 +572,80 @@ fn install_subscriber(
     config: &LoggingConfig,
     file_writer: Option<NonBlocking>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    type OutputLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
-
-    let mut output_layers = Vec::<OutputLayer>::with_capacity(2);
     match config.format {
-        LogFormat::Human => {
-            if config.to_stderr {
-                output_layers.push(Box::new(
+        LogFormat::Human => match (config.to_stderr, file_writer) {
+            (true, Some(writer)) => tracing_subscriber::registry()
+                .with(
                     tracing_subscriber::fmt::layer()
                         .event_format(HumanEventFormatter::default())
-                        .with_writer(BoxMakeWriter::new(std::io::stderr))
+                        .with_writer(std::io::stderr)
                         .with_ansi(std::io::stderr().is_terminal()),
-                ));
-            }
-            if let Some(writer) = file_writer {
-                output_layers.push(Box::new(
+                )
+                .with(
                     tracing_subscriber::fmt::layer()
                         .event_format(HumanEventFormatter::default())
-                        .with_writer(BoxMakeWriter::new(writer))
+                        .with_writer(writer)
                         .with_ansi(false),
-                ));
-            }
-        }
-        LogFormat::Json => {
-            if config.to_stderr {
-                output_layers.push(Box::new(
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (true, None) => tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .event_format(HumanEventFormatter::default())
+                        .with_writer(std::io::stderr)
+                        .with_ansi(std::io::stderr().is_terminal()),
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (false, Some(writer)) => tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .event_format(HumanEventFormatter::default())
+                        .with_writer(writer)
+                        .with_ansi(false),
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (false, None) => unreachable!("logging configuration requires at least one output"),
+        },
+        LogFormat::Json => match (config.to_stderr, file_writer) {
+            (true, Some(writer)) => tracing_subscriber::registry()
+                .with(
                     tracing_subscriber::fmt::layer()
                         .json()
-                        .with_writer(BoxMakeWriter::new(std::io::stderr))
+                        .with_writer(std::io::stderr)
                         .with_ansi(false),
-                ));
-            }
-            if let Some(writer) = file_writer {
-                output_layers.push(Box::new(
+                )
+                .with(
                     tracing_subscriber::fmt::layer()
                         .json()
-                        .with_writer(BoxMakeWriter::new(writer))
+                        .with_writer(writer)
                         .with_ansi(false),
-                ));
-            }
-        }
-    }
-    debug_assert!(!output_layers.is_empty());
-    tracing_subscriber::registry()
-        .with(output_layers)
-        .with(config.env_filter()?)
-        .try_init()?;
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (true, None) => tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(std::io::stderr)
+                        .with_ansi(false),
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (false, Some(writer)) => tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(writer)
+                        .with_ansi(false),
+                )
+                .with(config.env_filter()?)
+                .try_init()?,
+            (false, None) => unreachable!("logging configuration requires at least one output"),
+        },
+    };
     Ok(())
 }
 
