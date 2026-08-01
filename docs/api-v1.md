@@ -312,7 +312,7 @@
 
 `VideoStats` 将公开互动计数与所选账户状态分开：`view_count/danmaku_count/like_count/coin_count/favorite_count/comment_count/share_count` 是平台公开计数，`liked/favorited/coins_contributed` 只表示明确选择的账户。平台或资源不提供的字段保持 `null`，匿名请求不会为了填充账户态而回退到默认账户。`VideoStream` 以 `available` 和可空 `url` 表达取流结果，同时保留备用地址、请求/实际清晰度、大小、时长、业务码、费用和平台原文；平台成功响应没有 URL 时仍返回可检查的成功数据，不会伪造播放地址。`resolution` 兼容 `res`，默认 1080；网易云与 QQ 接受 1–4320，并把上游实际命中的清晰度写入 `actual_resolution`。批量视频流使用 `GET/POST /v1/videos/streams`，保留输入顺序和重复项，但一个请求只接受同一平台，以便支持平台原生批量协议。
 
-已关注歌手的新视频与新曲时间线分别返回 `Video[]` 和 `Track[]`，但都属于账户资源。它们以毫秒时间戳 `before` 翻页，并在 `meta.pagination.extensions.next_before_ms` 返回下一页起点；`account` 只选择登录态，不改变内容平台。
+已关注歌手的新视频、新曲与混合新作时间线都属于账户资源。它们以毫秒时间戳 `before` 翻页，并在 `meta.pagination.extensions.next_before_ms` 返回下一页起点；`account` 只选择登录态，不改变内容平台。网易云新曲的 `limit` 单位是作品块，一个专辑块可以完整展开为多首 `Track`，因此统一条目数可能大于 `limit`，但不会裁断块内歌曲；混合新作的上游会额外返回一个续页哨兵，统一列表只返回请求数量并以最后一个保留块生成游标，哨兵留到下一页，完整原始响应和裁剪数保存在分页扩展。
 
 混合作品流返回 `ArtistWorkUpdate[]`：`kind=track|video|mixed|unknown` 明确资源类型，已识别内容分别进入 `tracks` 或 `videos`；同一作品块同时含歌曲和视频时使用 `mixed`，两类数组都保留。实际非空资源优先于 `blockType` 提示，空的旧字段别名也不会遮住后续非空数组。`source_type`、作品标题、歌手、封面和发布时间使用稳定字段；尚未识别的平台来源仍返回 `kind=unknown`，完整负载保留在 `extensions.artist_work`，不会静默丢弃。
 
@@ -1576,8 +1576,8 @@ QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会�
 | GET | `/v1/account/library/podcasts` | `platform`、`account?`、分页 | 已订阅的 `Podcast[]`；列表身份明确使 `subscribed=true`，完整平台条目与分页响应保留在扩展 |
 | GET | `/v1/account/following/artists` | `platform`、`account?`、分页 | 已关注的 `Artist[]`；关注时间和平台原始资料保留在条目扩展 |
 | GET | `/v1/account/following/artists/new-videos` | `platform`、`account?`、`limit?`、`before?` | 已关注歌手的新 `Video[]`；`before` 与 `next_before_ms` 均为毫秒时间戳 |
-| GET | `/v1/account/following/artists/new-tracks` | `platform`、`account?`、`limit?`、`before?` | 已关注歌手的新 `Track[]`；上游新曲总数保留为分页 `total` |
-| GET | `/v1/account/following/artists/new-works` | `platform`、`account?`、`limit?`、`before?`、`source_type?`、`first_request?` | `ArtistWorkUpdate[]`；歌曲/MV 混合更新流，未知来源保留原文 |
+| GET | `/v1/account/following/artists/new-tracks` | `platform`、`account?`、`limit?`、`before?` | 已关注歌手的新 `Track[]`；`limit` 按作品块计数，块内歌曲完整展开，上游新曲总数保留为分页 `total` |
+| GET | `/v1/account/following/artists/new-works` | `platform`、`account?`、`limit?`、`before?`、`source_type?`、`first_request?` | `ArtistWorkUpdate[]`；歌曲/MV 混合更新流，上游额外续页哨兵不计入本页，未知来源保留原文 |
 | GET | `/v1/account/following/artists/new-tracks/play-all` | `platform`、`account?` | 最近至多 50 首新 `Track[]`；固定快照，不伪装成可翻页目录 |
 | GET | `/v1/account/favorites/tracks` | `platform`、`account?`、分页 | `Track[]` |
 | GET | `/v1/account/history` | `platform`、`account?`、`period=all_time|week`、分页 | `PlaybackHistoryEntry[]`，含 `track`、`play_count`、`score`、`last_played_at` |

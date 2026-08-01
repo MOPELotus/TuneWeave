@@ -13277,30 +13277,30 @@ fn map_artist_new_works_response(
     limit: u32,
     before_ms: u64,
 ) -> Result<Page<ArtistWorkUpdate>> {
-    let next_before_ms = response
-        .data
-        .new_works
-        .last()
-        .and_then(artist_update_timestamp);
-    let items = response
-        .data
-        .new_works
+    let upstream_has_more = response.data.has_more;
+    let latest_visit_time = response.data.latest_visit_time;
+    let mut new_works = response.data.new_works;
+    let upstream_work_count = new_works.len();
+    let requested_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let overfetch_trimmed = upstream_work_count.saturating_sub(requested_limit);
+    new_works.truncate(requested_limit);
+    let next_before_ms = new_works.last().and_then(artist_update_timestamp);
+    let items = new_works
         .into_iter()
         .map(|raw| map_artist_work_update(raw, request.source_type))
         .collect::<Result<Vec<_>>>()?;
     let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    let has_more = response.data.has_more.unwrap_or(consumed == limit);
+    let has_more = overfetch_trimmed > 0 || upstream_has_more.unwrap_or(consumed == limit);
     let mut extensions = Extensions::new();
     extensions.insert("response".to_owned(), raw_response);
     extensions.insert("before_ms".to_owned(), json!(before_ms));
     extensions.insert("source_type".to_owned(), json!(request.source_type));
     extensions.insert("first_request".to_owned(), json!(request.first_request));
+    extensions.insert("limit_unit".to_owned(), json!("work_blocks"));
+    extensions.insert("upstream_work_count".to_owned(), json!(upstream_work_count));
+    extensions.insert("overfetch_trimmed".to_owned(), json!(overfetch_trimmed));
     insert_extension(&mut extensions, "next_before_ms", next_before_ms);
-    insert_extension(
-        &mut extensions,
-        "latest_visit_time",
-        response.data.latest_visit_time,
-    );
+    insert_extension(&mut extensions, "latest_visit_time", latest_visit_time);
     Ok(Page {
         items,
         pagination: PageMeta {
@@ -24040,6 +24040,23 @@ mod tests {
                             "blockTitle": { "resourceName": "未知作品" },
                             "futurePayload": { "kept": true }
                         }
+                    },
+                    {
+                        "sourceType": 1,
+                        "publishTime": 1_700_000_000_000_u64,
+                        "info": {
+                            "blockType": "SONG",
+                            "songLists": [
+                                {
+                                    "id": 2099002,
+                                    "name": "续页哨兵",
+                                    "artists": [{ "id": 6452, "name": "周杰伦" }],
+                                    "album": { "id": 3099002, "name": "下一页" },
+                                    "duration": 188000,
+                                    "mvid": 0
+                                }
+                            ]
+                        }
                     }
                 ]
             }
@@ -24070,6 +24087,7 @@ mod tests {
         assert_eq!(page.items[0].title.as_deref(), Some("新专辑"));
         assert_eq!(page.items[1].kind, ArtistWorkKind::Unknown);
         assert_eq!(page.items[1].source_type, 9);
+        assert_eq!(page.items.len(), 2);
         assert_eq!(
             page.items[1].extensions["artist_work"]["info"]["futurePayload"]["kept"],
             true
@@ -24083,6 +24101,15 @@ mod tests {
             1_730_000_000_000_u64
         );
         assert_eq!(page.pagination.extensions["first_request"], false);
+        assert_eq!(page.pagination.extensions["limit_unit"], "work_blocks");
+        assert_eq!(page.pagination.extensions["upstream_work_count"], 3);
+        assert_eq!(page.pagination.extensions["overfetch_trimmed"], 1);
+        assert_eq!(
+            page.pagination.extensions["response"]["data"]["newWorks"]
+                .as_array()
+                .map(Vec::len),
+            Some(3)
+        );
         assert!(page.pagination.has_more);
     }
 
