@@ -1625,12 +1625,12 @@
       "platform_scope": {
         "mode": "request_selected",
         "platforms": [
-          "netease"
+          "qq"
         ]
       },
-      "authentication": "required",
+      "authentication": "optional",
       "destructive_level": "read_only",
-      "network": "authenticated",
+      "network": "anonymous",
       "acceptance_cases": [
         "cloud_lyrics_accept_reference_query_names_and_opaque_track_ids",
         "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
