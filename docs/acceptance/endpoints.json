@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 3,
+  "covered_route_count": 11,
   "entries": [
     {
       "id": "health",
@@ -57,6 +57,160 @@
       "acceptance_cases": [
         "platform_discovery_exposes_uni_without_claiming_provider_capabilities",
         "invalid_platform_uses_the_error_envelope"
+      ]
+    },
+    {
+      "id": "catalog_search",
+      "method": "GET",
+      "path": "/v1/search",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "search_accepts_every_reference_cloudsearch_type_and_keywords_alias",
+        "invalid_search_parameters_use_the_error_envelope"
+      ]
+    },
+    {
+      "id": "general_search",
+      "method": "GET",
+      "path": "/v1/search/general",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "general_search_preserves_session_bucket_cursor_related_and_direct_results",
+        "general_search_rejects_invalid_pages_cursors_and_unknown_fields"
+      ]
+    },
+    {
+      "id": "default_search_keyword",
+      "method": "GET",
+      "path": "/v1/search/default",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "default_search_keyword_uses_selected_platform_account_and_stable_fields",
+        "default_search_keyword_rejects_unknown_platforms_and_query_fields"
+      ]
+    },
+    {
+      "id": "trending_search",
+      "method": "GET",
+      "path": "/v1/search/trending",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "trending_searches_share_one_endpoint_for_brief_and_full_catalogs",
+        "trending_searches_reject_unknown_detail_platform_and_query_fields"
+      ]
+    },
+    {
+      "id": "search_suggestions",
+      "method": "GET",
+      "path": "/v1/search/suggestions",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "search_suggestions_share_web_mobile_and_pc_clients_on_one_endpoint",
+        "search_suggestions_reject_missing_query_unknown_client_platform_and_fields"
+      ]
+    },
+    {
+      "id": "search_multi_match",
+      "method": "GET",
+      "path": "/v1/search/multimatch",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "multi_match_search_accepts_unified_and_reference_query_names",
+        "multi_match_search_rejects_missing_query_unknown_kind_platform_and_fields"
+      ]
+    },
+    {
+      "id": "local_track_match_get",
+      "method": "GET",
+      "path": "/v1/search/match",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "local_track_match_supports_reference_get_and_unified_post_inputs",
+        "local_track_match_rejects_missing_md5_bad_durations_platform_and_fields"
+      ]
+    },
+    {
+      "id": "local_track_match_post",
+      "method": "POST",
+      "path": "/v1/search/match",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "local_track_match_supports_reference_get_and_unified_post_inputs",
+        "local_track_match_rejects_missing_md5_bad_durations_platform_and_fields"
       ]
     }
   ]
