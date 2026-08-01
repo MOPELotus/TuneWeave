@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 11,
+  "covered_route_count": 16,
   "entries": [
     {
       "id": "health",
@@ -211,6 +211,122 @@
       "acceptance_cases": [
         "local_track_match_supports_reference_get_and_unified_post_inputs",
         "local_track_match_rejects_missing_md5_bad_durations_platform_and_fields"
+      ]
+    },
+    {
+      "id": "track_details_get",
+      "method": "GET",
+      "path": "/v1/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_batches_accept_ids_and_refs_without_losing_order_or_duplicates",
+        "track_batches_accept_typed_query_items_and_shared_get_song_type",
+        "track_batches_reject_ambiguous_empty_and_cross_platform_inputs"
+      ]
+    },
+    {
+      "id": "track_details_post",
+      "method": "POST",
+      "path": "/v1/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_batches_accept_ids_and_refs_without_losing_order_or_duplicates",
+        "track_batches_accept_typed_query_items_and_shared_get_song_type",
+        "track_batches_reject_ambiguous_empty_and_cross_platform_inputs"
+      ]
+    },
+    {
+      "id": "track_detail",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_reference_selects_its_provider",
+        "track_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_availability",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/availability",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_availability_supports_default_unified_and_reference_bitrates",
+        "track_availability_rejects_non_numeric_bitrates"
+      ]
+    },
+    {
+      "id": "track_lyrics",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_lyrics_use_reference_platform",
+        "track_lyrics_forward_unified_and_qq_reference_options",
+        "track_lyrics_reject_invalid_options_and_unknown_fields"
       ]
     }
   ]
