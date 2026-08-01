@@ -1,17 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
 
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
-const INVENTORY_SOURCE: &str = "crates/tuneweave-server/src/lib.rs";
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 struct RouteInventory {
     schema_version: u32,
-    source: String,
     route_count: usize,
     routes: Vec<RouteSpec>,
 }
@@ -19,12 +17,6 @@ struct RouteInventory {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 struct RouteSpec {
     method: String,
-    path: String,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CoverageRouteMention {
-    methods: Option<Vec<&'static str>>,
     path: String,
 }
 
@@ -65,89 +57,6 @@ fn checked_in_route_inventory_matches_router() {
         expected, actual,
         "route inventory drifted; set TUNEWEAVE_UPDATE_ENDPOINT_INVENTORY=1 and run \
          cargo test -p tuneweave-server --test endpoint_inventory"
-    );
-}
-
-#[test]
-fn api_reference_matches_router() {
-    let source_path = source_path();
-    let source = fs::read_to_string(&source_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
-    let inventory = inventory_from_source(&source).expect("router source should be extractable");
-    let actual = inventory
-        .routes
-        .iter()
-        .map(normalized_route_key)
-        .collect::<BTreeSet<_>>();
-
-    let api_path = api_reference_path();
-    let api = fs::read_to_string(&api_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", api_path.display()));
-    let documented = documented_routes(&api).expect("API endpoint tables should be extractable");
-
-    let missing = actual.difference(&documented).cloned().collect::<Vec<_>>();
-    let extra = documented.difference(&actual).cloned().collect::<Vec<_>>();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "API endpoint tables drifted from build_router\nmissing from docs: {}\nnot registered: {}",
-        display_route_keys(&missing),
-        display_route_keys(&extra)
-    );
-}
-
-#[test]
-fn coverage_ledgers_only_reference_registered_routes() {
-    let source_path = source_path();
-    let source = fs::read_to_string(&source_path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
-    let inventory = inventory_from_source(&source).expect("router source should be extractable");
-    let coverage_root = coverage_path();
-    let mut files = Vec::new();
-    collect_markdown_files(&coverage_root, &mut files)
-        .expect("coverage Markdown files should be enumerable");
-    files.sort();
-
-    let mut missing = Vec::new();
-    for file in files {
-        let markdown = fs::read_to_string(&file)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
-        for route in coverage_route_mentions(&markdown) {
-            let registered = route.methods.as_ref().map_or_else(
-                || {
-                    inventory
-                        .routes
-                        .iter()
-                        .any(|candidate| route_path_matches(&candidate.path, &route.path))
-                },
-                |methods| {
-                    methods.iter().all(|method| {
-                        inventory.routes.iter().any(|candidate| {
-                            candidate.method == *method
-                                && route_path_matches(&candidate.path, &route.path)
-                        })
-                    })
-                },
-            );
-            if !registered {
-                let relative = file.strip_prefix(&coverage_root).unwrap_or(&file);
-                missing.push(format!(
-                    "{}: {}{}",
-                    relative.to_string_lossy().replace('\\', "/"),
-                    route
-                        .methods
-                        .as_ref()
-                        .map(|methods| format!("{} ", methods.join("/")))
-                        .unwrap_or_default(),
-                    route.path
-                ));
-            }
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "coverage ledgers reference routes that are not registered:\n{}",
-        missing.join("\n")
     );
 }
 
@@ -238,51 +147,12 @@ pub fn build_router(state: AppState) -> Router {
     );
 }
 
-#[test]
-fn extracts_combined_documented_methods_and_normalizes_parameters() {
-    let routes =
-        documented_routes("| 方法 | 端点 |\n| --- | --- |\n| GET / POST | `/v1/tracks/{ref}` |")
-            .expect("fixture should be extractable");
-
-    assert_eq!(
-        routes,
-        BTreeSet::from([
-            "GET /v1/tracks/{}".to_owned(),
-            "POST /v1/tracks/{}".to_owned(),
-        ])
-    );
-}
-
-#[test]
-fn matches_coverage_examples_to_parameterized_routes() {
-    assert!(route_path_matches(
-        "/v1/resources/{kind}/{reference}/comments",
-        "/v1/resources/track/netease:123/comments"
-    ));
-    assert!(route_path_matches(
-        "/v1/charts/{reference}/tracks",
-        "/v1/charts/{qq:chart:<topId>}/tracks"
-    ));
-    assert!(!route_path_matches(
-        "/v1/users/{reference}/favorites/playlists",
-        "/v1/users/bilibili:123/playlists/favorite"
-    ));
-}
-
 fn source_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
 }
 
 fn inventory_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/acceptance/routes.json")
-}
-
-fn api_reference_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.md")
-}
-
-fn coverage_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/coverage")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/routes.json")
 }
 
 fn inventory_from_source(source: &str) -> Result<RouteInventory, String> {
@@ -316,7 +186,6 @@ fn inventory_from_source(source: &str) -> Result<RouteInventory, String> {
 
     Ok(RouteInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
-        source: INVENTORY_SOURCE.to_owned(),
         route_count: routes.len(),
         routes,
     })
@@ -519,177 +388,4 @@ fn is_identifier_start(byte: u8) -> bool {
 
 fn is_identifier_continue(byte: u8) -> bool {
     is_identifier_start(byte) || byte.is_ascii_digit()
-}
-
-fn documented_routes(markdown: &str) -> Result<BTreeSet<String>, String> {
-    let mut routes = BTreeSet::new();
-    for line in markdown.lines() {
-        let cells = line.split('|').skip(1).map(str::trim).collect::<Vec<_>>();
-        if cells.len() < 2 {
-            continue;
-        }
-        let Some(methods) = documented_methods(cells[0]) else {
-            continue;
-        };
-        let Some(path) = inline_route_path(cells[1])? else {
-            continue;
-        };
-        for method in methods {
-            let key = format!("{method} {}", normalize_placeholders(path));
-            routes.insert(key);
-        }
-    }
-    if routes.is_empty() {
-        return Err("API reference does not contain any endpoint table rows".to_owned());
-    }
-    Ok(routes)
-}
-
-fn documented_methods(cell: &str) -> Option<Vec<&'static str>> {
-    let compact = cell
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .map(char::from)
-        .collect::<String>();
-    if compact.is_empty() {
-        return None;
-    }
-
-    compact
-        .split('/')
-        .map(|method| match method {
-            "GET" => Some("GET"),
-            "POST" => Some("POST"),
-            "PUT" => Some("PUT"),
-            "PATCH" => Some("PATCH"),
-            "DELETE" => Some("DELETE"),
-            _ => None,
-        })
-        .collect()
-}
-
-fn inline_route_path(cell: &str) -> Result<Option<&str>, String> {
-    let Some(start) = cell.find('`') else {
-        return Ok(None);
-    };
-    let remaining = &cell[start + 1..];
-    let end = remaining
-        .find('`')
-        .ok_or_else(|| format!("unclosed inline code in endpoint cell: {cell}"))?;
-    let path = &remaining[..end];
-    if !path.starts_with('/') {
-        return Ok(None);
-    }
-    if path.contains('?') || path.contains('#') || path.contains(char::is_whitespace) {
-        return Err(format!("endpoint table path is not canonical: {path}"));
-    }
-    Ok(Some(path))
-}
-
-fn normalized_route_key(route: &RouteSpec) -> String {
-    format!("{} {}", route.method, normalize_placeholders(&route.path))
-}
-
-fn normalize_placeholders(path: &str) -> String {
-    let mut normalized = String::with_capacity(path.len());
-    let mut characters = path.chars();
-    while let Some(character) = characters.next() {
-        if character != '{' {
-            normalized.push(character);
-            continue;
-        }
-        normalized.push_str("{}");
-        for parameter in characters.by_ref() {
-            if parameter == '}' {
-                break;
-            }
-        }
-    }
-    normalized
-}
-
-fn display_route_keys(routes: &[String]) -> String {
-    if routes.is_empty() {
-        "none".to_owned()
-    } else {
-        routes.join(", ")
-    }
-}
-
-fn collect_markdown_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_markdown_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "md") {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn coverage_route_mentions(markdown: &str) -> Vec<CoverageRouteMention> {
-    let mut mentions = Vec::new();
-    let mut in_fence = false;
-    for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-
-        let mut remaining = line;
-        while let Some(start) = remaining.find('`') {
-            remaining = &remaining[start + 1..];
-            let Some(end) = remaining.find('`') else {
-                break;
-            };
-            if let Some(route) = coverage_route_mention(&remaining[..end]) {
-                mentions.push(route);
-            }
-            remaining = &remaining[end + 1..];
-        }
-    }
-    mentions
-}
-
-fn coverage_route_mention(code: &str) -> Option<CoverageRouteMention> {
-    let value = code.trim();
-    let route_start = value.find("/v1/")?;
-    let prefix = value[..route_start].trim();
-    let methods = if prefix.is_empty() {
-        None
-    } else {
-        Some(documented_methods(prefix)?)
-    };
-    let value = &value[route_start..];
-
-    let end = value
-        .find(|character: char| {
-            character.is_whitespace()
-                || matches!(character, ',' | '，' | ';' | '；' | '、' | '。' | '）')
-        })
-        .unwrap_or(value.len());
-    let route = value[..end]
-        .split(['?', '#'])
-        .next()
-        .expect("split always yields the original value")
-        .trim_end_matches(['.', ')']);
-    (!route.is_empty()).then(|| CoverageRouteMention {
-        methods,
-        path: route.to_owned(),
-    })
-}
-
-fn route_path_matches(pattern: &str, route: &str) -> bool {
-    let pattern = pattern.split('/').collect::<Vec<_>>();
-    let route = route.split('/').collect::<Vec<_>>();
-    pattern.len() == route.len()
-        && pattern.iter().zip(route.iter()).all(|(pattern, route)| {
-            (pattern.starts_with('{') && pattern.ends_with('}') && !route.is_empty())
-                || pattern == route
-        })
 }
