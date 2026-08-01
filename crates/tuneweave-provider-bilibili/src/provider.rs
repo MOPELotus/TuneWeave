@@ -2303,10 +2303,16 @@ fn map_bilibili_playback_manifest(
         last_play_time_ms: manifest.last_play_time_ms,
         last_play_part_ref,
         expires_at_epoch_seconds: manifest.expires_at_epoch_seconds,
-        headers: BTreeMap::from([(
-            "Referer".to_owned(),
-            format!("https://www.bilibili.com/video/{}", manifest.bvid),
-        )]),
+        headers: BTreeMap::from([
+            (
+                "Referer".to_owned(),
+                format!("https://www.bilibili.com/video/{}", manifest.bvid),
+            ),
+            (
+                "User-Agent".to_owned(),
+                crate::client::WEB_USER_AGENT.to_owned(),
+            ),
+        ]),
         extensions: Extensions::from([
             ("aid".to_owned(), json!(manifest.aid)),
             ("bvid".to_owned(), json!(manifest.bvid)),
@@ -5118,6 +5124,10 @@ mod tests {
             manifest.headers["Referer"],
             "https://www.bilibili.com/video/BV1Jt411P77c"
         );
+        assert_eq!(
+            manifest.headers["User-Agent"],
+            crate::client::WEB_USER_AGENT
+        );
         assert_eq!(manifest.extensions["fnval"], 4048);
         assert_eq!(manifest.extensions["cid"], 106_101_299);
     }
@@ -5204,10 +5214,16 @@ mod tests {
             last_play_time_ms: None,
             last_play_part_ref: None,
             expires_at_epoch_seconds: Some(1_999_999_999),
-            headers: BTreeMap::from([(
-                "Referer".to_owned(),
-                "https://www.bilibili.com/video/BV1Jt411P77c".to_owned(),
-            )]),
+            headers: BTreeMap::from([
+                (
+                    "Referer".to_owned(),
+                    "https://www.bilibili.com/video/BV1Jt411P77c".to_owned(),
+                ),
+                (
+                    "User-Agent".to_owned(),
+                    crate::client::WEB_USER_AGENT.to_owned(),
+                ),
+            ]),
             extensions: Extensions::new(),
         }
     }
@@ -5545,6 +5561,10 @@ mod tests {
         assert_eq!(
             stream.headers.get("Referer").map(String::as_str),
             Some("https://www.bilibili.com/video/BV1Jt411P77c")
+        );
+        assert_eq!(
+            stream.headers.get("User-Agent").map(String::as_str),
+            Some(crate::client::WEB_USER_AGENT)
         );
         assert!(!stream.headers.contains_key("Cookie"));
     }
