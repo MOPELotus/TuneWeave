@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 16,
+  "covered_route_count": 26,
   "entries": [
     {
       "id": "health",
@@ -327,6 +327,231 @@
         "track_lyrics_use_reference_platform",
         "track_lyrics_forward_unified_and_qq_reference_options",
         "track_lyrics_reject_invalid_options_and_unknown_fields"
+      ]
+    },
+    {
+      "id": "audio_cdn_dispatch",
+      "method": "GET",
+      "path": "/v1/media/cdn",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "audio_cdn_dispatch_preserves_catalog_and_response_metadata",
+        "audio_tools_accept_caller_credentials_without_server_aliases",
+        "audio_cdn_dispatch_rejects_unknown_platforms_and_query_fields"
+      ]
+    },
+    {
+      "id": "audio_files",
+      "method": "POST",
+      "path": "/v1/media/files",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "audio_file_routes_accept_unified_and_reference_compatible_inputs",
+        "audio_file_routes_accept_caller_credentials_without_server_aliases",
+        "audio_file_routes_reject_ambiguous_mixed_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "track_files",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/files",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "audio_file_routes_accept_unified_and_reference_compatible_inputs",
+        "audio_file_routes_accept_caller_credentials_without_server_aliases",
+        "audio_file_routes_reject_ambiguous_mixed_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "track_stream",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_stream_reports_resolution_attempts",
+        "track_stream_scopes_caller_credentials_across_playback_platforms",
+        "track_stream_accepts_netease_level_and_backend_aliases",
+        "track_stream_forwards_all_immersive_type_aliases",
+        "track_stream_rejects_invalid_or_ambiguous_modern_parameters"
+      ]
+    },
+    {
+      "id": "track_stream_redirect",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream/redirect",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_stream_redirect_reuses_resolution_and_disables_response_caching",
+        "track_stream_rejects_invalid_or_ambiguous_modern_parameters"
+      ]
+    },
+    {
+      "id": "track_stream_content",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream/content",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_stream_content_returns_bounded_no_store_audio_without_routing_inputs"
+      ]
+    },
+    {
+      "id": "track_download",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/download",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_download_accepts_modern_level_backend_and_bitrate_aliases",
+        "track_download_keeps_an_unavailable_url_as_successful_data",
+        "stream_and_download_forward_account_to_origin_metadata_lookup",
+        "track_downloads_use_caller_credentials_without_server_account_fallback",
+        "track_download_rejects_invalid_or_unknown_parameters"
+      ]
+    },
+    {
+      "id": "track_download_redirect",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/download/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_download_redirect_prefers_download_and_falls_back_to_stream",
+        "track_download_redirect_never_exposes_a_trial_as_a_full_download",
+        "track_download_rejects_invalid_or_unknown_parameters"
+      ]
+    },
+    {
+      "id": "track_streams_get",
+      "method": "GET",
+      "path": "/v1/tracks/streams",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_stream_batch_get_preserves_order_duplicates_and_netease_aliases",
+        "track_stream_batch_unblock_uses_the_unified_resolver",
+        "track_stream_batches_forward_immersive_type_for_get_and_post",
+        "track_stream_batches_scope_caller_credentials_per_platform",
+        "track_stream_batch_rejects_ambiguous_or_malformed_get_inputs"
+      ]
+    },
+    {
+      "id": "track_streams_post",
+      "method": "POST",
+      "path": "/v1/tracks/streams",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "track_stream_batch_post_supports_mixed_refs_and_per_item_errors",
+        "track_stream_batch_unblock_uses_the_unified_resolver",
+        "track_stream_batches_forward_immersive_type_for_get_and_post",
+        "track_stream_batches_scope_caller_credentials_per_platform",
+        "track_stream_batch_rejects_ambiguous_or_malformed_post_inputs"
       ]
     }
   ]
