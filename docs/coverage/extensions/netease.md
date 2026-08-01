@@ -11,6 +11,8 @@
 
 已经实现的能力继续保留映射证据；未实现能力统一记为 `candidate`，不会表现成 TuneWeave 欠账。只有出现真实调用需求、现有范围维护需要或明确收益时，才将一组候选改为 `selected` 并建立独立验收边界。
 
+除 api-enhanced 模块外，作者明确授权参考的 Lotus-ReFactor 音乐合伙人完整任务链另记为 `candidate`。它尚未注册 TuneWeave HTTP 路由，也不进入当前 API 文档；只有选入独立扩展任务并完成强类型协议、多账户隔离、运行策略、失败恢复和真实账户验收后，才会公开端点。
+
 | 上游模块 | 参考路由 | 状态 | TuneWeave 映射/缺口 |
 | --- | --- | --- | --- |
 | `activate_init_profile` | `/activate/init/profile` | `candidate` | — |

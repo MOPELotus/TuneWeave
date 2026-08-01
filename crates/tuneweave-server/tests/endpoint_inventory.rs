@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -59,6 +59,33 @@ fn checked_in_route_inventory_matches_router() {
         expected, actual,
         "route inventory drifted; set TUNEWEAVE_UPDATE_ENDPOINT_INVENTORY=1 and run \
          cargo test -p tuneweave-server --test endpoint_inventory"
+    );
+}
+
+#[test]
+fn api_reference_matches_router() {
+    let source_path = source_path();
+    let source = fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+    let inventory = inventory_from_source(&source).expect("router source should be extractable");
+    let actual = inventory
+        .routes
+        .iter()
+        .map(normalized_route_key)
+        .collect::<BTreeSet<_>>();
+
+    let api_path = api_reference_path();
+    let api = fs::read_to_string(&api_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", api_path.display()));
+    let documented = documented_routes(&api).expect("API endpoint tables should be extractable");
+
+    let missing = actual.difference(&documented).cloned().collect::<Vec<_>>();
+    let extra = documented.difference(&actual).cloned().collect::<Vec<_>>();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "API endpoint tables drifted from build_router\nmissing from docs: {}\nnot registered: {}",
+        display_route_keys(&missing),
+        display_route_keys(&extra)
     );
 }
 
@@ -149,12 +176,31 @@ pub fn build_router(state: AppState) -> Router {
     );
 }
 
+#[test]
+fn extracts_combined_documented_methods_and_normalizes_parameters() {
+    let routes =
+        documented_routes("| 方法 | 端点 |\n| --- | --- |\n| GET / POST | `/v1/tracks/{ref}` |")
+            .expect("fixture should be extractable");
+
+    assert_eq!(
+        routes,
+        BTreeSet::from([
+            "GET /v1/tracks/{}".to_owned(),
+            "POST /v1/tracks/{}".to_owned(),
+        ])
+    );
+}
+
 fn source_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
 }
 
 fn inventory_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/acceptance/routes.json")
+}
+
+fn api_reference_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.md")
 }
 
 fn inventory_from_source(source: &str) -> Result<RouteInventory, String> {
@@ -391,4 +437,99 @@ fn is_identifier_start(byte: u8) -> bool {
 
 fn is_identifier_continue(byte: u8) -> bool {
     is_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+fn documented_routes(markdown: &str) -> Result<BTreeSet<String>, String> {
+    let mut routes = BTreeSet::new();
+    for line in markdown.lines() {
+        let cells = line.split('|').skip(1).map(str::trim).collect::<Vec<_>>();
+        if cells.len() < 2 {
+            continue;
+        }
+        let Some(methods) = documented_methods(cells[0]) else {
+            continue;
+        };
+        let Some(path) = inline_route_path(cells[1])? else {
+            continue;
+        };
+        for method in methods {
+            let key = format!("{method} {}", normalize_placeholders(path));
+            routes.insert(key);
+        }
+    }
+    if routes.is_empty() {
+        return Err("API reference does not contain any endpoint table rows".to_owned());
+    }
+    Ok(routes)
+}
+
+fn documented_methods(cell: &str) -> Option<Vec<&'static str>> {
+    let compact = cell
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .map(char::from)
+        .collect::<String>();
+    if compact.is_empty() {
+        return None;
+    }
+
+    compact
+        .split('/')
+        .map(|method| match method {
+            "GET" => Some("GET"),
+            "POST" => Some("POST"),
+            "PUT" => Some("PUT"),
+            "PATCH" => Some("PATCH"),
+            "DELETE" => Some("DELETE"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn inline_route_path(cell: &str) -> Result<Option<&str>, String> {
+    let Some(start) = cell.find('`') else {
+        return Ok(None);
+    };
+    let remaining = &cell[start + 1..];
+    let end = remaining
+        .find('`')
+        .ok_or_else(|| format!("unclosed inline code in endpoint cell: {cell}"))?;
+    let path = &remaining[..end];
+    if !path.starts_with('/') {
+        return Ok(None);
+    }
+    if path.contains('?') || path.contains('#') || path.contains(char::is_whitespace) {
+        return Err(format!("endpoint table path is not canonical: {path}"));
+    }
+    Ok(Some(path))
+}
+
+fn normalized_route_key(route: &RouteSpec) -> String {
+    format!("{} {}", route.method, normalize_placeholders(&route.path))
+}
+
+fn normalize_placeholders(path: &str) -> String {
+    let mut normalized = String::with_capacity(path.len());
+    let mut characters = path.chars();
+    while let Some(character) = characters.next() {
+        if character != '{' {
+            normalized.push(character);
+            continue;
+        }
+        normalized.push_str("{}");
+        for parameter in characters.by_ref() {
+            if parameter == '}' {
+                break;
+            }
+        }
+    }
+    normalized
+}
+
+fn display_route_keys(routes: &[String]) -> String {
+    if routes.is_empty() {
+        "none".to_owned()
+    } else {
+        routes.join(", ")
+    }
 }

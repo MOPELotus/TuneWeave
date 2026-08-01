@@ -1189,6 +1189,8 @@ B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P
 | POST | `/v1/account/podcasts/{ref}/episodes` | 原始音频请求体、`Content-Type`；查询含必选 `filename/cover_image_id/category_id/second_category_id/description` 和可选发布、隐私、排序、包含歌曲及 `account` 参数 | `PodcastEpisodeUploadResult`；完成令牌、NOS 分片、预检查与正式提交的完整上传事务 |
 | DELETE | `/v1/account/podcast-episodes/{ref}` | `account?` | `PodcastEpisodeDeleteResult`；删除单条账户声音，引用决定平台 |
 | DELETE | `/v1/account/podcast-episodes` | JSON `{refs 或 ids, platform?, account?}`；兼容 `episodeRefs/programIds/voiceIds` | `PodcastEpisodeDeleteResult`；有序批量删除账户声音，保留重复项和完整响应 |
+| GET | `/v1/account/podcast-episodes` | `platform?`、`account?`、工作台筛选与分页 | 登录账户创作者工作台中的 `PodcastEpisode[]` |
+| GET | `/v1/account/podcasts/created` | `platform?`、`account?`、`limit?` | 登录账户创建的 `Podcast[]` 不可续页快照 |
 | GET | `/v1/tracks` | `refs` 或 `ids`（逗号分隔）、`platform?`（仅配合 `ids`）、`account?`、`song_type/type?` | 有序 `Track[]` 批量详情；共享歌曲类型应用到每项，保留重复项且一个批次只调用一个平台 |
 | POST | `/v1/tracks` | 兼容 `{refs 或 ids, platform?, account?, song_type/type?}`；或 `{items/query_info:[{ref|id|mid, song_type/type?}], platform?, account?}` | 强类型逐项批量详情；`id` 是无符号数字 ID，`mid` 是平台 MID，顺序和重复项不丢失 |
 | GET | `/v1/tracks/{ref}` | `account?` | `Track`；QQ 数字 ID/MID 分别走 Web 富详情分支，发行公司、流派、简介、语言、发布时间、额外字段和完整子响应位于扩展 |
@@ -1423,7 +1425,6 @@ QQ 分类 MV 目录使用同一 `GET /v1/videos`，要求 `platform=qq&catalog=a
 | POST | `/v1/tracks/streams` | JSON `{refs?|ids?, platform?, quality?, variant?, bitrate?, immersive_type?, playback_platform?, fallback?, fallback_platforms?, unblock?, source?, account?}` | `StreamBatch`；`refs/ids` 可为字符串或字符串数组 |
 | GET | `/v1/tracks/{ref}/download` | `quality?`、`variant?`、`bitrate?`、`account?`；兼容 `level/backend/br` | `MediaDownload`；无可用 URL 仍是可检查的成功数据 |
 | GET | `/v1/tracks/{ref}/download/redirect` | 同上 | 有专用下载 URL 时返回 302；否则尝试同音质播放 URL 后再返回 302 |
-| POST | `/v1/resolve` | 完整解析请求，见下文 | `Stream` |
 | GET | `/v1/videos/{ref}` | `kind/type=mv|video`、`account?` | `VideoDetail`，含统一视频信息和平台公布的清晰度 |
 | GET | `/v1/videos/details` | `refs` 或 `ids/vids`、`platform?`、`kind/type?`、`account?` | `VideoDetail[]`；1–100 项，同平台、同类型、保序且保留重复项 |
 | POST | `/v1/videos/details` | JSON `{refs?|ids/vids?, platform?, kind/type?, account?}`；引用可为字符串、逗号字符串或数组 | `VideoDetail[]`；使用 provider 原生批量能力或统一逐项默认实现 |
@@ -1531,7 +1532,7 @@ QQ 统一歌曲流建立在同一精确授权上，但不会把需要 EKey 的�
 
 音频流的统一音质为 `auto/low/standard/higher/high/lossless/hires/surround/spatial/dolby/master`。网易云兼容字段 `level` 是 `quality` 的别名，并完整接受 `standard/higher/exhigh/lossless/hires/jyeffect/sky/dolby/jymaster`，其中 `exhigh/jyeffect/sky/jymaster` 分别映射为 `high/surround/spatial/master`。`variant=default|legacy|modern` 选择 provider 推荐后端、旧版码率后端或新版等级后端；兼容字段 `backend` 接受 `v0/song_url` 与 `v1/song_url_v1` 等别名。网易云缺省使用现代 v1；`variant=legacy` 时 `bitrate`（兼容 `br`）按原始无符号 bit/s 精确提交，省略时再由 `quality` 映射默认码率；现代后端按参考行为忽略 `br`。
 
-`immersive_type=c51|ste|aac` 选择沉浸声音频类型，并兼容网易云字段名 `immerse_type`/`immerseType`。省略时网易云 `spatial/sky` 使用上游默认 `c51`；显式选择仅在现代 `song_url_v1` 且音质为 `spatial/sky` 时写入 `immerseType`，其他音质和旧版协议不会误发该字段。该控制与音质、账户和跨平台路由一同贯穿单曲、批量、播客、Uni Playlist 项播放及 `POST /v1/resolve`；不支持的值返回 `invalid_request`，不会静默降级为另一种沉浸声类型。
+`immersive_type=c51|ste|aac` 选择沉浸声音频类型，并兼容网易云字段名 `immerse_type`/`immerseType`。省略时网易云 `spatial/sky` 使用上游默认 `c51`；显式选择仅在现代 `song_url_v1` 且音质为 `spatial/sky` 时写入 `immerseType`，其他音质和旧版协议不会误发该字段。该控制与音质、账户和跨平台路由一同贯穿单曲、批量、播客及 Uni Playlist 项播放；不支持的值返回 `invalid_request`，不会静默降级为另一种沉浸声类型。
 
 `available_qualities` 始终按上述能力层级从低到高返回，不依赖平台响应数组的偶然顺序。网易云歌曲元数据中的 192 kbps `m` 档映射为 `higher`，320 kbps `h` 档才映射为 `high`；QQ 的 192k OGG/AAC 同样映射 `higher`，`size_new[2]/[6]` 是 `spatial` 而不是较低级的 `surround`，DTS/`size_new[9]` 才是环绕；零大小不会遮住其他真实可用规格。当逐字 YRC 与逐行 LRC 同时存在时，`Lyrics.format` 标记能力更高的 `yrc`，但 `plain` 与 `word_synced` 两份内容都会保留；歌词贡献者的无效旧 ID 也不会遮住有效 `userId`。QQ 的 `qrc/trans/roma` 是相互独立的上游开关，返回内容使用平台自定义 3DES+zlib 编码；TuneWeave 解密后按实际 `qrc` 响应标志选择 `qrc` 或 `lrc`，逐字歌词存在时不会被逐行格式覆盖。歌曲 ID/MID、`song_type` 和完整上游响应仍保存在扩展。
 
@@ -1548,25 +1549,6 @@ Uni Playlist 项流复用同一音质与路由参数，并额外以 `accounts` �
 网易云的 `/v1/videos/{ref}`、`/stats` 和 `/stream` 分别精确覆盖 `mv_detail/video_detail`、`mv_detail_info/video_detail_info` 与 `mv_url/video_url`。MV 详情、统计和平台公布的 240/480/720/1080 四档播放地址已经完成真实 HTTP 验收；站内视频 ID 是不透明字符串，失效资源的 404 以及 `code=200` 但空 URL 列表都保持原始业务语义。又以账户收藏中的当前有效普通视频真实验证详情、4 档资源、统计、480p 非空播放 URL 与统一 302 重定向。
 
 QQ MV 播放固定调用 `MvUrlProxy/GetMvUrls`，单项和 1–100 项批量共用同一强类型映射。QQ 的字母数字 VID 在省略 `kind` 时默认解释为 `mv`；显式 `video` 会被拒绝，避免把尚未支持的普通视频伪装成 MV。平台返回的 MP4/HLS 各档、直连/通用/免流/m3u8 地址、文件类型、编码、大小、令牌、有效期和业务码全部保留；选择时先取不高于请求值的最高已知清晰度，同档优先直接 MP4，只有没有低档时才向上选择。常规 `url` 为空不会遮住可用的 `comm_url/freeflow_url/m3u8`；所有可输出或重定向的地址都必须属于固定 QQ/Tencent Music 媒体域且不得嵌入用户凭据。重复 VID 在单次上游请求后按输入位置恢复，平台以 VID 为键的响应不会使重复项消失。
-
-`POST /v1/resolve` 同时接受已有引用或纯元数据：
-
-```json
-{
-  "track": {
-    "ref": "netease:123456"
-  },
-  "quality": "lossless",
-  "playback_platforms": ["qq", "netease", "kugou"],
-  "accounts": {
-    "qq": "green-diamond",
-    "netease": "default"
-  },
-  "strict_match": true
-}
-```
-
-也可以把 `track` 写成 `{ "name": "...", "artists": ["..."], "album": "...", "duration_ms": 0, "isrc": null }`。没有引用时不会产生 `origin_track`，但仍返回最终 `resolved_track`。
 
 ### 登录与账户
 
@@ -1827,15 +1809,17 @@ QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用
 | --- | --- | --- |
 | GET | `/v1/extensions/netease/calendar` | 查询指定毫秒时间范围内的网易云账户音乐日历 |
 | GET/POST | `/v1/extensions/netease/anonymous-session` | 读取持久化匿名身份或注册/刷新 `MUSIC_A`；兼容 `/register/anonymous` 与参考拼写 `/register/anonimous` |
+| GET/POST | `/v1/extensions/netease/register/anonymous` | 匿名身份的正确拼写兼容路由 |
+| GET/POST | `/v1/extensions/netease/register/anonimous` | 匿名身份的上游参考拼写兼容路由 |
 | GET/POST | `/v1/extensions/netease/check-token` | `version?=v2|v3`（默认 v3）、`refresh?`；读取缓存或注册/刷新网易云易盾 anti-cheat token |
+| GET/POST | `/v1/extensions/netease/register/checktoken` | checkToken 的参考兼容路由，默认 v3 |
 | GET/POST | `/v1/extensions/netease/register/checktoken/v2` | 固定读取或刷新 v2 token；另有固定 v3 路由，旧 `/register/checktoken` 别名默认 v3 |
+| GET/POST | `/v1/extensions/netease/register/checktoken/v3` | 固定读取或刷新 v3 token |
 | POST | `/v1/extensions/netease/api` | 在固定网易云域名上调用指定 `/api/...` 路径，支持 `eapi/weapi/api/linuxapi/xeapi` |
 | GET | `/v1/extensions/netease/batch` | 以参考项目的查询参数形式批量调用网易云 `/api/...` 路径 |
 | POST | `/v1/extensions/netease/batch` | 以 JSON 对象批量调用网易云 `/api/...` 路径 |
 | POST | `/v1/extensions/qq/api` | 使用固定 QQ Android/Web 普通或签名 CGI 档案调用一个 `module + method + param` |
 | POST | `/v1/extensions/qq/batch` | 在一次固定 QQ CGI 请求中执行最多 20 个有键子请求并保持键与响应对应关系 |
-| GET | `/v1/extensions/netease/partner/tasks` | 查询音乐合伙人当日任务与待评作品 |
-| POST | `/v1/extensions/netease/partner/run` | 按服务端策略执行合伙人任务并返回逐账户报告 |
 
 网易云日历接受统一参数 `start_time`、`end_time`，并兼容参考项目的 `startTime`、`endTime`；值必须是无符号 Unix 毫秒时间戳。为完整保留参考实现的运行时行为，任一时间参数省略时都会使用本次请求的当前毫秒时间，两个参数也允许同时省略。`account` 选择服务端保存的网易云登录态，也可省略账户并通过 `X-TuneWeave-Credential` 使用调用方托管凭证；两者不能同时用于网易云。端点固定使用 WeAPI 调用 `/api/mcalendar/detail`，成功时完整上游日历 JSON 位于统一包络的 `data` 中。
 
