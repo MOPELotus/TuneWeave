@@ -4,15 +4,15 @@
 
 状态含义：`pending` 尚未实现，`deferred` 已明确保留但按路线延期，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户或后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
-当前共 64 个验收单元：`pending=0`、`partial=3`、`implemented=18`、`verified=43`。
+当前共 64 个验收单元：`pending=0`、`partial=0`、`implemented=21`、`verified=43`。
 
-- 完整实现率：`(implemented + verified) / 64 = 61 / 64 = 95.31%`。
+- 完整实现率：`(implemented + verified) / 64 = 64 / 64 = 100.00%`。
 - 已触达率：`(partial + implemented + verified) / 64 = 64 / 64 = 100.00%`。
 - 完整联网验收率：`verified / 64 = 43 / 64 = 67.19%`。
 
 这些百分比仅统计项目范围。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；网易云项目范围收口前，`pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
-全部 64 个项目范围单元现已触达，MV 与站内视频的目录、详情、收藏和播放链也已真实验收。上游新增的免费听市场状态已纳入 P08；剩余 C10、C11、P10 仍需补齐相应分支后再升级状态。
+全部 64 个项目范围单元均已完成代码和离线验收，网易云项目范围代码据此收口。MV、站内视频、公开播客节目播放与免费听状态等读取链也已真实验收；仍为 `implemented` 的单元只缺真实成功态、可回滚写入或其他 provider 前置条件，不存在以 `partial` 隐藏的必要代码分支。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
@@ -35,8 +35,8 @@
 | C07 | 内容展示 | MV/视频搜索、歌手视频目录和收藏态 | `verified` | 搜索、歌手目录、全部/最新/网易出品 MV 目录、站内全部/推荐/分组视频时间线、9 项分类与 107 项标签，以及 MV/普通视频分协议收藏和账户混合收藏列表均已完成并真实验证；时间线外层算法与内层视频不丢失，`datas=null` 合法为空页，累计 63 次当前分组请求均保留上游 200 空态；两次收藏闭环后账户状态均已恢复 |
 | C08 | 内容展示 | MV/视频详情、分辨率和资源信息 | `verified` | MV 详情及统计已真实验收；又从账户收藏列表取得当前有效普通视频，真实验证详情、正时长、4 档资源及统计成功态；失效资源 404 仍保持原始业务语义 |
 | C09 | 内容展示 | 广播电台分类、地区、列表和当前节目 | `verified` | `broadcast_category_region_get/broadcast_channel_list/currentinfo` 已验收；收藏兼容结构的空包装及空分页别名不会遮蔽后续有效值 |
-| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `partial` | `dj_catelist/dj_category_excludehot/dj_category_recommend/dj_hot/dj_detail/dj_program/dj_program_detail/voicelist_search/program_recommend/record_recent_voice/dj_difm_all_style_channel/dj_difm_playing_tracks_list/dj_difm_subscribe_channels_get` 已通过 provider 与真实统一 HTTP/联网验收；分类链分别返回 19 个完整分类、13 个非热门分类和 12 个含完整播客的推荐分组，分类节目推荐的 offset 0/2 也返回两组不同完整节目及可播放音频；持久账户最近声音返回 2 条记录，节目、承载音频、播放时间和终端完整分离；DiFM 电子/古典/爵士三源真实返回 15/8/12 个风格及 252/70/103 个频道，来源、风格、频道层级和 source-qualified 引用完整保留；频道 `netease:difm:0:10505` 的当前队列真实返回 5 条独立 DiFM 播放项，首条 351 秒、2001 个波形采样且直链可用，不伪装普通歌曲；三源账户收藏快照真实返回 `code=200/total=0`，订阅与取消链已完整接入同一 source-qualified 资源路径但未改动真实账户收藏；分组没有被错误压平或丢弃，上游不可靠的 `more=false` 和没有续页控制的账户快照均不会被伪造成续页；精选、个性化、分类热门、今日、付费目录、播客横幅、新晋/热门/付费播客榜、新人/热门/24 小时主播榜、节目榜以及 `dj_sub/dj_sublist` 已完成稳定统一映射和离线 HTTP 验证；搜索解包排名包装为完整 `Podcast` 并保留算法/理由，1009 不再伪装直播广播；横幅目标明确使用 `podcast_episode` 而不伪装歌曲，榜单显式分离排名包装与完整资源，主播榜额外保留粉丝数和完整用户身份，节目榜可直接进入播放链，真实不生效的 offset 不会伪装成分页，不存在的翻页控制会被拒绝，账户列表语义优先于条目陈旧收藏态；登录成功写入分支留待有可安全回滚内容时集中验收 |
-| C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `partial` | `voice_lyric` 已通过 provider 与真实统一 HTTP 验收，覆盖 675 段非空转写和 `data=null`；`voice_detail`、`voicelist_detail`、`voicelist_list`、`voicelist_list_search` 与 `voicelist_my_created` 分别以详情/目录的 `backend=workbench`、`/v1/account/podcast-episodes` 或 `/v1/account/podcasts/created` 接入独立能力和类型化输出，完整保留名称、七种审核状态、公开性、付费性、所属播客、包装字段合并、空/畸形首选列表回退、最大 200 条分页及不可续页快照语义，并实测匿名认证边界；创作目录又以普通持久账户真实验证当前 `data.data` 空快照及总数，未把合法空目录误判为协议错误；`voicelist_trans` 已以独立统一写能力接入声音排序，完整保留参考分页定位、同平台身份和 1 基序号，并真实到达上游所有权边界；`voice_delete` 已按实际声音 ID 语义接入单条/批量删除，完整保留原始顺序、重复项、平台身份与参考逗号协议；`voice_upload` 已完整迁移令牌、10 MiB NOS 分片、XML 完成、预检查和正式提交事务，全部发布/隐私/分类/排序/包含歌曲参数均进入稳定统一模型且不泄露音频或 token；三条写链均已验证发网前账户边界，真实上传后的详情/播放、拥有者排序及破坏性删除成功态留待创作者账户和可丢弃声音集中验收 |
+| C10 | 内容展示 | 播客/电台节目分类、详情和节目列表 | `implemented` | `dj_catelist/dj_category_excludehot/dj_category_recommend/dj_hot/dj_detail/dj_program/dj_program_detail/voicelist_search/program_recommend/record_recent_voice/dj_difm_all_style_channel/dj_difm_playing_tracks_list/dj_difm_subscribe_channels_get` 已通过 provider 与真实统一 HTTP/联网验收；分类链分别返回 19 个完整分类、13 个非热门分类和 12 个含完整播客的推荐分组，分类节目推荐的 offset 0/2 也返回两组不同完整节目及可播放音频；持久账户最近声音返回 2 条记录，节目、承载音频、播放时间和终端完整分离；DiFM 电子/古典/爵士三源真实返回 15/8/12 个风格及 252/70/103 个频道，来源、风格、频道层级和 source-qualified 引用完整保留；频道 `netease:difm:0:10505` 的当前队列真实返回 5 条独立 DiFM 播放项，首条 351 秒、2001 个波形采样且直链可用，不伪装普通歌曲；三源账户收藏快照真实返回 `code=200/total=0`，订阅与取消链已完整接入同一 source-qualified 资源路径但未改动真实账户收藏；分组没有被错误压平或丢弃，上游不可靠的 `more=false` 和没有续页控制的账户快照均不会被伪造成续页；精选、个性化、分类热门、今日、付费目录、播客横幅、新晋/热门/付费播客榜、新人/热门/24 小时主播榜、节目榜以及 `dj_sub/dj_sublist` 已完成稳定统一映射和离线 HTTP 验证；持久账户订阅目录再次只读返回 5 项。搜索、横幅、榜单、账户列表和写入协议的必要代码分支均已完成；真实订阅写入成功态留待可安全回滚内容集中验收 |
+| C11 | 内容展示 | 声音及声音歌单详情、目录和歌词 | `implemented` | `voice_lyric` 已通过 provider 与真实统一 HTTP 验收，覆盖 675 段非空转写和 `data=null`；`voice_detail`、`voicelist_detail`、`voicelist_list`、`voicelist_list_search` 与 `voicelist_my_created` 分别以详情/目录的 `backend=workbench`、`/v1/account/podcast-episodes` 或 `/v1/account/podcasts/created` 接入独立能力和类型化输出，完整保留名称、七种审核状态、公开性、付费性、所属播客、包装字段合并、空/畸形首选列表回退、最大 200 条分页及不可续页快照语义；普通持久账户再次真实验证工作台声音查询和创作目录均为 200 空快照，未把合法空目录误判为协议错误；`voicelist_trans` 已以独立统一写能力接入声音排序，`voice_delete` 已按实际声音 ID 语义接入有序单条/批量删除，`voice_upload` 已完整迁移令牌、10 MiB NOS 分片、XML 完成、预检查和正式提交事务，全部发布、隐私、分类、排序和包含歌曲参数均进入稳定统一模型且不泄露音频或 token；必要读写分支、异常和认证前置均已完成，真实上传后的详情/播放、拥有者排序及破坏性删除成功态留待创作者账户和可丢弃声音集中验收 |
 | C12 | 内容展示 | 用户公开资料与当前账户完整资料 | `verified` | `user_detail/user_detail_new` 已以同一 `UserProfile` 的显式 legacy/modern 后端完整接入，平台原始资料不丢失；公开两后端及持久账户 modern 路径均真实 HTTP 验收成功 |
 | P01 | 播放与权益 | 可听性及请求/实际码率 | `verified` | `check_music` 可播与不可播路径已验收 |
 | P02 | 播放与权益 | 旧版歌曲播放 URL 与精确 `br` | `verified` | `song_url` 单/批量和任意码率已真实验收；空白编码与零时长不遮蔽有效格式/歌曲时长 |
@@ -47,7 +47,7 @@
 | P07 | 播放与权益 | 当前/公开 VIP 状态和完整客户端权益 | `implemented` | `vip_info` 已验证；`vip_info_v2` 以显式 `backend=client` 和独立能力接入，保留五类权益包并按服务器时间映射激活态/最长有效期，认证前置及离线成功映射已覆盖，待持久化真实账户成功态 |
 | P08 | 播放与权益 | 广告换免费听、免费听时长及播放权益 | `implemented` | `ad_get`、`ad_listening_rights_gain` 与 `ad_listening_rights` 均已接入独立统一能力；目录/领取覆盖完整类型数组、`req_id` 提取、显式或自动请求 ID、完整参数、参考 GET/统一 POST、v3 checkToken 和未知 `gainFlag` 保守映射；状态查询固定提交 `entrance=FREE_LISTEN_RN`，以毫秒精度返回剩余时长和结束时间，并强类型保留卡片、会员预览、云贝入口、操作与规则。匿名目录返回合法空投放，领取链真实返回登录边界；持久账户只读实测状态为 `INIT`、剩余 0 ms、30 分钟权益卡，成功领取仍待可安全回滚场景验收 |
 | P09 | 播放与权益 | MV/视频播放地址与清晰度 | `verified` | MV 四档真实播放地址和 302 已验收；零首选清晰度/有效期不遮蔽兼容字段；当前有效普通视频真实返回 480p 非空 URL、`available=true/actual_resolution=480`，统一重定向返回 302，空 URL 业务态仍有独立回归 |
-| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `partial` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；声音逐词转写已接入且真实验证，工作台详情、声音歌单目录及账户声音查询都会把 `songId/trackId` 稳定映射为独立 `audio.ref`，待登录成功态确认后即可复用现有取流；声音写入后的完整播放事务仍待验收 |
+| P10 | 播放与权益 | 播客、电台节目和声音播放地址 | `implemented` | 节目先解析独立 `audio.ref`，再复用完整歌曲音质、VIP、账户、跨平台回退和 302 链路；公开节目已再次用持久账户真实解析为节目 `netease:1367665101`、独立音频 `netease:530692704` 和非空播放 URL。声音逐词转写已接入且真实验证，工作台详情、声音歌单目录及账户声音查询都会把 `songId/trackId` 稳定映射为独立 `audio.ref`；必要播放分支均已完成，声音上传后的完整播放事务仍待创作者账户与可丢弃音频联合验收 |
 | P11 | 播放与权益 | 歌曲下载地址及 302 重定向 | `verified` | `song_download_url/song_download_url_v1/song_url_v1_302` 的旧版、新版九档、无 URL 和播放兜底均已真实验收；空白编码与零时长回退有效元数据 |
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
