@@ -16113,7 +16113,11 @@ fn map_qq_dislike_list(
             "platform_message": data.message
         })));
     }
-    if data.page != u64::from(request.page) {
+    let empty_page_sentinel = data.page == 0
+        && data.artists.is_empty()
+        && data.tracks.is_empty()
+        && data.styles.is_empty();
+    if data.page != u64::from(request.page) && !empty_page_sentinel {
         return Err(qq_data_error(
             "QQ dislike list returned a different page number",
         ));
@@ -16158,6 +16162,8 @@ fn map_qq_dislike_list(
         extensions: Extensions::from([
             ("platform_code".to_owned(), json!(data.retcode)),
             ("platform_message".to_owned(), json!(data.message)),
+            ("platform_page".to_owned(), json!(data.page)),
+            ("empty_page_sentinel".to_owned(), json!(empty_page_sentinel)),
             ("requested_cursor".to_owned(), json!(request.cursor)),
             (
                 "continuation_inferred".to_owned(),
@@ -24608,6 +24614,25 @@ mod tests {
         assert_eq!(end.next_cursor, None);
         assert_eq!(end.token, None);
         assert_eq!(end.extensions["continuation_inferred"], false);
+
+        let empty_sentinel = map_qq_dislike_list(
+            &AccountDislikeListRequest::default(),
+            response(json!({
+                "Retcode": 0,
+                "Msg": "",
+                "Singers": [],
+                "Songs": [],
+                "Styles": [],
+                "Page": 0,
+                "Token": "opaque-empty-token"
+            })),
+        )
+        .expect("QQ empty dislike sentinel");
+        assert!(empty_sentinel.items.is_empty());
+        assert_eq!(empty_sentinel.page, 1);
+        assert_eq!(empty_sentinel.next_page, None);
+        assert_eq!(empty_sentinel.extensions["platform_page"], 0);
+        assert_eq!(empty_sentinel.extensions["empty_page_sentinel"], true);
     }
 
     #[test]
