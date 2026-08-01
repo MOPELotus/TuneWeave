@@ -16,11 +16,11 @@ const MAX_PLATFORM_ID: u64 = 9_999_999_999_999_999_999;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SodaDeviceState {
-    schema_version: u32,
-    device_id: String,
-    install_id: String,
-    created_at_ms: u64,
+pub(crate) struct SodaDeviceState {
+    pub(crate) schema_version: u32,
+    pub(crate) device_id: String,
+    pub(crate) install_id: String,
+    pub(crate) created_at_ms: u64,
 }
 
 impl SodaDeviceState {
@@ -108,8 +108,7 @@ impl SodaDeviceStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn snapshot(&self) -> Result<SodaDeviceState> {
+    pub(crate) fn snapshot(&self) -> Result<SodaDeviceState> {
         self.initialize()?;
         self.state
             .lock()

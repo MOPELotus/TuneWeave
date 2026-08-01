@@ -2150,6 +2150,7 @@ dependencies = [
  "async-trait",
  "base64",
  "hex",
+ "qrcode",
  "rand",
  "reqwest",
  "serde",

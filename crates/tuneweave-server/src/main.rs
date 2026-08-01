@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Bilibili,
         BilibiliProvider::new(BilibiliConfig {
             proxy_url: bilibili_proxy.clone(),
-            credential_store: Some(credential_store),
+            credential_store: Some(credential_store.clone()),
         }),
     )?;
     register_provider(
@@ -143,6 +143,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         SodaProvider::new(SodaConfig {
             proxy_url: soda_proxy.clone(),
             device_path: Some(data_dir.join("soda-device.json")),
+            credential_store: Some(credential_store),
         }),
     )?;
     let state =
@@ -171,8 +172,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         default_platform = "netease",
         credential_store_open = true,
         uni_playlist_store_open = true,
-        server_account_platforms = "netease,qq,bilibili",
-        caller_credential_platforms = "netease,qq,bilibili",
+        server_account_platforms = "netease,qq,bilibili,soda",
+        caller_credential_platforms = "netease,qq,bilibili,soda",
         netease_bootstrap_cookie = netease_cookie.is_some(),
         netease_proxy = netease_proxy.is_some(),
         qq_proxy = qq_proxy.is_some(),

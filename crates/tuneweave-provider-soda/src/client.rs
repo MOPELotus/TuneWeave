@@ -14,14 +14,14 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Album, AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor,
-    Lyrics, Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
-    TrackAvailabilityRequest, TuneWeaveError, UpstreamBusinessClass, UpstreamOutcome,
-    UpstreamRequestSummary,
+    AccountCredentialStore, Album, AlbumSummary, ArtistSummary, AudioContent, ErrorCode,
+    Extensions, LyricContributor, Lyrics, Platform, Playlist, Quality, ResourceRef, Result, Track,
+    TrackAvailability, TrackAvailabilityRequest, TuneWeaveError, UpstreamBusinessClass,
+    UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
-use crate::device::SodaDeviceStore;
+use crate::device::{SodaDeviceState, SodaDeviceStore};
 use crate::identity::{
     SodaTrackIdentity, SodaTrackIdentityInput, classify_track_identity,
     parse_short_redirect_location,
@@ -44,6 +44,7 @@ const USER_AGENT: &str = "TuneWeave/0.1 (Soda public music provider)";
 pub struct SodaConfig {
     pub proxy_url: Option<String>,
     pub device_path: Option<PathBuf>,
+    pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl fmt::Debug for SodaConfig {
@@ -55,6 +56,10 @@ impl fmt::Debug for SodaConfig {
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
             .field("device_path", &self.device_path)
+            .field(
+                "credential_store_configured",
+                &self.credential_store.is_some(),
+            )
             .finish()
     }
 }
@@ -622,6 +627,14 @@ impl SodaClient {
         self.device.initialize()
     }
 
+    pub(crate) fn login_http(&self) -> &Client {
+        &self.http
+    }
+
+    pub(crate) fn login_device(&self) -> Result<SodaDeviceState> {
+        self.device.snapshot()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_client() -> Self {
         Self::new(&SodaConfig::default()).expect("build Soda test client")
@@ -994,7 +1007,7 @@ impl SodaClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn log_upstream_request<T>(
+    pub(crate) fn log_upstream_request<T>(
         &self,
         operation: &'static str,
         upstream_host: &'static str,
@@ -2515,7 +2528,7 @@ fn canonical_nonnegative_decimal(value: &str) -> Option<&str> {
     .then_some(value)
 }
 
-fn unix_rfc3339(timestamp: u64) -> Option<String> {
+pub(crate) fn unix_rfc3339(timestamp: u64) -> Option<String> {
     let days = i64::try_from(timestamp / 86_400).ok()?;
     let seconds = timestamp % 86_400;
     let shifted_days = days.checked_add(719_468)?;
@@ -2542,7 +2555,10 @@ fn unix_rfc3339(timestamp: u64) -> Option<String> {
     ))
 }
 
-async fn read_bounded_response(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+pub(crate) async fn read_bounded_response(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<Vec<u8>> {
     let mut response = response;
     let status = response.status();
     if !status.is_success() {
@@ -2671,7 +2687,7 @@ fn validate_decrypted_codec(audio: &DecryptedSodaAudio, declared_codec: &str) ->
     Ok(())
 }
 
-fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
+pub(crate) fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
     let code = if error.is_timeout() {
         ErrorCode::UpstreamTimeout
     } else {
@@ -2682,7 +2698,7 @@ fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
         .retryable(true)
 }
 
-fn soda_http_error(status: StatusCode) -> TuneWeaveError {
+pub(crate) fn soda_http_error(status: StatusCode) -> TuneWeaveError {
     let code = if status == StatusCode::TOO_MANY_REQUESTS {
         ErrorCode::RateLimited
     } else {
@@ -2710,7 +2726,7 @@ fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Soda)
 }
 
-fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
+pub(crate) fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::UpstreamError, message).with_platform(Platform::Soda)
 }
 
@@ -3355,6 +3371,7 @@ mod tests {
         let client = SodaClient::new(&SodaConfig {
             proxy_url: None,
             device_path: Some(path.clone()),
+            credential_store: None,
         })
         .expect("build Soda client");
         assert!(!path.exists());

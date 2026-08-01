@@ -7,7 +7,7 @@ TuneWeave 使用 Rust 构建，目标是在保持较小存储体积、较低运�
 ## 设计方向
 
 - 同一种业务能力使用相同端点和统一输入输出结构。
-- 账户请求可通过 `platform + account` 选择服务器持久化的多账户登录态，也可通过 `X-TuneWeave-Credential` 按请求携带调用方自管凭证。QQ、网易云与 B 站登录均支持 `credential_mode=server|client|both`，分别对应仅保存、仅返回或保存并返回同一凭证代际；各平台已实现的账户与业务端点按[调用方托管凭证契约](docs/credential-ownership.md)逐项接通。
+- 账户请求可通过 `platform + account` 选择服务器持久化的多账户登录态，也可通过 `X-TuneWeave-Credential` 按请求携带调用方自管凭证。QQ、网易云、B 站与汽水二维码登录支持 `credential_mode=server|client|both`，分别对应仅保存、仅返回或保存并返回同一凭证代际；各平台已实现的账户与业务端点按[调用方托管凭证契约](docs/credential-ownership.md)逐项接通。
 - 内容来源与播放来源解耦：歌单来自一个平台时，音频可按策略从其他平台解析。
 - 指定或默认平台播放失败后，可按可配置顺序回退到其他平台。
 - 平台适配器按能力声明接入，不要求每个平台实现不存在的功能。

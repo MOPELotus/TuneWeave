@@ -1,49 +1,121 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Album, AudioContent, Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
-    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, PlaylistPlayableItem, Quality,
-    Result, SearchKind, SearchQuery, SearchVariant, StreamRequest, StreamVariant, Track,
-    TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
+    AccountCredentialStore, AccountProfile, Album, AudioContent, AuthState, Capability,
+    CredentialMode, ErrorCode, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
+    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, PlaylistPlayableItem,
+    ProviderAuthResult, ProviderCredential, ProviderQrPoll, ProviderQrStart, Quality, Result,
+    SearchKind, SearchQuery, SearchVariant, StoredAccountCredential, StreamRequest, StreamVariant,
+    Track, TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
 };
 
 use crate::{
     client::{SodaClient, SodaConfig, SodaPlayback, UPSTREAM_SEARCH_PAGE_SIZE},
     identity::SodaTrackIdentity,
+    login::{SodaCredential, SodaQrPollOutcome, SodaQrTransactions},
 };
 
 const MAX_UPSTREAM_PAGES_PER_SEARCH: u32 = 6;
 const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
 const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 128;
+const SODA_CREDENTIAL_KIND: &str = "soda_cookie_v1";
 
 #[derive(Clone)]
 pub struct SodaProvider {
     client: SodaClient,
+    credential_store: Option<Arc<dyn AccountCredentialStore>>,
+    caller_credential: Option<SodaCredential>,
+    qr_transactions: SodaQrTransactions,
 }
 
 impl fmt::Debug for SodaProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SodaProvider")
+            .field(
+                "credential_store_configured",
+                &self.credential_store.is_some(),
+            )
+            .field(
+                "caller_credential_configured",
+                &self.caller_credential.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl SodaProvider {
     pub fn new(config: SodaConfig) -> Result<Self> {
+        let credential_store = config.credential_store.clone();
         Ok(Self {
             client: SodaClient::new(&config)?,
+            credential_store,
+            caller_credential: None,
+            qr_transactions: SodaQrTransactions::default(),
         })
     }
 
     #[must_use]
-    pub const fn from_client(client: SodaClient) -> Self {
-        Self { client }
+    pub fn from_client(client: SodaClient) -> Self {
+        Self {
+            client,
+            credential_store: None,
+            caller_credential: None,
+            qr_transactions: SodaQrTransactions::default(),
+        }
+    }
+
+    fn caller_credential_scope(&self, credential: &ProviderCredential) -> Result<Self> {
+        Ok(Self {
+            client: self.client.clone(),
+            credential_store: None,
+            caller_credential: Some(parse_soda_caller_credential(credential)?),
+            qr_transactions: self.qr_transactions.clone(),
+        })
+    }
+
+    fn finish_authentication(
+        &self,
+        account: &str,
+        credential: &SodaCredential,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        validate_soda_login_account(account, mode)?;
+        let account = account.trim();
+        let secret = credential.serialize()?;
+        let caller_credential = mode
+            .returns_to_caller()
+            .then(|| ProviderCredential::new(Platform::Soda, SODA_CREDENTIAL_KIND, &secret, None))
+            .transpose()?;
+        if mode.persists_on_server() {
+            let store = self.credential_store.as_ref().ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::InternalError,
+                    "Soda account storage is not configured",
+                )
+                .with_platform(Platform::Soda)
+            })?;
+            store.put(&StoredAccountCredential::new(
+                Platform::Soda,
+                account,
+                SODA_CREDENTIAL_KIND,
+                &secret,
+            )?)?;
+        }
+        let mut profile = AccountProfile::authenticated(Platform::Soda, account);
+        profile
+            .extensions
+            .insert("credential_kind".to_owned(), json!(SODA_CREDENTIAL_KIND));
+        Ok(ProviderAuthResult {
+            profile,
+            credential: caller_credential,
+        })
     }
 }
 
@@ -57,8 +129,17 @@ impl MusicProvider for SodaProvider {
         "Soda Music"
     }
 
+    fn with_caller_credential(
+        &self,
+        credential: &ProviderCredential,
+    ) -> Result<Arc<dyn MusicProvider>> {
+        Ok(Arc::new(self.caller_credential_scope(credential)?))
+    }
+
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::QrLogin,
+            Capability::CallerManagedCredentials,
             Capability::AlbumDetail,
             Capability::AudioDownload,
             Capability::AudioStream,
@@ -68,6 +149,91 @@ impl MusicProvider for SodaProvider {
             Capability::Lyrics,
             Capability::TrackAvailability,
         ])
+    }
+
+    async fn start_qr_login(&self, login_type: Option<&str>) -> Result<ProviderQrStart> {
+        if let Some(login_type) = login_type.map(str::trim).filter(|value| !value.is_empty())
+            && !matches!(
+                login_type.to_ascii_lowercase().as_str(),
+                "default" | "web" | "soda"
+            )
+        {
+            return Err(soda_invalid_request(format!(
+                "unsupported Soda QR login type: {login_type}"
+            )));
+        }
+        let start = self.qr_transactions.start(&self.client).await?;
+        Ok(ProviderQrStart {
+            provider_transaction_id: start.provider_transaction_id,
+            url: start.image_data_url.clone(),
+            image_data_url: Some(start.image_data_url),
+            expires_at: start.expires_at,
+        })
+    }
+
+    async fn poll_qr_login(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+    ) -> Result<ProviderQrPoll> {
+        self.poll_qr_login_with_mode(provider_transaction_id, account, CredentialMode::Server)
+            .await
+    }
+
+    async fn poll_qr_login_with_mode(
+        &self,
+        provider_transaction_id: &str,
+        account: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrPoll> {
+        validate_soda_login_account(account, mode)?;
+        match self
+            .qr_transactions
+            .poll(&self.client, provider_transaction_id)
+            .await?
+        {
+            SodaQrPollOutcome::Waiting => Ok(ProviderQrPoll {
+                state: AuthState::Waiting,
+                message: Some("waiting for Soda QR scan".to_owned()),
+                profile: None,
+                credential: None,
+            }),
+            SodaQrPollOutcome::Scanned => Ok(ProviderQrPoll {
+                state: AuthState::Scanned,
+                message: Some("Soda QR scanned; waiting for confirmation".to_owned()),
+                profile: None,
+                credential: None,
+            }),
+            SodaQrPollOutcome::AdditionalVerificationRequired => Ok(ProviderQrPoll {
+                state: AuthState::Scanned,
+                message: Some(
+                    "Soda QR confirmed; additional account verification is required".to_owned(),
+                ),
+                profile: None,
+                credential: None,
+            }),
+            SodaQrPollOutcome::Expired => Ok(ProviderQrPoll {
+                state: AuthState::Expired,
+                message: Some("Soda QR login expired".to_owned()),
+                profile: None,
+                credential: None,
+            }),
+            SodaQrPollOutcome::Failed { code } => Ok(ProviderQrPoll {
+                state: AuthState::Failed,
+                message: Some(format!("Soda QR login failed ({code})")),
+                profile: None,
+                credential: None,
+            }),
+            SodaQrPollOutcome::Confirmed(credential) => {
+                let result = self.finish_authentication(account, &credential, mode)?;
+                Ok(ProviderQrPoll {
+                    state: AuthState::Confirmed,
+                    message: Some("Soda account authenticated".to_owned()),
+                    profile: Some(result.profile),
+                    credential: result.credential,
+                })
+            }
+        }
     }
 
     async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
@@ -729,6 +895,44 @@ fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<(
     Ok(())
 }
 
+fn validate_soda_login_account(account: &str, mode: CredentialMode) -> Result<()> {
+    let account = account.trim();
+    if account.is_empty() {
+        return Err(soda_invalid_request("Soda account alias cannot be empty"));
+    }
+    if account.len() > 64 {
+        return Err(soda_invalid_request(
+            "Soda account alias cannot exceed 64 bytes",
+        ));
+    }
+    if mode == CredentialMode::Client && account != "default" {
+        return Err(soda_invalid_request(
+            "client credential mode does not accept a server account alias",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_soda_caller_credential(credential: &ProviderCredential) -> Result<SodaCredential> {
+    if credential.platform != Platform::Soda {
+        return Err(soda_invalid_request(
+            "caller credential platform does not match Soda",
+        ));
+    }
+    if credential.kind != SODA_CREDENTIAL_KIND {
+        return Err(soda_invalid_request(
+            "caller credential kind is not supported by Soda",
+        ));
+    }
+    if credential.expires_at.is_some() {
+        return Err(soda_invalid_request(
+            "caller Soda credential expiry does not match its payload",
+        ));
+    }
+    SodaCredential::parse(credential.secret())
+        .map_err(|_| soda_invalid_request("caller Soda credential payload is malformed or invalid"))
+}
+
 fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Soda)
 }
@@ -742,14 +946,23 @@ fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 mod tests {
     use super::*;
 
+    fn test_soda_credential() -> SodaCredential {
+        SodaCredential::parse(
+            r#"{"version":1,"cookies":{"passport_csrf_token":"csrf-value","sessionid_ss":"session-secret"}}"#,
+        )
+        .expect("Soda credential")
+    }
+
     #[test]
-    fn provider_advertises_only_verified_public_capabilities() {
+    fn provider_advertises_current_public_and_auth_capabilities() {
         let provider = SodaProvider::new(SodaConfig::default()).expect("Soda provider");
         assert_eq!(provider.platform(), Platform::Soda);
         assert_eq!(provider.name(), "Soda Music");
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::QrLogin,
+                Capability::CallerManagedCredentials,
                 Capability::AlbumDetail,
                 Capability::AudioDownload,
                 Capability::AudioStream,
@@ -767,6 +980,55 @@ mod tests {
         assert!(provider.supports(Capability::AudioDownload));
         assert!(provider.supports(Capability::PlaylistRead));
         assert!(provider.supports(Capability::AlbumDetail));
+    }
+
+    #[test]
+    fn authentication_ownership_is_atomic_and_caller_credentials_are_strict() {
+        let root = std::env::temp_dir().join(format!(
+            "tuneweave-soda-provider-credential-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let store = Arc::new(tuneweave_core::FileAccountCredentialStore::new(&root));
+        let provider = SodaProvider::new(SodaConfig {
+            credential_store: Some(store.clone()),
+            ..SodaConfig::default()
+        })
+        .expect("Soda provider");
+        let credential = test_soda_credential();
+
+        let result = provider
+            .finish_authentication("personal", &credential, CredentialMode::Both)
+            .expect("persist and return credential");
+        assert!(result.profile.authenticated);
+        assert_eq!(result.profile.account, "personal");
+        let caller = result.credential.expect("caller credential");
+        assert_eq!(caller.platform, Platform::Soda);
+        assert_eq!(caller.kind, SODA_CREDENTIAL_KIND);
+        assert!(caller.expires_at.is_none());
+        assert_eq!(
+            store
+                .load_platform(Platform::Soda)
+                .expect("load Soda credentials")
+                .len(),
+            1
+        );
+        let scoped = provider
+            .caller_credential_scope(&caller)
+            .expect("caller credential scope");
+        assert!(scoped.caller_credential.is_some());
+        assert!(scoped.credential_store.is_none());
+
+        let wrong_platform =
+            ProviderCredential::new(Platform::Qq, SODA_CREDENTIAL_KIND, caller.secret(), None)
+                .expect("foreign credential");
+        assert!(provider.caller_credential_scope(&wrong_platform).is_err());
+        assert!(
+            provider
+                .finish_authentication("named", &credential, CredentialMode::Client)
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).expect("remove credential directory");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod client;
 mod device;
 mod identity;
+mod login;
 pub mod media;
 mod provider;
 
