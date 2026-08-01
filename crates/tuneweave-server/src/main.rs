@@ -10,8 +10,8 @@ use std::{
 use tokio::net::TcpListener;
 use tracing::{error, info};
 use tuneweave_core::{
-    AccountCredentialStore, DirectoryUniPlaylistStore, FileAccountCredentialStore, MusicProvider,
-    Platform, ProviderRegistry, TuneWeaveError, UniPlaylistStore,
+    AccountCredentialStore, DirectoryUniPlaylistStore, ErrorCode, FileAccountCredentialStore,
+    MusicProvider, Platform, ProviderRegistry, TuneWeaveError, UniPlaylistStore,
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
 use tuneweave_provider_kugou::{KugouConfig, KugouProvider};
@@ -74,15 +74,22 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let kuwo_proxy = nonempty_env("TUNEWEAVE_KUWO_PROXY");
     let soda_proxy = nonempty_env("TUNEWEAVE_SODA_PROXY");
     let mut registry = ProviderRegistry::new();
+    let netease_real_ip = env::var("TUNEWEAVE_NETEASE_REAL_IP")
+        .ok()
+        .filter(|ip| !ip.trim().is_empty())
+        .map(|ip| ip.trim().parse::<Ipv4Addr>())
+        .transpose()
+        .inspect_err(|_| {
+            log_provider_configuration_failure(Platform::Netease, "real_ip");
+        })?;
+    let netease_random_cn_ip = env_bool("TUNEWEAVE_NETEASE_RANDOM_CN_IP").inspect_err(|_| {
+        log_provider_configuration_failure(Platform::Netease, "random_cn_ip");
+    })?;
     let netease_config = NeteaseConfig {
         cookie: netease_cookie.clone(),
         proxy_url: netease_proxy.clone(),
-        real_ip: env::var("TUNEWEAVE_NETEASE_REAL_IP")
-            .ok()
-            .filter(|ip| !ip.trim().is_empty())
-            .map(|ip| ip.trim().parse::<Ipv4Addr>())
-            .transpose()?,
-        random_cn_ip: env_bool("TUNEWEAVE_NETEASE_RANDOM_CN_IP")?,
+        real_ip: netease_real_ip,
+        random_cn_ip: netease_random_cn_ip,
         credential_store: Some(credential_store.clone()),
         ..NeteaseConfig::default()
     };
@@ -267,6 +274,7 @@ fn log_server_io_failure(stage: ServerLifecycleStage, error: &IoError) {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderStartupStage {
+    Configure,
     Initialize,
     Register,
 }
@@ -274,10 +282,23 @@ enum ProviderStartupStage {
 impl ProviderStartupStage {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Configure => "configure",
             Self::Initialize => "initialize",
             Self::Register => "register",
         }
     }
+}
+
+fn log_provider_configuration_failure(platform: Platform, setting: &'static str) {
+    error!(
+        event = "provider_startup_failure",
+        provider = platform.as_str(),
+        stage = ProviderStartupStage::Configure.as_str(),
+        setting,
+        error_code = ErrorCode::InvalidRequest.as_str(),
+        retryable = false,
+        "TuneWeave provider failed startup validation"
+    );
 }
 
 fn log_provider_startup_failure(
@@ -439,6 +460,7 @@ mod tests {
 
     #[test]
     fn provider_startup_stages_use_stable_safe_names() {
+        assert_eq!(ProviderStartupStage::Configure.as_str(), "configure");
         assert_eq!(ProviderStartupStage::Initialize.as_str(), "initialize");
         assert_eq!(ProviderStartupStage::Register.as_str(), "register");
     }
