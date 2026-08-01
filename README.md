@@ -37,6 +37,7 @@ curl http://127.0.0.1:7832/v1/capabilities
 - [登录与调用方托管凭证](docs/authentication.md)
 - [Uni Playlist](docs/uni-playlist.md)
 - [完整路由目录](docs/routes.json)
+- [版本下载清单](release-manifest.json)
 
 所有业务响应使用统一 JSON 包络。资源引用带有平台前缀，例如 `netease:123456`、`qq:0039MnYb0qxYhV` 和 `bilibili:bvid:BV1xx411c7mD`。调用方可通过 `platform` 选择内容或账户平台，通过 `account` 选择服务器托管账户，也可使用 `X-TuneWeave-Credential` 携带由调用方保存的登录凭证。
 

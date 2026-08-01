@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "project": "TuneWeave",
+  "version": "0.1.0-alpha.1",
+  "tag": "v0.1.0-alpha.1",
+  "channel": "prerelease",
+  "prerelease": true,
+  "api_version": "v1",
+  "release_page": "https://github.com/MOPELotus/TuneWeave/releases/tag/v0.1.0-alpha.1",
+  "manifest_url": "https://raw.githubusercontent.com/MOPELotus/TuneWeave/main/release-manifest.json",
+  "artifacts": [
+    {
+      "platform": "linux",
+      "architecture": "x86_64",
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "tuneweave-x86_64-unknown-linux-gnu.tar.gz",
+      "executable": "tuneweave",
+      "format": "tar.gz",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-unknown-linux-gnu.tar.gz",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-x86_64-unknown-linux-gnu.tar.gz.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-unknown-linux-gnu.tar.gz.sha256"
+      }
+    },
+    {
+      "platform": "windows",
+      "architecture": "x86_64",
+      "target": "x86_64-pc-windows-msvc",
+      "archive": "tuneweave-x86_64-pc-windows-msvc.tar.gz",
+      "executable": "tuneweave.exe",
+      "format": "tar.gz",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-pc-windows-msvc.tar.gz",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-x86_64-pc-windows-msvc.tar.gz.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-pc-windows-msvc.tar.gz.sha256"
+      }
+    },
+    {
+      "platform": "macos",
+      "architecture": "x86_64",
+      "target": "x86_64-apple-darwin",
+      "archive": "tuneweave-x86_64-apple-darwin.tar.gz",
+      "executable": "tuneweave",
+      "format": "tar.gz",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-apple-darwin.tar.gz",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-x86_64-apple-darwin.tar.gz.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-x86_64-apple-darwin.tar.gz.sha256"
+      }
+    },
+    {
+      "platform": "macos",
+      "architecture": "aarch64",
+      "target": "aarch64-apple-darwin",
+      "archive": "tuneweave-aarch64-apple-darwin.tar.gz",
+      "executable": "tuneweave",
+      "format": "tar.gz",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-aarch64-apple-darwin.tar.gz",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-aarch64-apple-darwin.tar.gz.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-aarch64-apple-darwin.tar.gz.sha256"
+      }
+    }
+  ]
+}
