@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 206,
+  "covered_route_count": 228,
   "entries": [
     {
       "id": "health",
@@ -3982,6 +3982,424 @@
       "acceptance_cases": [
         "user_playlist_directories_keep_identity_kind_and_optional_viewer_account",
         "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_catalog",
+      "method": "GET",
+      "path": "/v1/videos",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "music_video_catalog_unifies_reference_filters_and_pagination",
+        "music_video_catalog_rejects_unknown_filters_and_invalid_pagination",
+        "video_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_details_get",
+      "method": "GET",
+      "path": "/v1/videos/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_video_details_preserve_batch_order_duplicates_and_default_mv_kind",
+        "video_detail_batch_default_provider_fanout_preserves_duplicates",
+        "video_detail_batches_reject_ambiguous_mixed_and_invalid_requests",
+        "video_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_details_post",
+      "method": "POST",
+      "path": "/v1/videos/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_video_details_preserve_batch_order_duplicates_and_default_mv_kind",
+        "video_detail_batch_default_provider_fanout_preserves_duplicates",
+        "video_detail_batches_reject_ambiguous_mixed_and_invalid_requests",
+        "video_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_streams_get",
+      "method": "GET",
+      "path": "/v1/videos/streams",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_stream_batches_preserve_qq_duplicates_and_batch_controls",
+        "video_stream_batches_reject_ambiguous_mixed_and_invalid_requests",
+        "video_streams_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_streams_post",
+      "method": "POST",
+      "path": "/v1/videos/streams",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_stream_batches_preserve_qq_duplicates_and_batch_controls",
+        "video_stream_batches_reject_ambiguous_mixed_and_invalid_requests",
+        "video_streams_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_taxonomy",
+      "method": "GET",
+      "path": "/v1/videos/taxonomy",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_taxonomy_unifies_categories_groups_and_pagination",
+        "music_video_catalog_rejects_unknown_filters_and_invalid_pagination",
+        "video_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_detail",
+      "method": "GET",
+      "path": "/v1/videos/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_detail_infers_mv_or_video_and_preserves_explicit_type_and_account",
+        "video_stats_and_stream_use_unified_kind_resolution_and_metadata",
+        "video_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_audio_download",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-download",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection"
+      ]
+    },
+    {
+      "id": "video_audio_download_redirect",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-download/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection"
+      ]
+    },
+    {
+      "id": "video_audio_stream",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-stream",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_audio_stream_forwards_selection_and_defaults_to_primary_part",
+        "video_audio_stream_rejects_foreign_empty_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_audio_stream_redirect",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-stream/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection",
+        "video_audio_stream_rejects_foreign_empty_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_parts",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/parts",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_parts_preserve_parent_identity_pagination_kind_and_account",
+        "video_parts_reject_invalid_pagination_kind_and_unknown_parameters"
+      ]
+    },
+    {
+      "id": "video_playback_manifest",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/playback",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_playback_manifest_forwards_part_language_and_account",
+        "video_playback_manifest_rejects_missing_foreign_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_stats",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stats",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_stats_and_stream_use_unified_kind_resolution_and_metadata"
+      ]
+    },
+    {
+      "id": "video_stream",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stream",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_stats_and_stream_use_unified_kind_resolution_and_metadata",
+        "video_stream_redirects_only_when_a_real_url_is_available",
+        "video_routes_reject_bad_types_resolutions_and_unknown_parameters",
+        "video_streams_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "video_stream_redirect",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stream/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_stream_redirects_only_when_a_real_url_is_available",
+        "video_routes_reject_bad_types_resolutions_and_unknown_parameters"
+      ]
+    },
+    {
+      "id": "video_subtitles",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/subtitles",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_subtitles_require_a_matching_part_and_forward_account",
+        "video_subtitles_reject_missing_foreign_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_subtitle_body",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/subtitles/{subtitle}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_subtitle_body_accepts_full_or_local_refs_and_forwards_account",
+        "video_subtitle_body_rejects_missing_foreign_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_download",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-download",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection"
+      ]
+    },
+    {
+      "id": "video_download_redirect",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-download/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection"
+      ]
+    },
+    {
+      "id": "video_track_stream",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-stream",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_stream_forwards_quality_codec_and_defaults_to_primary_part",
+        "video_track_stream_rejects_foreign_empty_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "video_track_stream_redirect",
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-stream/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "video_track_download_aliases_and_media_redirects_preserve_selection",
+        "video_track_stream_rejects_foreign_empty_and_unknown_inputs"
       ]
     }
   ]
