@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -19,6 +21,7 @@ use tuneweave_core::{
 };
 use url::Url;
 
+use crate::device::SodaDeviceStore;
 use crate::identity::{
     SodaTrackIdentity, SodaTrackIdentityInput, classify_track_identity,
     parse_short_redirect_location,
@@ -40,6 +43,7 @@ const USER_AGENT: &str = "TuneWeave/0.1 (Soda public music provider)";
 #[derive(Clone, Default)]
 pub struct SodaConfig {
     pub proxy_url: Option<String>,
+    pub device_path: Option<PathBuf>,
 }
 
 impl fmt::Debug for SodaConfig {
@@ -50,6 +54,7 @@ impl fmt::Debug for SodaConfig {
                 "proxy_url",
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
+            .field("device_path", &self.device_path)
             .finish()
     }
 }
@@ -58,6 +63,7 @@ impl fmt::Debug for SodaConfig {
 pub struct SodaClient {
     http: Client,
     proxy_configured: bool,
+    device: Arc<SodaDeviceStore>,
 }
 
 impl fmt::Debug for SodaClient {
@@ -606,7 +612,14 @@ impl SodaClient {
         Ok(Self {
             http,
             proxy_configured: config.proxy_url.is_some(),
+            device: Arc::new(SodaDeviceStore::new(config.device_path.clone())),
         })
+    }
+
+    /// Initializes the private device identity used by Soda account flows.
+    /// Public anonymous music operations do not call this method.
+    pub fn initialize_login_device(&self) -> Result<()> {
+        self.device.initialize()
     }
 
     #[cfg(test)]
@@ -3319,6 +3332,7 @@ mod tests {
 
         let config = SodaConfig {
             proxy_url: Some("http://user:secret@example.test:8080".to_owned()),
+            ..SodaConfig::default()
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("[configured]"));
@@ -3328,6 +3342,27 @@ mod tests {
             format!("{:?}", SodaClient::test_client()),
             "SodaClient { .. }"
         );
+    }
+
+    #[test]
+    fn login_device_is_initialized_lazily_through_the_client() {
+        let root = std::env::temp_dir().join(format!(
+            "tuneweave-soda-client-device-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = root.join("soda-device.json");
+        let client = SodaClient::new(&SodaConfig {
+            proxy_url: None,
+            device_path: Some(path.clone()),
+        })
+        .expect("build Soda client");
+        assert!(!path.exists());
+        client
+            .initialize_login_device()
+            .expect("initialize login device");
+        assert!(path.exists());
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]

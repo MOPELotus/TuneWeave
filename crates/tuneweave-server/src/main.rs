@@ -142,6 +142,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Soda,
         SodaProvider::new(SodaConfig {
             proxy_url: soda_proxy.clone(),
+            device_path: Some(data_dir.join("soda-device.json")),
         }),
     )?;
     let state =
