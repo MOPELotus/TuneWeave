@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "status": "draft",
+  "status": "complete",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 237,
+  "covered_route_count": 257,
   "entries": [
     {
       "id": "health",
@@ -4572,6 +4572,375 @@
         "comment_report_exposes_reason_account_and_submission_state",
         "comment_report_rejects_invalid_reason_body_target_and_query",
         "comment_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "netease_anonymous_session_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/anonymous-session",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_anonymous_session_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/anonymous-session",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_extension_api",
+      "method": "POST",
+      "path": "/v1/extensions/netease/api",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "netease_extension_api_uses_the_standard_envelope_and_account_alias",
+        "netease_extension_api_defaults_to_an_empty_data_object",
+        "netease_extensions_accept_caller_credentials_without_server_aliases",
+        "netease_extension_api_rejects_transport_and_credential_overrides"
+      ]
+    },
+    {
+      "id": "netease_extension_batch_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/batch",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "netease_batch_get_accepts_reference_query_shape",
+        "netease_batch_rejects_empty_duplicate_and_transport_fields",
+        "netease_extensions_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "netease_extension_batch_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/batch",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "netease_batch_post_accepts_container_and_reference_dynamic_fields",
+        "netease_batch_rejects_empty_duplicate_and_transport_fields",
+        "netease_extensions_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "netease_calendar",
+      "method": "GET",
+      "path": "/v1/extensions/netease/calendar",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_calendar_accepts_reference_and_unified_parameter_names",
+        "netease_calendar_accepts_caller_credentials_without_server_aliases",
+        "netease_calendar_defaults_both_runtime_timestamps_to_the_same_current_time",
+        "netease_calendar_rejects_invalid_timestamps_before_provider_dispatch"
+      ]
+    },
+    {
+      "id": "netease_check_token_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/check-token",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_check_token_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/check-token",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_anonimous_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/anonimous",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_anonimous_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/anonimous",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_anonymous_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/anonymous",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_anonymous_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/anonymous",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_anonymous_session_supports_cache_refresh_and_reference_aliases",
+        "netease_anonymous_session_rejects_invalid_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_v2_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken/v2",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_v2_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken/v2",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_v3_get",
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken/v3",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "netease_register_checktoken_v3_post",
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken/v3",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "netease_check_token_supports_cached_query_refresh_and_post_refresh_flows",
+        "netease_check_token_rejects_invalid_refresh_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "qq_extension_api",
+      "method": "POST",
+      "path": "/v1/extensions/qq/api",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "qq_extension_api_uses_fixed_protocol_and_standard_envelope",
+        "qq_extensions_accept_caller_credentials_without_server_aliases",
+        "qq_extension_http_shape_rejects_transport_and_credential_overrides"
+      ]
+    },
+    {
+      "id": "qq_extension_batch",
+      "method": "POST",
+      "path": "/v1/extensions/qq/batch",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "qq_extension_batch_preserves_caller_keys_and_web_profile",
+        "qq_extensions_accept_caller_credentials_without_server_aliases",
+        "qq_extension_http_shape_rejects_transport_and_credential_overrides",
+        "qq_extension_batch_rejects_bounds_before_account_or_network_access"
       ]
     }
   ]
