@@ -7961,6 +7961,7 @@ fn map_netease_created_podcasts(body: Value, limit: u32) -> Result<Page<Podcast>
         data.and_then(|value| value.get("voiceLists")),
         data.and_then(|value| value.get("voicelists")),
         data.and_then(|value| value.get("records")),
+        data.and_then(|value| value.get("data")),
         data.filter(|value| value.is_array()),
         body.get("voiceLists"),
         body.get("voicelists"),
@@ -21877,11 +21878,26 @@ mod tests {
         assert_eq!(page.pagination.extensions["continuation_supported"], false);
 
         let empty = map_netease_created_podcasts(
-            json!({"code": 200, "data": {"list": [], "total": 0}}),
+            json!({
+                "code": 200,
+                "data": {
+                    "count": 0,
+                    "data": [],
+                    "extraRecords": null,
+                    "hasMore": false,
+                    "privacySetting": null,
+                    "recentPlayData": []
+                }
+            }),
             20,
         )
         .expect("map empty created podcast list");
         assert!(empty.items.is_empty());
+        assert_eq!(empty.pagination.total, Some(0));
+        assert_eq!(
+            empty.pagination.extensions["response"]["data"]["hasMore"],
+            false
+        );
 
         for invalid in [
             json!({"code": 200}),
