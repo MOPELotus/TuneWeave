@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 46,
+  "covered_route_count": 58,
   "entries": [
     {
       "id": "health",
@@ -977,6 +977,231 @@
       "network": "anonymous",
       "acceptance_cases": [
         "uni_playlist_items_preserve_types_order_duplicates_and_platform_accounts"
+      ]
+    },
+    {
+      "id": "playlist_create",
+      "method": "POST",
+      "path": "/v1/playlists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_create_and_update_preserve_unified_and_reference_fields",
+        "playlist_writes_accept_caller_credentials_without_server_aliases",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_delete_batch",
+      "method": "DELETE",
+      "path": "/v1/playlists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_delete_supports_single_and_ordered_batch_references",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_delete",
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_delete_supports_single_and_ordered_batch_references",
+        "qq_playlist_deletion_uses_explicit_directory_identity"
+      ]
+    },
+    {
+      "id": "playlist_update",
+      "method": "PATCH",
+      "path": "/v1/playlists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_create_and_update_preserve_unified_and_reference_fields",
+        "playlist_writes_accept_caller_credentials_without_server_aliases",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_cover_update",
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/cover",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_cover_accepts_binary_images_and_reference_parameter_aliases",
+        "playlist_writes_accept_caller_credentials_without_server_aliases",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_items_add",
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/items",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_items_remove",
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/items",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct",
+        "playlist_write_routes_reject_conflicts_unknown_fields_and_mixed_platforms"
+      ]
+    },
+    {
+      "id": "playlist_tracks_add",
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct",
+        "qq_playlist_track_mutations_preserve_action_order_duplicates_and_account",
+        "playlist_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "playlist_tracks_remove",
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct",
+        "qq_playlist_track_mutations_preserve_action_order_duplicates_and_account"
+      ]
+    },
+    {
+      "id": "playlist_tracks_order",
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/tracks/order",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_and_account_order_routes_preserve_exact_input_order",
+        "playlist_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "playlist_videos_add",
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/videos",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct"
+      ]
+    },
+    {
+      "id": "playlist_videos_remove",
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/videos",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_item_routes_keep_tracks_and_videos_distinct"
       ]
     }
   ]
