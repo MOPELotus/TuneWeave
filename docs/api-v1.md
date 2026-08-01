@@ -1723,7 +1723,7 @@ B 站 `season` 与 `favorite_folder` 来源已接通真实导入，来源 `id` �
 
 B 站 `video` 类型 Uni 项默认把视频视为可播放音频来源：未提交 `resolution` 时先用项目原始 B 站身份选择 BM02 音轨，`quality` 与 `accounts.bilibili` 指定的服务器账户或调用方托管凭证会进入同一播放请求。成功响应的统一 `MediaStream` 保留实际音质、码率、格式、编码、备用 URL、到期时间和必要 `Referer`，`extensions.transport=native_video_audio` 与完整强类型音轨结果用于区分来源；不会返回账户 Cookie。显式提交 `resolution=1..4320` 时改用原生视频轨，并标记 `transport=native_video`。Uni 项的 `/stream/redirect` 同样只是无缓存 302，无法代传 `MediaStream.headers`；需要 `Referer` 的客户端必须使用 JSON 端点自行发起媒体请求。
 
-只有原始 B 站音轨失败且 `fallback=true` 时，解析器才按 `playback_platform/fallback_platforms` 顺序搜索其他音乐平台；匹配使用 Uni 快照中的标题、艺人、时长、ISRC 和版本标签，保持严格阈值，翻唱、现场或版本冲突不会因“能播放”而被接受。每个平台可用 `accounts` 提交独立账户，全部候选、分数、账户和失败分类按尝试顺序返回。默认音乐回退列表不包含 B 站，普通歌曲不会反向搜索 B 站视频；B 站视频是原始项目时仍自动先尝试自身音轨。公开视频 `BV1Jt411P77c` 已通过真实 Uni HTTP 取得原生音轨，账户隔离、原音轨失败后 QQ 严格命中及显式视频轨分支完成自动化验收。
+只有原始 B 站音轨失败且 `fallback=true` 时，解析器才按 `playback_platform/fallback_platforms` 顺序搜索其他音乐平台；匹配使用 Uni 快照中的标题、艺人、时长、ISRC 和版本标签，保持严格阈值，翻唱、现场或版本冲突不会因“能播放”而被接受。每个平台可用 `accounts` 提交独立账户，全部候选、分数、账户和失败分类按尝试顺序返回。默认音乐回退列表不包含 B 站，普通歌曲不会反向搜索 B 站视频；B 站视频是原始项目时仍自动先尝试自身音轨。公开视频 `BV1Jt411P77c` 已通过真实 Uni HTTP 取得原生音轨，账户隔离、原音轨失败后 QQ 严格命中及显式视频轨分支完成自动化验收。普通非大会员账户请求 `master` 时真实降级为普通 `higher` 音轨，保留 URL 和必要 Referer；同一视频经 Client Uni 无状态播放仍选择 B 站且不持久化，未伪造大会员权益。
 
 ### 写操作
 
