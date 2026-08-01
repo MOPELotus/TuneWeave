@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 196,
+  "covered_route_count": 206,
   "entries": [
     {
       "id": "health",
@@ -3798,6 +3798,190 @@
         "recommendation_endpoints_share_platform_account_and_pagination",
         "recommendation_refresh_rejects_invalid_booleans",
         "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_profile",
+      "method": "GET",
+      "path": "/v1/users/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_profile_exposes_both_upstream_backends_through_one_unified_endpoint",
+        "user_profile_endpoints_reject_invalid_references_backends_and_query_fields"
+      ]
+    },
+    {
+      "id": "user_favorite_albums",
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/albums",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_favorite_albums_keep_target_identity_and_optional_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_favorite_playlists",
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/playlists",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_playlist_directories_keep_identity_kind_and_optional_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_favorite_tracks",
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_favorite_tracks_select_reference_platform_and_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_favorite_videos",
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/videos",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_favorite_videos_keep_target_identity_and_optional_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_following_artists",
+      "method": "GET",
+      "path": "/v1/users/{reference}/following/artists",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_following_artists_keep_target_identity_and_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_history",
+      "method": "GET",
+      "path": "/v1/users/{reference}/history",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_history_selects_reference_platform_and_rejects_bad_periods",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_membership",
+      "method": "GET",
+      "path": "/v1/users/{reference}/membership",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "membership_endpoints_separate_public_user_and_current_account_status",
+        "membership_endpoints_expose_the_authenticated_client_backend_explicitly",
+        "membership_endpoints_reject_bad_references_platforms_and_query_fields"
+      ]
+    },
+    {
+      "id": "user_music_gene",
+      "method": "GET",
+      "path": "/v1/users/{reference}/music-gene",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_music_gene_preserves_typed_dimensions_order_and_optional_account",
+        "music_gene_rejects_invalid_references_and_unknown_query_fields"
+      ]
+    },
+    {
+      "id": "user_created_playlists",
+      "method": "GET",
+      "path": "/v1/users/{reference}/playlists/created",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "user_playlist_directories_keep_identity_kind_and_optional_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
