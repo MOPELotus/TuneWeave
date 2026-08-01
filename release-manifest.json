@@ -1,82 +1,82 @@
 {
   "schema_version": 1,
   "project": "TuneWeave",
-  "version": "0.1.0-alpha.1",
-  "tag": "v0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
+  "tag": "v0.1.0-alpha.2",
   "channel": "prerelease",
   "prerelease": true,
   "api_version": "v1",
-  "release_page": "https://github.com/MOPELotus/TuneWeave/releases/tag/v0.1.0-alpha.1",
+  "release_page": "https://github.com/MOPELotus/TuneWeave/releases/tag/v0.1.0-alpha.2",
   "manifest_url": "https://raw.githubusercontent.com/MOPELotus/TuneWeave/main/release-manifest.json",
   "artifacts": [
     {
       "platform": "linux",
       "architecture": "x86_64",
       "target": "x86_64-unknown-linux-gnu",
-      "file": "tuneweave-v0.1.0-alpha.1-linux-x86_64",
-      "executable": "tuneweave-v0.1.0-alpha.1-linux-x86_64",
+      "file": "tuneweave-v0.1.0-alpha.2-linux-x86_64",
+      "executable": "tuneweave-v0.1.0-alpha.2-linux-x86_64",
       "format": "elf",
-      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-linux-x86_64",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-linux-x86_64",
       "verification": {
         "algorithm": "sha256",
-        "checksum_file": "tuneweave-v0.1.0-alpha.1-linux-x86_64.sha256",
-        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-linux-x86_64.sha256"
+        "checksum_file": "tuneweave-v0.1.0-alpha.2-linux-x86_64.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-linux-x86_64.sha256"
       }
     },
     {
       "platform": "windows",
       "architecture": "x86_64",
       "target": "x86_64-pc-windows-msvc",
-      "file": "tuneweave-v0.1.0-alpha.1-windows-x86_64.exe",
-      "executable": "tuneweave-v0.1.0-alpha.1-windows-x86_64.exe",
+      "file": "tuneweave-v0.1.0-alpha.2-windows-x86_64.exe",
+      "executable": "tuneweave-v0.1.0-alpha.2-windows-x86_64.exe",
       "format": "exe",
-      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-x86_64.exe",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-windows-x86_64.exe",
       "verification": {
         "algorithm": "sha256",
-        "checksum_file": "tuneweave-v0.1.0-alpha.1-windows-x86_64.exe.sha256",
-        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-x86_64.exe.sha256"
+        "checksum_file": "tuneweave-v0.1.0-alpha.2-windows-x86_64.exe.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-windows-x86_64.exe.sha256"
       }
     },
     {
       "platform": "windows",
       "architecture": "aarch64",
       "target": "aarch64-pc-windows-msvc",
-      "file": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
-      "executable": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
+      "file": "tuneweave-v0.1.0-alpha.2-windows-aarch64.exe",
+      "executable": "tuneweave-v0.1.0-alpha.2-windows-aarch64.exe",
       "format": "exe",
-      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-windows-aarch64.exe",
       "verification": {
         "algorithm": "sha256",
-        "checksum_file": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe.sha256",
-        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-aarch64.exe.sha256"
+        "checksum_file": "tuneweave-v0.1.0-alpha.2-windows-aarch64.exe.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-windows-aarch64.exe.sha256"
       }
     },
     {
       "platform": "macos",
       "architecture": "x86_64",
       "target": "x86_64-apple-darwin",
-      "file": "tuneweave-v0.1.0-alpha.1-macos-x86_64",
-      "executable": "tuneweave-v0.1.0-alpha.1-macos-x86_64",
+      "file": "tuneweave-v0.1.0-alpha.2-macos-x86_64",
+      "executable": "tuneweave-v0.1.0-alpha.2-macos-x86_64",
       "format": "mach-o",
-      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-macos-x86_64",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-macos-x86_64",
       "verification": {
         "algorithm": "sha256",
-        "checksum_file": "tuneweave-v0.1.0-alpha.1-macos-x86_64.sha256",
-        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-macos-x86_64.sha256"
+        "checksum_file": "tuneweave-v0.1.0-alpha.2-macos-x86_64.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-macos-x86_64.sha256"
       }
     },
     {
       "platform": "macos",
       "architecture": "aarch64",
       "target": "aarch64-apple-darwin",
-      "file": "tuneweave-v0.1.0-alpha.1-macos-aarch64",
-      "executable": "tuneweave-v0.1.0-alpha.1-macos-aarch64",
+      "file": "tuneweave-v0.1.0-alpha.2-macos-aarch64",
+      "executable": "tuneweave-v0.1.0-alpha.2-macos-aarch64",
       "format": "mach-o",
-      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-macos-aarch64",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-macos-aarch64",
       "verification": {
         "algorithm": "sha256",
-        "checksum_file": "tuneweave-v0.1.0-alpha.1-macos-aarch64.sha256",
-        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-macos-aarch64.sha256"
+        "checksum_file": "tuneweave-v0.1.0-alpha.2-macos-aarch64.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.2/tuneweave-v0.1.0-alpha.2-macos-aarch64.sha256"
       }
     }
   ]
