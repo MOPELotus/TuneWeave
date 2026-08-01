@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 26,
+  "covered_route_count": 29,
   "entries": [
     {
       "id": "health",
@@ -552,6 +552,76 @@
         "track_stream_batches_forward_immersive_type_for_get_and_post",
         "track_stream_batches_scope_caller_credentials_per_platform",
         "track_stream_batch_rejects_ambiguous_or_malformed_post_inputs"
+      ]
+    },
+    {
+      "id": "uni_client_item_stream",
+      "method": "POST",
+      "path": "/v1/uni/items/stream",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "uni_client_item_stream_uses_v1_item_without_creating_server_state",
+        "uni_stream_accounts_accept_list_and_json_forms_without_platform_collisions"
+      ]
+    },
+    {
+      "id": "uni_materialize_imports",
+      "method": "POST",
+      "path": "/v1/uni/materialize/imports",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "uni_materialize_imports_pages_complete_sources_without_persisting"
+      ]
+    },
+    {
+      "id": "uni_materialize_items",
+      "method": "POST",
+      "path": "/v1/uni/materialize/items",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "uni_materialize_items_returns_client_items_without_creating_server_state"
       ]
     }
   ]
