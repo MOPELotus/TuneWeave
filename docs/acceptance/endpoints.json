@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 29,
+  "covered_route_count": 41,
   "entries": [
     {
       "id": "health",
@@ -622,6 +622,233 @@
       "network": "anonymous",
       "acceptance_cases": [
         "uni_materialize_items_returns_client_items_without_creating_server_state"
+      ]
+    },
+    {
+      "id": "uni_playlist_directory",
+      "method": "GET",
+      "path": "/v1/uni/playlists",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_directory_is_paginated_without_inlining_items",
+        "uni_playlist_routes_reject_invalid_or_unknown_inputs"
+      ]
+    },
+    {
+      "id": "uni_playlist_create",
+      "method": "POST",
+      "path": "/v1/uni/playlists",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_create_and_read_share_persistent_store_identity",
+        "uni_playlist_routes_reject_invalid_or_unknown_inputs"
+      ]
+    },
+    {
+      "id": "uni_playlist_document_import",
+      "method": "POST",
+      "path": "/v1/uni/playlists/import-document",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_document_import_is_atomic_and_preserves_client_item_identity"
+      ]
+    },
+    {
+      "id": "uni_playlist_imports",
+      "method": "POST",
+      "path": "/v1/uni/playlists/imports",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "uni",
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "uni_playlist_import_merges_public_and_account_sources_across_complete_pages",
+        "uni_playlist_import_scopes_multiple_caller_credentials_by_source_platform",
+        "uni_playlist_import_accepts_a_playable_user_favorite_track_source",
+        "uni_playlist_import_rejects_ambiguous_sources_and_unsupported_collection_types"
+      ]
+    },
+    {
+      "id": "uni_playlist_delete",
+      "method": "DELETE",
+      "path": "/v1/uni/playlists/{reference}",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_delete_atomically_removes_metadata_and_items",
+        "uni_playlist_routes_reject_invalid_or_unknown_inputs"
+      ]
+    },
+    {
+      "id": "uni_playlist_detail",
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_create_and_read_share_persistent_store_identity",
+        "uni_playlist_routes_reject_invalid_or_unknown_inputs"
+      ]
+    },
+    {
+      "id": "uni_playlist_update",
+      "method": "PATCH",
+      "path": "/v1/uni/playlists/{reference}",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_metadata_update_is_partial_validated_and_idempotent"
+      ]
+    },
+    {
+      "id": "uni_playlist_export",
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}/export",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_export_returns_a_safe_complete_v1_document"
+      ]
+    },
+    {
+      "id": "uni_playlist_items",
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}/items",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_items_preserve_types_order_duplicates_and_platform_accounts"
+      ]
+    },
+    {
+      "id": "uni_playlist_items_add",
+      "method": "POST",
+      "path": "/v1/uni/playlists/{reference}/items",
+      "platform_scope": {
+        "mode": "cross_platform",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "uni_playlist_items_preserve_types_order_duplicates_and_platform_accounts",
+        "uni_playlist_item_routes_reject_ambiguous_invalid_and_missing_resources"
+      ]
+    },
+    {
+      "id": "uni_playlist_items_reorder",
+      "method": "PATCH",
+      "path": "/v1/uni/playlists/{reference}/items/order",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_items_delete_one_duplicate_and_reorder_by_complete_stable_ids",
+        "uni_playlist_item_routes_reject_ambiguous_invalid_and_missing_resources"
+      ]
+    },
+    {
+      "id": "uni_playlist_item_delete",
+      "method": "DELETE",
+      "path": "/v1/uni/playlists/{reference}/items/{item_id}",
+      "platform_scope": {
+        "mode": "fixed",
+        "platforms": [
+          "uni"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "none",
+      "acceptance_cases": [
+        "uni_playlist_items_delete_one_duplicate_and_reorder_by_complete_stable_ids",
+        "uni_playlist_item_routes_reject_ambiguous_invalid_and_missing_resources"
       ]
     }
   ]
