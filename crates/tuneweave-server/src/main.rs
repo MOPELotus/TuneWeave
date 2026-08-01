@@ -22,7 +22,7 @@ use tuneweave_provider_qq::{QqConfig, QqProvider};
 use tuneweave_provider_soda::{SodaConfig, SodaProvider};
 use tuneweave_server::{
     AppState, ShutdownSnapshot, build_router,
-    logging::{LoggingConfig, init_logging},
+    logging::{LogFormat, LoggingConfig, init_logging},
 };
 
 #[tokio::main]
@@ -156,34 +156,86 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         log_server_io_failure(ServerLifecycleStage::ListenerAddress, error);
     })?;
 
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        address = %local_address,
-        data_dir = ?data_dir,
-        log_format = logging_config.format.as_str(),
-        log_filter_source = logging_config.filter_source.as_str(),
-        log_to_stderr = logging_config.to_stderr,
-        log_to_file = logging.file_output_active(),
-        log_dir = ?logging_config.directory,
-        log_max_files = logging_config.max_files,
-        log_max_file_bytes = logging_config.max_file_bytes,
-        log_max_total_bytes = logging_config.max_total_bytes,
-        enabled_platforms = 7,
-        default_platform = "netease",
-        credential_store_open = true,
-        uni_playlist_store_open = true,
-        server_account_platforms = "netease,qq,bilibili,soda",
-        caller_credential_platforms = "netease,qq,bilibili,soda",
-        netease_bootstrap_cookie = netease_cookie.is_some(),
-        netease_proxy = netease_proxy.is_some(),
-        qq_proxy = qq_proxy.is_some(),
-        bilibili_proxy = bilibili_proxy.is_some(),
-        kugou_proxy = kugou_proxy.is_some(),
-        migu_proxy = migu_proxy.is_some(),
-        kuwo_proxy = kuwo_proxy.is_some(),
-        soda_proxy = soda_proxy.is_some(),
-        "TuneWeave startup completed"
-    );
+    if logging_config.format == LogFormat::Human {
+        let log_outputs = match (logging_config.to_stderr, logging.file_output_active()) {
+            (true, true) => "控制台 + 文件",
+            (true, false) => "控制台",
+            (false, true) => "文件",
+            (false, false) => "未启用",
+        };
+        let configured_proxies = [
+            ("网易云", netease_proxy.is_some()),
+            ("QQ 音乐", qq_proxy.is_some()),
+            ("B 站", bilibili_proxy.is_some()),
+            ("酷狗", kugou_proxy.is_some()),
+            ("咪咕", migu_proxy.is_some()),
+            ("酷我", kuwo_proxy.is_some()),
+            ("汽水", soda_proxy.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(platform, configured)| configured.then_some(platform))
+        .collect::<Vec<_>>();
+        let proxy_summary = if configured_proxies.is_empty() {
+            "未配置".to_owned()
+        } else {
+            configured_proxies.join("、")
+        };
+        info!("服务启动完成");
+        info!("  版本：{}", env!("CARGO_PKG_VERSION"));
+        info!("  监听地址：http://{local_address}");
+        info!("  本地数据：{}", data_dir.display());
+        info!("  默认平台：网易云音乐");
+        info!("  已启用平台：网易云、QQ 音乐、B 站、酷狗、咪咕、酷我、汽水");
+        info!("  账户能力：服务端托管与调用方凭据均支持网易云、QQ 音乐、B 站、汽水");
+        info!("  存储状态：账户凭据与 Uni Playlist 已就绪");
+        info!(
+            "  日志输出：{log_outputs}（{}）",
+            logging_config.format.as_str()
+        );
+        if logging.file_output_active() {
+            info!("  日志目录：{}", logging_config.directory.display());
+            info!(
+                "  日志限制：最多 {} 个文件，单文件 {}，总计 {}",
+                logging_config.max_files,
+                readable_bytes(logging_config.max_file_bytes),
+                readable_bytes(logging_config.max_total_bytes)
+            );
+        }
+        info!(
+            "  网易云启动 Cookie：{}",
+            configured_label(netease_cookie.is_some())
+        );
+        info!("  平台代理：{proxy_summary}");
+    } else {
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            address = %local_address,
+            data_dir = ?data_dir,
+            log_format = logging_config.format.as_str(),
+            log_filter_source = logging_config.filter_source.as_str(),
+            log_to_stderr = logging_config.to_stderr,
+            log_to_file = logging.file_output_active(),
+            log_dir = ?logging_config.directory,
+            log_max_files = logging_config.max_files,
+            log_max_file_bytes = logging_config.max_file_bytes,
+            log_max_total_bytes = logging_config.max_total_bytes,
+            enabled_platforms = 7,
+            default_platform = "netease",
+            credential_store_open = true,
+            uni_playlist_store_open = true,
+            server_account_platforms = "netease,qq,bilibili,soda",
+            caller_credential_platforms = "netease,qq,bilibili,soda",
+            netease_bootstrap_cookie = netease_cookie.is_some(),
+            netease_proxy = netease_proxy.is_some(),
+            qq_proxy = qq_proxy.is_some(),
+            bilibili_proxy = bilibili_proxy.is_some(),
+            kugou_proxy = kugou_proxy.is_some(),
+            migu_proxy = migu_proxy.is_some(),
+            kuwo_proxy = kuwo_proxy.is_some(),
+            soda_proxy = soda_proxy.is_some(),
+            "TuneWeave startup completed"
+        );
+    }
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await;
@@ -228,6 +280,22 @@ fn env_bool(name: &str) -> Result<bool, IoError> {
             format!("{name} must be true/false, yes/no, on/off, or 1/0"),
         )),
     }
+}
+
+fn configured_label(configured: bool) -> &'static str {
+    if configured { "已配置" } else { "未配置" }
+}
+
+fn readable_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    for (unit, size) in [("GiB", GIB), ("MiB", MIB), ("KiB", KIB)] {
+        if bytes >= size && bytes % size == 0 {
+            return format!("{} {unit}", bytes / size);
+        }
+    }
+    format!("{bytes} B")
 }
 
 fn nonempty_env(name: &str) -> Option<String> {

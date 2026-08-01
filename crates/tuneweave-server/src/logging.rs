@@ -1,7 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
-    env, fs,
-    io::{self, ErrorKind, Write},
+    env, fmt, fs,
+    io::{self, ErrorKind, IsTerminal, Write},
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
@@ -12,11 +13,23 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{
-    EnvFilter,
-    fmt::{MakeWriter, writer::MakeWriterExt},
+    EnvFilter, Registry,
+    fmt::{
+        FmtContext,
+        format::{FormatEvent, FormatFields, Writer},
+        time::{ChronoLocal, FormatTime},
+        writer::BoxMakeWriter,
+    },
+    layer::{Layer, SubscriberExt},
+    registry::LookupSpan,
+    util::SubscriberInitExt,
 };
+
+#[cfg(test)]
+use tracing_subscriber::fmt::MakeWriter;
 
 const DEFAULT_LOG_FILE: &str = "tuneweave.log";
 const DEFAULT_RETENTION_DAYS: u32 = 14;
@@ -288,12 +301,7 @@ pub fn init_logging(
             None => (None, None, None, None, Vec::new()),
         };
 
-    match (config.to_stderr, file_writer) {
-        (true, Some(writer)) => install_subscriber(config, std::io::stderr.and(writer))?,
-        (true, None) => install_subscriber(config, std::io::stderr)?,
-        (false, Some(writer)) => install_subscriber(config, writer)?,
-        (false, None) => unreachable!("logging configuration requires at least one output"),
-    }
+    install_subscriber(config, file_writer)?;
 
     Ok(LoggingHandle {
         _health_monitor: error_counter
@@ -321,7 +329,7 @@ pub(crate) fn init_test_logging() {
         ]);
         let config = LoggingConfig::from_values(Path::new(".local/test-logging"), &values)
             .expect("test logging configuration must remain valid");
-        install_subscriber(&config, tracing_subscriber::fmt::TestWriter::new())
+        install_test_subscriber(&config, tracing_subscriber::fmt::TestWriter::new())
             .expect("test logging subscriber must initialize once");
     });
 }
@@ -482,20 +490,162 @@ impl<W: io::Write> io::Write for MonitoredWriter<W> {
     }
 }
 
-fn install_subscriber<W>(
+#[derive(Clone, Debug)]
+struct HumanEventFormatter {
+    timer: ChronoLocal,
+}
+
+impl Default for HumanEventFormatter {
+    fn default() -> Self {
+        Self {
+            timer: ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_owned()),
+        }
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for HumanEventFormatter
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        context: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let metadata = event.metadata();
+        let ansi = writer.has_ansi_escapes();
+        if ansi {
+            write!(
+                writer,
+                "\u{1b}[36m[{}]\u{1b}[0m{}[{}]\u{1b}[0m\u{1b}[90m[",
+                human_target(metadata.target()),
+                level_color(metadata.level()),
+                metadata.level(),
+            )?;
+        } else {
+            write!(
+                writer,
+                "[{}][{}][",
+                human_target(metadata.target()),
+                metadata.level()
+            )?;
+        }
+        self.timer.format_time(&mut writer)?;
+        if ansi {
+            writer.write_str("]\u{1b}[0m ")?;
+        } else {
+            writer.write_str("] ")?;
+        }
+        context
+            .field_format()
+            .format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+fn level_color(level: &Level) -> &'static str {
+    match *level {
+        Level::TRACE => "\u{1b}[35m",
+        Level::DEBUG => "\u{1b}[34m",
+        Level::INFO => "\u{1b}[32m",
+        Level::WARN => "\u{1b}[33m",
+        Level::ERROR => "\u{1b}[31m",
+    }
+}
+
+fn human_target(target: &str) -> Cow<'_, str> {
+    if target == "tuneweave" {
+        return Cow::Borrowed("TuneWeave");
+    }
+    let Some(target) = target.strip_prefix("tuneweave_") else {
+        return Cow::Borrowed(target);
+    };
+    let component = target
+        .split_once("::")
+        .map_or(target, |(component, _)| component);
+    let component = component.replace('_', "-");
+    Cow::Owned(format!("TuneWeave/{component}"))
+}
+
+fn install_subscriber(
+    config: &LoggingConfig,
+    file_writer: Option<NonBlocking>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    type OutputLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
+
+    let mut output_layers = Vec::<OutputLayer>::with_capacity(2);
+    match config.format {
+        LogFormat::Human => {
+            if config.to_stderr {
+                output_layers.push(Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .event_format(HumanEventFormatter::default())
+                        .with_writer(BoxMakeWriter::new(std::io::stderr))
+                        .with_ansi(std::io::stderr().is_terminal()),
+                ));
+            }
+            if let Some(writer) = file_writer {
+                output_layers.push(Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .event_format(HumanEventFormatter::default())
+                        .with_writer(BoxMakeWriter::new(writer))
+                        .with_ansi(false),
+                ));
+            }
+        }
+        LogFormat::Json => {
+            if config.to_stderr {
+                output_layers.push(Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(BoxMakeWriter::new(std::io::stderr))
+                        .with_ansi(false),
+                ));
+            }
+            if let Some(writer) = file_writer {
+                output_layers.push(Box::new(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(BoxMakeWriter::new(writer))
+                        .with_ansi(false),
+                ));
+            }
+        }
+    }
+    debug_assert!(!output_layers.is_empty());
+    tracing_subscriber::registry()
+        .with(output_layers)
+        .with(config.env_filter()?)
+        .try_init()?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn install_test_subscriber<W>(
     config: &LoggingConfig,
     writer: W,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(config.env_filter()?)
-        .with_writer(writer)
-        .with_ansi(false);
     match config.format {
-        LogFormat::Human => builder.try_init()?,
-        LogFormat::Json => builder.json().try_init()?,
+        LogFormat::Human => tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .event_format(HumanEventFormatter::default())
+                    .with_ansi(false)
+                    .with_filter(config.env_filter()?),
+            )
+            .try_init()?,
+        LogFormat::Json => tracing_subscriber::fmt()
+            .with_env_filter(config.env_filter()?)
+            .with_writer(writer)
+            .json()
+            .with_ansi(false)
+            .try_init()?,
     }
     Ok(())
 }
@@ -901,7 +1051,10 @@ fn invalid_config(message: impl Into<String>) -> io::Error {
 mod tests {
     use std::{
         io::Write,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -910,6 +1063,92 @@ mod tests {
     use super::*;
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture writer lock").write(buffer)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn human_formatter_uses_backend_style_local_timestamp_and_clean_target() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = output.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || CaptureWriter(writer_output.clone()))
+                .event_format(HumanEventFormatter::default())
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            info!(target: "tuneweave", answer = 42, "ready");
+        });
+        let output = String::from_utf8(output.lock().expect("captured output lock").clone())
+            .expect("UTF-8 human log output");
+        let line = output.trim_end();
+        let timestamp = line
+            .strip_prefix("[TuneWeave][INFO][")
+            .and_then(|line| line.split_once("] ready answer=42"))
+            .map(|(timestamp, _)| timestamp)
+            .expect("backend-style log line");
+        let (date, time) = timestamp.split_once(' ').expect("date and time sections");
+        assert_eq!(date.len(), 10);
+        assert_eq!(time.len(), 8);
+        assert_eq!(date.as_bytes()[4], b'-');
+        assert_eq!(date.as_bytes()[7], b'-');
+        assert_eq!(time.as_bytes()[2], b':');
+        assert_eq!(time.as_bytes()[5], b':');
+        assert!(!output.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn human_formatter_colors_levels_timestamps_and_targets_when_enabled() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = output.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || CaptureWriter(writer_output.clone()))
+                .event_format(HumanEventFormatter::default())
+                .with_ansi(true),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "tuneweave_server::http", "attention");
+        });
+        let output = String::from_utf8(output.lock().expect("captured output lock").clone())
+            .expect("UTF-8 colored log output");
+        assert!(output.contains("\u{1b}[36m[TuneWeave/server]\u{1b}[0m"));
+        assert!(output.contains("\u{1b}[33m[WARN]\u{1b}[0m"));
+        assert!(output.contains("\u{1b}[90m["));
+        assert!(output.contains("\u{1b}[0m attention"));
+    }
+
+    #[test]
+    fn human_output_filter_keeps_matching_tuneweave_events() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = output.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || CaptureWriter(writer_output.clone()))
+                .event_format(HumanEventFormatter::default())
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("tuneweave=info")),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            info!(target: "tuneweave", "visible");
+            info!(target: "unrelated", "hidden");
+        });
+        let output = String::from_utf8(output.lock().expect("captured output lock").clone())
+            .expect("UTF-8 filtered log output");
+        assert!(output.contains("[TuneWeave][INFO]["));
+        assert!(output.contains("] visible"));
+        assert!(!output.contains("hidden"));
+    }
 
     #[test]
     fn test_logging_initialization_is_idempotent() {
