@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 79,
+  "covered_route_count": 91,
   "entries": [
     {
       "id": "health",
@@ -1598,6 +1598,226 @@
         "auth_session_refresh_uses_a_json_body_and_returns_fresh_status",
         "auth_session_refresh_rotates_caller_credentials_without_server_alias_fallback",
         "session_mutation_logs_preserve_credential_ownership_sources"
+      ]
+    },
+    {
+      "id": "account_cloud_import",
+      "method": "POST",
+      "path": "/v1/account/cloud/imports",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_import_accepts_reference_aliases_and_stringified_numbers",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_lyrics",
+      "method": "GET",
+      "path": "/v1/account/cloud/lyrics",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_lyrics_accept_reference_query_names_and_opaque_track_ids",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_match",
+      "method": "POST",
+      "path": "/v1/account/cloud/matches",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_match_supports_reference_matching_and_cancellation_branches",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_tracks_delete",
+      "method": "DELETE",
+      "path": "/v1/account/cloud/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_track_delete_preserves_reference_order_duplicates_and_account",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_tracks",
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_library_tracks_use_platform_account_and_unified_pagination",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_track_details_get",
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_track_details_accept_full_references_and_raw_id_batches",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_track_details_post",
+      "method": "POST",
+      "path": "/v1/account/cloud/tracks/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_track_details_accept_full_references_and_raw_id_batches",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_track_download",
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/{reference}/download",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_track_download_exposes_data_and_redirects_with_stream_fallback",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_track_download_redirect",
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/{reference}/download/redirect",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "cloud_track_download_exposes_data_and_redirects_with_stream_fallback",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_upload",
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_proxy_upload_accepts_binary_audio_and_reference_metadata_aliases",
+        "cloud_proxy_upload_uses_default_bitrate_and_optional_content_type",
+        "cloud_proxy_upload_rejects_missing_audio_fields_and_invalid_bitrate",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_upload_complete",
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/complete",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_upload_completion_uses_reference_aliases_and_default_bitrate",
+        "cloud_upload_routes_reject_invalid_json_and_zero_numeric_fields",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_cloud_upload_ticket",
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/ticket",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "cloud_upload_ticket_uses_platform_account_and_reference_aliases",
+        "cloud_upload_routes_reject_invalid_json_and_zero_numeric_fields",
+        "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
       ]
     }
   ]
