@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 68,
+  "covered_route_count": 79,
   "entries": [
     {
       "id": "health",
@@ -1383,6 +1383,221 @@
       "network": "destructive",
       "acceptance_cases": [
         "playlist_favorites_put_and_delete_select_reference_platform_and_account"
+      ]
+    },
+    {
+      "id": "auth_challenge_start",
+      "method": "POST",
+      "path": "/v1/auth/challenges",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "sms_challenge_verification_returns_an_authenticated_profile",
+        "sms_challenge_transaction_accepts_reference_aliases_and_numeric_values",
+        "multistep_authentication_fixes_client_ownership_on_the_initial_request"
+      ]
+    },
+    {
+      "id": "auth_challenge_validate",
+      "method": "POST",
+      "path": "/v1/auth/challenges/validate",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "challenge_validation_accepts_reference_and_unified_sms_fields_without_login",
+        "challenge_validation_rejects_non_scalar_principals_and_empty_codes"
+      ]
+    },
+    {
+      "id": "auth_challenge_verify",
+      "method": "POST",
+      "path": "/v1/auth/challenges/{transaction_id}/verify",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "transaction",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "sms_challenge_verification_returns_an_authenticated_profile",
+        "sms_challenge_transaction_accepts_reference_aliases_and_numeric_values",
+        "multistep_authentication_fixes_client_ownership_on_the_initial_request"
+      ]
+    },
+    {
+      "id": "auth_country_calling_codes",
+      "method": "GET",
+      "path": "/v1/auth/country-codes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "country_calling_codes_use_selected_platform_account_and_unified_fields",
+        "country_calling_codes_reject_unknown_platforms_and_query_fields"
+      ]
+    },
+    {
+      "id": "auth_password",
+      "method": "POST",
+      "path": "/v1/auth/password",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "password_auth_never_echoes_credentials",
+        "password_auth_supports_client_and_both_credential_ownership"
+      ]
+    },
+    {
+      "id": "auth_principal_status",
+      "method": "POST",
+      "path": "/v1/auth/principals/status",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "principal_status_accepts_reference_and_unified_phone_fields",
+        "principal_status_rejects_unsupported_types_and_non_scalar_values"
+      ]
+    },
+    {
+      "id": "auth_qr_start",
+      "method": "POST",
+      "path": "/v1/auth/qr",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "local_write",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qr_auth_uses_an_opaque_server_transaction_and_saves_the_account",
+        "multistep_authentication_fixes_client_ownership_on_the_initial_request"
+      ]
+    },
+    {
+      "id": "auth_qr_poll",
+      "method": "GET",
+      "path": "/v1/auth/qr/{transaction_id}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "transaction",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "qr_auth_uses_an_opaque_server_transaction_and_saves_the_account",
+        "multistep_authentication_fixes_client_ownership_on_the_initial_request",
+        "unknown_auth_transaction_uses_the_error_envelope"
+      ]
+    },
+    {
+      "id": "auth_session_delete",
+      "method": "DELETE",
+      "path": "/v1/auth/session",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "auth_logout_uses_the_selected_platform_and_account",
+        "auth_logout_closes_caller_credentials_without_claiming_to_delete_them",
+        "session_mutation_logs_preserve_credential_ownership_sources"
+      ]
+    },
+    {
+      "id": "auth_session_get",
+      "method": "GET",
+      "path": "/v1/auth/session",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "auth_session_status_returns_only_the_selected_account_profile",
+        "session_and_account_profile_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "auth_session_refresh",
+      "method": "POST",
+      "path": "/v1/auth/session/refresh",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "credential_mutation",
+      "network": "destructive",
+      "acceptance_cases": [
+        "auth_session_refresh_uses_a_json_body_and_returns_fresh_status",
+        "auth_session_refresh_rotates_caller_credentials_without_server_alias_fallback",
+        "session_mutation_logs_preserve_credential_ownership_sources"
       ]
     }
   ]
