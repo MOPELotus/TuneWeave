@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 105,
+  "covered_route_count": 118,
   "entries": [
     {
       "id": "health",
@@ -2081,6 +2081,253 @@
       "acceptance_cases": [
         "video_library_put_and_delete_preserve_kind_account_and_result",
         "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_dislikes_remove",
+      "method": "DELETE",
+      "path": "/v1/account/dislikes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "account_dislike_remove_reuses_the_typed_batch_contract",
+        "account_dislikes_accept_caller_credentials_without_server_aliases",
+        "dislike_remove_validates_ids_and_exact_account_before_network_access"
+      ]
+    },
+    {
+      "id": "account_dislikes",
+      "method": "GET",
+      "path": "/v1/account/dislikes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_dislikes_accept_unified_kinds_and_qq_cursor_aliases",
+        "account_dislikes_accept_caller_credentials_without_server_aliases",
+        "dislike_list_requires_the_exact_account_before_signed_network_access"
+      ]
+    },
+    {
+      "id": "account_dislikes_add",
+      "method": "POST",
+      "path": "/v1/account/dislikes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "account_dislike_add_preserves_reference_types_ids_and_account",
+        "account_dislikes_accept_caller_credentials_without_server_aliases",
+        "dislike_add_validates_ids_and_exact_account_before_network_access"
+      ]
+    },
+    {
+      "id": "account_dislike_tracks_clear",
+      "method": "DELETE",
+      "path": "/v1/account/dislikes/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "account_dislike_track_clear_is_explicit_and_account_scoped",
+        "account_dislikes_accept_caller_credentials_without_server_aliases",
+        "dislike_clear_requires_the_exact_account_before_the_token_handshake"
+      ]
+    },
+    {
+      "id": "account_following_artists",
+      "method": "GET",
+      "path": "/v1/account/following/artists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_following_artists_use_unified_pagination",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "followed_artist_catalog_requires_the_selected_account_alias",
+        "followed_artist_catalog_requires_exact_accounts_before_network"
+      ]
+    },
+    {
+      "id": "account_following_artist_new_tracks",
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_artist_new_tracks_use_platform_account_and_timestamp_cursor",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "followed_artist_new_tracks_require_the_selected_account_alias"
+      ]
+    },
+    {
+      "id": "account_following_artist_new_tracks_play_all",
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-tracks/play-all",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_artist_new_tracks_play_all_returns_the_fixed_snapshot",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "followed_artist_new_tracks_play_all_requires_the_selected_account_alias"
+      ]
+    },
+    {
+      "id": "account_following_artist_new_videos",
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-videos",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_artist_new_videos_use_platform_account_and_timestamp_cursor",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "followed_artist_new_videos_require_the_selected_account_alias"
+      ]
+    },
+    {
+      "id": "account_following_artist_new_works",
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-works",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_artist_new_works_keep_type_and_first_request_controls",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "followed_artist_new_works_require_the_selected_account_alias"
+      ]
+    },
+    {
+      "id": "account_following_artist_remove",
+      "method": "DELETE",
+      "path": "/v1/account/following/artists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "artist_following_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_following_artist_add",
+      "method": "PUT",
+      "path": "/v1/account/following/artists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "artist_following_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_history",
+      "method": "GET",
+      "path": "/v1/account/history",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_history_maps_period_and_pagination",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "play_history_requires_a_valid_user_and_selected_account"
+      ]
+    },
+    {
+      "id": "account_podcast_episode_history",
+      "method": "GET",
+      "path": "/v1/account/history/podcast-episodes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "recent_podcast_episode_history_preserves_episode_audio_time_and_device",
+        "personal_library_reads_accept_caller_credentials_without_server_aliases",
+        "recent_podcast_episode_history_rejects_invalid_controls_and_missing_accounts"
       ]
     }
   ]
