@@ -1777,7 +1777,7 @@ QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，当前账户自建目录
 
 当前直接写入平台歌单要求资源已经能被目标 provider 接受；网易云因此要求项目引用属于网易云。Uni Playlist 与后续跨平台导入层在目标平台和歌曲来源平台不同时，必须先执行严格匹配；低于阈值时返回 `match_rejected`，不得把同名但不同版本的歌曲写入目标歌单。
 
-歌曲喜欢写入由路径中的完整引用选择 provider，`account` 缺省为 `default`，未知查询字段会被拒绝。QQ 接入固定的“我喜欢”目录 `201`：TuneWeave 先查询歌曲详情，将 MID 或数值引用解析为平台要求的正数 `songId` 与 `songType`，再以所选 `(qq, account)` 凭据调用 `PlaylistDetailWrite/AddSonglist|DelSonglist`；不会把 MID 当数字、猜测歌曲类型或在缺失账户时访问歌曲服务。添加分支按参考协议保留 `bFmtUtf8=true`，删除分支使用普通 Android 参数规范化；两者均要求内层 `retCode=0`，平台拒绝不会虚报为已喜欢或已取消。
+歌曲喜欢写入由路径中的完整引用选择 provider，`account` 缺省为 `default`，未知查询字段会被拒绝。QQ 接入固定的“我喜欢”目录 `201`：TuneWeave 先查询歌曲详情，将 MID 或数值引用解析为平台要求的正数 `songId` 与 `songType`，再以所选 `(qq, account)` 凭据调用 `PlaylistDetailWrite/AddSonglist|DelSonglist`；不会把 MID 当数字、猜测歌曲类型或在缺失账户时访问歌曲服务。添加分支按参考协议保留 `bFmtUtf8=true`，删除分支使用普通 Android 参数规范化；两者除要求 CGI 包络与内层 `retCode=0` 外，还校验返回的 `result.dirId=201`、正数 `result.tid` 以及精确歌曲结果：添加必须只确认本次歌曲，删除必须返回空歌曲列表。删除成功正文可能是 GBK JSON，仅在原始字节不是合法 UTF-8 时进行完整限定解码，之后仍执行相同校验。普通账户已经完成 158→159→158 的可逆读写闭环，平台拒绝或矛盾结果不会虚报为已喜欢或已取消。
 
 歌单收藏写入同样由完整引用选择 provider，并与歌曲喜欢使用不同能力。QQ 只接受正整数公开歌单 `qq:<tid>`，不会把 `qq:dir:<dirId>` 当成外部歌单；请求用所选账户的加密 UIN 调用 `PlaylistFavWrite/FavPlaylist|CancelFavPlaylist`。只有 CGI 顶层业务码为 0、响应 `result=0` 且目标不在 `v_failedPlaylistId` 中时才返回成功；收藏已存在或取消本就未收藏时，按 QQ 实际幂等结果处理，不由 TuneWeave 本地猜测。
 

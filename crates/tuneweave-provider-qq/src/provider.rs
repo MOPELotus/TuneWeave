@@ -16946,6 +16946,29 @@ fn map_qq_track_subscription(
             "subscribed": subscribed
         })));
     }
+    let result = parsed
+        .result
+        .as_ref()
+        .ok_or_else(|| qq_data_error("QQ track subscription response is missing its result"))?;
+    if result.directory_id != 201 || result.playlist_id == 0 {
+        return Err(qq_data_error(
+            "QQ track subscription returned a conflicting liked-playlist identity",
+        ));
+    }
+    if subscribed {
+        if result.songlist.len() != 1
+            || result.songlist[0].song_id != track.song_id
+            || result.songlist[0].song_type != track.song_type
+        {
+            return Err(qq_data_error(
+                "QQ track subscription returned an unexpected song result",
+            ));
+        }
+    } else if !result.songlist.is_empty() {
+        return Err(qq_data_error(
+            "QQ track unsubscription returned an unexpected song result",
+        ));
+    }
     Ok(SubscriptionResult {
         resource_ref: qq_ref(requested_id, "track subscription")?,
         subscribed,
@@ -16955,6 +16978,7 @@ fn map_qq_track_subscription(
                 json!(if subscribed { "like" } else { "unlike" }),
             ),
             ("directory_id".to_owned(), json!(201)),
+            ("playlist_id".to_owned(), json!(result.playlist_id)),
             ("numeric_id".to_owned(), json!(track.song_id)),
             ("song_type".to_owned(), json!(track.song_type)),
             ("platform_code".to_owned(), json!(response.code)),
@@ -25570,13 +25594,48 @@ mod tests {
 
         let unliked = qq_track_subscription_request(identity, false);
         assert_eq!(unliked.method, "DelSonglist");
+        let liked_result = map_qq_track_subscription(
+            "0039MnYb0qxYhV",
+            identity,
+            true,
+            QqBusinessResponse {
+                code: 0,
+                data: json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": 5_871_971_520_u64,
+                        "dirId": 201,
+                        "dirName": "我喜欢",
+                        "songlist": [{
+                            "songId": 97_773,
+                            "songType": 113,
+                            "backendSongId": 97_773,
+                            "existed": 0
+                        }]
+                    }
+                }),
+                raw: json!({"code": 0, "data": {"retCode": 0}}),
+            },
+        )
+        .expect("track subscription result");
+        assert!(liked_result.subscribed);
+        assert_eq!(liked_result.extensions["playlist_id"], 5_871_971_520_u64);
+
         let result = map_qq_track_subscription(
             "0039MnYb0qxYhV",
             identity,
             false,
             QqBusinessResponse {
                 code: 0,
-                data: json!({"retCode": 0}),
+                data: json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": 5_871_971_520_u64,
+                        "dirId": 201,
+                        "dirName": "我喜欢",
+                        "songlist": []
+                    }
+                }),
                 raw: json!({"code": 0, "data": {"retCode": 0}}),
             },
         )
@@ -25627,6 +25686,59 @@ mod tests {
         )
         .expect_err("missing retCode");
         assert_eq!(malformed.code, ErrorCode::UpstreamError);
+
+        for (subscribed, data) in [
+            (true, json!({"retCode": 0})),
+            (
+                true,
+                json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": 5_871_971_520_u64,
+                        "dirId": 202,
+                        "songlist": [{"songId": 97_773, "songType": 113}]
+                    }
+                }),
+            ),
+            (
+                true,
+                json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": 5_871_971_520_u64,
+                        "dirId": 201,
+                        "songlist": [{"songId": 42, "songType": 0}]
+                    }
+                }),
+            ),
+            (
+                false,
+                json!({
+                    "retCode": 0,
+                    "result": {
+                        "tid": 5_871_971_520_u64,
+                        "dirId": 201,
+                        "songlist": [{"songId": 97_773, "songType": 113}]
+                    }
+                }),
+            ),
+        ] {
+            assert_eq!(
+                map_qq_track_subscription(
+                    "0039MnYb0qxYhV",
+                    identity,
+                    subscribed,
+                    QqBusinessResponse {
+                        code: 0,
+                        data,
+                        raw: json!({"code": 0}),
+                    },
+                )
+                .expect_err("invalid track subscription result")
+                .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
