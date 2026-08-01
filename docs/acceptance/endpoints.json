@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 125,
+  "covered_route_count": 130,
   "entries": [
     {
       "id": "health",
@@ -2466,6 +2466,102 @@
         "podcast_episode_order_rejects_invalid_or_cross_platform_inputs",
         "podcast_episode_writes_accept_caller_credentials_without_server_aliases",
         "podcast_episode_order_requires_valid_controls_references_and_account"
+      ]
+    },
+    {
+      "id": "album_catalog",
+      "method": "GET",
+      "path": "/v1/albums",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "album_list_uses_unified_catalog_filters_and_pagination",
+        "album_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "album_detail",
+      "method": "GET",
+      "path": "/v1/albums/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "album_detail_and_tracks_use_reference_platform_and_pagination",
+        "qq_album_detail_canonicalizes_numeric_identity_and_forwards_account",
+        "album_reads_accept_caller_credentials_without_server_aliases",
+        "public_albums_require_canonical_ids_and_support_album_import_pages"
+      ]
+    },
+    {
+      "id": "album_stats",
+      "method": "GET",
+      "path": "/v1/albums/{reference}/stats",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "album_stats_use_reference_platform_and_account"
+      ]
+    },
+    {
+      "id": "album_track_entitlements",
+      "method": "GET",
+      "path": "/v1/albums/{reference}/track-entitlements",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "album_track_entitlements_use_reference_platform_and_pagination"
+      ]
+    },
+    {
+      "id": "album_tracks",
+      "method": "GET",
+      "path": "/v1/albums/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "soda"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "album_detail_and_tracks_use_reference_platform_and_pagination",
+        "album_reads_accept_caller_credentials_without_server_aliases",
+        "public_albums_require_canonical_ids_and_support_album_import_pages"
       ]
     }
   ]
