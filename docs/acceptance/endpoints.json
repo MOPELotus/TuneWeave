@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 58,
+  "covered_route_count": 68,
   "entries": [
     {
       "id": "health",
@@ -1202,6 +1202,187 @@
       "network": "destructive",
       "acceptance_cases": [
         "playlist_item_routes_keep_tracks_and_videos_distinct"
+      ]
+    },
+    {
+      "id": "account_session_profile",
+      "method": "GET",
+      "path": "/v1/account",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq",
+          "bilibili"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_profile_selects_platform_and_account_alias",
+        "session_and_account_profile_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_user_profile",
+      "method": "GET",
+      "path": "/v1/account/profile",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_user_profile_resolves_the_selected_sessions_user_id"
+      ]
+    },
+    {
+      "id": "account_membership",
+      "method": "GET",
+      "path": "/v1/account/membership",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "membership_endpoints_separate_public_user_and_current_account_status",
+        "membership_endpoints_expose_the_authenticated_client_backend_explicitly",
+        "membership_endpoints_reject_bad_references_platforms_and_query_fields"
+      ]
+    },
+    {
+      "id": "account_playlists",
+      "method": "GET",
+      "path": "/v1/account/playlists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_playlists_use_unified_pagination",
+        "playlist_reads_use_caller_credentials_without_server_account_fallback"
+      ]
+    },
+    {
+      "id": "account_playlists_order",
+      "method": "PUT",
+      "path": "/v1/account/playlists/order",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_and_account_order_routes_preserve_exact_input_order",
+        "playlist_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_favorite_tracks",
+      "method": "GET",
+      "path": "/v1/account/favorites/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_favorite_tracks_use_unified_pagination"
+      ]
+    },
+    {
+      "id": "account_favorite_track_add",
+      "method": "PUT",
+      "path": "/v1/account/favorites/tracks/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "track_favorites_put_and_delete_select_reference_platform_and_account"
+      ]
+    },
+    {
+      "id": "account_favorite_track_remove",
+      "method": "DELETE",
+      "path": "/v1/account/favorites/tracks/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "track_favorites_put_and_delete_select_reference_platform_and_account"
+      ]
+    },
+    {
+      "id": "account_favorite_playlist_add",
+      "method": "PUT",
+      "path": "/v1/account/favorites/playlists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_favorites_put_and_delete_select_reference_platform_and_account"
+      ]
+    },
+    {
+      "id": "account_favorite_playlist_remove",
+      "method": "DELETE",
+      "path": "/v1/account/favorites/playlists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "playlist_favorites_put_and_delete_select_reference_platform_and_account"
       ]
     }
   ]
