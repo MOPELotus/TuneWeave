@@ -78,6 +78,7 @@ const SPACE_PLAYLIST_WEB_LOCATION: &str = "333.999";
 const SEASON_ARCHIVE_PAGE_SIZE: u32 = 30;
 const FAVORITE_MEDIA_PAGE_SIZE: u32 = 20;
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
+const WEB_DEVICE_B_NUT: &str = "100";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_SUBTITLE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -3467,32 +3468,7 @@ impl BilibiliClient {
                 .map_err(bilibili_network_error)?;
             let status = response.status();
             http_status = Some(status);
-            if !status.is_success() {
-                return Err(bilibili_http_error(
-                    "Bilibili web identity endpoint",
-                    status,
-                ));
-            }
-            let value = response
-                .headers()
-                .get_all(SET_COOKIE)
-                .iter()
-                .filter_map(|header| header.to_str().ok())
-                .filter_map(|header| header.split(';').next())
-                .filter_map(|pair| pair.split_once('='))
-                .find_map(|(name, value)| (name == "b_nut").then(|| value.to_owned()))
-                .ok_or_else(|| {
-                    bilibili_upstream_error("Bilibili web identity did not return b_nut")
-                })?;
-            if value.is_empty()
-                || value.len() > 20
-                || !value.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return Err(bilibili_upstream_error(
-                    "Bilibili web identity returned an invalid b_nut",
-                ));
-            }
-            Ok(value)
+            parse_web_cookie_timestamp_response(status, response.headers())
         }
         .await;
         self.log_upstream_request(
@@ -4286,6 +4262,14 @@ fn parse_video_search_response(
         })?;
     let mut videos = Vec::with_capacity(data.result.len());
     for item in data.result {
+        let result_type = parse_video_search_result_type(&item.r#type)?;
+        if matches!(
+            result_type,
+            BilibiliVideoSearchResultType::SponsoredVideo(_)
+        ) && item.title.trim().is_empty()
+        {
+            continue;
+        }
         videos.push(map_video_search_item(item)?);
     }
     Ok(BilibiliVideoSearchPage {
@@ -6590,6 +6574,31 @@ fn validate_cookie_value(value: &str, name: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
+fn parse_web_cookie_timestamp_response(status: StatusCode, headers: &HeaderMap) -> Result<String> {
+    if !status.is_success() && !status.is_redirection() {
+        return Err(bilibili_http_error(
+            "Bilibili web identity endpoint",
+            status,
+        ));
+    }
+    let value = headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|header| header.to_str().ok())
+        .filter_map(|header| header.split(';').next())
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(name, value)| (name == "b_nut").then(|| value.to_owned()));
+    let Some(value) = value else {
+        return Ok(WEB_DEVICE_B_NUT.to_owned());
+    };
+    if value.is_empty() || value.len() > 20 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(bilibili_upstream_error(
+            "Bilibili web identity returned an invalid b_nut",
+        ));
+    }
+    Ok(value)
+}
+
 fn parse_cookie_info_response(bytes: &[u8]) -> Result<CookieInfoData> {
     let response: PassportResponse<CookieInfoData> =
         serde_json::from_slice(bytes).map_err(|_| {
@@ -7420,6 +7429,47 @@ mod tests {
     }
 
     #[test]
+    fn web_cookie_timestamp_accepts_valid_redirect_cookie_without_following_it() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            "buvid3=device-id; Path=/".parse().expect("cookie header"),
+        );
+        headers.append(
+            SET_COOKIE,
+            "b_nut=100; Path=/; Domain=.bilibili.com"
+                .parse()
+                .expect("cookie header"),
+        );
+
+        assert_eq!(
+            parse_web_cookie_timestamp_response(StatusCode::OK, &headers)
+                .expect("successful response"),
+            "100"
+        );
+        assert_eq!(
+            parse_web_cookie_timestamp_response(StatusCode::FOUND, &headers)
+                .expect("redirect response with a cookie"),
+            "100"
+        );
+        assert_eq!(
+            parse_web_cookie_timestamp_response(StatusCode::FOUND, &HeaderMap::new())
+                .expect("redirect response without a repeated device cookie"),
+            WEB_DEVICE_B_NUT
+        );
+        assert!(parse_web_cookie_timestamp_response(StatusCode::FORBIDDEN, &headers).is_err());
+
+        let mut invalid = HeaderMap::new();
+        invalid.append(
+            SET_COOKIE,
+            "b_nut=not-a-timestamp; Path=/"
+                .parse()
+                .expect("cookie header"),
+        );
+        assert!(parse_web_cookie_timestamp_response(StatusCode::OK, &invalid).is_err());
+    }
+
+    #[test]
     fn qr_creation_maps_the_reference_response_without_exposing_the_key() {
         let url = format!(
             "https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key={QR_KEY}&from="
@@ -8108,6 +8158,47 @@ mod tests {
                 "{invalid} must not be treated as a video"
             );
         }
+    }
+
+    #[test]
+    fn video_search_skips_unnamed_sponsored_cards_without_hiding_organic_drift() {
+        let item = |kind: &str, aid: u64, title: &str| {
+            json!({
+                "type": kind,
+                "aid": aid,
+                "bvid": "BV1xx411c7mD",
+                "title": title,
+                "author": "author",
+                "mid": 1,
+                "description": "",
+                "pic": "//i0.hdslb.com/bfs/archive/cover.jpg",
+                "duration": "0:01"
+            })
+        };
+        let response = |kind: &str| {
+            serde_json::to_vec(&json!({
+                "code": 0,
+                "message": "0",
+                "data": {
+                    "seid": "1",
+                    "page": 1,
+                    "pagesize": VIDEO_SEARCH_PAGE_SIZE,
+                    "numResults": 2,
+                    "numPages": 1,
+                    "result": [item("video", 1, "normal"), item(kind, 2, "")]
+                }
+            }))
+            .expect("search fixture")
+        };
+
+        let page = parse_video_search_response(&response("video_ad_82"), 1)
+            .expect("unnamed sponsored card is skipped");
+        assert_eq!(page.videos.len(), 1);
+        assert_eq!(page.videos[0].title, "normal");
+
+        let error = parse_video_search_response(&response("video"), 1)
+            .expect_err("unnamed organic result remains invalid");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
     #[test]
