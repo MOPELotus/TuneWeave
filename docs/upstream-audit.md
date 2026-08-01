@@ -6,11 +6,11 @@ TuneWeave 将参考项目作为协议资料，用于理解请求参数、默认�
 
 | 平台 | 参考项目 | 参考修订 | 许可证 |
 | --- | --- | --- | --- |
-| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `63d89aa906f78c286a7f838258fa29220d7f41dd` | MIT |
+| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `6732fc7c32518ee481b089e2a40f488c28729054` | MIT |
 | 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `e98e19711d7b97e2795f28729bcded82158769df` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
 | QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | GPL-3.0-or-later |
-| 酷狗 | `MakcRe/KuGouMusicApi` | `283f1e97b110726b208a64b486a657c0fc0a6126` | MIT |
-| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `1dae8297705d0eb14013cf45e4e3c7d5b4a6220c` | Apache-2.0 |
+| 酷狗 | `MakcRe/KuGouMusicApi` | `62ac8e2f209438d5d480a1dc9dd78b50a52b5748` | MIT |
+| 咪咕 | `Domdkw/miguMusic-api-enhanced` | `fbb0121d0c23088c74d63bc95a005c6fada413c1` | Apache-2.0 |
 | 酷我 | `qyhqiu/kuwoMusicApi` | `e8e720b90b4d7e3052078a3380906f2b3349e388` | Apache-2.0；README 与根许可证优先于过时的包元数据 |
 | 酷我、汽水 | `guohuiyuan/music-lib` | `b299302e3163765d3efcc9df592700b41867c3d8` | AGPL-3.0；仅作协议研究，不复制、翻译或链接源码 |
 | 酷我 | `UnblockNeteaseMusic/server` | `39e21bfb4b7581f39785b190aeced201d23f0d41` | LGPL-3.0-only；仅研究酷我移动播放、DES 与失败分支 |
@@ -63,6 +63,7 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 - 参考项目按模块公开 API，并使用 `api`、`weapi`、`eapi`、`linuxapi`、`xeapi` 等协议。
 - 搜索、详情、歌单、歌词、播放、云盘、播客、MV、账户和权益能力进入统一模型；平台特有能力进入扩展端点。
 - 音乐合伙人逻辑来自作者明确授权参考的 Lotus-ReFactor，实现时仍遵循 TuneWeave 的多账户与安全边界。
+- `6ce6b840` 将社交资源分享改为 XEAPI v3；该能力仍只登记在扩展候选池，不进入音乐客户端项目范围。
 
 ### QQ 音乐
 
@@ -82,6 +83,7 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 - 当前 Android 歌曲搜索即使刚取得匿名 `dfid` 仍会返回业务码 152；官方 `songsearch.kugou.com/song_search_v2` Web 搜索实测可匿名返回歌曲、音质哈希和权益字段，公开搜索继续采用该真实可用分支。匿名 GUID/MID 在启动时持久化，`dfid` 只在歌曲详情、歌单、歌词、权益和播放等真正进入移动协议的请求前注册，不把失效前置条件扩散到 Web 搜索。
 - 播放链保留 `hash`、`album_audio_id`、设备身份、普通 token、VIP token、实际音质和试听状态。
 - KRC/LRC 搜索与下载所需的 `id + accesskey` 作为强类型平台扩展保存。
+- `62ac8e2f` 新增登录账户的已购单曲与已购专辑分页读取；两者属于账户媒体库，已登记到酷狗后续项目范围，不能被普通收藏或公开专辑目录替代。
 
 ### 咪咕
 
@@ -94,7 +96,7 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 - 统一 resolver 已用真实跨平台歌曲确认咪咕精确匹配、实际音质和试听窗口不会在回退中丢失；调用方托管 Uni 项、完整媒体 302 与受限试听拒绝下载也已通过统一 HTTP 验收。该层复用 TuneWeave 通用解析契约，不另造咪咕特例或放宽匹配阈值。
 - 公开歌单详情会回配 `resourceType=2021 + musicListId`，歌曲页使用另一套 M3 协议。真实响应证明传入 `pageSize=100` 仍只返回 50 首，不能相信参考项目把任意 `size` 直接透传后的表面语义；TuneWeave 固定物理页宽 50，再以受限连续页实现统一分页和完整 Uni 导入。
 - 参考项目的公开模块直接使用普通 HTTP 客户端且不设响应上限。TuneWeave 将六个所需 API 固定为官方 HTTPS、关闭重定向并分别限制 API/歌词响应，同时独立校验资源与媒体链接；外部调用方不能覆盖传输参数。真实匿名差分仍是免费全曲与会员限时试听，不存在免登录伪造会员权益的分支。
-- `47d2edb` 新增的 `ninan_signInfo` 与 H5/用户接口重构属于后续项目范围，未改变公开音源补充层的实施优先级。
+- `fbb0121d` 合并了呢喃签到与播放重定向。签到属于营销奖励活动，不进入项目范围；播放重定向映射到既有统一 stream redirect，参考实现中的明文 HTTP 请求和删除媒体签名查询行为不迁入。
 - 关键资源身份包括 `contentId + copyrightId + resourceType`，登录播放还可能使用 PACM token。
 - 外部歌单匹配只接受经过验证的公开来源，不提供任意 URL 转发。
 

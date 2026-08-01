@@ -1,6 +1,6 @@
 # 网易云音乐项目范围覆盖账本
 
-上游基线为 `NeteaseCloudMusicApiEnhanced/api-enhanced@63d89aa906f78c286a7f838258fa29220d7f41dd`。本表是网易云音乐在 TuneWeave 产品定位内承诺完成的正式能力分母；参考项目中不属于本范围的能力仅登记到[网易云扩展候选池](extensions/netease.md)，不影响平台完成度。
+上游基线为 `NeteaseCloudMusicApiEnhanced/api-enhanced@6732fc7c32518ee481b089e2a40f488c28729054`。本表是网易云音乐在 TuneWeave 产品定位内承诺完成的正式能力分母；参考项目中不属于本范围的能力仅登记到[网易云扩展候选池](extensions/netease.md)，不影响平台完成度。
 
 状态含义：`pending` 尚未实现，`deferred` 已明确保留但按路线延期，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户或后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 

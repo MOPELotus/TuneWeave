@@ -1,6 +1,6 @@
 # 网易云平台功能扩展候选池
 
-上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@63d89aa906f78c286a7f838258fa29220d7f41dd`
+上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@6732fc7c32518ee481b089e2a40f488c28729054`
 
 本表由该快照的 `module/*.js` 文件生成，用于保存已发现的协议能力、参考来源和可能用途，不是完成度验收清单。网易云音乐的正式完成状态只看[项目范围覆盖账本](../netease-scope.md)。候选池没有固定实施顺序、分母、完成率或清零要求。
 
@@ -299,7 +299,7 @@
 | `send_song` | `/send/song` | `candidate` | — |
 | `send_text` | `/send/text` | `candidate` | — |
 | `setting` | `/setting` | `candidate` | — |
-| `share_resource` | `/share/resource` | `candidate` | — |
+| `share_resource` | `/share/resource` | `candidate` | `6ce6b840` 已将协议切换为 XEAPI v3 `/api/share/friends/resource`；属于社交分享，仍不进入项目范围 |
 | `sheet_list` | `/sheet/list` | `candidate` | — |
 | `sheet_preview` | `/sheet/preview` | `candidate` | — |
 | `sign_happy_info` | `/sign/happy/info` | `candidate` | — |

@@ -7,7 +7,7 @@ future ports can be audited precisely.
 ## NeteaseCloudMusicApiEnhanced/api-enhanced
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
-- Reviewed commit: `63d89aa906f78c286a7f838258fa29220d7f41dd`
+- Reviewed commit: `6732fc7c32518ee481b089e2a40f488c28729054`
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.
@@ -38,7 +38,7 @@ independent implementation of observed request and response behavior.
 ## MakcRe/KuGouMusicApi
 
 - Source: https://github.com/MakcRe/KuGouMusicApi
-- Reviewed commit: `283f1e97b110726b208a64b486a657c0fc0a6126`
+- Reviewed commit: `62ac8e2f209438d5d480a1dc9dd78b50a52b5748`
 - License: MIT
 - Used for: KuGou request signing, device identity, authentication, catalog,
   lyric, playlist, and media URL behavior research.
@@ -46,7 +46,7 @@ independent implementation of observed request and response behavior.
 ## Domdkw/miguMusic-api-enhanced
 
 - Source: https://github.com/Domdkw/miguMusic-api-enhanced
-- Reviewed commit: `1dae8297705d0eb14013cf45e4e3c7d5b4a6220c`
+- Reviewed commit: `fbb0121d0c23088c74d63bc95a005c6fada413c1`
 - License: Apache License 2.0
 - Used for: Migu catalog, login, PACM token, resource identity, entitlement,
   and media URL behavior research.
