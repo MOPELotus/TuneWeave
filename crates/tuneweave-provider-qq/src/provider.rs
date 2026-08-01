@@ -15969,14 +15969,38 @@ fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
         .filter(|value| !value.is_empty() && *value != name.as_str())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let image_mid = [album.pmid.as_str(), mid]
+    let image_source = [album.pmid.as_str(), mid]
         .into_iter()
         .map(str::trim)
         .find(|value| !value.is_empty());
-    if let Some(image_mid) = image_mid {
-        validate_qq_image_id(image_mid)
-            .map_err(|_| qq_data_error("QQ favorite album returned an invalid cover MID"))?;
-    }
+    let (cover_url, image_mid) = match image_source {
+        Some(value)
+            if value.starts_with("//")
+                || value.starts_with("http://")
+                || value.starts_with("https://") =>
+        {
+            let normalized = first_qq_display_url(&[(value, "favorite album cover")])?
+                .expect("a non-empty cover URL candidate always produces a URL");
+            let mut url = reqwest::Url::parse(&normalized)
+                .map_err(|_| qq_data_error("QQ favorite album cover URL is malformed"))?;
+            if url.scheme() == "http"
+                && url
+                    .host_str()
+                    .is_some_and(|host| host.eq_ignore_ascii_case("y.gtimg.cn"))
+            {
+                url.set_scheme("https").map_err(|_| {
+                    qq_data_error("QQ favorite album cover URL has an unsafe scheme")
+                })?;
+            }
+            (Some(url.to_string()), None)
+        }
+        Some(value) => {
+            validate_qq_image_id(value)
+                .map_err(|_| qq_data_error("QQ favorite album returned an invalid cover MID"))?;
+            (Some(qq_cover_url("T002", value)), Some(value.to_owned()))
+        }
+        None => (None, None),
+    };
     let artists = album
         .singers
         .iter()
@@ -16000,7 +16024,7 @@ fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
     if let Some(subscribed_at) = subscribed_at {
         extensions.insert("subscribed_at".to_owned(), json!(subscribed_at));
     }
-    if let Some(image_mid) = image_mid {
+    if let Some(image_mid) = image_mid.as_deref() {
         extensions.insert("image_mid".to_owned(), json!(image_mid));
     }
     Ok(Album {
@@ -16011,7 +16035,7 @@ fn map_qq_favorite_album(album: QqFavoriteAlbumItem) -> Result<Album> {
         aliases,
         artists,
         description: String::new(),
-        cover_url: image_mid.map(|image_mid| qq_cover_url("T002", image_mid)),
+        cover_url,
         published_at,
         track_count: Some(album.songnum),
         company: None,
@@ -24250,6 +24274,9 @@ mod tests {
 
     #[test]
     fn favorite_album_mapping_preserves_identity_times_singers_and_page_metadata() {
+        let mut url_album = sample_favorite_album(100, "001uKKpF1RuJSd", "叶惠美");
+        url_album["logo"] =
+            json!("http://y.gtimg.cn/music/photo_new/T002R150x150M000001uKKpF1RuJSd_5.jpg");
         let mut numeric_album = sample_favorite_album(101, "001SecondAlbum", "第二张专辑");
         numeric_album["albumMid"] = json!("");
         numeric_album["logo"] = json!("001SecondAlbum_1");
@@ -24264,7 +24291,7 @@ mod tests {
                 "hasmore": 1,
                 "hide": false,
                 "v_list": [
-                    sample_favorite_album(100, "001uKKpF1RuJSd", "叶惠美"),
+                    url_album,
                     numeric_album
                 ],
                 "v_failAlbumId": [999],
@@ -24290,16 +24317,22 @@ mod tests {
         assert_eq!(page.items[0].extensions["subscribed"], true);
         assert_eq!(page.items[0].extensions["numeric_id"], 100);
         assert_eq!(
+            page.items[0].cover_url.as_deref(),
+            Some("https://y.gtimg.cn/music/photo_new/T002R150x150M000001uKKpF1RuJSd_5.jpg")
+        );
+        assert!(!page.items[0].extensions.contains_key("image_mid"));
+        assert_eq!(
             page.items[0].extensions["favorite_album"]["futureAlbumField"]["kept"],
             true
         );
+        assert_eq!(page.items[1].resource_ref.to_string(), "qq:101");
+        assert_eq!(page.items[1].extensions["image_mid"], "001SecondAlbum_1");
         assert!(
-            page.items[0]
+            page.items[1]
                 .cover_url
                 .as_deref()
-                .is_some_and(|url| url.contains("001uKKpF1RuJSd_1"))
+                .is_some_and(|url| url.contains("001SecondAlbum_1"))
         );
-        assert_eq!(page.items[1].resource_ref.to_string(), "qq:101");
         assert_eq!(page.pagination.total, Some(3));
         assert_eq!(page.pagination.next_offset, Some(2));
         assert!(page.pagination.has_more);
@@ -24355,6 +24388,7 @@ mod tests {
             ("albumMid", json!("unsafe/album")),
             ("albumName", json!("")),
             ("logo", json!("unsafe/image")),
+            ("logo", json!("https://user:secret@y.gtimg.cn/cover.jpg")),
             ("v_singer", json!({})),
             ("pubtime", json!("not-a-time")),
         ] {
