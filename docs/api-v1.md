@@ -1559,7 +1559,7 @@ QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会�
 | GET | `/v1/auth/country-codes` | `platform?`、`account?` | `CountryCallingCodeGroup[]`；登录可选国家/地区及电话区号目录 |
 | POST | `/v1/auth/qr` | `{platform, account?, login_type?, credential_mode?}` | 二维码事务 ID、二维码 URL/图片、过期时间；事务固定凭证模式 |
 | GET | `/v1/auth/qr/{transaction_id}` | 无 | `waiting/scanned/confirmed/expired/failed`；成功时按事务模式保存、返回或同时处理登录态 |
-| POST | `/v1/auth/password` | `{platform, account?, principal_type, principal, password, credential_mode?}` | 登录状态、脱敏账户摘要及显式模式允许时的一次性调用方凭证 |
+| POST | `/v1/auth/password` | `{platform, account?, principal_type, principal, password, password_format?, country_code?, secure_captcha?, credential_mode?}` | 登录状态、脱敏账户摘要及显式模式允许时的一次性调用方凭证 |
 | POST | `/v1/auth/principals/status` | `{platform, account?, principal_type?, principal, country_code?}` | `AuthPrincipalStatus`；查询主体是否已注册，不创建登录态 |
 | POST | `/v1/auth/challenges` | `{platform, account?, method?, principal, country_code?, credential_mode?}` | 短信等挑战事务；事务固定凭证模式 |
 | POST | `/v1/auth/challenges/validate` | `{platform, account?, method?, principal, code, country_code?}` | `AuthChallengeValidation`；仅校验挑战码，不创建登录态 |
@@ -1608,7 +1608,7 @@ QQ 歌手 MV 固定调用 Android `MvService.MvInfoProServer/GetSingerMvList`，
 
 QQ MV 详情固定调用 Android `video.VideoDataServer/get_video_info_batch`。请求完整列出 VID、SID、封面、时长、歌手、开关、消息、名称、描述、播放量、发布时间、收藏态、GMID、上传者资料及关联歌曲等 21 个唯一字段；参考实现中重复的 `uploader_hasfollow` 选择项被去重。单项和 1–100 项批量共用原生批量请求，返回映射按输入重建，因此重复 VID 和调用顺序不会被上游字典覆盖；缺失、额外、错位或畸形 VID 明确失败。上传者字段允许平台真实存在的空字符串/null，并保持其他非标量为错误；每项保留完整自身详情及去除整批 data 后的顶层响应元数据，避免批量响应在每项重复造成二次方膨胀。详情接口不伪造播放清晰度，实际档位继续由流端点返回。已真实验证普通短视频 MV 与歌手 MV，以及异构三项、首尾重复的统一批次。
 
-`principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
+`principal_type` 至少允许平台实际支持的 `email`、`phone` 或平台账号类型；密码默认按明文接收并立即在适配器内完成平台要求的摘要，也可用 `password_format: "md5"` 明确提交已有摘要。网易云手机号密码登录还接受可选 `secure_captcha`，兼容 `secureCaptcha` 与参考参数 `sca`；该值只映射到上游 `secureCaptcha`，邮箱等其他登录主体会在发网前拒绝。安全验证码去除首尾空白后不得超过 1024 字节或包含控制字符，不进入日志、响应及凭据存储。`method` 至少允许 `sms`，并可由平台扩展。上游存在多种登录方式时必须全部接入，不能只保留二维码这一条流程。
 
 网易云播客订阅列表固定使用 WeAPI `/api/djradio/get/subed`，提交 `limit/offset/total=true`，并将 `count/hasMore`（兼容 `more`）映射为统一分页。列表本身比条目内可能陈旧的 `subed=false` 更明确，因此返回项稳定标记 `subscribed=true`，不会让低层默认值遮住账户资料库语义。订阅与取消订阅分别使用 `/api/djradio/sub` 和 `/api/djradio/unsub`，统一为同一资源路径的 PUT/DELETE，并由 `account` 选择隔离的持久登录态。
 

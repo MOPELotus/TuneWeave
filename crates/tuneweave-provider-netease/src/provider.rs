@@ -3088,6 +3088,12 @@ impl MusicProvider for NeteaseProvider {
     ) -> Result<ProviderAuthResult> {
         validate_netease_login_account(&request.account, mode)?;
         let country_code = request.country_code.as_deref().unwrap_or("86");
+        if request.secure_captcha.is_some() && request.principal_type != PrincipalType::Phone {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase secure captcha is only valid for phone password login",
+            )
+            .with_platform(Platform::Netease));
+        }
         let login = match (request.principal_type, request.password_format) {
             (PrincipalType::Email, PasswordFormat::Plain) => {
                 self.client
@@ -3101,15 +3107,21 @@ impl MusicProvider for NeteaseProvider {
             }
             (PrincipalType::Phone, PasswordFormat::Plain) => {
                 self.client
-                    .login_with_phone_password(&request.principal, country_code, &request.password)
+                    .login_with_phone_password_secure(
+                        &request.principal,
+                        country_code,
+                        &request.password,
+                        request.secure_captcha.as_deref(),
+                    )
                     .await?
             }
             (PrincipalType::Phone, PasswordFormat::Md5) => {
                 self.client
-                    .login_with_phone_password_md5(
+                    .login_with_phone_password_md5_secure(
                         &request.principal,
                         country_code,
                         &request.password,
+                        request.secure_captcha.as_deref(),
                     )
                     .await?
             }
@@ -27937,11 +27949,28 @@ mod tests {
                 password: "password".to_owned(),
                 password_format: PasswordFormat::Plain,
                 country_code: None,
+                secure_captcha: None,
             },
         )
         .await
         .expect_err("unsupported principal type");
         assert_eq!(password_error.code, ErrorCode::InvalidRequest);
+
+        let secure_email_error = MusicProvider::password_login(
+            &provider,
+            &PasswordLoginRequest {
+                account: "default".to_owned(),
+                principal_type: PrincipalType::Email,
+                principal: "private@example.test".to_owned(),
+                password: "password".to_owned(),
+                password_format: PasswordFormat::Plain,
+                country_code: None,
+                secure_captcha: Some("secure-captcha".to_owned()),
+            },
+        )
+        .await
+        .expect_err("email login must reject phone-only secure captcha");
+        assert_eq!(secure_email_error.code, ErrorCode::InvalidRequest);
     }
 
     #[test]

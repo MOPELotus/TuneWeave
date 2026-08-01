@@ -172,7 +172,7 @@
 | `listentogether_sync_list_command` | `/listentogether/sync/list/command` | `candidate` | — |
 | `listentogether_sync_playlist_get` | `/listentogether/sync/playlist/get` | `candidate` | — |
 | `login` | `/login` | `implemented` | `POST /v1/auth/password`（邮箱，待真实账户验证） |
-| `login_cellphone` | `/login/cellphone` | `selected` | `POST /v1/auth/password` / challenge verify 已实现；上游新增可选 `sca→secureCaptcha` 安全验证码字段，TuneWeave 尚未在强类型登录请求中暴露该分支，补齐前降为 `partial` |
+| `login_cellphone` | `/login/cellphone` | `implemented` | `POST /v1/auth/password` / challenge verify 已实现；手机号密码登录完整支持明文或 MD5 密码以及可选 `secure_captcha`（兼容 `secureCaptcha/sca`），后者精确映射到上游 `secureCaptcha`，只允许手机号主体、限制为 1024 字节且拒绝控制字符，不进入日志、响应或凭据存储。当前验收账户没有可用于受控验证的密码，真实成功态保持未验证 |
 | `login_qr_check` | `/login/qr/check` | `selected` | `GET /v1/auth/qr/{transaction_id}`（waiting 已验证，确认态待账户实测） |
 | `login_qr_create` | `/login/qr/create` | `implemented` | `POST /v1/auth/qr`（二维码 key 与业务码会跳过空或不可解析的顶层别名并读取嵌套有效值；真实 HTTP 创建返回可扫码 URL 及自包含 SVG data URL；二维码图片不依赖外部渲染服务） |
 | `login_qr_key` | `/login/qr/key` | `implemented` | `POST /v1/auth/qr`（真实 HTTP 验证上游 key 创建成功；响应只暴露 TuneWeave 随机事务 ID，不泄露上游 key） |

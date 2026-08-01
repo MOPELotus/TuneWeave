@@ -129,6 +129,8 @@ pub struct PasswordLoginRequest {
     #[serde(default)]
     pub password_format: PasswordFormat,
     pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure_captcha: Option<String>,
 }
 
 impl fmt::Debug for PasswordLoginRequest {
@@ -141,6 +143,7 @@ impl fmt::Debug for PasswordLoginRequest {
             .field("password", &"[redacted]")
             .field("password_format", &self.password_format)
             .field("country_code", &self.country_code)
+            .field("has_secure_captcha", &self.secure_captcha.is_some())
             .finish()
     }
 }
@@ -249,6 +252,7 @@ mod tests {
             password: "password-secret".to_owned(),
             password_format: PasswordFormat::Plain,
             country_code: None,
+            secure_captcha: Some("secure-captcha-secret".to_owned()),
         };
         let challenge = AuthChallengeRequest {
             account: "default".to_owned(),
@@ -265,6 +269,7 @@ mod tests {
         let output = format!("{password:?} {challenge:?} {status:?}");
         assert!(!output.contains("secret@example.test"));
         assert!(!output.contains("password-secret"));
+        assert!(!output.contains("secure-captcha-secret"));
         assert!(!output.contains("13800138000"));
         assert!(!output.contains("13900139000"));
     }

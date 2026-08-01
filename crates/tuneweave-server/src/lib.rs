@@ -12620,6 +12620,8 @@ struct AuthPasswordBody {
     #[serde(default)]
     password_format: PasswordFormat,
     country_code: Option<String>,
+    #[serde(default, alias = "sca", alias = "secureCaptcha")]
+    secure_captcha: Option<String>,
     #[serde(default)]
     credential_mode: CredentialMode,
 }
@@ -12650,6 +12652,7 @@ async fn auth_password(
                 password: body.password,
                 password_format: body.password_format,
                 country_code: optional_trimmed(body.country_code),
+                secure_captcha: optional_trimmed(body.secure_captcha),
             },
             body.credential_mode,
         )
@@ -35656,6 +35659,28 @@ mod tests {
         let output = serde_json::to_string(&json).expect("serialize response");
         assert!(!output.contains("private@example.test"));
         assert!(!output.contains("must-never-appear"));
+    }
+
+    #[test]
+    fn password_auth_accepts_netease_secure_captcha_aliases() {
+        for alias in ["secure_captcha", "secureCaptcha", "sca"] {
+            let mut payload = json!({
+                "platform": "netease",
+                "principal_type": "phone",
+                "principal": "13800138000",
+                "password": "password-secret"
+            });
+            payload
+                .as_object_mut()
+                .expect("password body")
+                .insert(alias.to_owned(), json!("secure-captcha-secret"));
+            let body: AuthPasswordBody =
+                serde_json::from_value(payload).expect("secure captcha alias");
+            assert_eq!(
+                body.secure_captcha.as_deref(),
+                Some("secure-captcha-secret")
+            );
+        }
     }
 
     #[tokio::test]

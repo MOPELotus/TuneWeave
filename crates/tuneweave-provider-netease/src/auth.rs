@@ -219,9 +219,25 @@ impl NeteaseClient {
         country_code: &str,
         password: &str,
     ) -> Result<NeteaseLoginResult> {
-        let password_md5 = password_digest(required_value("password", password)?);
-        self.login_with_phone_password_md5(phone, country_code, &password_md5)
+        self.login_with_phone_password_secure(phone, country_code, password, None)
             .await
+    }
+
+    pub async fn login_with_phone_password_secure(
+        &self,
+        phone: &str,
+        country_code: &str,
+        password: &str,
+        secure_captcha: Option<&str>,
+    ) -> Result<NeteaseLoginResult> {
+        let password_md5 = password_digest(required_value("password", password)?);
+        self.login_with_phone_password_md5_secure(
+            phone,
+            country_code,
+            &password_md5,
+            secure_captcha,
+        )
+        .await
     }
 
     pub async fn login_with_phone_password_md5(
@@ -230,20 +246,21 @@ impl NeteaseClient {
         country_code: &str,
         password_md5: &str,
     ) -> Result<NeteaseLoginResult> {
-        let phone = required_value("phone", phone)?;
-        let password_md5 = validated_password_digest(password_md5)?;
+        self.login_with_phone_password_md5_secure(phone, country_code, password_md5, None)
+            .await
+    }
+
+    pub async fn login_with_phone_password_md5_secure(
+        &self,
+        phone: &str,
+        country_code: &str,
+        password_md5: &str,
+        secure_captcha: Option<&str>,
+    ) -> Result<NeteaseLoginResult> {
+        let payload =
+            phone_password_login_payload(phone, country_code, password_md5, secure_captcha)?;
         let response = self
-            .request_weapi(
-                "/api/w/login/cellphone",
-                json!({
-                    "type": "1",
-                    "https": "true",
-                    "phone": phone,
-                    "countrycode": normalized_country_code(country_code),
-                    "password": password_md5,
-                    "remember": "true"
-                }),
-            )
+            .request_weapi("/api/w/login/cellphone", payload)
             .await?;
         login_result(self, response, "phone password login")
     }
@@ -431,6 +448,37 @@ fn normalized_country_code(value: &str) -> &str {
     if value.is_empty() { "86" } else { value }
 }
 
+fn phone_password_login_payload(
+    phone: &str,
+    country_code: &str,
+    password_md5: &str,
+    secure_captcha: Option<&str>,
+) -> Result<Value> {
+    let phone = required_value("phone", phone)?;
+    let password_md5 = validated_password_digest(password_md5)?;
+    let secure_captcha = validated_secure_captcha(secure_captcha)?;
+    Ok(json!({
+        "type": "1",
+        "https": "true",
+        "phone": phone,
+        "countrycode": normalized_country_code(country_code),
+        "password": password_md5,
+        "remember": "true",
+        "secureCaptcha": secure_captcha
+    }))
+}
+
+fn validated_secure_captcha(value: Option<&str>) -> Result<&str> {
+    let value = value.unwrap_or_default().trim();
+    if value.len() > 1024 || value.chars().any(char::is_control) {
+        return Err(
+            TuneWeaveError::invalid_request("NetEase secure captcha is invalid")
+                .with_platform(Platform::Netease),
+        );
+    }
+    Ok(value)
+}
+
 fn password_digest(password: &str) -> String {
     hex::encode(Md5::digest(password.as_bytes()))
 }
@@ -559,6 +607,33 @@ mod tests {
     #[test]
     fn rejects_invalid_prehashed_password_before_network_access() {
         let error = validated_password_digest("not-md5").expect_err("invalid digest");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn phone_password_payload_preserves_optional_secure_captcha() {
+        let digest = "ABCDEF0123456789ABCDEF0123456789";
+        let plain = phone_password_login_payload(" 13800138000 ", "", digest, None)
+            .expect("plain phone password payload");
+        assert_eq!(plain["phone"], "13800138000");
+        assert_eq!(plain["countrycode"], "86");
+        assert_eq!(plain["password"], digest.to_ascii_lowercase());
+        assert_eq!(plain["secureCaptcha"], "");
+
+        let secured =
+            phone_password_login_payload("13800138000", "86", digest, Some(" secure-captcha "))
+                .expect("secured phone password payload");
+        assert_eq!(secured["secureCaptcha"], "secure-captcha");
+
+        let error =
+            phone_password_login_payload("13800138000", "86", digest, Some("unsafe\ncaptcha"))
+                .expect_err("control characters must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let oversized = "x".repeat(1025);
+        let error =
+            phone_password_login_payload("13800138000", "86", digest, Some(oversized.as_str()))
+                .expect_err("oversized secure captcha must be rejected");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 
