@@ -28,15 +28,27 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: tuneweave
+            asset_platform: linux
+            asset_architecture: x86_64
+            asset_extension: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: tuneweave.exe
+            asset_platform: windows
+            asset_architecture: x86_64
+            asset_extension: .exe
           - os: macos-latest
             target: x86_64-apple-darwin
             binary: tuneweave
+            asset_platform: macos
+            asset_architecture: x86_64
+            asset_extension: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: tuneweave
+            asset_platform: macos
+            asset_architecture: aarch64
+            asset_extension: ""
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -57,28 +69,28 @@ jobs:
           --package tuneweave-server --bin tuneweave
           --target ${{ matrix.target }}
 
-      - name: Package release archive
+      - name: Package release asset
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           BINARY: ${{ matrix.binary }}
+          ASSET_PLATFORM: ${{ matrix.asset_platform }}
+          ASSET_ARCHITECTURE: ${{ matrix.asset_architecture }}
+          ASSET_EXTENSION: ${{ matrix.asset_extension }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         run: |
           set -euo pipefail
-          archive="tuneweave-${TARGET}.tar.gz"
-          mkdir -p package dist
-          cp "target/${TARGET}/release/${BINARY}" package/
-          cp LICENSE LICENSE-APACHE LICENSE-MIT README.md THIRD_PARTY_NOTICES.md package/
-          cp release-manifest.json package/
-          cp -R docs package/
-          tar -czf "dist/${archive}" -C package .
+          mkdir -p dist
+          asset="tuneweave-${RELEASE_TAG}-${ASSET_PLATFORM}-${ASSET_ARCHITECTURE}${ASSET_EXTENSION}"
+          cp "target/${TARGET}/release/${BINARY}" "dist/${asset}"
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${archive}" > "${archive}.sha256"
+            sha256sum "${asset}" > "${asset}.sha256"
           else
-            shasum -a 256 "${archive}" > "${archive}.sha256"
+            shasum -a 256 "${asset}" > "${asset}.sha256"
           fi
 
-      - name: Upload release archive and checksum
+      - name: Upload release asset and checksum
         uses: actions/upload-artifact@v7
         with:
           name: tuneweave-${{ matrix.target }}
@@ -95,7 +107,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
-      - name: Download release archives
+      - name: Download release assets
         uses: actions/download-artifact@v8
         with:
           path: dist
@@ -139,10 +151,10 @@ jobs:
             --argjson prerelease "${prerelease}" \
             '.tag == $tag and .version == $version and .prerelease == $prerelease and (.artifacts | length > 0)' \
             release-manifest.json >/dev/null
-          while IFS=$'\t' read -r archive checksum; do
-            test -f "dist/${archive}"
+          while IFS=$'\t' read -r asset checksum; do
+            test -f "dist/${asset}"
             test -f "dist/${checksum}"
-          done < <(jq -r '.artifacts[] | [.archive, .verification.checksum_file] | @tsv' release-manifest.json)
+          done < <(jq -r '.artifacts[] | [.file, .verification.checksum_file] | @tsv' release-manifest.json)
           cp release-manifest.json dist/release-manifest.json
 
       - name: Create or update release
@@ -163,6 +175,16 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
               --prerelease="${prerelease}"
+            while IFS= read -r asset; do
+              if [[ -n "${asset}" && ! -f "dist/${asset}" ]]; then
+                gh release delete-asset "${TAG}" "${asset}" \
+                  --yes \
+                  --repo "${GITHUB_REPOSITORY}"
+              fi
+            done < <(gh release view "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json assets \
+              --jq '.assets[].name')
             gh release upload "${TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
           else
             gh release create "${TAG}" dist/* \

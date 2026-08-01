@@ -2,7 +2,7 @@
 
 ## 运行预编译包
 
-从 GitHub Release 下载与系统匹配的 `tuneweave-<target>.tar.gz`，解压后运行 `tuneweave`；Windows 可执行文件名为 `tuneweave.exe`。每个压缩包都有同名 `.sha256` 文件，下载程序也可以从仓库根目录的 [`release-manifest.json`](../release-manifest.json) 获取版本、文件名、下载地址和校验地址。
+从 GitHub Release 下载与系统匹配的单文件可执行程序：Windows 文件名为 `tuneweave-<version>-windows-<architecture>.exe`，Linux 和 macOS 文件名分别为 `tuneweave-<version>-linux-<architecture>` 和 `tuneweave-<version>-macos-<architecture>`，均无需解压。每个发布文件都有同名 `.sha256` 校验文件，下载程序也可以从仓库根目录的 [`release-manifest.json`](../release-manifest.json) 获取版本、文件名、下载地址和校验地址。
 
 默认监听地址是 `127.0.0.1:7832`：
 
