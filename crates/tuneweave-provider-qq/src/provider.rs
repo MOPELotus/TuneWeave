@@ -16245,7 +16245,11 @@ fn map_qq_dislike_item(
 ) -> Result<AccountDislikeEntry> {
     let id = qq_response_positive_u64(&item.id, "dislike item ID")?;
     let (_, _, expected_id_type) = qq_dislike_kind_contract(kind);
-    if item.id_type != expected_id_type {
+    let id_type_matches = match kind {
+        AccountDislikeKind::Track => matches!(item.id_type, 0 | 1),
+        AccountDislikeKind::Artist | AccountDislikeKind::Style => item.id_type == expected_id_type,
+    };
+    if !id_type_matches {
         return Err(qq_data_error(
             "QQ dislike item type does not match its response container",
         ));
@@ -24701,7 +24705,7 @@ mod tests {
                 "Msg": "ok",
                 "Singers": [],
                 "Songs": [
-                    sample_dislike_item(398_282_803, 1, "不喜欢歌曲"),
+                    sample_dislike_item(398_282_803, 0, "不喜欢歌曲"),
                     sample_dislike_item(399_000_001, 1, "下一首")
                 ],
                 "Styles": [],
@@ -24725,7 +24729,8 @@ mod tests {
             list.items[0].added_at.as_deref(),
             Some("2024-01-01T00:00:00Z")
         );
-        assert_eq!(list.items[0].extensions["id_type"], 1);
+        assert_eq!(list.items[0].extensions["id_type"], 0);
+        assert_eq!(list.items[1].extensions["id_type"], 1);
         assert_eq!(
             list.items[0].extensions["dislike_item"]["futureDislikeField"]["kept"],
             true
