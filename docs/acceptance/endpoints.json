@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 130,
+  "covered_route_count": 144,
   "entries": [
     {
       "id": "health",
@@ -2562,6 +2562,264 @@
         "album_detail_and_tracks_use_reference_platform_and_pagination",
         "album_reads_accept_caller_credentials_without_server_aliases",
         "public_albums_require_canonical_ids_and_support_album_import_pages"
+      ]
+    },
+    {
+      "id": "artist_list",
+      "method": "GET",
+      "path": "/v1/artists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_snapshot_catalog_uses_unified_area_category_and_genre_filters",
+        "artist_catalog_rejects_unknown_cross_platform_filters",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_catalog",
+      "method": "GET",
+      "path": "/v1/artists/catalog",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_catalog_uses_unified_filters_and_pagination",
+        "artist_catalog_rejects_unknown_cross_platform_filters",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_details_get",
+      "method": "GET",
+      "path": "/v1/artists/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_artist_description_batches_preserve_order_duplicates_and_inputs"
+      ]
+    },
+    {
+      "id": "artist_details_post",
+      "method": "POST",
+      "path": "/v1/artists/details",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_artist_description_batches_preserve_order_duplicates_and_inputs"
+      ]
+    },
+    {
+      "id": "artist_detail",
+      "method": "GET",
+      "path": "/v1/artists/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_detail_uses_reference_platform_and_account",
+        "qq_artist_detail_forwards_mid_and_named_account",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_albums",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/albums",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_albums_use_reference_platform_account_and_pagination",
+        "artist_page_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_fans",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/fans",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_fans_use_reference_platform_account_and_pagination",
+        "artist_page_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_overview",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/overview",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_overview_keeps_featured_tracks_distinct_from_the_artist",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_similar",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/similar",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_similar_artists_use_reference_limit_account_and_strict_inputs"
+      ]
+    },
+    {
+      "id": "artist_stats",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/stats",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_stats_use_reference_platform_and_account",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_homepage_tab",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/tabs/{tab}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_artist_detail_forwards_mid_and_named_account",
+        "artist_page_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_top_tracks",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/top-tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_top_tracks_are_exposed_as_a_fixed_snapshot",
+        "artist_directory_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_tracks",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_tracks_use_reference_platform_order_account_and_pagination",
+        "artist_tracks_reject_unknown_order",
+        "artist_page_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_videos",
+      "method": "GET",
+      "path": "/v1/artists/{reference}/videos",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_videos_use_reference_platform_type_account_and_pagination",
+        "artist_page_accepts_caller_credentials_without_server_aliases"
       ]
     }
   ]
