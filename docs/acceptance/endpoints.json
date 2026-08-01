@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 144,
+  "covered_route_count": 159,
   "entries": [
     {
       "id": "health",
@@ -2820,6 +2820,272 @@
       "acceptance_cases": [
         "artist_videos_use_reference_platform_type_account_and_pagination",
         "artist_page_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_favorite_counts_get",
+      "method": "GET",
+      "path": "/v1/tracks/favorite-counts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_favorite_counts_support_single_and_ordered_duplicate_batches",
+        "track_favorite_count_routes_reject_ambiguous_mixed_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "track_favorite_counts_post",
+      "method": "POST",
+      "path": "/v1/tracks/favorite-counts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_favorite_counts_support_single_and_ordered_duplicate_batches",
+        "track_favorite_count_routes_reject_ambiguous_mixed_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "track_credits",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/credits",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_credits_preserve_roles_people_summary_account_and_strict_queries",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_favorite_count",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/favorite-count",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_favorite_counts_support_single_and_ordered_duplicate_batches",
+        "track_favorite_count_routes_reject_ambiguous_mixed_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "track_labels",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/labels",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_labels_preserve_zero_ids_optional_display_fields_and_strict_inputs",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_ai_lyric_dictionary",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/ai-dictionary",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "ai_lyric_dictionary_preserves_complete_ordered_entries_and_reference_platform"
+      ]
+    },
+    {
+      "id": "track_ai_lyric_dictionary_availability",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/ai-dictionary/availability",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "ai_lyric_dictionary_availability_uses_explicit_flag_and_reference_platform"
+      ]
+    },
+    {
+      "id": "track_singing_annotations_availability",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/singing-annotations/availability",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "singing_annotations_availability_uses_reference_platform_and_optional_account"
+      ]
+    },
+    {
+      "id": "track_lyric_translation_styles",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/translations/styles",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "multi_style_lyric_translations_preserve_order_and_reference_platform"
+      ]
+    },
+    {
+      "id": "track_related_playlists",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/related-playlists",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_related_playlists_preserve_sections_batch_cursor_aliases_and_strict_inputs",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_related_videos",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/related-videos",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_related_mvs_use_numeric_cursor_aliases_and_preserve_vid_identity",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_sheet_music",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/sheet-music",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_sheet_music_preserves_source_metadata_account_aliases_and_strict_queries",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_sheet_music_availability",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/sheet-music/availability",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_sheet_music_availability_preserves_independent_flags_account_and_strict_queries",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_similar",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/similar",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_similar_tracks_preserve_sections_limit_account_and_strict_inputs",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "track_versions",
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/versions",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "qq_track_versions_keep_source_order_account_and_strict_query_shape",
+        "track_related_reads_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
