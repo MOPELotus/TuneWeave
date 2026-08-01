@@ -1622,10 +1622,18 @@ fn parse_qq_qr_poll(body: &str) -> Result<ParsedQqQrPoll> {
             let callback = Url::parse(callback)
                 .map_err(|_| login_data_error("QQ QR success callback URL is invalid"))?;
             if callback.scheme() != "https"
-                || callback.host_str() != Some("graph.qq.com")
+                || !matches!(
+                    callback.host_str(),
+                    Some(
+                        "ssl.ptlogin2.graph.qq.com"
+                            | "ptlogin2.graph.qq.com"
+                            | "ssl.ptlogin2.qq.com"
+                    )
+                )
+                || callback.path() != "/check_sig"
                 || !callback.username().is_empty()
                 || callback.password().is_some()
-                || callback.port().is_some()
+                || callback.port_or_known_default() != Some(443)
                 || callback.fragment().is_some()
             {
                 return Err(login_data_error(
@@ -1952,7 +1960,7 @@ mod tests {
 
     #[test]
     fn parses_qq_qr_callback_without_exposing_unquoted_text() {
-        let body = "ptuiCB('0','0','https://graph.qq.com/?uin=123&service=x&ptsigx=sig&s_url=y','0','ok','nick');";
+        let body = "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig?uin=123&service=x&ptsigx=sig&s_url=y','0','ok','nick');";
         let args = parse_qq_status_arguments(body).expect("QQ callback");
         assert_eq!(args[0], "0");
         assert!(args[2].contains("ptsigx=sig"));
@@ -1971,6 +1979,19 @@ mod tests {
             )
             .is_err()
         );
+        for callback in [
+            "https://graph.qq.com/?uin=123&ptsigx=secret",
+            "https://ssl.ptlogin2.graph.qq.com/other?uin=123&ptsigx=secret",
+            "https://ssl.ptlogin2.graph.qq.com:444/check_sig?uin=123&ptsigx=secret",
+            "https://user@ssl.ptlogin2.graph.qq.com/check_sig?uin=123&ptsigx=secret",
+            "https://ssl.ptlogin2.graph.qq.com/check_sig?uin=123&ptsigx=secret#fragment",
+        ] {
+            let body = format!("ptuiCB('0','0','{callback}','0','ok','');");
+            assert!(
+                parse_qq_qr_poll(&body).is_err(),
+                "unsafe QQ callback was accepted: {callback}"
+            );
+        }
     }
 
     #[test]
