@@ -10,8 +10,8 @@ use std::{
 use tokio::net::TcpListener;
 use tracing::{error, info};
 use tuneweave_core::{
-    AccountCredentialStore, DirectoryUniPlaylistStore, FileAccountCredentialStore, Platform,
-    ProviderRegistry, UniPlaylistStore,
+    AccountCredentialStore, DirectoryUniPlaylistStore, FileAccountCredentialStore, MusicProvider,
+    Platform, ProviderRegistry, TuneWeaveError, UniPlaylistStore,
 };
 use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
 use tuneweave_provider_kugou::{KugouConfig, KugouProvider};
@@ -81,29 +81,57 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         credential_store: Some(credential_store.clone()),
         ..NeteaseConfig::default()
     };
-    registry.register(NeteaseProvider::new(netease_config)?)?;
-    registry.register(QqProvider::new(QqConfig {
-        proxy_url: qq_proxy.clone(),
-        device_path: Some(data_dir.join("qq-device.json")),
-        credential_store: Some(credential_store.clone()),
-    })?)?;
-    registry.register(BilibiliProvider::new(BilibiliConfig {
-        proxy_url: bilibili_proxy.clone(),
-        credential_store: Some(credential_store),
-    })?)?;
-    registry.register(KugouProvider::new(KugouConfig {
-        proxy_url: kugou_proxy.clone(),
-        device_path: Some(data_dir.join("kugou-device.json")),
-    })?)?;
-    registry.register(MiguProvider::new(MiguConfig {
-        proxy_url: migu_proxy.clone(),
-    })?)?;
-    registry.register(KuwoProvider::new(KuwoConfig {
-        proxy_url: kuwo_proxy.clone(),
-    })?)?;
-    registry.register(SodaProvider::new(SodaConfig {
-        proxy_url: soda_proxy.clone(),
-    })?)?;
+    register_provider(
+        &mut registry,
+        Platform::Netease,
+        NeteaseProvider::new(netease_config),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Qq,
+        QqProvider::new(QqConfig {
+            proxy_url: qq_proxy.clone(),
+            device_path: Some(data_dir.join("qq-device.json")),
+            credential_store: Some(credential_store.clone()),
+        }),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Bilibili,
+        BilibiliProvider::new(BilibiliConfig {
+            proxy_url: bilibili_proxy.clone(),
+            credential_store: Some(credential_store),
+        }),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Kugou,
+        KugouProvider::new(KugouConfig {
+            proxy_url: kugou_proxy.clone(),
+            device_path: Some(data_dir.join("kugou-device.json")),
+        }),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Migu,
+        MiguProvider::new(MiguConfig {
+            proxy_url: migu_proxy.clone(),
+        }),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Kuwo,
+        KuwoProvider::new(KuwoConfig {
+            proxy_url: kuwo_proxy.clone(),
+        }),
+    )?;
+    register_provider(
+        &mut registry,
+        Platform::Soda,
+        SodaProvider::new(SodaConfig {
+            proxy_url: soda_proxy.clone(),
+        }),
+    )?;
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);
     let app = build_router(state.clone());
@@ -188,6 +216,52 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderStartupStage {
+    Initialize,
+    Register,
+}
+
+impl ProviderStartupStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::Register => "register",
+        }
+    }
+}
+
+fn log_provider_startup_failure(
+    platform: Platform,
+    stage: ProviderStartupStage,
+    error: &TuneWeaveError,
+) {
+    error!(
+        event = "provider_startup_failure",
+        provider = platform.as_str(),
+        stage = stage.as_str(),
+        error_code = error.code.as_str(),
+        retryable = error.retryable,
+        "TuneWeave provider failed startup validation"
+    );
+}
+
+fn register_provider<P>(
+    registry: &mut ProviderRegistry,
+    platform: Platform,
+    provider: tuneweave_core::Result<P>,
+) -> tuneweave_core::Result<()>
+where
+    P: MusicProvider + 'static,
+{
+    let provider = provider.inspect_err(|error| {
+        log_provider_startup_failure(platform, ProviderStartupStage::Initialize, error);
+    })?;
+    registry.register(provider).inspect_err(|error| {
+        log_provider_startup_failure(platform, ProviderStartupStage::Register, error);
+    })
 }
 
 fn install_panic_observer() {
@@ -300,7 +374,13 @@ async fn wait_for_shutdown_reason() -> ShutdownReason {
 
 #[cfg(test)]
 mod tests {
-    use super::ShutdownReason;
+    use super::{ProviderStartupStage, ShutdownReason};
+
+    #[test]
+    fn provider_startup_stages_use_stable_safe_names() {
+        assert_eq!(ProviderStartupStage::Initialize.as_str(), "initialize");
+        assert_eq!(ProviderStartupStage::Register.as_str(), "register");
+    }
 
     #[test]
     fn shutdown_reasons_use_stable_safe_names() {
