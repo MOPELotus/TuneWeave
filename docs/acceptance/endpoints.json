@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 164,
+  "covered_route_count": 172,
   "entries": [
     {
       "id": "health",
@@ -3186,6 +3186,157 @@
         "listening_rights_accept_caller_credentials_without_server_aliases",
         "listening_rights_gain_rejects_invalid_reference_and_json_inputs",
         "listening_rights_gain_rejects_unknown_accounts_before_auto_ad_lookup"
+      ]
+    },
+    {
+      "id": "chart_catalog",
+      "method": "GET",
+      "path": "/v1/charts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "general_chart_catalog_uses_unified_view_platform_and_account_parameters",
+        "general_chart_catalog_accepts_all_reference_view_aliases",
+        "chart_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "artist_charts",
+      "method": "GET",
+      "path": "/v1/charts/artists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "artist_charts_accept_named_and_numeric_areas_and_reject_conflicts",
+        "chart_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "digital_album_charts",
+      "method": "GET",
+      "path": "/v1/charts/digital-albums",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "digital_album_chart_uses_typed_filters_and_pagination",
+        "digital_album_chart_rejects_invalid_period_and_year_combinations",
+        "digital_albums_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "dimension_chart_detail",
+      "method": "GET",
+      "path": "/v1/charts/dimensions/{chart_code}",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "dimension_chart_detail_accepts_reference_parameter_aliases",
+        "dimension_chart_rejects_missing_dimension_parameters",
+        "chart_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "dimension_chart_tracks",
+      "method": "GET",
+      "path": "/v1/charts/dimensions/{chart_code}/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "dimension_chart_tracks_return_a_complete_unpaginated_snapshot",
+        "dimension_chart_rejects_missing_dimension_parameters",
+        "chart_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_creator_charts",
+      "method": "GET",
+      "path": "/v1/charts/podcast-creators",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_creator_charts_preserve_user_rank_and_real_pagination_controls",
+        "podcast_charts_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_charts",
+      "method": "GET",
+      "path": "/v1/charts/podcasts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_charts_preserve_rank_and_real_pagination_controls",
+        "podcast_charts_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "chart_tracks",
+      "method": "GET",
+      "path": "/v1/charts/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "chart_tracks_reuse_the_platform_playlist_snapshot_with_unified_pagination",
+        "chart_tracks_accept_reference_page_num_and_tag_parameters",
+        "chart_reads_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
