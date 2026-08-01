@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 172,
+  "covered_route_count": 177,
   "entries": [
     {
       "id": "health",
@@ -3337,6 +3337,99 @@
         "chart_tracks_reuse_the_platform_playlist_snapshot_with_unified_pagination",
         "chart_tracks_accept_reference_page_num_and_tag_parameters",
         "chart_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "radio_station_catalog",
+      "method": "GET",
+      "path": "/v1/radio/stations",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "radio_station_catalog_preserves_filters_cursor_and_ignored_offset",
+        "radio_station_catalog_accepts_independent_reference_cursor_fields",
+        "radio_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "radio_station_detail",
+      "method": "GET",
+      "path": "/v1/radio/stations/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "radio_station_detail_uses_reference_platform_and_account",
+        "radio_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "radio_station_tracks",
+      "method": "GET",
+      "path": "/v1/radio/stations/{reference}/tracks",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "radio_playback_queue_uses_station_reference_account_and_limit",
+        "radio_playback_queue_rejects_bad_references_limits_and_queries",
+        "radio_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "radio_styles",
+      "method": "GET",
+      "path": "/v1/radio/styles",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "radio_style_catalog_accepts_reference_and_unified_source_lists",
+        "radio_style_catalog_rejects_invalid_sources_and_unknown_queries",
+        "radio_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "radio_taxonomy",
+      "method": "GET",
+      "path": "/v1/radio/taxonomy",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "radio_taxonomy_uses_platform_account_and_stable_string_ids",
+        "radio_reads_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
