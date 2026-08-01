@@ -3977,7 +3977,7 @@ mod tests {
     #[test]
     fn video_search_mapping_uses_stable_video_and_creator_references() {
         let video = map_bilibili_search_video(BilibiliSearchVideo {
-            result_type: crate::client::BilibiliVideoSearchResultType::SponsoredVideo(82),
+            result_type: crate::client::BilibiliVideoSearchResultType::SponsoredVideo(Some(82)),
             aid: 78_977_417,
             bvid: Some("BV1KJ411C7Un".to_owned()),
             title: "初音未来".to_owned(),

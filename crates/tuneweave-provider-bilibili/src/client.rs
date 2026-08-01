@@ -251,7 +251,7 @@ pub(crate) struct BilibiliVideoSearchPage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BilibiliVideoSearchResultType {
     Video,
-    SponsoredVideo(u32),
+    SponsoredVideo(Option<u32>),
 }
 
 impl BilibiliVideoSearchResultType {
@@ -269,7 +269,7 @@ impl BilibiliVideoSearchResultType {
     pub(crate) const fn sponsored_type(self) -> Option<u32> {
         match self {
             Self::Video => None,
-            Self::SponsoredVideo(value) => Some(value),
+            Self::SponsoredVideo(value) => value,
         }
     }
 }
@@ -6187,6 +6187,7 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
 fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResultType> {
     match value {
         "" | "video" => Ok(BilibiliVideoSearchResultType::Video),
+        "video_ad" => Ok(BilibiliVideoSearchResultType::SponsoredVideo(None)),
         _ => {
             let code = value
                 .strip_prefix("video_ad_")
@@ -6196,7 +6197,7 @@ fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResu
                 .ok_or_else(|| {
                     bilibili_upstream_error("Bilibili video search returned an unknown item type")
                 })?;
-            Ok(BilibiliVideoSearchResultType::SponsoredVideo(code))
+            Ok(BilibiliVideoSearchResultType::SponsoredVideo(Some(code)))
         }
     }
 }
@@ -8149,7 +8150,11 @@ mod tests {
             map_video_search_item(nullable_hit_columns).expect("sponsored video is valid");
         assert_eq!(
             sponsored.result_type,
-            BilibiliVideoSearchResultType::SponsoredVideo(82)
+            BilibiliVideoSearchResultType::SponsoredVideo(Some(82))
+        );
+        assert_eq!(
+            parse_video_search_result_type("video_ad").expect("untyped sponsored video"),
+            BilibiliVideoSearchResultType::SponsoredVideo(None)
         );
         assert!(sponsored.description.is_empty());
         for invalid in ["activity", "video_ad_", "video_ad_x", "video_ad_4294967296"] {
