@@ -52,16 +52,16 @@ use tuneweave_core::{
     DimensionChartTrackSnapshot, ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult,
     ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog,
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
-    ListeningRightsTimestamp, LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest,
-    MediaDownload, MediaStream, MembershipSummary, MemoryUniPlaylistStore,
-    MultiStyleLyricTranslations, MusicProvider, MusicVideoArea, MusicVideoCatalog,
-    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta, PageRequest, PasswordFormat,
-    PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest,
-    Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest,
-    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind,
-    PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
+    ListeningRightsStatus, ListeningRightsStatusRequest, ListeningRightsTimestamp,
+    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
+    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MultiStyleLyricTranslations,
+    MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder,
+    MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
+    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
+    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
     PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
     PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
@@ -1180,6 +1180,7 @@ pub fn build_router(state: AppState) -> Router {
             post(dislike_recommendation),
         )
         .route("/listening-rights/ads", get(listening_rights_ads))
+        .route("/listening-rights/status", get(listening_rights_status))
         .route(
             "/listening-rights/gains",
             get(listening_rights_gain_get).post(listening_rights_gain_post),
@@ -11756,6 +11757,36 @@ async fn listening_rights_ads(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ListeningRightsStatusParams {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn listening_rights_status(
+    State(state): State<AppState>,
+    params: Result<Query<ListeningRightsStatusParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<ListeningRightsStatus>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let account = optional_trimmed(params.account);
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let status = access
+        .provider
+        .listening_rights_status(&ListeningRightsStatusRequest {
+            account: access.provider_account.clone(),
+        })
+        .await?;
+    Ok(Json(access.response(status, platform)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListeningRightsGainQuery {
     platform: Option<String>,
     account: Option<String>,
@@ -17911,6 +17942,7 @@ mod tests {
                 Capability::AntiCheatToken,
                 Capability::ListeningRightsAds,
                 Capability::ListeningRightsGain,
+                Capability::ListeningRightsStatus,
                 Capability::Favorites,
                 Capability::ListeningHistory,
                 Capability::RecommendationFeed,
@@ -18330,6 +18362,33 @@ mod tests {
                     ("app_info".to_owned(), json!(request.app_info)),
                     ("account".to_owned(), json!(request.account)),
                 ]),
+            })
+        }
+
+        async fn listening_rights_status(
+            &self,
+            request: &ListeningRightsStatusRequest,
+        ) -> Result<ListeningRightsStatus> {
+            Ok(ListeningRightsStatus {
+                status: "ACTIVE".to_owned(),
+                remaining_ms: 1_800_000,
+                ends_at_ms: Some(1_784_196_492_000),
+                covers_today: true,
+                upper_limit_reached: false,
+                card_type: Some(2),
+                title: Some("免费听".to_owned()),
+                action: None,
+                rule: None,
+                offer: Some(tuneweave_core::ListeningRightsOffer {
+                    amount: Some(30),
+                    unit: Some("分钟".to_owned()),
+                    top_left_title: None,
+                    top_right_description: None,
+                    action: None,
+                }),
+                membership: None,
+                reward: None,
+                extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
             })
         }
 
@@ -39309,6 +39368,68 @@ mod tests {
         let (status, response) = json_response_from(test_app_with_provider(), &path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_status_supports_server_and_caller_credentials() {
+        let (status, server) = json_response_from(
+            test_app_with_provider(),
+            "/v1/listening-rights/status?platform=netease&account=rights-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(server["data"]["status"], "ACTIVE");
+        assert_eq!(server["data"]["remaining_ms"], 1_800_000);
+        assert_eq!(server["data"]["ends_at_ms"], 1_784_196_492_000_u64);
+        assert_eq!(server["data"]["offer"]["amount"], 30);
+        assert_eq!(server["data"]["extensions"]["account"], "rights-user");
+        assert_eq!(server["meta"]["account"], "rights-user");
+
+        let credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=caller-listening-rights-status",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let app = test_app_with_provider();
+        let (status, caller) = caller_json_request(
+            app.clone(),
+            Method::GET,
+            "/v1/listening-rights/status?platform=netease",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(caller["data"]["extensions"]["account"], "default");
+        assert!(caller["meta"].get("account").is_none());
+
+        let (status, conflict) = caller_json_request(
+            app,
+            Method::GET,
+            "/v1/listening-rights/status?platform=netease&account=rights-user",
+            None,
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(conflict["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn listening_rights_status_rejects_invalid_platforms_and_query_fields() {
+        for path in [
+            "/v1/listening-rights/status?platform=unknown",
+            "/v1/listening-rights/status?unknown=true",
+        ] {
+            let (status, response) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(response["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

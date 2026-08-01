@@ -800,6 +800,28 @@ B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P
 
 广告换听权益目录只稳定提取后续领取流程需要的广告请求 ID；广告创意、下载应用、曝光上下文及未来平台字段保持在每项 `extensions.raw/ext_json`，不会因为统一模型丢失。无投放是正常成功结果，返回空 `ads` 和可空 `request_uid`。
 
+### ListeningRightsStatus
+
+```json
+{
+  "status": "ACTIVE",
+  "remaining_ms": 1800000,
+  "ends_at_ms": 1784196492000,
+  "covers_today": true,
+  "upper_limit_reached": false,
+  "card_type": 2,
+  "title": "免费听",
+  "action": null,
+  "rule": null,
+  "offer": { "amount": 30, "unit": "分钟", "top_left_title": null, "top_right_description": null, "action": null },
+  "membership": null,
+  "reward": null,
+  "extensions": {}
+}
+```
+
+剩余时长和结束时间保持平台的毫秒单位；结束时间为 0 时返回 `null`。状态字符串不猜测为固定枚举，卡片、会员预览、奖励入口、操作和规则使用稳定类型，完整平台响应保留在扩展中。该接口要求所选账户已登录，支持服务器 `(platform, account)` 多账户或调用方凭据，但两种来源不能在同一请求中混用。
+
 ### ListeningRightsGainResult
 
 ```json
@@ -1271,6 +1293,7 @@ B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P
 | GET | `/v1/recommendations/personal-fm` | `platform?`、`account?`、`backend?=classic|mode`、`mode?`、`sub_mode?`、`limit?` | `Track[]` 私人 FM 当前队列快照；不伪造续页 |
 | POST | `/v1/recommendations/tracks/{ref}/dislike` | `account?` | `RecommendationDislikeResult`；向所选平台账户提交推荐跳过/不喜欢反馈 |
 | GET | `/v1/listening-rights/ads` | `platform?`、`account?`、`type_ids?` | `ListeningRightsAdCatalog`；取得广告换听目录及后续领取所需请求 ID |
+| GET | `/v1/listening-rights/status` | `platform?`、`account?` | `ListeningRightsStatus`；读取所选登录账户的免费听状态、剩余毫秒数和权益入口 |
 | GET | `/v1/listening-rights/gains` | `platform?`、`account?` 及参考 `reqUid/creativeType/exposureTime/clickTime/rightsGainMethod/rightsGainDuration/extraRightsGainMethod/extraRightsGainDuration/nextRightsGainDuration/source/rightsExtJson/appInfo/installed/type_ids` | `ListeningRightsGainResult`；参考查询形态领取广告换听权益 |
 | POST | `/v1/listening-rights/gains` | `platform?`、`account?`；JSON 使用上述字段的 snake_case 或 camelCase 名称，`type_ids` 为字符串数组 | `ListeningRightsGainResult`；统一 JSON 形态领取广告换听权益 |
 | GET | `/v1/account/profile` | `platform?`、`account?`、`backend?=modern|legacy` | 所选登录账户的完整 `UserProfile`；先从隔离会话解析用户 ID，缺少登录态时返回 401 |

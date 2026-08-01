@@ -38,42 +38,45 @@ use tuneweave_core::{
     CredentialMode, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
     DimensionChartRequest, DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode,
-    Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAd,
-    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
-    ListeningRightsGainResult, ListeningRightsTimestamp, LocalTrackMatchRequest,
-    LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload, MediaStream, MembershipSummary,
-    Money, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
-    MusicVideoOrder, MusicVideoType, Page, PageMeta, PageRequest, ParseResourceRefError,
-    PasswordFormat, PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant, Platform,
-    PlatformApiRequest, PlatformBatchRequest, PlaybackDevice, PlaybackHistoryEntry,
-    PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
-    PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationAction, PlaylistMutationResult,
-    PlaylistOrderRequest, PlaylistOrderResult, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
-    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
-    PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
-    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
-    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
-    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
-    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue,
-    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAction,
+    ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest,
+    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsMembershipContent,
+    ListeningRightsMembershipPreview, ListeningRightsOffer, ListeningRightsRewardEntry,
+    ListeningRightsStatus, ListeningRightsStatusRequest, ListeningRightsTimestamp,
+    LocalTrackMatchRequest, LocalTrackMatchResult, LyricContributor, Lyrics, MediaDownload,
+    MediaStream, MembershipSummary, Money, MusicProvider, MusicVideoArea, MusicVideoCatalog,
+    MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta, PageRequest,
+    ParseResourceRefError, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
+    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackDevice,
+    PlaybackHistoryEntry, PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
+    PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
+    PlaylistMutationAction, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
+    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility,
+    Podcast, PodcastCatalog, PodcastCategory, PodcastCategoryRecommendation,
+    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
+    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderAuthResult, ProviderCredential,
+    ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
+    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
     UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
     VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
@@ -671,6 +674,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AntiCheatToken,
             Capability::ListeningRightsAds,
             Capability::ListeningRightsGain,
+            Capability::ListeningRightsStatus,
             Capability::AudioRecognition,
             Capability::Banners,
             Capability::RadioTaxonomy,
@@ -1114,6 +1118,22 @@ impl MusicProvider for NeteaseProvider {
             rights_param,
             response.body,
         )
+    }
+
+    async fn listening_rights_status(
+        &self,
+        request: &ListeningRightsStatusRequest,
+    ) -> Result<ListeningRightsStatus> {
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "listening-rights status")?;
+        let response = client
+            .request_xeapi(
+                "/api/ad/homepage/free/tab/extend/v2",
+                json!({ "entrance": "FREE_LISTEN_RN" }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "listening-rights status")?;
+        map_netease_listening_rights_status(response.body)
     }
 
     async fn recognize_audio(&self, request: &AudioRecognitionRequest) -> Result<AudioRecognition> {
@@ -15641,6 +15661,157 @@ fn map_netease_user_membership_client(
     })
 }
 
+fn map_netease_listening_rights_status(response: Value) -> Result<ListeningRightsStatus> {
+    let data = response
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| listening_rights_status_error("response did not contain a data object"))?;
+    let status = listening_rights_text(data, "status")
+        .ok_or_else(|| listening_rights_status_error("response did not contain a status"))?;
+    let remaining_ms = data
+        .get("rightsRemainingTime")
+        .and_then(json_u64)
+        .ok_or_else(|| {
+            listening_rights_status_error("response did not contain a remaining millisecond value")
+        })?;
+    let ends_at_ms = data
+        .get("rightsEndTime")
+        .and_then(json_u64)
+        .filter(|value| *value > 0);
+    if data.contains_key("rightsEndTime") && data.get("rightsEndTime").and_then(json_u64).is_none()
+    {
+        return Err(listening_rights_status_error(
+            "response contained an invalid end timestamp",
+        ));
+    }
+    let covers_today = data
+        .get("rightsCoverToday")
+        .and_then(json_bool)
+        .ok_or_else(|| {
+            listening_rights_status_error("response did not contain the daily coverage state")
+        })?;
+    let upper_limit_reached = data
+        .get("rightsUpperLimit")
+        .and_then(json_bool)
+        .ok_or_else(|| {
+            listening_rights_status_error("response did not contain the upper-limit state")
+        })?;
+    let card_type = optional_listening_rights_i64(data, "cardType")?;
+    let action = listening_rights_action(data, "actionTitle", "actionUrl");
+    let rule = listening_rights_action(data, "ruleTitle", "ruleUrl");
+    let offer = optional_listening_rights_object(data, "cardContent")?
+        .map(|card| {
+            Ok(ListeningRightsOffer {
+                amount: optional_listening_rights_i64(card, "amount")?,
+                unit: listening_rights_text(card, "unit"),
+                top_left_title: listening_rights_text(card, "cardTopLeftTitle"),
+                top_right_description: listening_rights_text(card, "cardTopRightDesc"),
+                action: listening_rights_action(card, "actionTitle", "actionUrl"),
+            })
+        })
+        .transpose()?;
+    let membership = match data.get("vipInfoContent") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| ListeningRightsMembershipContent::Text(value.to_owned()))
+        }
+        Some(Value::Object(profile)) => Some(ListeningRightsMembershipContent::Profile(
+            ListeningRightsMembershipPreview {
+                nickname: listening_rights_text(profile, "nickname"),
+                avatar_url: listening_rights_text(profile, "avatarUrl"),
+                content: listening_rights_text(profile, "content"),
+                expiry_description: listening_rights_text(profile, "expireTimeDesc"),
+                vip_icon_url: listening_rights_text(profile, "vipIconUrl"),
+            },
+        )),
+        Some(_) => {
+            return Err(listening_rights_status_error(
+                "response contained invalid membership content",
+            ));
+        }
+    };
+    let reward = optional_listening_rights_object(data, "yunbeiEntry")?
+        .map(|entry| {
+            Ok(ListeningRightsRewardEntry {
+                title: listening_rights_text(entry, "title"),
+                amount: optional_listening_rights_i64(entry, "amount")?,
+                action: listening_rights_action(entry, "actionTitle", "actionUrl"),
+            })
+        })
+        .transpose()?;
+    Ok(ListeningRightsStatus {
+        status,
+        remaining_ms,
+        ends_at_ms,
+        covers_today,
+        upper_limit_reached,
+        card_type,
+        title: listening_rights_text(data, "title"),
+        action,
+        rule,
+        offer,
+        membership,
+        reward,
+        extensions: Extensions::from([
+            ("entrance".to_owned(), json!("FREE_LISTEN_RN")),
+            ("response".to_owned(), response),
+        ]),
+    })
+}
+
+fn listening_rights_text(object: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn listening_rights_action(
+    object: &serde_json::Map<String, Value>,
+    title_field: &str,
+    url_field: &str,
+) -> Option<ListeningRightsAction> {
+    let title = listening_rights_text(object, title_field);
+    let url = listening_rights_text(object, url_field);
+    (title.is_some() || url.is_some()).then_some(ListeningRightsAction { title, url })
+}
+
+fn optional_listening_rights_object<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<&'a serde_json::Map<String, Value>>> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(value)) => Ok(Some(value)),
+        Some(_) => Err(listening_rights_status_error(&format!(
+            "response contained an invalid {field} object"
+        ))),
+    }
+}
+
+fn optional_listening_rights_i64(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<i64>> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => json_i64(value).map(Some).ok_or_else(|| {
+            listening_rights_status_error(&format!("response contained an invalid {field} number"))
+        }),
+    }
+}
+
+fn listening_rights_status_error(reason: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        format!("NetEase listening-rights status {reason}"),
+    )
+    .with_platform(Platform::Netease)
+}
+
 fn netease_listening_rights_ads_request(
     request: &ListeningRightsAdRequest,
 ) -> Result<(&'static str, Value)> {
@@ -17722,6 +17893,155 @@ mod tests {
     }
 
     #[test]
+    fn listening_rights_status_maps_milliseconds_and_typed_nested_content() {
+        let status = map_netease_listening_rights_status(json!({
+            "code": 200,
+            "data": {
+                "status": "ACTIVE",
+                "rightsRemainingTime": 1_800_000,
+                "rightsEndTime": 1_784_196_492_000_u64,
+                "rightsCoverToday": true,
+                "rightsUpperLimit": false,
+                "cardType": 2,
+                "title": "免费听",
+                "actionTitle": "去播放",
+                "actionUrl": "orpheus://free-listen",
+                "ruleTitle": "规则",
+                "ruleUrl": "https://music.163.com/free-listen/rule",
+                "cardContent": {
+                    "amount": 30,
+                    "unit": "分钟",
+                    "cardTopLeftTitle": "可领取",
+                    "cardTopRightDesc": "今日有效",
+                    "actionTitle": "领取",
+                    "actionUrl": "orpheus://free-listen/gain"
+                },
+                "vipInfoContent": {
+                    "nickname": "listener",
+                    "avatarUrl": "https://p1.music.126.net/avatar.jpg",
+                    "content": "普通会员",
+                    "expireTimeDesc": "未开通",
+                    "vipIconUrl": null
+                },
+                "yunbeiEntry": {
+                    "title": "云贝任务",
+                    "amount": 5,
+                    "actionTitle": "查看",
+                    "actionUrl": "orpheus://yunbei"
+                }
+            }
+        }))
+        .expect("map listening-rights status");
+        assert_eq!(status.status, "ACTIVE");
+        assert_eq!(status.remaining_ms, 1_800_000);
+        assert_eq!(status.ends_at_ms, Some(1_784_196_492_000));
+        assert!(status.covers_today);
+        assert!(!status.upper_limit_reached);
+        assert_eq!(status.card_type, Some(2));
+        assert_eq!(
+            status
+                .action
+                .as_ref()
+                .and_then(|item| item.title.as_deref()),
+            Some("去播放")
+        );
+        assert_eq!(
+            status.rule.as_ref().and_then(|item| item.title.as_deref()),
+            Some("规则")
+        );
+        assert_eq!(status.offer.as_ref().and_then(|item| item.amount), Some(30));
+        assert!(matches!(
+            status.membership,
+            Some(ListeningRightsMembershipContent::Profile(
+                ListeningRightsMembershipPreview { ref nickname, .. }
+            )) if nickname.as_deref() == Some("listener")
+        ));
+        assert_eq!(status.reward.as_ref().and_then(|item| item.amount), Some(5));
+        assert_eq!(status.extensions["entrance"], "FREE_LISTEN_RN");
+        assert_eq!(status.extensions["response"]["code"], 200);
+
+        let initial = map_netease_listening_rights_status(json!({
+            "code": 200,
+            "data": {
+                "status": "INIT",
+                "rightsRemainingTime": 0,
+                "rightsEndTime": 0,
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false,
+                "vipInfoContent": "暂未领取"
+            }
+        }))
+        .expect("map initial listening-rights status");
+        assert_eq!(initial.ends_at_ms, None);
+        assert!(matches!(
+            initial.membership,
+            Some(ListeningRightsMembershipContent::Text(ref value)) if value == "暂未领取"
+        ));
+    }
+
+    #[test]
+    fn listening_rights_status_rejects_missing_and_malformed_required_content() {
+        for response in [
+            json!({"code": 200}),
+            json!({"code": 200, "data": []}),
+            json!({"code": 200, "data": {
+                "status": "",
+                "rightsRemainingTime": 0,
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false
+            }}),
+            json!({"code": 200, "data": {
+                "status": "INIT",
+                "rightsRemainingTime": "invalid",
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false
+            }}),
+            json!({"code": 200, "data": {
+                "status": "INIT",
+                "rightsRemainingTime": 0,
+                "rightsEndTime": "invalid",
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false
+            }}),
+            json!({"code": 200, "data": {
+                "status": "INIT",
+                "rightsRemainingTime": 0,
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false,
+                "cardContent": []
+            }}),
+            json!({"code": 200, "data": {
+                "status": "INIT",
+                "rightsRemainingTime": 0,
+                "rightsCoverToday": false,
+                "rightsUpperLimit": false,
+                "vipInfoContent": true
+            }}),
+        ] {
+            assert_eq!(
+                map_netease_listening_rights_status(response)
+                    .expect_err("malformed listening-rights status")
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn listening_rights_status_requires_a_logged_in_account_before_network_access() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
+        for account in [None, Some("missing".to_owned())] {
+            let error = MusicProvider::listening_rights_status(
+                &provider,
+                &ListeningRightsStatusRequest { account },
+            )
+            .await
+            .expect_err("listening-rights status should require authentication");
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+        }
+    }
+
+    #[test]
     fn listening_rights_gain_matches_the_reference_req_param_and_maps_explicit_flags() {
         let request = ListeningRightsGainRequest {
             request_uid: Some(" request-1 ".to_owned()),
@@ -18406,6 +18726,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::AntiCheatToken));
         assert!(capabilities.contains(&Capability::ListeningRightsAds));
         assert!(capabilities.contains(&Capability::ListeningRightsGain));
+        assert!(capabilities.contains(&Capability::ListeningRightsStatus));
     }
 
     #[test]

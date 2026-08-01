@@ -450,6 +450,66 @@ pub struct ListeningRightsGainResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsStatusRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsAction {
+    pub title: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsOffer {
+    pub amount: Option<i64>,
+    pub unit: Option<String>,
+    pub top_left_title: Option<String>,
+    pub top_right_description: Option<String>,
+    pub action: Option<ListeningRightsAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsMembershipPreview {
+    pub nickname: Option<String>,
+    pub avatar_url: Option<String>,
+    pub content: Option<String>,
+    pub expiry_description: Option<String>,
+    pub vip_icon_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum ListeningRightsMembershipContent {
+    Profile(ListeningRightsMembershipPreview),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsRewardEntry {
+    pub title: Option<String>,
+    pub amount: Option<i64>,
+    pub action: Option<ListeningRightsAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListeningRightsStatus {
+    pub status: String,
+    pub remaining_ms: u64,
+    pub ends_at_ms: Option<u64>,
+    pub covers_today: bool,
+    pub upper_limit_reached: bool,
+    pub card_type: Option<i64>,
+    pub title: Option<String>,
+    pub action: Option<ListeningRightsAction>,
+    pub rule: Option<ListeningRightsAction>,
+    pub offer: Option<ListeningRightsOffer>,
+    pub membership: Option<ListeningRightsMembershipContent>,
+    pub reward: Option<ListeningRightsRewardEntry>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SearchItem {
@@ -6073,6 +6133,43 @@ mod tests {
         let result = serde_json::to_value(result).expect("serialize listening-rights result");
         assert!(result["granted"].is_null());
         assert_eq!(result["platform_code"], 200);
+    }
+
+    #[test]
+    fn listening_rights_status_keeps_milliseconds_and_nested_entries_typed() {
+        let status = ListeningRightsStatus {
+            status: "ACTIVE".to_owned(),
+            remaining_ms: 1_800_000,
+            ends_at_ms: Some(1_784_196_492_000),
+            covers_today: true,
+            upper_limit_reached: false,
+            card_type: Some(2),
+            title: Some("免费听".to_owned()),
+            action: None,
+            rule: None,
+            offer: Some(ListeningRightsOffer {
+                amount: Some(30),
+                unit: Some("分钟".to_owned()),
+                top_left_title: None,
+                top_right_description: None,
+                action: Some(ListeningRightsAction {
+                    title: Some("领取".to_owned()),
+                    url: Some("orpheus://free-listen".to_owned()),
+                }),
+            }),
+            membership: Some(ListeningRightsMembershipContent::Text(
+                "普通会员".to_owned(),
+            )),
+            reward: None,
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(status).expect("serialize listening-rights status");
+        assert_eq!(value["remaining_ms"], 1_800_000);
+        assert_eq!(value["ends_at_ms"], 1_784_196_492_000_u64);
+        assert_eq!(value["offer"]["amount"], 30);
+        assert_eq!(value["offer"]["action"]["title"], "领取");
+        assert_eq!(value["membership"]["type"], "text");
+        assert_eq!(value["membership"]["data"], "普通会员");
     }
 
     #[test]

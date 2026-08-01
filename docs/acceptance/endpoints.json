@@ -2,8 +2,8 @@
   "schema_version": 1,
   "status": "complete",
   "routes_source": "docs/acceptance/routes.json",
-  "route_count": 258,
-  "covered_route_count": 258,
+  "route_count": 259,
+  "covered_route_count": 259,
   "entries": [
     {
       "id": "health",
@@ -3183,6 +3183,25 @@
         "listening_rights_accept_caller_credentials_without_server_aliases",
         "listening_rights_gain_rejects_invalid_reference_and_json_inputs",
         "listening_rights_gain_rejects_unknown_accounts_before_auto_ad_lookup"
+      ]
+    },
+    {
+      "id": "listening_rights_status",
+      "method": "GET",
+      "path": "/v1/listening-rights/status",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "listening_rights_status_supports_server_and_caller_credentials",
+        "listening_rights_status_rejects_invalid_platforms_and_query_fields",
+        "listening_rights_status_requires_a_logged_in_account_before_network_access"
       ]
     },
     {
