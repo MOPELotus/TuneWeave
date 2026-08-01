@@ -8,7 +8,7 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
-const DEVICE_SCHEMA_VERSION: u8 = 1;
+const DEVICE_SCHEMA_VERSION: u8 = 2;
 const DFID_LENGTH: usize = 24;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -33,7 +33,7 @@ impl std::fmt::Debug for KugouDevice {
 
 impl Default for KugouDevice {
     fn default() -> Self {
-        let guid = hex::encode(rand::random::<[u8; 16]>());
+        let guid = generate_guid();
         let mid = derive_mid(&guid);
         Self {
             schema_version: DEVICE_SCHEMA_VERSION,
@@ -52,7 +52,7 @@ impl KugouDevice {
                 "stored KuGou device state uses an unsupported schema",
             ));
         }
-        if !is_lower_hex(&self.guid, 32) {
+        if !valid_guid(&self.guid) {
             return Err(device_data_error(
                 "stored KuGou device state contains an invalid GUID",
             ));
@@ -211,15 +211,33 @@ fn derive_mid(guid: &str) -> String {
     u128::from_be_bytes(Md5::digest(guid.as_bytes()).into()).to_string()
 }
 
+fn generate_guid() -> String {
+    let mut bytes = rand::random::<[u8; 16]>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let value = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &value[..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..]
+    )
+}
+
 fn valid_dfid(value: &str) -> bool {
     value.len() == DFID_LENGTH && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-fn is_lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+fn valid_guid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            14 => byte == b'4',
+            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
 }
 
 #[cfg(unix)]
@@ -346,7 +364,7 @@ mod tests {
         let path = temporary_path("persist");
         let mut store = DeviceStore::open(Some(path.clone())).expect("create store");
         let before = store.device().identity();
-        assert!(is_lower_hex(&before.guid, 32));
+        assert!(valid_guid(&before.guid));
         assert_eq!(before.mid, derive_mid(&before.guid));
         assert!(before.dfid.is_none());
 
@@ -393,6 +411,21 @@ mod tests {
     fn invalid_guid_or_derived_mid_is_rejected_instead_of_silently_rotated() {
         let path = temporary_path("invalid-mid");
         let device = KugouDevice::default();
+        let compact_guid = device.guid.replace('-', "");
+        let legacy = serde_json::json!({
+            "schema_version": DEVICE_SCHEMA_VERSION,
+            "guid": compact_guid,
+            "mid": derive_mid(&compact_guid),
+            "dfid": null,
+            "registered_at": null,
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&legacy).expect("encode legacy state"),
+        )
+        .expect("write legacy state");
+        assert!(DeviceStore::open(Some(path.clone())).is_err());
+
         let malformed = serde_json::json!({
             "schema_version": DEVICE_SCHEMA_VERSION,
             "guid": device.guid,
