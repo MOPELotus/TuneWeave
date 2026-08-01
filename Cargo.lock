@@ -2125,6 +2125,7 @@ dependencies = [
  "base64",
  "bytes",
  "cbc",
+ "encoding_rs",
  "flate2",
  "futures-util",
  "hex",

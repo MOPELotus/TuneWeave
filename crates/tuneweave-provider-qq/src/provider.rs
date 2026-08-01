@@ -2090,6 +2090,46 @@ struct QqPlaylistWriteTrack {
 struct QqPlaylistWriteResponse {
     #[serde(rename = "retCode", deserialize_with = "deserialize_qq_i64")]
     ret_code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    result: Option<QqPlaylistWriteResult>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqPlaylistWriteResult {
+    #[serde(default, rename = "tid", deserialize_with = "deserialize_qq_u64")]
+    playlist_id: u64,
+    #[serde(default, rename = "dirId", deserialize_with = "deserialize_qq_u64")]
+    directory_id: u64,
+    #[serde(default, rename = "dirName")]
+    name: String,
+    #[serde(default)]
+    songlist: Vec<QqPlaylistWriteResultTrack>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QqPlaylistWriteResultTrack {
+    #[serde(rename = "songId", deserialize_with = "deserialize_qq_u64")]
+    song_id: u64,
+    #[serde(rename = "songType", deserialize_with = "deserialize_qq_i64")]
+    song_type: i64,
+    #[serde(
+        default,
+        rename = "backendSongId",
+        deserialize_with = "deserialize_qq_u64"
+    )]
+    backend_song_id: u64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    existed: i64,
+    #[serde(default, deserialize_with = "deserialize_qq_i64")]
+    loc: i64,
+    #[serde(default, rename = "songUrl")]
+    song_url: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -15726,7 +15766,7 @@ fn map_account_playlist_page(input: QqAccountPlaylistPageInput) -> Result<Page<P
     let mut items = created.playlists[created_from..created_to]
         .iter()
         .cloned()
-        .map(|playlist| map_account_playlist(playlist, false, "created"))
+        .map(|playlist| map_account_playlist(playlist, false, "created", true))
         .collect::<Result<Vec<_>>>()?;
     items.extend(
         favorite
@@ -15734,7 +15774,7 @@ fn map_account_playlist_page(input: QqAccountPlaylistPageInput) -> Result<Page<P
             .iter()
             .take(usize::try_from(favorite_take).unwrap_or(usize::MAX))
             .cloned()
-            .map(|playlist| map_account_playlist(playlist, true, "favorite"))
+            .map(|playlist| map_account_playlist(playlist, true, "favorite", false))
             .collect::<Result<Vec<_>>>()?,
     );
     let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
@@ -15785,7 +15825,7 @@ fn map_created_playlist_page(
     let items = response.playlists[from..to]
         .iter()
         .cloned()
-        .map(|playlist| map_account_playlist(playlist, false, "created"))
+        .map(|playlist| map_account_playlist(playlist, false, "created", false))
         .collect::<Result<Vec<_>>>()?;
     let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
     let next_offset = offset.saturating_add(consumed);
@@ -15821,7 +15861,7 @@ fn map_favorite_playlist_page(
         .playlists
         .iter()
         .cloned()
-        .map(|playlist| map_account_playlist(playlist, true, "favorite"))
+        .map(|playlist| map_account_playlist(playlist, true, "favorite", false))
         .collect::<Result<Vec<_>>>()?;
     let consumed = u32::try_from(items.len()).unwrap_or(u32::MAX);
     let next_offset = offset.saturating_add(consumed);
@@ -16573,8 +16613,11 @@ fn map_account_playlist(
     record: QqAccountPlaylistRecord,
     subscribed: bool,
     source: &'static str,
+    prefer_directory_identity: bool,
 ) -> Result<Playlist> {
-    let id = if record.id > 0 {
+    let id = if prefer_directory_identity && record.dir_id > 0 {
+        format!("dir:{}", record.dir_id)
+    } else if record.id > 0 {
         record.id.to_string()
     } else if record.dir_id > 0 {
         format!("dir:{}", record.dir_id)
@@ -16613,6 +16656,15 @@ fn map_account_playlist(
     extensions.insert("source".to_owned(), json!(source));
     extensions.insert("numeric_id".to_owned(), json!(record.id));
     extensions.insert("dir_id".to_owned(), json!(record.dir_id));
+    if record.id > 0 {
+        extensions.insert(
+            "public_playlist_ref".to_owned(),
+            json!(qq_ref(
+                &record.id.to_string(),
+                "account public playlist identity"
+            )?),
+        );
+    }
     if record.dir_id > 0 {
         extensions.insert(
             "directory_ref".to_owned(),
@@ -17079,6 +17131,42 @@ fn map_qq_playlist_items_mutation(
             "action": action
         })));
     }
+    let result = parsed.result.as_ref().ok_or_else(|| {
+        qq_data_error(format!(
+            "QQ playlist track {operation} response is missing its result"
+        ))
+    })?;
+    if result.directory_id == 0 && result.playlist_id == 0 {
+        return Err(qq_data_error(format!(
+            "QQ playlist track {operation} response is missing its playlist identity"
+        )));
+    }
+    if locator.directory_id > 0 && result.directory_id != locator.directory_id {
+        return Err(qq_data_error(format!(
+            "QQ playlist track {operation} returned a conflicting directory ID"
+        )));
+    }
+    if locator.playlist_id > 0 && result.playlist_id != locator.playlist_id {
+        return Err(qq_data_error(format!(
+            "QQ playlist track {operation} returned a conflicting playlist ID"
+        )));
+    }
+    if result.songlist.iter().any(|returned| {
+        returned.song_id == 0
+            || returned.song_type < 0
+            || !tracks.iter().any(|requested| {
+                requested.song_id == returned.song_id && requested.song_type == returned.song_type
+            })
+    }) {
+        return Err(qq_data_error(format!(
+            "QQ playlist track {operation} returned an unexpected song identity"
+        )));
+    }
+    if action == PlaylistItemMutationAction::Add && result.songlist.is_empty() {
+        return Err(qq_data_error(
+            "QQ playlist track addition returned no song results",
+        ));
+    }
     Ok(PlaylistItemMutationResult {
         playlist_ref: qq_ref(playlist_id, "playlist track mutation")?,
         item_refs: request.item_refs.clone(),
@@ -17159,27 +17247,27 @@ fn map_qq_playlist_creation(
             "QQ playlist creation response is missing its name",
         ));
     }
-    let id = result.playlist_id.to_string();
-    let playlist_ref = qq_ref(&id, "created playlist")?;
-    let directory_ref = qq_ref(
-        &format!("dir:{}", result.directory_id),
-        "created playlist directory",
-    )?;
+    let public_id = result.playlist_id.to_string();
+    let public_playlist_ref = qq_ref(&public_id, "created public playlist")?;
+    let id = format!("dir:{}", result.directory_id);
+    let directory_ref = qq_ref(&id, "created playlist directory")?;
     let data = serde_json::to_value(&parsed)
         .map_err(|_| qq_data_error("QQ playlist creation response could not be preserved"))?;
     let extensions = Extensions::from([
         ("directory_id".to_owned(), json!(result.directory_id)),
         ("directory_ref".to_owned(), json!(directory_ref)),
+        ("public_playlist_id".to_owned(), json!(result.playlist_id)),
+        ("public_playlist_ref".to_owned(), json!(public_playlist_ref)),
         ("requested_name".to_owned(), json!(requested_name)),
         ("ret_code".to_owned(), json!(parsed.ret_code)),
         ("data".to_owned(), data.clone()),
         ("response".to_owned(), response.raw.clone()),
     ]);
     Ok(PlaylistMutationResult {
-        playlist_ref: playlist_ref.clone(),
+        playlist_ref: directory_ref.clone(),
         action: PlaylistMutationAction::Create,
         playlist: Some(Playlist {
-            resource_ref: playlist_ref,
+            resource_ref: directory_ref.clone(),
             platform: Platform::Qq,
             id,
             name: name.to_owned(),
@@ -17194,6 +17282,8 @@ fn map_qq_playlist_creation(
             extensions: Extensions::from([
                 ("directory_id".to_owned(), json!(result.directory_id)),
                 ("directory_ref".to_owned(), json!(directory_ref)),
+                ("public_playlist_id".to_owned(), json!(result.playlist_id)),
+                ("public_playlist_ref".to_owned(), json!(public_playlist_ref)),
                 ("data".to_owned(), data),
             ]),
         }),
@@ -25363,8 +25453,10 @@ mod tests {
         })
         .expect("account playlist page");
         assert_eq!(page.items.len(), 2);
-        assert_eq!(page.items[0].resource_ref.to_string(), "qq:12");
+        assert_eq!(page.items[0].resource_ref.to_string(), "qq:dir:102");
         assert_eq!(page.items[0].subscribed, Some(false));
+        assert_eq!(page.items[0].extensions["numeric_id"], 12);
+        assert_eq!(page.items[0].extensions["directory_ref"], "qq:dir:102");
         assert_eq!(page.items[1].resource_ref.to_string(), "qq:21");
         assert_eq!(page.items[1].subscribed, Some(true));
         assert_eq!(page.pagination.total, Some(4));
@@ -25384,7 +25476,7 @@ mod tests {
             "nick": "Lotus"
         }))
         .expect("directory playlist");
-        let playlist = map_account_playlist(record, false, "created").expect("playlist");
+        let playlist = map_account_playlist(record, false, "created", true).expect("playlist");
         assert_eq!(playlist.resource_ref.to_string(), "qq:dir:201");
         assert_eq!(playlist.extensions["dir_id"], 201);
     }
@@ -25748,6 +25840,15 @@ mod tests {
             PlaylistItemMutationAction::Add,
             PlaylistItemMutationAction::Remove,
         ] {
+            let songlist = if action == PlaylistItemMutationAction::Add {
+                json!([
+                    {"songId": 97_773, "songType": 113, "existed": 0},
+                    {"songId": 97_773, "songType": 113, "existed": 0},
+                    {"songId": 97_773, "songType": 113, "existed": 1}
+                ])
+            } else {
+                json!([])
+            };
             let result = map_qq_playlist_items_mutation(
                 playlist_ref.id(),
                 action,
@@ -25756,7 +25857,16 @@ mod tests {
                 tracks.clone(),
                 QqBusinessResponse {
                     code: 0,
-                    data: json!({"retCode": 0, "future": true}),
+                    data: json!({
+                        "retCode": 0,
+                        "result": {
+                            "tid": 7_039_749_142_u64,
+                            "dirId": 301,
+                            "dirName": "通勤",
+                            "songlist": songlist
+                        },
+                        "future": true
+                    }),
                     raw: json!({"code": 0, "data": {"retCode": 0}}),
                 },
             )
@@ -25817,7 +25927,7 @@ mod tests {
                 PlaylistItemMutationAction::Remove,
                 &request,
                 locator,
-                tracks,
+                tracks.clone(),
                 QqBusinessResponse {
                     code: 0,
                     data: json!({}),
@@ -25828,6 +25938,56 @@ mod tests {
             .code,
             ErrorCode::UpstreamError
         );
+
+        for data in [
+            json!({"retCode": 0}),
+            json!({
+                "retCode": 0,
+                "result": {"tid": 0, "dirId": 0, "songlist": []}
+            }),
+            json!({
+                "retCode": 0,
+                "result": {
+                    "tid": 9_999_u64,
+                    "dirId": 301,
+                    "songlist": [{"songId": 97_773, "songType": 113}]
+                }
+            }),
+            json!({
+                "retCode": 0,
+                "result": {
+                    "tid": 7_039_749_142_u64,
+                    "dirId": 301,
+                    "songlist": [{"songId": 999, "songType": 0}]
+                }
+            }),
+            json!({
+                "retCode": 0,
+                "result": {
+                    "tid": 7_039_749_142_u64,
+                    "dirId": 301,
+                    "songlist": []
+                }
+            }),
+        ] {
+            assert_eq!(
+                map_qq_playlist_items_mutation(
+                    "7039749142",
+                    PlaylistItemMutationAction::Add,
+                    &request,
+                    locator,
+                    tracks.clone(),
+                    QqBusinessResponse {
+                        code: 0,
+                        data,
+                        raw: json!({"code": 0}),
+                    },
+                )
+                .expect_err("invalid playlist mutation result")
+                .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[test]
@@ -25949,16 +26109,21 @@ mod tests {
             },
         )
         .expect("playlist creation result");
-        assert_eq!(result.playlist_ref.to_string(), "qq:7039749142");
+        assert_eq!(result.playlist_ref.to_string(), "qq:dir:301");
         assert_eq!(result.action, PlaylistMutationAction::Create);
         let playlist = result.playlist.expect("created playlist");
+        assert_eq!(playlist.resource_ref.to_string(), "qq:dir:301");
+        assert_eq!(playlist.id, "dir:301");
         assert_eq!(playlist.name, "通勤_20260726");
         assert_eq!(playlist.track_count, Some(0));
         assert_eq!(playlist.extensions["directory_id"], 301);
         assert_eq!(playlist.extensions["directory_ref"], "qq:dir:301");
+        assert_eq!(playlist.extensions["public_playlist_id"], 7_039_749_142_u64);
+        assert_eq!(playlist.extensions["public_playlist_ref"], "qq:7039749142");
         assert_eq!(playlist.extensions["data"]["result"]["future"], true);
         assert_eq!(result.extensions["requested_name"], "通勤");
         assert_eq!(result.extensions["directory_ref"], "qq:dir:301");
+        assert_eq!(result.extensions["public_playlist_ref"], "qq:7039749142");
     }
 
     #[test]

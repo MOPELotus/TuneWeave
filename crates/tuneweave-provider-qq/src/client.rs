@@ -816,11 +816,8 @@ impl QqClient {
             if !status.is_success() {
                 return Err(http_error(status));
             }
-            let raw: Value = response.json().await.map_err(|_| {
-                TuneWeaveError::new(ErrorCode::UpstreamError, "QQ API returned invalid JSON")
-                    .with_platform(Platform::Qq)
-            })?;
-            parse_api_responses(&raw, requests, allow_business_errors)
+            let body = response.bytes().await.map_err(network_error)?;
+            parse_api_response_body(&body, requests, allow_business_errors)
         }
         .await;
         self.log_upstream_request(
@@ -1178,6 +1175,72 @@ fn parse_api_responses(
         .collect()
 }
 
+fn parse_api_response_body(
+    body: &[u8],
+    requests: &[QqApiRequest],
+    allow_business_errors: bool,
+) -> Result<Vec<QqApiResponse>> {
+    let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(body);
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "QQ API returned an empty response",
+        )
+        .with_platform(Platform::Qq));
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(raw) => parse_api_responses(&raw, requests, allow_business_errors),
+        Err(original_error) => {
+            if std::str::from_utf8(body).is_err() {
+                let (decoded, _, had_errors) = encoding_rs::GBK.decode(body);
+                if !had_errors && let Ok(raw) = serde_json::from_str::<Value>(&decoded) {
+                    let mut responses = parse_api_responses(&raw, requests, allow_business_errors)?;
+                    for response in &mut responses {
+                        if let Some(fields) = response.raw.as_object_mut() {
+                            fields.insert("response_encoding".to_owned(), json!("gbk"));
+                        }
+                    }
+                    return Ok(responses);
+                }
+            }
+            Err(invalid_qq_json_error(body, original_error))
+        }
+    }
+}
+
+fn qq_api_body_kind(body: &[u8]) -> &'static str {
+    match body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+    {
+        Some(b'{') => "json_object",
+        Some(b'[') => "json_array",
+        Some(b'<') => "markup",
+        Some(byte) if byte.is_ascii() => "other_ascii",
+        Some(_) => "other_binary",
+        None => "empty",
+    }
+}
+
+fn invalid_qq_json_error(body: &[u8], error: serde_json::Error) -> TuneWeaveError {
+    TuneWeaveError::new(ErrorCode::UpstreamError, "QQ API returned invalid JSON")
+        .with_platform(Platform::Qq)
+        .with_details(json!({
+            "body_bytes": body.len(),
+            "body_kind": qq_api_body_kind(body),
+            "parse_error": error.to_string(),
+            "parse_error_category": match error.classify() {
+                serde_json::error::Category::Io => "io",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "data",
+                serde_json::error::Category::Eof => "eof",
+            },
+            "parse_error_line": error.line(),
+            "parse_error_column": error.column()
+        }))
+}
+
 fn business_responses(
     responses: Vec<QqApiResponse>,
     context: &str,
@@ -1500,6 +1563,52 @@ mod tests {
         };
         assert_eq!(missing.code, ErrorCode::UpstreamError);
         assert!(missing.message.contains("req_1"));
+    }
+
+    #[test]
+    fn response_body_parser_keeps_normal_json_validation() {
+        let requests = [QqApiRequest::new("music.test", "Read", json!({}))];
+        let responses = parse_api_response_body(
+            br#"{"code":0,"req_0":{"code":0,"data":{"value":1}}}"#,
+            &requests,
+            false,
+        )
+        .expect("ordinary JSON response");
+        assert_eq!(responses[0].data["value"], 1);
+
+        let Err(error) = parse_api_response_body(b"not-json", &requests, false) else {
+            panic!("invalid JSON response was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(error.message.contains("invalid JSON"));
+
+        let Err(error) = parse_api_response_body(b"\xef\xbb\xbf \r\n", &requests, false) else {
+            panic!("empty JSON response was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(error.message.contains("empty response"));
+    }
+
+    #[test]
+    fn response_body_parser_accepts_complete_gbk_json_without_weakening_business_checks() {
+        let requests = [QqApiRequest::new("music.test", "Read", json!({}))];
+        let source = r#"{"code":0,"req_0":{"code":0,"data":{"name":"中文歌单"}}}"#;
+        let (encoded, _, had_errors) = encoding_rs::GBK.encode(source);
+        assert!(!had_errors);
+        assert!(std::str::from_utf8(&encoded).is_err());
+        let response =
+            parse_api_response_body(&encoded, &requests, false).expect("GBK JSON response");
+        assert_eq!(response[0].data["name"], "中文歌单");
+        assert_eq!(response[0].raw["response_encoding"], "gbk");
+
+        let failed = r#"{"code":0,"req_0":{"code":80092,"data":{"name":"中文歌单"}}}"#;
+        let (encoded, _, had_errors) = encoding_rs::GBK.encode(failed);
+        assert!(!had_errors);
+        let Err(error) = parse_api_response_body(&encoded, &requests, false) else {
+            panic!("GBK business error was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.details["platform_code"], 80_092);
     }
 
     #[test]

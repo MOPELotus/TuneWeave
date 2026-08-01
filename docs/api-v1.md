@@ -1767,13 +1767,13 @@ B 站 `video` 类型 Uni 项默认把视频视为可播放音频来源：未提�
 
 创建歌单时 `visibility=public|private` 与参考 `privacy=0|10` 等价，`kind=normal|video|shared` 与参考 `type=NORMAL|VIDEO|SHARED` 等价；同一语义的统一字段和参考字段不得同时提交。元数据更新的 `variant=default|batch|individual` 分别表示自动选择、参考批量模块和独立字段模块；批量分支必须同时包含名称、描述和标签。标签既可用字符串数组，也可用参考分号字符串，空数组或空字符串表示清除。
 
-QQ 的创建协议目前只接受 `visibility=public` 和 `kind=normal`，其他统一变体会在联网前返回 `invalid_request`，不会伪装成 QQ 已支持。成功响应中的 `tid` 是统一 `qq:<id>` 歌单引用，`dirId` 同时以数值和 `qq:dir:<dirId>` 的 `directory_ref` 保存在扩展中；当同名歌单已存在时，QQ 可能返回自动调整后的 `dirName`，因此 `playlist.name` 使用服务端实际名称，原始请求名保存在 `extensions.requested_name`。创建操作必须指定或使用默认 QQ 账户，且只读取精确 `(qq, account)` 凭据。
+QQ 的创建协议目前只接受 `visibility=public` 和 `kind=normal`，其他统一变体会在联网前返回 `invalid_request`，不会伪装成 QQ 已支持。创建后的自建歌单以可继续读取、增删歌曲和删除的 `qq:dir:<dirId>` 作为主引用；服务端同时返回的公开 `tid` 以 `public_playlist_id/public_playlist_ref` 保存在扩展中，不能反过来把 `tid` 猜成目录 ID。当同名歌单已存在时，QQ 可能返回自动调整后的 `dirName`，因此 `playlist.name` 使用服务端实际名称，原始请求名保存在 `extensions.requested_name`。创建操作必须指定或使用默认 QQ 账户，且只读取精确 `(qq, account)` 凭据。
 
-QQ 删除协议只接受目录 ID，因此单个和批量删除都必须使用创建结果或账户歌单扩展给出的 `qq:dir:<dirId>`，不会把普通 `qq:<tid>` 猜成另一个身份。单批最多 100 项；结果中的 `extensions.results[]` 按请求顺序保留目录 ID、服务端返回身份、名称和 `deleted`。QQ 对不存在目录仍返回业务成功但将 `dirId` 置为 `0`，TuneWeave 会返回 `deleted=false` 和 `all_deleted=false`，不会虚报真实删除；非零平台业务码仍作为错误返回，并附带已完成项以便调用方恢复。
+QQ 删除协议只接受目录 ID，因此单个和批量删除都必须使用创建结果或当前账户自建歌单给出的 `qq:dir:<dirId>`，不会把普通 `qq:<tid>` 猜成另一个身份。单批最多 100 项；结果中的 `extensions.results[]` 按请求顺序保留目录 ID、服务端返回身份、名称和 `deleted`。当前 `DelPlaylist` 会把含中文名称的 JSON 正文编码为 GBK；客户端先严格尝试 UTF-8，只在原字节不是合法 UTF-8 时完整按 GBK 解码，随后仍执行相同的包络码、`retCode` 和身份校验，空体或其他坏 JSON 不会被当成成功。QQ 对不存在目录仍返回业务成功但将 `dirId` 置为 `0`，TuneWeave 会返回 `deleted=false` 和 `all_deleted=false`，不会虚报真实删除；非零平台业务码仍作为错误返回，并附带已完成项以便调用方恢复。
 
 歌单写入的 `refs` 是完整 `platform:id`，`ids` 是由路径或显式 `platform` 绑定的平台 ID；两者均接受单值、数组和逗号分隔字符串，但不能同时出现，输入顺序和重复项原样保留。批量删除和账户歌单排序不能混合平台。`/tracks` 只操作普通歌曲；`/videos` 只操作视频项目；`/items` 以 `kind=track|video` 选择，兼容参考 `type=0|3`。网易云创建结果会跳过零 ID，项目写入与排序结果会跳过空快照 ID，再采用后续有效兼容字段；`playlist_track_add/delete` 实际是 VIDEO 歌单的 `type=3` 项目接口，不会被错误复用为普通歌曲增删。
 
-QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，账户目录也可使用 `qq:dir:<dirId>`；项目仅接受 QQ 歌曲引用。TuneWeave 会先用 Web 富详情把 MID 或数字 ID 解析为平台实际要求的 `songId + songType` 元组；同一请求内的重复引用只查询一次，但写入仍保留原顺序和重复项。这里不使用默认 `songType=0` 的数字歌曲批查，以免特殊类型歌曲被错误解析。添加分支保留 JSON 布尔 `bFmtUtf8=true`，删除分支按参考客户端的普通参数规范化发送；CGI 顶层业务码和内层 `retCode` 都会检查，任一层的 `80092` 都返回 `conflict`，不会被通用 CGI 错误提前覆盖。
+QQ 的普通歌单歌曲增删接受目标 `qq:<tid>`，当前账户自建目录使用可写的 `qq:dir:<dirId>`；创建结果和当前账户自建目录都直接以目录引用作为主引用，项目仅接受 QQ 歌曲引用。TuneWeave 会先用 Web 富详情把 MID 或数字 ID 解析为平台实际要求的 `songId + songType` 元组；同一请求内的重复引用只查询一次，但写入仍保留原顺序和重复项。这里不使用默认 `songType=0` 的数字歌曲批查，以免特殊类型歌曲被错误解析。添加分支保留 JSON 布尔 `bFmtUtf8=true`，删除分支按参考客户端的普通参数规范化发送；删除响应与歌单删除一样可能是 GBK JSON，解码后仍必须通过 CGI 顶层业务码、内层 `retCode`、返回 `dirId/tid` 及歌曲身份校验。任一层的 `80092` 都返回 `conflict`，空体、身份冲突或意外歌曲结果不会被包装成成功。QQ 详情读取在写操作后可能短时返回旧快照，写结果以已经交叉校验身份的 `result.songlist` 表示平台接受的事务结果，调用方需要强读一致性时应在有界等待后重新读取，不得重复发送写请求。
 
 当前直接写入平台歌单要求资源已经能被目标 provider 接受；网易云因此要求项目引用属于网易云。Uni Playlist 与后续跨平台导入层在目标平台和歌曲来源平台不同时，必须先执行严格匹配；低于阈值时返回 `match_rejected`，不得把同名但不同版本的歌曲写入目标歌单。
 
