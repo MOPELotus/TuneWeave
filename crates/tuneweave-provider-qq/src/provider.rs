@@ -18,9 +18,9 @@ use tuneweave_core::{
     ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabMetadata, ArtistHomepageTabRequest,
     ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistVideoListRequest,
     AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Chart,
-    ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest, ChartTrackPreview,
-    CreatorSummary, CredentialMode, ErrorCode, Extensions, GeneralSearchRelated,
+    AudioFileRequestItem, AuthChallengeBackend, AuthChallengeRequest, AuthState, Capability,
+    ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest,
+    ChartTrackPreview, CreatorSummary, CredentialMode, ErrorCode, Extensions, GeneralSearchRelated,
     GeneralSearchRelatedTerm, GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection,
     ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
     MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicGeneAge,
@@ -6110,6 +6110,12 @@ impl MusicProvider for QqProvider {
     }
 
     async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
+        if request.backend != AuthChallengeBackend::Standard {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ phone authentication only supports the standard challenge backend",
+            )
+            .with_platform(Platform::Qq));
+        }
         match request.method {
             ChallengeMethod::Sms => {
                 send_phone_authcode(
@@ -6140,6 +6146,12 @@ impl MusicProvider for QqProvider {
         mode: CredentialMode,
     ) -> Result<ProviderAuthResult> {
         validate_qq_login_account(&request.account, mode)?;
+        if request.backend != AuthChallengeBackend::Standard {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ phone authentication only supports the standard challenge backend",
+            )
+            .with_platform(Platform::Qq));
+        }
         let credential = match request.method {
             ChallengeMethod::Sms => {
                 login_with_phone_authcode(&self.client, &request.principal, code).await?
@@ -26752,6 +26764,7 @@ mod tests {
         let request = AuthChallengeRequest {
             account: "phone-account".to_owned(),
             method: ChallengeMethod::Sms,
+            backend: AuthChallengeBackend::Standard,
             principal: "+8613800138000".to_owned(),
             country_code: Some("86".to_owned()),
         };
@@ -26769,6 +26782,16 @@ mod tests {
             .verify_auth_challenge(&request, "\r\n")
             .await
             .expect_err("invalid verification code");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+
+        let request = AuthChallengeRequest {
+            backend: AuthChallengeBackend::Middle,
+            ..request
+        };
+        let error = provider
+            .start_auth_challenge(&request)
+            .await
+            .expect_err("QQ must reject nonstandard challenge backends");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
     }
 

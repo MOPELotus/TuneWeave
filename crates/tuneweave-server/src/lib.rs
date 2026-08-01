@@ -33,12 +33,12 @@ use tuneweave_core::{
     ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest,
     ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
     ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeRequest,
-    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
-    BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential,
-    Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView,
-    ChartTrackListRequest, CloudImportRequest, CloudImportResult, CloudLyricsRequest,
-    CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeBackend,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER,
+    CallerCredential, Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest,
+    ChartCatalogView, ChartTrackListRequest, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
     CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
     CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
     CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
@@ -12703,6 +12703,8 @@ struct AuthChallengeStartBody {
     platform: String,
     account: Option<String>,
     method: Option<ChallengeMethod>,
+    #[serde(default)]
+    backend: AuthChallengeBackend,
     #[serde(alias = "phone")]
     principal: Value,
     #[serde(
@@ -12720,6 +12722,7 @@ struct AuthChallengeStartBody {
 struct AuthChallengeStartData {
     transaction_id: String,
     method: ChallengeMethod,
+    backend: AuthChallengeBackend,
 }
 
 async fn auth_challenge_start(
@@ -12740,6 +12743,7 @@ async fn auth_challenge_start(
     let request = AuthChallengeRequest {
         account: account.clone(),
         method,
+        backend: body.backend,
         principal,
         country_code: Some(country_code),
     };
@@ -12754,6 +12758,7 @@ async fn auth_challenge_start(
     let data = AuthChallengeStartData {
         transaction_id,
         method,
+        backend: body.backend,
     };
     Ok(Json(auth_api_response(
         data,
@@ -12856,6 +12861,7 @@ async fn auth_challenge_validate(
             &AuthChallengeRequest {
                 account: account.clone(),
                 method: body.method.unwrap_or(ChallengeMethod::Sms),
+                backend: AuthChallengeBackend::Standard,
                 principal,
                 country_code: Some(country_code),
             },
@@ -17611,6 +17617,7 @@ mod tests {
                         request: AuthChallengeRequest {
                             account: "private-account-alias".to_owned(),
                             method: ChallengeMethod::Sms,
+                            backend: AuthChallengeBackend::Standard,
                             principal: "private-principal".to_owned(),
                             country_code: Some("86".to_owned()),
                         },
@@ -17658,6 +17665,7 @@ mod tests {
                 request: AuthChallengeRequest {
                     account: "private-sms-account".to_owned(),
                     method: ChallengeMethod::Sms,
+                    backend: AuthChallengeBackend::Standard,
                     principal: "private-principal".to_owned(),
                     country_code: Some("86".to_owned()),
                 },
@@ -35863,6 +35871,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(start["data"]["method"], "sms");
+        assert_eq!(start["data"]["backend"], "standard");
         let transaction_id = start["data"]["transaction_id"]
             .as_str()
             .expect("transaction id");
@@ -35875,6 +35884,30 @@ mod tests {
         let serialized = serde_json::to_string(&verified).expect("serialize challenge response");
         assert!(!serialized.contains("13800138000"));
         assert!(!serialized.contains("1234"));
+    }
+
+    #[tokio::test]
+    async fn sms_challenge_transaction_accepts_middle_backend_without_echoing_principal() {
+        let (status, start) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(json!({
+                "platform": "netease",
+                "account": "middle-sms",
+                "method": "sms",
+                "backend": "middle",
+                "principal": "13800138000",
+                "country_code": "86"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(start["data"]["method"], "sms");
+        assert_eq!(start["data"]["backend"], "middle");
+        assert!(start["data"]["transaction_id"].is_string());
+        let serialized = serde_json::to_string(&start).expect("serialize challenge start");
+        assert!(!serialized.contains("13800138000"));
     }
 
     #[tokio::test]

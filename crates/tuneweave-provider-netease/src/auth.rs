@@ -2,7 +2,7 @@ use std::fmt;
 
 use md5::{Digest, Md5};
 use serde_json::{Value, json};
-use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
+use tuneweave_core::{AuthChallengeBackend, ErrorCode, Platform, Result, TuneWeaveError};
 
 use crate::{
     NeteaseClient, NeteaseResponse,
@@ -127,18 +127,21 @@ impl NeteaseClient {
     }
 
     pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
-        let phone = required_value("phone", phone)?;
-        let country_code = normalized_country_code(country_code);
-        let response = self
-            .request_weapi(
-                "/api/sms/captcha/sent",
-                json!({
-                    "ctcode": country_code,
-                    "secrete": "music_middleuser_pclogin",
-                    "cellphone": phone
-                }),
-            )
-            .await?;
+        self.send_phone_captcha_with_backend(phone, country_code, AuthChallengeBackend::Standard)
+            .await
+    }
+
+    pub async fn send_phone_captcha_with_backend(
+        &self,
+        phone: &str,
+        country_code: &str,
+        backend: AuthChallengeBackend,
+    ) -> Result<()> {
+        let request = phone_captcha_request(phone, country_code, backend)?;
+        let response = match request.protocol {
+            NeteaseAuthProtocol::Weapi => self.request_weapi(request.path, request.payload).await?,
+            NeteaseAuthProtocol::Eapi => self.request_eapi(request.path, request.payload).await?,
+        };
         ensure_response_code(&response.body, 200, "send phone captcha")
     }
 
@@ -448,6 +451,54 @@ fn normalized_country_code(value: &str) -> &str {
     if value.is_empty() { "86" } else { value }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NeteaseAuthProtocol {
+    Weapi,
+    Eapi,
+}
+
+#[derive(Debug, PartialEq)]
+struct PhoneCaptchaRequest {
+    protocol: NeteaseAuthProtocol,
+    path: &'static str,
+    payload: Value,
+}
+
+fn phone_captcha_request(
+    phone: &str,
+    country_code: &str,
+    backend: AuthChallengeBackend,
+) -> Result<PhoneCaptchaRequest> {
+    let phone = required_value("phone", phone)?;
+    let country_code = normalized_country_code(country_code);
+    let (protocol, path, payload) = match backend {
+        AuthChallengeBackend::Standard => (
+            NeteaseAuthProtocol::Weapi,
+            "/api/sms/captcha/sent",
+            json!({
+                "ctcode": country_code,
+                "secrete": "music_middleuser_pclogin",
+                "cellphone": phone
+            }),
+        ),
+        AuthChallengeBackend::Middle => (
+            NeteaseAuthProtocol::Eapi,
+            "/api/middle/captcha/sent/v1",
+            json!({
+                "ctcode": country_code,
+                "secrete": "music_middleuser_pclogin",
+                "cellphone": phone,
+                "scene": "0"
+            }),
+        ),
+    };
+    Ok(PhoneCaptchaRequest {
+        protocol,
+        path,
+        payload,
+    })
+}
+
 fn phone_password_login_payload(
     phone: &str,
     country_code: &str,
@@ -608,6 +659,27 @@ mod tests {
     fn rejects_invalid_prehashed_password_before_network_access() {
         let error = validated_password_digest("not-md5").expect_err("invalid digest");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn phone_captcha_backends_keep_protocol_paths_and_payloads_distinct() {
+        let standard = phone_captcha_request(" 13800138000 ", "", AuthChallengeBackend::Standard)
+            .expect("standard captcha request");
+        assert_eq!(standard.protocol, NeteaseAuthProtocol::Weapi);
+        assert_eq!(standard.path, "/api/sms/captcha/sent");
+        assert_eq!(standard.payload["ctcode"], "86");
+        assert_eq!(standard.payload["cellphone"], "13800138000");
+        assert_eq!(standard.payload["secrete"], "music_middleuser_pclogin");
+        assert!(standard.payload.get("scene").is_none());
+
+        let middle = phone_captcha_request("13800138000", "1", AuthChallengeBackend::Middle)
+            .expect("middle captcha request");
+        assert_eq!(middle.protocol, NeteaseAuthProtocol::Eapi);
+        assert_eq!(middle.path, "/api/middle/captcha/sent/v1");
+        assert_eq!(middle.payload["ctcode"], "1");
+        assert_eq!(middle.payload["cellphone"], "13800138000");
+        assert_eq!(middle.payload["secrete"], "music_middleuser_pclogin");
+        assert_eq!(middle.payload["scene"], "0");
     }
 
     #[test]

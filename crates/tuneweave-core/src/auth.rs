@@ -69,6 +69,17 @@ pub enum ChallengeMethod {
     Sms,
 }
 
+/// Selects the provider protocol used to deliver an authentication challenge.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthChallengeBackend {
+    /// Use the provider's normal challenge-delivery protocol.
+    #[default]
+    Standard,
+    /// Use a provider's middle-layer login challenge protocol when available.
+    Middle,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountProfile {
     pub platform: Platform,
@@ -152,6 +163,8 @@ impl fmt::Debug for PasswordLoginRequest {
 pub struct AuthChallengeRequest {
     pub account: String,
     pub method: ChallengeMethod,
+    #[serde(default)]
+    pub backend: AuthChallengeBackend,
     pub principal: String,
     pub country_code: Option<String>,
 }
@@ -162,6 +175,7 @@ impl fmt::Debug for AuthChallengeRequest {
             .debug_struct("AuthChallengeRequest")
             .field("account", &self.account)
             .field("method", &self.method)
+            .field("backend", &self.backend)
             .field("principal", &"[redacted]")
             .field("country_code", &self.country_code)
             .finish()
@@ -257,6 +271,7 @@ mod tests {
         let challenge = AuthChallengeRequest {
             account: "default".to_owned(),
             method: ChallengeMethod::Sms,
+            backend: AuthChallengeBackend::Standard,
             principal: "13800138000".to_owned(),
             country_code: Some("86".to_owned()),
         };
@@ -272,6 +287,28 @@ mod tests {
         assert!(!output.contains("secure-captcha-secret"));
         assert!(!output.contains("13800138000"));
         assert!(!output.contains("13900139000"));
+    }
+
+    #[test]
+    fn challenge_backend_defaults_to_standard_and_round_trips_middle() {
+        let standard: AuthChallengeRequest = serde_json::from_value(serde_json::json!({
+            "account": "default",
+            "method": "sms",
+            "principal": "13800138000",
+            "country_code": "86"
+        }))
+        .expect("default challenge backend");
+        assert_eq!(standard.backend, AuthChallengeBackend::Standard);
+
+        let middle: AuthChallengeRequest = serde_json::from_value(serde_json::json!({
+            "account": "default",
+            "method": "sms",
+            "backend": "middle",
+            "principal": "13800138000",
+            "country_code": "86"
+        }))
+        .expect("middle challenge backend");
+        assert_eq!(middle.backend, AuthChallengeBackend::Middle);
     }
 
     #[test]

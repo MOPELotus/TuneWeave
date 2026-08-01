@@ -20,10 +20,10 @@ use tuneweave_core::{
     ArtistChartRequest, ArtistContentCount, ArtistGenre, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart,
-    ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeBackend, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
+    BannerCatalog, BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod,
+    Chart, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
     CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
     CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
@@ -202,9 +202,21 @@ impl NeteaseProvider {
     }
 
     pub async fn send_phone_captcha(&self, phone: &str, country_code: &str) -> Result<()> {
+        self.send_phone_captcha_with_backend(phone, country_code, AuthChallengeBackend::Standard)
+            .await
+    }
+
+    pub async fn send_phone_captcha_with_backend(
+        &self,
+        phone: &str,
+        country_code: &str,
+        backend: AuthChallengeBackend,
+    ) -> Result<()> {
         let client = self.client.clone();
         let client = self.client_with_anonymous_identity(client).await?;
-        client.send_phone_captcha(phone, country_code).await?;
+        client
+            .send_phone_captcha_with_backend(phone, country_code, backend)
+            .await?;
         self.store_pending_captcha_client(phone, country_code, client)?;
         Ok(())
     }
@@ -3138,10 +3150,11 @@ impl MusicProvider for NeteaseProvider {
     async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
         match request.method {
             ChallengeMethod::Sms => {
-                NeteaseProvider::send_phone_captcha(
+                NeteaseProvider::send_phone_captcha_with_backend(
                     self,
                     &request.principal,
                     request.country_code.as_deref().unwrap_or("86"),
+                    request.backend,
                 )
                 .await
             }
@@ -30357,6 +30370,7 @@ mod tests {
             &AuthChallengeRequest {
                 account: "default".to_owned(),
                 method: ChallengeMethod::Sms,
+                backend: AuthChallengeBackend::Standard,
                 principal: "13800138000".to_owned(),
                 country_code: Some("86".to_owned()),
             },

@@ -52,7 +52,7 @@
 | A01 | 账户与身份 | 国家和电话区号目录 | `verified` | `countries_code_list` 已验收 |
 | A02 | 账户与身份 | 手机号注册状态和密码状态 | `verified` | `cellphone_existence_check` 两分支已验收 |
 | A03 | 账户与身份 | 验证码独立校验 | `implemented` | 错误码真实路径已验收；空白 `message` 不遮蔽有效 `msg`，待有效验证码成功态 |
-| A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `partial` | 普通短信分支已真实完成单次发送、事务确认、服务器凭据保存、会话检查、刷新及服务重启恢复；自动测试仍不主动发送短信。新增 `captcha_sent_v1` 中间层登录验证码和 `captcha_safe_sent` 安全验证码两条独立分支尚未接入，因此保持 `partial` |
+| A04 | 账户与身份 | 发送验证码及事务式验证码登录 | `partial` | 普通短信分支已真实完成单次发送、事务确认、服务器凭据保存、会话检查、刷新及服务重启恢复；`captcha_sent_v1` 已以强类型 `backend=middle` 接入 EAPI 中间层登录短信并复用同一事务链，自动测试仍不主动发送真实短信。只提交登录账户区号的 `captcha_safe_sent` 安全操作验证码尚未接入，不能退化为普通登录短信，因此保持 `partial` |
 | A05 | 账户与身份 | 邮箱/账号密码登录 | `implemented` | `login` 已实现并脱敏；当前验收账户没有邮箱登录主体，密码也不可用于受控验证，真实成功态明确保持未验证 |
 | A06 | 账户与身份 | 手机号密码登录 | `implemented` | `login_cellphone` 的明文/MD5 密码分支与可选 `sca→secureCaptcha` 安全验证码均已进入强类型请求；安全验证码只允许手机号登录、限制为 1024 字节且拒绝控制字符，不进入日志或凭据存储。当前验收账户没有可用于受控验证的密码，真实成功态保持未验证 |
 | A07 | 账户与身份 | 二维码 key、创建、图片和轮询确认 | `verified` | 真实扫码已覆盖 waiting/scanned/confirmed，并验证凭据按 `platform/account` 落盘和无扫码重启恢复；空顶层 key/业务码不遮蔽嵌套有效值，真实 HTTP 创建同时返回 URL 与自包含 SVG data URL，不依赖外部二维码服务 |
