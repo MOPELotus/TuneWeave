@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 159,
+  "covered_route_count": 164,
   "entries": [
     {
       "id": "health",
@@ -3086,6 +3086,106 @@
       "acceptance_cases": [
         "qq_track_versions_keep_source_order_account_and_strict_query_shape",
         "track_related_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "audio_recognition",
+      "method": "POST",
+      "path": "/v1/audio/recognize",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "audio_recognition_uses_unified_input_and_response_metadata",
+        "audio_recognition_accepts_source_compatible_field_aliases",
+        "audio_recognition_rejects_invalid_fingerprint_boundaries",
+        "audio_recognition_validates_fingerprint_boundaries_before_network_access"
+      ]
+    },
+    {
+      "id": "banners",
+      "method": "GET",
+      "path": "/v1/banners",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "banners_use_unified_client_platform_and_account_parameters",
+        "banners_accept_every_reference_numeric_client_type",
+        "banners_accept_caller_credentials_without_server_aliases",
+        "banners_reject_unknown_clients"
+      ]
+    },
+    {
+      "id": "listening_rights_ads",
+      "method": "GET",
+      "path": "/v1/listening-rights/ads",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "local_write",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "listening_rights_ads_accept_default_json_and_reference_type_id_inputs",
+        "listening_rights_ads_reject_invalid_type_ids_platforms_and_query_fields",
+        "listening_rights_accept_caller_credentials_without_server_aliases",
+        "listening_rights_ads_reject_unknown_account_aliases_before_network_access"
+      ]
+    },
+    {
+      "id": "listening_rights_gain_get",
+      "method": "GET",
+      "path": "/v1/listening-rights/gains",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "listening_rights_gain_accepts_reference_get_and_unified_post_inputs",
+        "listening_rights_accept_caller_credentials_without_server_aliases",
+        "listening_rights_gain_rejects_invalid_reference_and_json_inputs",
+        "listening_rights_gain_rejects_unknown_accounts_before_auto_ad_lookup"
+      ]
+    },
+    {
+      "id": "listening_rights_gain_post",
+      "method": "POST",
+      "path": "/v1/listening-rights/gains",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "listening_rights_gain_accepts_reference_get_and_unified_post_inputs",
+        "listening_rights_accept_caller_credentials_without_server_aliases",
+        "listening_rights_gain_rejects_invalid_reference_and_json_inputs",
+        "listening_rights_gain_rejects_unknown_accounts_before_auto_ad_lookup"
       ]
     }
   ]
