@@ -349,7 +349,7 @@ Season 与收藏夹通过 `GET /v1/playlists/{ref}`、`GET /v1/playlists/{ref}/i
 
 B 站 UGC 视频详情通过 `GET /v1/videos/bilibili:bvid:{bvid}` 或 `GET /v1/videos/bilibili:aid:{aid}` 读取，`kind` 只能为 `video`。两种输入都会由平台响应交叉校验并规范化为 BVID 引用；EP/SS 保持独立，待 PGC 详情链接入前不会误用 UGC 端点。详情返回标题、简介、可信封面、UP 主、时间、时长、首 CID、分 P 数、分区、公开统计、状态和下载/付费/互动等 rights。`resolutions` 在 playurl 接入前保持空，并以 `resolutions_require_playurl=true` 明示，因为投稿尺寸不是账户当前真正可用的清晰度。
 
-B 站视频统计通过 `GET /v1/videos/{ref}/stats?kind=video` 读取。公开计数来自同一份经过 AID/BVID 交叉校验的视频详情，不使用已经失效的 archive stat 接口；匿名请求的 `liked/favorited/coins_contributed` 保持 `null`。显式选择 B 站账户时才读取账户的近期点赞、投币数和收藏态，任一账户状态请求失败都返回对应错误而不拼接不完整状态。平台点赞查询只能覆盖近期记录，因此响应以 `extensions.liked_state_scope=recent` 明确限制，不能据此断言较早历史中从未点赞。
+B 站视频统计通过 `GET /v1/videos/{ref}/stats?kind=video` 读取。公开计数来自同一份经过 AID/BVID 交叉校验的视频详情，不使用已经失效的 archive stat 接口；匿名请求的 `liked/favorited/coins_contributed` 保持 `null`。显式选择 B 站账户时才读取账户的近期点赞、投币数和收藏态，任一账户状态请求失败都返回对应错误而不拼接不完整状态。平台点赞查询只能覆盖近期记录，因此响应以 `extensions.liked_state_scope=recent` 明确限制，不能据此断言较早历史中从未点赞。公开视频已真实验证匿名与普通账户两条路径：公开计数完全一致，匿名账户态为空，精确账户三项均为强类型值。
 
 B 站分 P 目录通过 `GET /v1/videos/{ref}/parts` 读取，接受同一 AID/BVID 身份、`kind/type=video`、`account` 及统一 `limit/offset`。每个 `VideoPart` 以 `bilibili:cid:{cid}` 作为稳定分段引用，同时用规范 BVID `video_ref` 指回父视频，并保留从 1 开始的 `page`、标题、毫秒时长、尺寸、旋转状态和平台来源。详情响应中的全部分 P 会先完成身份、顺序、唯一 CID 和维度校验，再应用本地分页；多 P 视频不会只保留首 P，超过目录尾部返回空页而不是重复首 P。
 
