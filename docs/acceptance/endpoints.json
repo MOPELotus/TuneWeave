@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 118,
+  "covered_route_count": 125,
   "entries": [
     {
       "id": "health",
@@ -2328,6 +2328,144 @@
         "recent_podcast_episode_history_preserves_episode_audio_time_and_device",
         "personal_library_reads_accept_caller_credentials_without_server_aliases",
         "recent_podcast_episode_history_rejects_invalid_controls_and_missing_accounts"
+      ]
+    },
+    {
+      "id": "account_avatar_update",
+      "method": "PUT",
+      "path": "/v1/account/avatar",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "account_avatar_accepts_binary_images_and_reference_parameter_aliases",
+        "account_avatar_uses_safe_jpeg_defaults",
+        "account_avatar_rejects_invalid_binary_inputs",
+        "account_avatar_size_limit_uses_the_error_envelope",
+        "avatar_upload_validates_input_and_authentication_before_network_access"
+      ]
+    },
+    {
+      "id": "account_podcast_episodes_delete_batch",
+      "method": "DELETE",
+      "path": "/v1/account/podcast-episodes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_episode_delete_supports_single_and_ordered_batch_references",
+        "podcast_episode_delete_rejects_ambiguous_malformed_and_mixed_inputs",
+        "podcast_episode_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_podcast_episodes",
+      "method": "GET",
+      "path": "/v1/account/podcast-episodes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_podcast_episode_search_preserves_every_workbench_filter",
+        "account_podcast_episode_search_rejects_invalid_filters_and_cross_platform_refs",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_podcast_episode_delete",
+      "method": "DELETE",
+      "path": "/v1/account/podcast-episodes/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_episode_delete_supports_single_and_ordered_batch_references",
+        "podcast_episode_delete_rejects_ambiguous_malformed_and_mixed_inputs",
+        "podcast_episode_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_created_podcasts",
+      "method": "GET",
+      "path": "/v1/account/podcasts/created",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_created_podcasts_are_a_fixed_account_snapshot",
+        "account_created_podcasts_reject_unsupported_controls",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases",
+        "created_podcasts_require_supported_controls_and_a_logged_in_account"
+      ]
+    },
+    {
+      "id": "account_podcast_episode_upload",
+      "method": "POST",
+      "path": "/v1/account/podcasts/{reference}/episodes",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_episode_upload_preserves_reference_metadata_and_binary_body",
+        "podcast_episode_upload_rejects_missing_malformed_and_cross_platform_inputs",
+        "podcast_episode_writes_accept_caller_credentials_without_server_aliases",
+        "podcast_episode_upload_validates_complete_metadata_before_account_or_network"
+      ]
+    },
+    {
+      "id": "account_podcast_episode_order",
+      "method": "PUT",
+      "path": "/v1/account/podcasts/{reference}/episodes/order",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_episode_order_uses_account_scope_and_reference_controls",
+        "podcast_episode_order_rejects_invalid_or_cross_platform_inputs",
+        "podcast_episode_writes_accept_caller_credentials_without_server_aliases",
+        "podcast_episode_order_requires_valid_controls_references_and_account"
       ]
     }
   ]
