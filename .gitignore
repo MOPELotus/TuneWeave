@@ -2,6 +2,8 @@
 /.reference/
 /.local/
 **/.local/
+/data/
+/logs/
 
 .env
 .env.*

@@ -56,8 +56,8 @@ fn verify_output_mode(mode: OutputMode) {
             "TUNEWEAVE_LOG_TO_FILE",
             if mode.file { "true" } else { "false" },
         )
-        .env("TUNEWEAVE_DATA_DIR", "data")
-        .env("TUNEWEAVE_LOG_DIR", "logs")
+        .env_remove("TUNEWEAVE_DATA_DIR")
+        .env_remove("TUNEWEAVE_LOG_DIR")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

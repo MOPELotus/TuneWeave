@@ -31,6 +31,7 @@ use tracing_subscriber::{
 use tracing_subscriber::{Layer, fmt::MakeWriter};
 
 const DEFAULT_LOG_FILE: &str = "tuneweave.log";
+const DEFAULT_LOG_DIRECTORY: &str = "logs";
 const DEFAULT_RETENTION_DAYS: u32 = 14;
 const DEFAULT_MAX_FILES: usize = 30;
 const DEFAULT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -212,7 +213,7 @@ impl LoggingConfig {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("logs"));
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_LOG_DIRECTORY));
         if to_file {
             validate_directory_separation(data_dir, &directory)?;
         }
@@ -1192,7 +1193,7 @@ mod tests {
         assert_eq!(config.format, LogFormat::Human);
         assert!(config.to_stderr);
         assert!(config.to_file);
-        assert_eq!(config.directory, Path::new("private-data/logs"));
+        assert_eq!(config.directory, Path::new(DEFAULT_LOG_DIRECTORY));
         assert_eq!(config.file_name, DEFAULT_LOG_FILE);
         assert_eq!(config.retention_days, DEFAULT_RETENTION_DAYS);
         assert_eq!(config.max_files, DEFAULT_MAX_FILES);

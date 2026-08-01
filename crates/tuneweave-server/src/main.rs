@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let data_dir = env::var_os("TUNEWEAVE_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".local").join("data"));
+        .unwrap_or_else(|| PathBuf::from("data"));
     let logging_config = LoggingConfig::from_env(&data_dir)?;
     let logging = init_logging(&logging_config)?;
     install_panic_observer();
