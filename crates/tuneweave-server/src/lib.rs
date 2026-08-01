@@ -17433,7 +17433,8 @@ fn parse_optional_u16_parameter(
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
-        io::Read,
+        io::{Read, Write},
+        sync::Mutex,
     };
 
     use async_trait::async_trait;
@@ -17444,6 +17445,8 @@ mod tests {
     use flate2::read::GzDecoder;
     use serde_json::Value;
     use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::fmt::MakeWriter;
     use tuneweave_core::{
         AiLyricDictionaryEntry, ArtistBiographySection, ArtistHomepageIntroduction,
         ArtistHomepageTabMetadata, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
@@ -17461,6 +17464,53 @@ mod tests {
     use tuneweave_provider_qq::{QqConfig, QqProvider};
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedTestLogs {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedTestLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.lock().expect("captured log lock").clone())
+                .expect("captured logs must be UTF-8")
+        }
+
+        fn json_events(&self) -> Vec<Value> {
+            self.text()
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("captured log line must be JSON"))
+                .collect()
+        }
+    }
+
+    struct CapturedTestLogWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturedTestLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .lock()
+                .map_err(|_| std::io::Error::other("captured log lock poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedTestLogs {
+        type Writer = CapturedTestLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTestLogWriter {
+                bytes: Arc::clone(&self.bytes),
+            }
+        }
+    }
 
     fn test_app() -> Router {
         build_router(AppState::new(ProviderRegistry::new(), Platform::Netease))
@@ -36061,6 +36111,64 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn request_completion_log_uses_safe_route_and_credential_summaries() {
+        let provider_secret = "MUSIC_U=log-redaction-secret";
+        let caller_credential = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Netease, "cookie", provider_secret, None)
+                .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let logs = CapturedTestLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        let response = async {
+            test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/auth/session?platform=netease")
+                        .header(REQUEST_ID_HEADER, "test-request-log-redaction")
+                        .header(CALLER_CREDENTIAL_HEADER, caller_credential.value.clone())
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("request succeeds")
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[REQUEST_ID_HEADER],
+            "test-request-log-redaction"
+        );
+
+        let events = logs.json_events();
+        let fields = events
+            .iter()
+            .filter_map(|event| event.get("fields"))
+            .find(|fields| fields["message"] == "HTTP request completed")
+            .expect("request completion event");
+        assert_eq!(fields["request_id"], "test-request-log-redaction");
+        assert_eq!(fields["method"], "GET");
+        assert_eq!(fields["route"], "/v1/auth/session");
+        assert_eq!(fields["operation"], "/v1/auth/session");
+        assert_eq!(fields["status"], 200);
+        assert_eq!(fields["platform"], "netease");
+        assert_eq!(fields["credential_source"], "caller");
+        assert_eq!(fields["caller_supplied_request_id"], true);
+
+        let output = logs.text();
+        assert!(!output.contains(provider_secret));
+        assert!(!output.contains(&caller_credential.value));
+        assert!(!output.contains("platform=netease"));
     }
 
     #[tokio::test]
