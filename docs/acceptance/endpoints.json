@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 228,
+  "covered_route_count": 237,
   "entries": [
     {
       "id": "health",
@@ -4400,6 +4400,178 @@
       "acceptance_cases": [
         "video_track_download_aliases_and_media_redirects_preserve_selection",
         "video_track_stream_rejects_foreign_empty_and_unknown_inputs"
+      ]
+    },
+    {
+      "id": "comment_thread_stats",
+      "method": "GET",
+      "path": "/v1/resources/{kind}/comments/stats",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "comment_thread_stats_accept_reference_batches_and_preserve_requested_refs",
+        "comment_thread_stats_support_single_id_fallback_numeric_types_and_empty_lists",
+        "comment_thread_stats_reject_unknown_platforms_and_resource_types",
+        "comment_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "comments",
+      "method": "GET",
+      "path": "/v1/resources/{kind}/{reference}/comments",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "comment_lists_expose_legacy_modern_hot_and_floor_views",
+        "comment_lists_reject_invalid_pagination_view_sort_and_conflicts",
+        "comment_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "comment_create",
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_create_reply_and_delete_share_the_unified_resource_endpoint",
+        "comment_writes_accept_caller_credentials_without_server_aliases",
+        "comment_endpoints_reject_invalid_targets_content_and_json"
+      ]
+    },
+    {
+      "id": "comment_delete",
+      "method": "DELETE",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_create_reply_and_delete_share_the_unified_resource_endpoint",
+        "comment_writes_accept_caller_credentials_without_server_aliases",
+        "comment_endpoints_reject_invalid_targets_content_and_json"
+      ]
+    },
+    {
+      "id": "comment_reaction_remove",
+      "method": "DELETE",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_reaction_put_and_delete_expose_like_and_unlike_actions",
+        "comment_reaction_mutations_reject_unknown_reactions_and_query_fields",
+        "comment_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "comment_reactions",
+      "method": "GET",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "comment_reaction_lists_expose_unified_users_and_reference_cursor_aliases",
+        "comment_reaction_lists_reject_missing_cross_platform_and_invalid_inputs",
+        "comment_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "comment_reaction_add",
+      "method": "PUT",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_reaction_put_and_delete_expose_like_and_unlike_actions",
+        "comment_reaction_mutations_reject_unknown_reactions_and_query_fields",
+        "comment_writes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "comment_reply_create",
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/replies",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_create_reply_and_delete_share_the_unified_resource_endpoint",
+        "comment_writes_accept_caller_credentials_without_server_aliases",
+        "comment_endpoints_reject_invalid_targets_content_and_json"
+      ]
+    },
+    {
+      "id": "comment_report",
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reports",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_destructive",
+      "network": "destructive",
+      "acceptance_cases": [
+        "comment_report_exposes_reason_account_and_submission_state",
+        "comment_report_rejects_invalid_reason_body_target_and_query",
+        "comment_writes_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
