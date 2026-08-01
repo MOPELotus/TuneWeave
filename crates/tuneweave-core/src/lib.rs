@@ -16,10 +16,11 @@ mod uni_playlist_document;
 mod uni_playlist_store;
 
 pub use auth::{
-    AccountProfile, AuthChallengeBackend, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, ChallengeMethod, CredentialMode,
-    PasswordFormat, PasswordLoginRequest, PrincipalType, ProviderAuthResult, ProviderLogoutResult,
-    ProviderQrPoll, ProviderQrStart,
+    AccountProfile, AuthChallengeBackend, AuthChallengeDelivery, AuthChallengeRequest,
+    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    AuthSecurityChallengeRequest, AuthState, ChallengeMethod, CredentialMode, PasswordFormat,
+    PasswordLoginRequest, PrincipalType, ProviderAuthResult, ProviderLogoutResult, ProviderQrPoll,
+    ProviderQrStart,
 };
 pub use caller_credential::{
     CALLER_CREDENTIAL_FORMAT, CALLER_CREDENTIAL_HEADER, CallerCredential, ProviderCredential,

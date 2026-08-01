@@ -145,6 +145,19 @@ impl NeteaseClient {
         ensure_response_code(&response.body, 200, "send phone captcha")
     }
 
+    pub async fn send_security_captcha(&self, country_code: &str) -> Result<NeteaseResponse> {
+        if !self.is_authenticated() {
+            return Err(TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                "NetEase security captcha requires a logged-in account",
+            )
+            .with_platform(Platform::Netease));
+        }
+        let request = security_captcha_request(country_code);
+        debug_assert_eq!(request.protocol, NeteaseAuthProtocol::Eapi);
+        self.request_eapi(request.path, request.payload).await
+    }
+
     pub async fn verify_phone_captcha(
         &self,
         phone: &str,
@@ -499,6 +512,16 @@ fn phone_captcha_request(
     })
 }
 
+fn security_captcha_request(country_code: &str) -> PhoneCaptchaRequest {
+    PhoneCaptchaRequest {
+        protocol: NeteaseAuthProtocol::Eapi,
+        path: "/api/sms/captcha/safe/sent",
+        payload: json!({
+            "ctcode": normalized_country_code(country_code)
+        }),
+    }
+}
+
 fn phone_password_login_payload(
     phone: &str,
     country_code: &str,
@@ -680,6 +703,27 @@ mod tests {
         assert_eq!(middle.payload["cellphone"], "13800138000");
         assert_eq!(middle.payload["secrete"], "music_middleuser_pclogin");
         assert_eq!(middle.payload["scene"], "0");
+    }
+
+    #[test]
+    fn security_captcha_uses_only_the_authenticated_account_and_country_code() {
+        let request = security_captcha_request(" 86 ");
+        assert_eq!(request.protocol, NeteaseAuthProtocol::Eapi);
+        assert_eq!(request.path, "/api/sms/captcha/safe/sent");
+        assert_eq!(request.payload, json!({ "ctcode": "86" }));
+        assert!(request.payload.get("phone").is_none());
+        assert!(request.payload.get("cellphone").is_none());
+        assert!(request.payload.get("principal").is_none());
+    }
+
+    #[tokio::test]
+    async fn security_captcha_rejects_anonymous_clients_before_network_access() {
+        let client = NeteaseClient::new(crate::NeteaseConfig::default()).expect("client");
+        let error = client
+            .send_security_captcha("86")
+            .await
+            .expect_err("anonymous security captcha");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
     }
 
     #[test]

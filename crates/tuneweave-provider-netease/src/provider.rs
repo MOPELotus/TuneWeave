@@ -20,12 +20,13 @@ use tuneweave_core::{
     ArtistChartRequest, ArtistContentCount, ArtistGenre, ArtistListRequest, ArtistOverview,
     ArtistStats, ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest,
     ArtistVideoListRequest, ArtistWorkKind, ArtistWorkUpdate, ArtistWorksRequest, AudioRecognition,
-    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeBackend, AuthChallengeRequest,
-    AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthState, Banner,
-    BannerCatalog, BannerClient, BannerListRequest, BannerTargetKind, Capability, ChallengeMethod,
-    Chart, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    AudioRecognitionMatch, AudioRecognitionRequest, AuthChallengeBackend, AuthChallengeDelivery,
+    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
+    AuthSecurityChallengeRequest, AuthState, Banner, BannerCatalog, BannerClient,
+    BannerListRequest, BannerTargetKind, Capability, ChallengeMethod, Chart, ChartCatalog,
+    ChartCatalogRequest, ChartCatalogView, ChartGroup, ChartTrackPreview, CloudImportRequest,
+    CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack,
+    CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
     CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
     CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
     CommentMutationAction, CommentMutationResult, CommentPage, CommentReaction,
@@ -739,6 +740,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::CallerManagedCredentials,
             Capability::CountryCallingCodes,
             Capability::ChallengeValidation,
+            Capability::AccountSecurityChallenge,
             Capability::PrincipalStatus,
             Capability::SessionManagement,
             Capability::AccountProfile,
@@ -3184,6 +3186,45 @@ impl MusicProvider for NeteaseProvider {
             valid: verification.valid,
             platform_code: Some(verification.code.to_string()),
             message: verification.message,
+            extensions,
+        })
+    }
+
+    async fn send_auth_security_challenge(
+        &self,
+        request: &AuthSecurityChallengeRequest,
+    ) -> Result<AuthChallengeDelivery> {
+        let response = match request.method {
+            ChallengeMethod::Sms => {
+                let client = self.client_for(Some(&request.account))?;
+                let response = client
+                    .send_security_captcha(request.country_code.as_deref().unwrap_or("86"))
+                    .await?;
+                ensure_account_access(&client, &response.body, "security captcha delivery")?;
+                response
+            }
+        };
+        let code = json_i64(&response.body["code"]).ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "NetEase security captcha response did not contain a status code",
+            )
+            .with_platform(Platform::Netease)
+        })?;
+        let message = ["message", "msg"].into_iter().find_map(|field| {
+            response.body[field]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        });
+        let mut extensions = Extensions::new();
+        extensions.insert("response".to_owned(), response.body);
+        Ok(AuthChallengeDelivery {
+            method: request.method,
+            sent: true,
+            platform_code: Some(code.to_string()),
+            message,
             extensions,
         })
     }
@@ -16451,6 +16492,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn account_security_captcha_uses_the_authenticated_eapi_account_scope() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept security captcha request");
+            let mut request = [0_u8; 16 * 1024];
+            let length = stream
+                .read(&mut request)
+                .expect("read security captcha request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(
+                request.starts_with("POST /eapi/sms/captcha/safe/sent HTTP/1.1\r\n"),
+                "unexpected request line"
+            );
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("cookie: ")
+                        && line.contains("MUSIC_U=test-account-session")),
+                "authenticated cookie must be present"
+            );
+            let body = r#"{"code":200,"message":"sent"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write security captcha response");
+        });
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            cookie: Some("MUSIC_U=test-account-session".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .expect("authenticated provider");
+        let delivery = MusicProvider::send_auth_security_challenge(
+            &provider,
+            &AuthSecurityChallengeRequest {
+                account: "default".to_owned(),
+                method: ChallengeMethod::Sms,
+                country_code: Some("86".to_owned()),
+            },
+        )
+        .await
+        .expect("security captcha delivery");
+        assert!(delivery.sent);
+        assert_eq!(delivery.method, ChallengeMethod::Sms);
+        assert_eq!(delivery.platform_code.as_deref(), Some("200"));
+        assert_eq!(delivery.message.as_deref(), Some("sent"));
+        assert_eq!(delivery.extensions["response"]["code"], 200);
+        server.join().expect("join security captcha server");
+
+        let anonymous = NeteaseProvider::new(NeteaseConfig::default()).expect("anonymous provider");
+        let error = MusicProvider::send_auth_security_challenge(
+            &anonymous,
+            &AuthSecurityChallengeRequest {
+                account: "default".to_owned(),
+                method: ChallengeMethod::Sms,
+                country_code: None,
+            },
+        )
+        .await
+        .expect_err("anonymous security captcha");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
     #[test]
     fn qr_login_image_is_a_self_contained_svg_data_url() {
         let data_url = qr_image_data_url("orpheus://orpheus/pub/login?codekey=test-key")
@@ -27753,6 +27863,7 @@ mod tests {
         assert!(capabilities.contains(&Capability::PhoneLogin));
         assert!(capabilities.contains(&Capability::CountryCallingCodes));
         assert!(capabilities.contains(&Capability::ChallengeValidation));
+        assert!(capabilities.contains(&Capability::AccountSecurityChallenge));
         assert!(capabilities.contains(&Capability::PrincipalStatus));
         assert!(capabilities.contains(&Capability::SessionManagement));
         assert!(capabilities.contains(&Capability::AccountProfile));

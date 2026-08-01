@@ -192,6 +192,24 @@ pub struct AuthChallengeValidation {
     pub extensions: BTreeMap<String, Value>,
 }
 
+/// Requests a challenge for an operation on an already-authenticated account.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthSecurityChallengeRequest {
+    pub account: String,
+    pub method: ChallengeMethod,
+    pub country_code: Option<String>,
+}
+
+/// Confirms that a provider accepted one challenge-delivery request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthChallengeDelivery {
+    pub method: ChallengeMethod,
+    pub sent: bool,
+    pub platform_code: Option<String>,
+    pub message: Option<String>,
+    pub extensions: BTreeMap<String, Value>,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthPrincipalStatusRequest {
     pub account: String,
@@ -309,6 +327,21 @@ mod tests {
         }))
         .expect("middle challenge backend");
         assert_eq!(middle.backend, AuthChallengeBackend::Middle);
+    }
+
+    #[test]
+    fn account_security_challenges_do_not_contain_a_caller_supplied_principal() {
+        let request = AuthSecurityChallengeRequest {
+            account: "personal".to_owned(),
+            method: ChallengeMethod::Sms,
+            country_code: Some("86".to_owned()),
+        };
+        let value = serde_json::to_value(&request).expect("security challenge request");
+        assert_eq!(value["account"], "personal");
+        assert_eq!(value["method"], "sms");
+        assert_eq!(value["country_code"], "86");
+        assert!(value.get("principal").is_none());
+        assert!(value.get("phone").is_none());
     }
 
     #[test]

@@ -34,18 +34,18 @@ use tuneweave_core::{
     ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
     ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch, AudioFileRequest,
     AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeBackend,
-    AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus, AuthPrincipalStatusRequest,
-    AuthState, Banner, BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER,
-    CallerCredential, Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest,
-    ChartCatalogView, ChartTrackListRequest, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    AuthChallengeDelivery, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthSecurityChallengeRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential, Capability,
+    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -1189,6 +1189,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
         .route("/auth/password", post(auth_password))
         .route("/auth/challenges", post(auth_challenge_start))
+        .route(
+            "/auth/security-challenges",
+            post(auth_security_challenge_start),
+        )
         .route("/auth/challenges/validate", post(auth_challenge_validate))
         .route("/auth/principals/status", post(auth_principal_status))
         .route(
@@ -12770,6 +12774,51 @@ async fn auth_challenge_start(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AuthSecurityChallengeStartBody {
+    platform: String,
+    account: Option<String>,
+    method: Option<ChallengeMethod>,
+    #[serde(
+        default,
+        alias = "ctcode",
+        alias = "countrycode",
+        alias = "countryCode"
+    )]
+    country_code: Option<Value>,
+}
+
+async fn auth_security_challenge_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<AuthSecurityChallengeStartBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<AuthChallengeDelivery>>, ApiError> {
+    let body = json_body(payload)?;
+    let platform = parse_platform_parameter(&body.platform)?;
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let country_code = match body.country_code.as_ref() {
+        None => "86".to_owned(),
+        Some(Value::String(value)) if value.trim().is_empty() => "86".to_owned(),
+        Some(value) => required_string_or_number("country_code", value)?,
+    };
+    let delivery = access
+        .provider
+        .send_auth_security_challenge(&AuthSecurityChallengeRequest {
+            account: access.required_account().to_owned(),
+            method: body.method.unwrap_or(ChallengeMethod::Sms),
+            country_code: Some(country_code),
+        })
+        .await?;
+    Ok(Json(access.response(delivery, platform)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthChallengeVerifyBody {
     #[serde(alias = "captcha")]
     code: Value,
@@ -21190,6 +21239,22 @@ mod tests {
                 platform_code: Some(platform_code.to_owned()),
                 message: (!valid).then(|| "invalid challenge code".to_owned()),
                 extensions,
+            })
+        }
+
+        async fn send_auth_security_challenge(
+            &self,
+            request: &AuthSecurityChallengeRequest,
+        ) -> Result<AuthChallengeDelivery> {
+            Ok(AuthChallengeDelivery {
+                method: request.method,
+                sent: true,
+                platform_code: Some("200".to_owned()),
+                message: Some("sent".to_owned()),
+                extensions: Extensions::from([
+                    ("account".to_owned(), json!(request.account)),
+                    ("country_code".to_owned(), json!(request.country_code)),
+                ]),
             })
         }
 
@@ -35907,6 +35972,60 @@ mod tests {
         assert_eq!(start["data"]["backend"], "middle");
         assert!(start["data"]["transaction_id"].is_string());
         let serialized = serde_json::to_string(&start).expect("serialize challenge start");
+        assert!(!serialized.contains("13800138000"));
+    }
+
+    #[tokio::test]
+    async fn account_security_challenge_uses_authenticated_scope_without_phone_input() {
+        let (status, delivery) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/security-challenges",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "method": "sms",
+                "ctcode": 86
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(delivery["data"]["method"], "sms");
+        assert_eq!(delivery["data"]["sent"], true);
+        assert_eq!(delivery["data"]["platform_code"], "200");
+        assert_eq!(delivery["data"]["extensions"]["account"], "personal");
+        assert_eq!(delivery["data"]["extensions"]["country_code"], "86");
+        assert_eq!(delivery["meta"]["account"], "personal");
+
+        let credential = netease_caller_credential();
+        let (status, caller) = caller_json_request(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/security-challenges",
+            Some(json!({ "platform": "netease", "country_code": "86" })),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(caller["data"]["sent"], true);
+        assert_eq!(caller["data"]["extensions"]["account"], "default");
+        assert!(caller["meta"].get("account").is_none());
+        let serialized = serde_json::to_string(&caller).expect("serialize caller delivery");
+        assert!(!serialized.contains(&credential.value));
+
+        let (status, rejected) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/auth/security-challenges",
+            Some(json!({
+                "platform": "netease",
+                "account": "personal",
+                "phone": "13800138000"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let serialized = serde_json::to_string(&rejected).expect("serialize rejection");
         assert!(!serialized.contains("13800138000"));
     }
 

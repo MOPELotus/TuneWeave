@@ -1562,6 +1562,7 @@ QQ、网易云与 B 站当前均声明 `caller_managed_credentials`：所有会�
 | POST | `/v1/auth/password` | `{platform, account?, principal_type, principal, password, password_format?, country_code?, secure_captcha?, credential_mode?}` | 登录状态、脱敏账户摘要及显式模式允许时的一次性调用方凭证 |
 | POST | `/v1/auth/principals/status` | `{platform, account?, principal_type?, principal, country_code?}` | `AuthPrincipalStatus`；查询主体是否已注册，不创建登录态 |
 | POST | `/v1/auth/challenges` | `{platform, account?, method?, backend?, principal, country_code?, credential_mode?}` | 短信等挑战事务；事务固定凭证模式和发送后端 |
+| POST | `/v1/auth/security-challenges` | `{platform, account?, method?, country_code?}` 或调用方凭证请求头 | 已登录账户安全操作验证码的单次发送结果；不创建登录事务 |
 | POST | `/v1/auth/challenges/validate` | `{platform, account?, method?, principal, code, country_code?}` | `AuthChallengeValidation`；仅校验挑战码，不创建登录态 |
 | POST | `/v1/auth/challenges/{transaction_id}/verify` | `{code}` | 验证状态；成功时按事务模式处理登录态；网易云兼容 `{captcha}` |
 | POST | `/v1/auth/session/refresh` | `{platform, account?, credential_mode?}` 或调用方凭证请求头 | 刷新状态和脱敏账户摘要；调用方模式返回新凭证代际 |
@@ -1623,6 +1624,8 @@ QQ MV 详情固定调用 Android `video.VideoDataServer/get_video_info_batch`。
 `/v1/auth/challenges/validate` 与事务验证端点语义不同：它只调用平台的验证码校验能力，不登录、不保存 Cookie，也不要求先发送验证码。`method` 省略时默认为 `sms`；网易云还兼容参考字段 `phone/captcha/ctcode`，分别作为 `principal/code/country_code` 的别名，手机号和区号都接受字符串或数字，区号缺省或为空时使用 `86`。`valid=false` 是正常业务结果，仍以 HTTP 200 返回，并通过 `platform_code`、`message` 和 `extensions.response` 保留平台信息；空白上游 `message` 不会遮蔽有效 `msg`。手机号和验证码不会回显。需要验证码登录时仍使用 `/v1/auth/challenges` 创建不透明事务，再调用 `/{transaction_id}/verify`。
 
 验证码登录事务同样允许省略 `method`（默认 `sms`），并兼容 `phone/ctcode` 与后续验证请求中的 `captcha`；这些标量既可为字符串也可为数字。`backend` 缺省为 `standard`；网易云还允许显式选择 `middle`，以 EAPI `/api/middle/captcha/sent/v1` 发送登录短信，固定提交 `secrete=music_middleuser_pclogin`、`scene=0`，随后继续复用同一校验和登录事务。其他 provider 不支持该后端时会在发网前拒绝，不会静默回落普通短信。发送端点只发送一次，不会自动重试；事务验证成功后才保存对应 `platform/account` 的登录态。
+
+`/v1/auth/security-challenges` 与登录验证码严格分离。网易云实现固定调用 EAPI `/api/sms/captcha/safe/sent`，只提交 `ctcode`，由服务器账户或 `X-TuneWeave-Credential` 中的当前登录态确定绑定手机号；接口故意不接受 `phone/principal`，不会让调用方把安全验证码发送给任意号码，也不会创建可用于登录的事务。成功结果以 `AuthChallengeDelivery` 返回方法、发送态、平台码、可选消息及完整平台响应；每次请求只发送一次，不重试、不切换登录短信后端。调用方凭据与显式服务器账户不能并用，凭据本身从不进入响应或日志。
 
 QQ 手机验证码使用 `music.login.LoginServer` 的 Android 链路。`principal` 默认必须是 5–32 位数字并作为 `phoneNo` 原样提交；确实持有平台加密手机号时可显式使用 `encrypted:<opaque>`，仅去掉此前缀后提交 `encryptedPhoneNo`，不会因 JSON 字符串类型而把普通手机号误判为密文。发送遇到 `20276` 时错误详情保留平台 `security_url`，但不会创建一个实际未发送验证码的事务；频率限制也不会自动重试。验证端提交 `loginMode=1`、`tmeLoginMethod=3/tmeLoginType=0`，成功后按 `(qq, account)` 原子保存凭据。
 

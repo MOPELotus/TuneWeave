@@ -121,6 +121,7 @@ pub enum Capability {
     PhoneLogin,
     CountryCallingCodes,
     ChallengeValidation,
+    AccountSecurityChallenge,
     PrincipalStatus,
     SessionManagement,
     CallerManagedCredentials,
@@ -555,6 +556,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Capability::ChallengeValidation).expect("serialize capability"),
             serde_json::json!("challenge_validation")
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::AccountSecurityChallenge)
+                .expect("serialize capability"),
+            serde_json::json!("account_security_challenge")
         );
         assert_eq!(
             serde_json::to_value(Capability::PrincipalStatus).expect("serialize capability"),

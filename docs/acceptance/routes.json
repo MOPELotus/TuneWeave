@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "crates/tuneweave-server/src/lib.rs",
-  "route_count": 257,
+  "route_count": 258,
   "routes": [
     {
       "method": "GET",
@@ -342,6 +342,10 @@
     {
       "method": "GET",
       "path": "/v1/auth/qr/{transaction_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/security-challenges"
     },
     {
       "method": "DELETE",
