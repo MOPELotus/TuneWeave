@@ -22,6 +22,12 @@ struct RouteSpec {
     path: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct CoverageRouteMention {
+    methods: Option<Vec<&'static str>>,
+    path: String,
+}
+
 #[test]
 fn checked_in_route_inventory_matches_router() {
     let source_path = source_path();
@@ -86,6 +92,62 @@ fn api_reference_matches_router() {
         "API endpoint tables drifted from build_router\nmissing from docs: {}\nnot registered: {}",
         display_route_keys(&missing),
         display_route_keys(&extra)
+    );
+}
+
+#[test]
+fn coverage_ledgers_only_reference_registered_routes() {
+    let source_path = source_path();
+    let source = fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source_path.display()));
+    let inventory = inventory_from_source(&source).expect("router source should be extractable");
+    let coverage_root = coverage_path();
+    let mut files = Vec::new();
+    collect_markdown_files(&coverage_root, &mut files)
+        .expect("coverage Markdown files should be enumerable");
+    files.sort();
+
+    let mut missing = Vec::new();
+    for file in files {
+        let markdown = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        for route in coverage_route_mentions(&markdown) {
+            let registered = route.methods.as_ref().map_or_else(
+                || {
+                    inventory
+                        .routes
+                        .iter()
+                        .any(|candidate| route_path_matches(&candidate.path, &route.path))
+                },
+                |methods| {
+                    methods.iter().all(|method| {
+                        inventory.routes.iter().any(|candidate| {
+                            candidate.method == *method
+                                && route_path_matches(&candidate.path, &route.path)
+                        })
+                    })
+                },
+            );
+            if !registered {
+                let relative = file.strip_prefix(&coverage_root).unwrap_or(&file);
+                missing.push(format!(
+                    "{}: {}{}",
+                    relative.to_string_lossy().replace('\\', "/"),
+                    route
+                        .methods
+                        .as_ref()
+                        .map(|methods| format!("{} ", methods.join("/")))
+                        .unwrap_or_default(),
+                    route.path
+                ));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "coverage ledgers reference routes that are not registered:\n{}",
+        missing.join("\n")
     );
 }
 
@@ -191,6 +253,22 @@ fn extracts_combined_documented_methods_and_normalizes_parameters() {
     );
 }
 
+#[test]
+fn matches_coverage_examples_to_parameterized_routes() {
+    assert!(route_path_matches(
+        "/v1/resources/{kind}/{reference}/comments",
+        "/v1/resources/track/netease:123/comments"
+    ));
+    assert!(route_path_matches(
+        "/v1/charts/{reference}/tracks",
+        "/v1/charts/{qq:chart:<topId>}/tracks"
+    ));
+    assert!(!route_path_matches(
+        "/v1/users/{reference}/favorites/playlists",
+        "/v1/users/bilibili:123/playlists/favorite"
+    ));
+}
+
 fn source_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
 }
@@ -201,6 +279,10 @@ fn inventory_path() -> PathBuf {
 
 fn api_reference_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api-v1.md")
+}
+
+fn coverage_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/coverage")
 }
 
 fn inventory_from_source(source: &str) -> Result<RouteInventory, String> {
@@ -532,4 +614,82 @@ fn display_route_keys(routes: &[String]) -> String {
     } else {
         routes.join(", ")
     }
+}
+
+fn collect_markdown_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "md") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn coverage_route_mentions(markdown: &str) -> Vec<CoverageRouteMention> {
+    let mut mentions = Vec::new();
+    let mut in_fence = false;
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+
+        let mut remaining = line;
+        while let Some(start) = remaining.find('`') {
+            remaining = &remaining[start + 1..];
+            let Some(end) = remaining.find('`') else {
+                break;
+            };
+            if let Some(route) = coverage_route_mention(&remaining[..end]) {
+                mentions.push(route);
+            }
+            remaining = &remaining[end + 1..];
+        }
+    }
+    mentions
+}
+
+fn coverage_route_mention(code: &str) -> Option<CoverageRouteMention> {
+    let value = code.trim();
+    let route_start = value.find("/v1/")?;
+    let prefix = value[..route_start].trim();
+    let methods = if prefix.is_empty() {
+        None
+    } else {
+        Some(documented_methods(prefix)?)
+    };
+    let value = &value[route_start..];
+
+    let end = value
+        .find(|character: char| {
+            character.is_whitespace()
+                || matches!(character, ',' | '，' | ';' | '；' | '、' | '。' | '）')
+        })
+        .unwrap_or(value.len());
+    let route = value[..end]
+        .split(['?', '#'])
+        .next()
+        .expect("split always yields the original value")
+        .trim_end_matches(['.', ')']);
+    (!route.is_empty()).then(|| CoverageRouteMention {
+        methods,
+        path: route.to_owned(),
+    })
+}
+
+fn route_path_matches(pattern: &str, route: &str) -> bool {
+    let pattern = pattern.split('/').collect::<Vec<_>>();
+    let route = route.split('/').collect::<Vec<_>>();
+    pattern.len() == route.len()
+        && pattern.iter().zip(route.iter()).all(|(pattern, route)| {
+            (pattern.starts_with('{') && pattern.ends_with('}') && !route.is_empty())
+                || pattern == route
+        })
 }
