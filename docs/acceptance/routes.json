@@ -1,0 +1,1035 @@
+{
+  "schema_version": 1,
+  "source": "crates/tuneweave-server/src/lib.rs",
+  "route_count": 257,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/healthz"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/avatar"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/imports"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/lyrics"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/matches"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/cloud/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/details"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/tracks/details"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/{reference}/download"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/tracks/{reference}/download/redirect"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/complete"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/ticket"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/dislikes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/dislikes"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/dislikes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/dislikes/tracks"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/favorites/playlists/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/favorites/playlists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/favorites/tracks"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/favorites/tracks/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/favorites/tracks/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/following/artists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-tracks/play-all"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/following/artists/new-works"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/following/artists/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/following/artists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/history"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/history/podcast-episodes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/library/albums"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/albums"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/albums/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/albums/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/library/podcasts"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/podcasts/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/podcasts/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/library/radio-stations"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/radio-stations/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/radio-stations/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/library/videos"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/videos/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/videos/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/membership"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/playlists"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/playlists/order"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/podcast-episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/podcast-episodes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/podcast-episodes/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/podcasts/created"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/podcasts/{reference}/episodes"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/podcasts/{reference}/episodes/order"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/profile"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/albums/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/albums/{reference}/stats"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/albums/{reference}/track-entitlements"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/albums/{reference}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/catalog"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/details"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/artists/details"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/fans"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/similar"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/stats"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/tabs/{tab}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/top-tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/videos"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/audio/recognize"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/challenges"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/challenges/validate"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/challenges/{transaction_id}/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/auth/country-codes"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/password"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/principals/status"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/qr"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/auth/qr/{transaction_id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/auth/session"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/auth/session"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/session/refresh"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/banners"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/artists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/digital-albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/dimensions/{chart_code}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/dimensions/{chart_code}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/podcast-creators"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/podcasts"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/charts/{reference}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/digital-albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/digital-albums/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/episodes/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/episodes/{reference}/lyrics"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/episodes/{reference}/stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/episodes/{reference}/stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/anonymous-session"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/anonymous-session"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/api"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/batch"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/batch"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/calendar"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/check-token"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/check-token"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/anonimous"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/anonimous"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/anonymous"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/anonymous"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken/v2"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken/v2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/netease/register/checktoken/v3"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/netease/register/checktoken/v3"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/qq/api"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/qq/batch"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/listening-rights/ads"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/listening-rights/gains"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/listening-rights/gains"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/media/cdn"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/media/files"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/platforms"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/playlists"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/playlists"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/playlists/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/cover"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/items"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}/items"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/items"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}/items/{item_id}/stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}/items/{item_id}/stream/redirect"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}/tracks"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/tracks"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/tracks/order"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/playlists/{reference}/videos"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts/categories"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts/category-recommendations"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts/{reference}/episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/radio/stations"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/radio/stations/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/radio/stations/{reference}/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/radio/styles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/radio/taxonomy"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/feed"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/personal-fm"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/playlists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/podcast-episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/tracks"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/recommendations/tracks/{reference}/dislike"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/resources/{kind}/comments/stats"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/resources/{kind}/{reference}/comments"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reactions/{reaction}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/replies"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resources/{kind}/{reference}/comments/{comment_id}/reports"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/default"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/general"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/match"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/search/match"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/multimatch"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/suggestions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/search/trending"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/favorite-counts"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/tracks/favorite-counts"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/streams"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/tracks/streams"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/availability"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/credits"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/download"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/download/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/favorite-count"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/files"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/labels"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/ai-dictionary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/ai-dictionary/availability"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/singing-annotations/availability"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/lyrics/translations/styles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/related-playlists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/related-videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/sheet-music"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/sheet-music/availability"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/similar"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream/content"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/tracks/{reference}/versions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/items/stream"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/materialize/imports"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/materialize/items"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/uni/playlists"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/playlists"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/playlists/import-document"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/playlists/imports"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/uni/playlists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/uni/playlists/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}/export"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/uni/playlists/{reference}/items"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/uni/playlists/{reference}/items"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/uni/playlists/{reference}/items/order"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/uni/playlists/{reference}/items/{item_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/playlists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/following/artists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/history"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/membership"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/music-gene"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/playlists/created"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/details"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/videos/details"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/streams"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/videos/streams"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/taxonomy"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-download"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-download/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/audio-stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/parts"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/playback"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stats"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/subtitles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/subtitles/{subtitle}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-download"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-download/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-stream"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/video-stream/redirect"
+    }
+  ]
+}
