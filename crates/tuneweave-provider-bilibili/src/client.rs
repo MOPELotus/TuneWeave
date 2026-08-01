@@ -4262,6 +4262,9 @@ fn parse_video_search_response(
         })?;
     let mut videos = Vec::with_capacity(data.result.len());
     for item in data.result {
+        if is_known_non_video_search_item_type(&item.r#type) {
+            continue;
+        }
         let result_type = parse_video_search_result_type(&item.r#type)?;
         if matches!(
             result_type,
@@ -6182,6 +6185,10 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
         collaborative: optional_binary_flag(item.is_union_video, "collaboration flag")?,
         rank_score: optional_flexible_u64(item.rank_score, "rank score")?,
     })
+}
+
+fn is_known_non_video_search_item_type(value: &str) -> bool {
+    matches!(value, "ketang")
 }
 
 fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResultType> {
@@ -8166,7 +8173,7 @@ mod tests {
     }
 
     #[test]
-    fn video_search_skips_unnamed_sponsored_cards_without_hiding_organic_drift() {
+    fn video_search_skips_known_non_video_and_unnamed_sponsored_cards_without_hiding_drift() {
         let item = |kind: &str, aid: u64, title: &str| {
             json!({
                 "type": kind,
@@ -8180,7 +8187,7 @@ mod tests {
                 "duration": "0:01"
             })
         };
-        let response = |kind: &str| {
+        let response = |kind: &str, title: &str| {
             serde_json::to_vec(&json!({
                 "code": 0,
                 "message": "0",
@@ -8190,19 +8197,28 @@ mod tests {
                     "pagesize": VIDEO_SEARCH_PAGE_SIZE,
                     "numResults": 2,
                     "numPages": 1,
-                    "result": [item("video", 1, "normal"), item(kind, 2, "")]
+                    "result": [item("video", 1, "normal"), item(kind, 2, title)]
                 }
             }))
             .expect("search fixture")
         };
 
-        let page = parse_video_search_response(&response("video_ad_82"), 1)
+        let page = parse_video_search_response(&response("video_ad_82", ""), 1)
             .expect("unnamed sponsored card is skipped");
         assert_eq!(page.videos.len(), 1);
         assert_eq!(page.videos[0].title, "normal");
 
-        let error = parse_video_search_response(&response("video"), 1)
+        let page = parse_video_search_response(&response("ketang", "paid course"), 1)
+            .expect("known course card is skipped");
+        assert_eq!(page.videos.len(), 1);
+        assert_eq!(page.videos[0].title, "normal");
+
+        let error = parse_video_search_response(&response("video", ""), 1)
             .expect_err("unnamed organic result remains invalid");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+
+        let error = parse_video_search_response(&response("activity", "unknown"), 1)
+            .expect_err("unknown non-video result remains a protocol drift");
         assert_eq!(error.code, ErrorCode::UpstreamError);
     }
 
