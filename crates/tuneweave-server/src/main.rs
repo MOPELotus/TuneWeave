@@ -28,7 +28,6 @@ use tuneweave_server::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind = env::var("TUNEWEAVE_BIND").unwrap_or_else(|_| "127.0.0.1:7832".to_owned());
-    let address: SocketAddr = bind.parse()?;
     let data_dir = env::var_os("TUNEWEAVE_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -42,6 +41,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             "failed to remove an expired log file"
         );
     }
+    let address: SocketAddr = bind.parse().inspect_err(|_| {
+        log_server_configuration_failure(
+            ServerLifecycleStage::BindConfiguration,
+            "invalid_socket_address",
+        );
+    })?;
     let credential_store: Arc<dyn AccountCredentialStore> = Arc::new(
         FileAccountCredentialStore::open(data_dir.join("accounts")).inspect_err(|error| {
             error!(
@@ -135,11 +140,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let state =
         AppState::new(registry, Platform::Netease).with_uni_playlist_store(uni_playlist_store);
     let app = build_router(state.clone());
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address).await.inspect_err(|error| {
+        log_server_io_failure(ServerLifecycleStage::ListenerBind, error);
+    })?;
+    let local_address = listener.local_addr().inspect_err(|error| {
+        log_server_io_failure(ServerLifecycleStage::ListenerAddress, error);
+    })?;
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        address = %listener.local_addr()?,
+        address = %local_address,
         data_dir = ?data_dir,
         log_format = logging_config.format.as_str(),
         log_filter_source = logging_config.filter_source.as_str(),
@@ -169,7 +179,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await;
     if let Err(error) = &serve_result {
-        error!(%error, "TuneWeave server exited with an error");
+        log_server_io_failure(ServerLifecycleStage::Serve, error);
     }
     let dropped_lines = logging.dropped_lines();
     let file_write_errors = logging.file_write_errors();
@@ -216,6 +226,43 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerLifecycleStage {
+    BindConfiguration,
+    ListenerBind,
+    ListenerAddress,
+    Serve,
+}
+
+impl ServerLifecycleStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::BindConfiguration => "bind_configuration",
+            Self::ListenerBind => "listener_bind",
+            Self::ListenerAddress => "listener_address",
+            Self::Serve => "serve",
+        }
+    }
+}
+
+fn log_server_configuration_failure(stage: ServerLifecycleStage, error_kind: &'static str) {
+    error!(
+        event = "server_lifecycle_failure",
+        stage = stage.as_str(),
+        error_kind,
+        "TuneWeave server failed lifecycle validation"
+    );
+}
+
+fn log_server_io_failure(stage: ServerLifecycleStage, error: &IoError) {
+    error!(
+        event = "server_lifecycle_failure",
+        stage = stage.as_str(),
+        error_kind = ?error.kind(),
+        "TuneWeave server failed lifecycle validation"
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -374,7 +421,21 @@ async fn wait_for_shutdown_reason() -> ShutdownReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderStartupStage, ShutdownReason};
+    use super::{ProviderStartupStage, ServerLifecycleStage, ShutdownReason};
+
+    #[test]
+    fn server_lifecycle_stages_use_stable_safe_names() {
+        assert_eq!(
+            ServerLifecycleStage::BindConfiguration.as_str(),
+            "bind_configuration"
+        );
+        assert_eq!(ServerLifecycleStage::ListenerBind.as_str(), "listener_bind");
+        assert_eq!(
+            ServerLifecycleStage::ListenerAddress.as_str(),
+            "listener_address"
+        );
+        assert_eq!(ServerLifecycleStage::Serve.as_str(), "serve");
+    }
 
     #[test]
     fn provider_startup_stages_use_stable_safe_names() {
