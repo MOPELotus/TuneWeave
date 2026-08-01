@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 91,
+  "covered_route_count": 105,
   "entries": [
     {
       "id": "health",
@@ -1818,6 +1818,269 @@
         "cloud_upload_ticket_uses_platform_account_and_reference_aliases",
         "cloud_upload_routes_reject_invalid_json_and_zero_numeric_fields",
         "cloud_routes_share_one_caller_credential_scope_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_library_albums_remove_batch",
+      "method": "DELETE",
+      "path": "/v1/account/library/albums",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "album_library_batch_put_and_delete_preserve_order_duplicates_and_account",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_albums",
+      "method": "GET",
+      "path": "/v1/account/library/albums",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_albums_preserve_subscription_and_page_metadata",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_library_albums_add_batch",
+      "method": "PUT",
+      "path": "/v1/account/library/albums",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "album_library_batch_put_and_delete_preserve_order_duplicates_and_account",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_album_remove",
+      "method": "DELETE",
+      "path": "/v1/account/library/albums/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "album_library_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_album_add",
+      "method": "PUT",
+      "path": "/v1/account/library/albums/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "album_library_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_podcasts",
+      "method": "GET",
+      "path": "/v1/account/library/podcasts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_podcasts_preserve_subscription_and_page_metadata",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases",
+        "account_podcast_library_rejects_invalid_platform_reference_and_pagination"
+      ]
+    },
+    {
+      "id": "account_library_podcast_remove",
+      "method": "DELETE",
+      "path": "/v1/account/library/podcasts/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_library_put_and_delete_share_the_subscription_result",
+        "account_podcast_library_rejects_invalid_platform_reference_and_pagination",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_podcast_add",
+      "method": "PUT",
+      "path": "/v1/account/library/podcasts/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "podcast_library_put_and_delete_share_the_subscription_result",
+        "account_podcast_library_rejects_invalid_platform_reference_and_pagination",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_radio_stations",
+      "method": "GET",
+      "path": "/v1/account/library/radio-stations",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_radio_stations_preserve_collection_and_page_metadata",
+        "account_styled_radio_stations_share_the_library_endpoint",
+        "account_radio_station_catalog_rejects_conflicting_controls",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_library_radio_station_remove",
+      "method": "DELETE",
+      "path": "/v1/account/library/radio-stations/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "radio_station_library_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_radio_station_add",
+      "method": "PUT",
+      "path": "/v1/account/library/radio-stations/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "radio_station_library_put_and_delete_share_the_subscription_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_videos",
+      "method": "GET",
+      "path": "/v1/account/library/videos",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "account_videos_preserve_subscription_and_page_metadata",
+        "account_media_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "account_library_video_remove",
+      "method": "DELETE",
+      "path": "/v1/account/library/videos/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "video_library_put_and_delete_preserve_kind_account_and_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
+      ]
+    },
+    {
+      "id": "account_library_video_add",
+      "method": "PUT",
+      "path": "/v1/account/library/videos/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "video_library_put_and_delete_preserve_kind_account_and_result",
+        "library_subscription_writes_accept_caller_credentials_without_account_aliases"
       ]
     }
   ]
