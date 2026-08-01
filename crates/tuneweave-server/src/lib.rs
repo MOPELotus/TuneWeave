@@ -822,6 +822,9 @@ impl AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    #[cfg(test)]
+    logging::init_test_logging();
+
     let request_activity = state.request_activity.clone();
     let versioned = Router::new()
         .route("/platforms", get(platforms))

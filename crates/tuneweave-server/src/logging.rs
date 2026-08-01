@@ -310,6 +310,22 @@ pub fn init_logging(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn init_test_logging() {
+    static TEST_LOGGING: std::sync::Once = std::sync::Once::new();
+
+    TEST_LOGGING.call_once(|| {
+        let values = BTreeMap::from([
+            ("TUNEWEAVE_LOG_LEVEL".to_owned(), "debug".to_owned()),
+            ("TUNEWEAVE_LOG_TO_FILE".to_owned(), "false".to_owned()),
+        ]);
+        let config = LoggingConfig::from_values(Path::new(".local/test-logging"), &values)
+            .expect("test logging configuration must remain valid");
+        install_subscriber(&config, tracing_subscriber::fmt::TestWriter::new())
+            .expect("test logging subscriber must initialize once");
+    });
+}
+
 struct FileLogHealthMonitor {
     stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -894,6 +910,12 @@ mod tests {
     use super::*;
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn test_logging_initialization_is_idempotent() {
+        init_test_logging();
+        init_test_logging();
+    }
 
     #[test]
     fn defaults_enable_human_console_and_bounded_file_output() {
