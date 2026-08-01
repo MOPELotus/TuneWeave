@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 177,
+  "covered_route_count": 182,
   "entries": [
     {
       "id": "health",
@@ -3430,6 +3430,106 @@
       "acceptance_cases": [
         "radio_taxonomy_uses_platform_account_and_stable_string_ids",
         "radio_reads_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_catalog",
+      "method": "GET",
+      "path": "/v1/podcasts",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "hot_podcast_catalog_uses_platform_account_and_real_pagination",
+        "featured_podcast_catalog_is_a_complete_fixed_snapshot",
+        "personalized_podcast_catalog_applies_limit_without_fake_continuation",
+        "category_hot_podcast_catalog_preserves_insertions_and_request_window",
+        "category_featured_podcast_catalog_exposes_known_more_without_fake_cursor",
+        "today_preferred_podcast_catalog_preserves_page_without_fake_offset",
+        "paid_podcast_catalog_exposes_price_and_offset_pagination",
+        "podcast_catalog_rejects_missing_unknown_and_invalid_controls",
+        "podcast_catalog_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_categories",
+      "method": "GET",
+      "path": "/v1/podcasts/categories",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_categories_use_selected_platform_account_and_preserve_extensions",
+        "podcast_categories_reject_unknown_platforms_and_query_fields",
+        "podcast_catalog_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_category_recommendations",
+      "method": "GET",
+      "path": "/v1/podcasts/category-recommendations",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_category_recommendations_keep_sections_and_complete_podcasts",
+        "podcast_categories_reject_unknown_platforms_and_query_fields",
+        "podcast_catalog_accepts_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_detail",
+      "method": "GET",
+      "path": "/v1/podcasts/{reference}",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_and_episode_details_keep_show_program_and_audio_ids_separate",
+        "podcast_details_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "podcast_episodes",
+      "method": "GET",
+      "path": "/v1/podcasts/{reference}/episodes",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "podcast_episode_catalog_accepts_reference_aliases_account_and_pagination",
+        "podcast_episode_catalog_preserves_the_explicit_workbench_backend",
+        "podcast_details_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
