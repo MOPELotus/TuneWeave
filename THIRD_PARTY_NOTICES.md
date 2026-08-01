@@ -7,7 +7,7 @@ future ports can be audited precisely.
 ## NeteaseCloudMusicApiEnhanced/api-enhanced
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
-- Reviewed commit: `6732fc7c32518ee481b089e2a40f488c28729054`
+- Reviewed commit: `8f4873f2e2f677153d398a62d9ca0e3826c3f86d`
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.
@@ -15,7 +15,7 @@ future ports can be audited precisely.
 ## MOPELotus/Lotus-ReFactor
 
 - Source: https://github.com/MOPELotus/Lotus-ReFactor
-- Reviewed commit: `e98e19711d7b97e2795f28729bcded82158769df`
+- Reviewed commit: `8d6ad59ca754a8055711c0b05c0e602442d406fe`
 - License: Lotus-ReFactor Source-Available Proprietary License
 - Used for: NetEase Music Partner request logic and implementation details.
 - Authorization: MOPELotus states that they contributed 100% of

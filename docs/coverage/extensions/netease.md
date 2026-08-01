@@ -1,6 +1,6 @@
 # 网易云平台功能扩展候选池
 
-上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@6732fc7c32518ee481b089e2a40f488c28729054`
+上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@8f4873f2e2f677153d398a62d9ca0e3826c3f86d`
 
 本表由该快照的 `module/*.js` 文件生成，用于保存已发现的协议能力、参考来源和可能用途，不是完成度验收清单。网易云音乐的正式完成状态只看[项目范围覆盖账本](../netease-scope.md)。候选池没有固定实施顺序、分母、完成率或清零要求。
 
@@ -137,6 +137,7 @@
 | `event` | `/event` | `candidate` | — |
 | `event_del` | `/event/del` | `candidate` | — |
 | `event_forward` | `/event/forward` | `candidate` | — |
+| `event_privacy` | `/event/privacy` | `candidate` | `8f4873f2` 新增；修改本人动态可见性，属于社交动态，不进入项目范围 |
 | `fanscenter_basicinfo_age_get` | `/fanscenter/basicinfo/age/get` | `candidate` | — |
 | `fanscenter_basicinfo_gender_get` | `/fanscenter/basicinfo/gender/get` | `candidate` | — |
 | `fanscenter_basicinfo_province_get` | `/fanscenter/basicinfo/province/get` | `candidate` | — |
@@ -382,7 +383,8 @@
 | `user_detail` | `/user/detail` | `implemented` | `GET /v1/users/{ref}?backend=legacy` 及 `GET /v1/account/profile?backend=legacy`（独立 `UserProfileLegacy` 能力，精确以空载荷 WeAPI 调用 `/api/v1/user/detail/{uid}`；统一 `UserProfile` 映射身份、等级、听歌数、社交/歌单计数、生日、注册时间、背景与公开态，完整平台资料和原始响应不丢失；请求构造、映射、空包装/文本/零时间戳回退、ID 一致性、无效等级、账户选择、查询边界及统一 HTTP 均有测试；公开用户真实 HTTP 返回 200 和完整非空资料） |
 | `user_detail_new` | `/user/detail/new` | `implemented` | `GET /v1/users/{ref}`（缺省 `backend=modern`，也接受 `new/eapi/v2`）及 `GET /v1/account/profile`（独立 `UserProfileModern` 能力，精确以 EAPI 调用 `/api/w/v1/user/detail/{uid}` 并提交字符串 `all=true/userId`；与 legacy 共用稳定模型但以 `extensions.backend/response` 明确保留后端和完整未来字段；公开用户及持久账户的统一 HTTP 均真实返回 200，账户路径正确解析所选账户自己的用户 ID） |
 | `user_dj` | `/user/dj` | `candidate` | — |
-| `user_event` | `/user/event` | `candidate` | — |
+| `user_event` | `/user/event` | `candidate` | `8f4873f2` 改为仅对 `null/undefined` 使用游标与条数默认值，并固定提交 `fromRN=true`；属于社交动态，不进入项目范围 |
+| `user_event_all` | `/user/event/all` | `candidate` | `8f4873f2` 新增；先取当前账户再以固定页宽枚举、去重全部可见动态，属于社交动态，不进入项目范围 |
 | `user_follow_mixed` | `/user/follow/mixed` | `candidate` | — |
 | `user_followeds` | `/user/followeds` | `candidate` | — |
 | `user_follows` | `/user/follows` | `candidate` | — |

@@ -6,8 +6,8 @@ TuneWeave 将参考项目作为协议资料，用于理解请求参数、默认�
 
 | 平台 | 参考项目 | 参考修订 | 许可证 |
 | --- | --- | --- | --- |
-| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `6732fc7c32518ee481b089e2a40f488c28729054` | MIT |
-| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `e98e19711d7b97e2795f28729bcded82158769df` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
+| 网易云 | `NeteaseCloudMusicApiEnhanced/api-enhanced` | `8f4873f2e2f677153d398a62d9ca0e3826c3f86d` | MIT |
+| 网易云音乐合伙人 | `MOPELotus/Lotus-ReFactor` | `8d6ad59ca754a8055711c0b05c0e602442d406fe` | Lotus-ReFactor Source-Available Proprietary License；作者另行授权 TuneWeave 参考其逻辑与实现 |
 | QQ 音乐 | `L-1124/QQMusicApi` | `873255f2774361ac97366bd89a14b8ed9d230aae` | GPL-3.0-or-later |
 | 酷狗 | `MakcRe/KuGouMusicApi` | `62ac8e2f209438d5d480a1dc9dd78b50a52b5748` | MIT |
 | 咪咕 | `Domdkw/miguMusic-api-enhanced` | `fbb0121d0c23088c74d63bc95a005c6fada413c1` | Apache-2.0 |
@@ -64,6 +64,8 @@ B 站只覆盖登录、账户、列表以及视频和音频直接相关能力，
 - 搜索、详情、歌单、歌词、播放、云盘、播客、MV、账户和权益能力进入统一模型；平台特有能力进入扩展端点。
 - 音乐合伙人逻辑来自作者明确授权参考的 Lotus-ReFactor，实现时仍遵循 TuneWeave 的多账户与安全边界。
 - `6ce6b840` 将社交资源分享改为 XEAPI v3；该能力仍只登记在扩展候选池，不进入音乐客户端项目范围。
+- `8f4873f2` 新增当前账户全量动态与动态可见性修改，并调整单页动态的默认值和 `fromRN` 参数；这些均属于社交动态，只同步登记到扩展候选池，不进入项目范围。同期接口类型声明更新不改变平台请求行为。
+- `8d6ad59c` 只修改 Lotus-ReFactor 的游戏抽卡存储与图鉴快捷方式，没有改变音乐合伙人协议或 TuneWeave 的迁移项。
 
 ### QQ 音乐
 
