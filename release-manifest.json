@@ -38,6 +38,20 @@
       }
     },
     {
+      "platform": "windows",
+      "architecture": "aarch64",
+      "target": "aarch64-pc-windows-msvc",
+      "file": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
+      "executable": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
+      "format": "exe",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-aarch64.exe",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-v0.1.0-alpha.1-windows-aarch64.exe.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v0.1.0-alpha.1/tuneweave-v0.1.0-alpha.1-windows-aarch64.exe.sha256"
+      }
+    },
+    {
       "platform": "macos",
       "architecture": "x86_64",
       "target": "x86_64-apple-darwin",

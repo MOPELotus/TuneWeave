@@ -37,6 +37,12 @@ jobs:
             asset_platform: windows
             asset_architecture: x86_64
             asset_extension: .exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: tuneweave.exe
+            asset_platform: windows
+            asset_architecture: aarch64
+            asset_extension: .exe
           - os: macos-latest
             target: x86_64-apple-darwin
             binary: tuneweave
