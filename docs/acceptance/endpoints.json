@@ -3,7 +3,7 @@
   "status": "draft",
   "routes_source": "docs/acceptance/routes.json",
   "route_count": 257,
-  "covered_route_count": 189,
+  "covered_route_count": 196,
   "entries": [
     {
       "id": "health",
@@ -3666,6 +3666,138 @@
       "acceptance_cases": [
         "digital_album_detail_uses_reference_platform_and_account",
         "digital_albums_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_feed",
+      "method": "GET",
+      "path": "/v1/recommendations/feed",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "recommendation_feed_preserves_multi_field_continuation_and_typed_cards",
+        "recommendation_feed_rejects_invalid_state_and_unknown_fields",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_personal_fm",
+      "method": "GET",
+      "path": "/v1/recommendations/personal-fm",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "personalized_homepage_resources_share_stable_recommendation_endpoints",
+        "personalized_homepage_routes_reject_unknown_or_malformed_controls",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_playlists",
+      "method": "GET",
+      "path": "/v1/recommendations/playlists",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "recommendation_endpoints_share_platform_account_and_pagination",
+        "recommendation_refresh_rejects_invalid_booleans",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_podcast_episodes",
+      "method": "GET",
+      "path": "/v1/recommendations/podcast-episodes",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "personalized_homepage_resources_share_stable_recommendation_endpoints",
+        "personalized_homepage_routes_reject_unknown_or_malformed_controls",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_tracks",
+      "method": "GET",
+      "path": "/v1/recommendations/tracks",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "recommendation_endpoints_share_platform_account_and_pagination",
+        "recommendation_refresh_rejects_invalid_booleans",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "recommendation_track_dislike",
+      "method": "POST",
+      "path": "/v1/recommendations/tracks/{reference}/dislike",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "remote_reversible",
+      "network": "destructive",
+      "acceptance_cases": [
+        "recommendation_dislike_preserves_track_platform_and_account",
+        "personal_fm_and_dislike_reject_invalid_controls"
+      ]
+    },
+    {
+      "id": "recommendation_videos",
+      "method": "GET",
+      "path": "/v1/recommendations/videos",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "recommendation_endpoints_share_platform_account_and_pagination",
+        "recommendation_refresh_rejects_invalid_booleans",
+        "recommendation_routes_accept_caller_credentials_without_server_aliases"
       ]
     }
   ]
