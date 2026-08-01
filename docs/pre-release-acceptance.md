@@ -20,6 +20,8 @@ B 站延期登录、后四个平台完整账户能力、验证码服务本地 Ru
 
 实际 Router 的原始 `方法 + 路径` 分母保存在 [`acceptance/routes.json`](acceptance/routes.json)。该文件由 Rust 集成测试直接从 `build_router` 提取；路由重复、无法识别或源码与清单不一致都会使全仓测试失败。需要接受路由变更时，显式设置 `TUNEWEAVE_UPDATE_ENDPOINT_INVENTORY=1`，运行 `cargo test -p tuneweave-server --test endpoint_inventory` 并审查差异。PowerShell 7 使用 `$env:TUNEWEAVE_UPDATE_ENDPOINT_INVENTORY='1'` 设置当前进程环境变量；POSIX shell 可把 `TUNEWEAVE_UPDATE_ENDPOINT_INVENTORY=1` 写在命令前。原始路由清单不代替最终验收元数据；平台适用性、认证要求、破坏性级别和验收用例必须在其上完整覆盖后，才能作为候选发布清单。
 
+增强验收清单保存在 [`acceptance/endpoints.json`](acceptance/endpoints.json)，以原始路由清单为固定分母，并逐项记录平台作用域、认证要求、破坏性级别、网络要求和验收用例。该文件在覆盖全部端点前必须保持 `status=draft`，同时如实记录 `covered_route_count`；只有覆盖数等于实际路由总数时才允许切换为 `complete`。集成测试会拒绝未知或重复端点、非法平台、空验收用例、计数漂移以及提前声明完成。当前先完成不发网的服务发现端点，后续按常用读取、播放下载、账户读取、认证事务和隔离破坏性操作的顺序扩展。
+
 逐项验证：
 
 - 匿名端点使用真实网络；

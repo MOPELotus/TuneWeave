@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "status": "draft",
+  "routes_source": "docs/acceptance/routes.json",
+  "route_count": 257,
+  "covered_route_count": 3,
+  "entries": [
+    {
+      "id": "health",
+      "method": "GET",
+      "path": "/healthz",
+      "platform_scope": {
+        "mode": "independent"
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "health_uses_the_success_envelope",
+        "invalid_request_id_is_rejected_without_echoing_it"
+      ]
+    },
+    {
+      "id": "platform_discovery",
+      "method": "GET",
+      "path": "/v1/platforms",
+      "platform_scope": {
+        "mode": "independent"
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "platform_discovery_exposes_uni_without_claiming_provider_capabilities"
+      ]
+    },
+    {
+      "id": "capability_discovery",
+      "method": "GET",
+      "path": "/v1/capabilities",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "uni",
+          "netease",
+          "qq",
+          "bilibili",
+          "kugou",
+          "migu",
+          "kuwo",
+          "soda"
+        ]
+      },
+      "authentication": "none",
+      "destructive_level": "read_only",
+      "network": "none",
+      "acceptance_cases": [
+        "platform_discovery_exposes_uni_without_claiming_provider_capabilities",
+        "invalid_platform_uses_the_error_envelope"
+      ]
+    }
+  ]
+}
