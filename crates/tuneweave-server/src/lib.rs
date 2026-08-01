@@ -12976,6 +12976,7 @@ async fn auth_session_refresh(
         source_credential.is_some(),
         credential_mode,
     )?;
+    record_auth_session_provider_access(platform, source_credential);
     let provider = state.registry.require(platform)?;
     let started_at = Instant::now();
     let result = match provider
@@ -13054,6 +13055,7 @@ async fn auth_session_delete(
         source_credential.is_some(),
         credential_mode,
     )?;
+    record_auth_session_provider_access(platform, source_credential);
     let provider = state.registry.require(platform)?;
     let started_at = Instant::now();
     let result = match provider
@@ -16035,6 +16037,20 @@ fn logout_account_alias(
     }
 }
 
+fn record_auth_session_provider_access(
+    platform: Platform,
+    source_credential: Option<&ProviderCredential>,
+) {
+    record_request_provider_access(
+        platform,
+        if source_credential.is_some() {
+            RequestCredentialSource::Caller
+        } else {
+            RequestCredentialSource::Server
+        },
+    );
+}
+
 fn finalize_auth_result(
     platform: Platform,
     credential_mode: CredentialMode,
@@ -17481,6 +17497,14 @@ mod tests {
                 .lines()
                 .map(|line| serde_json::from_str(line).expect("captured log line must be JSON"))
                 .collect()
+        }
+
+        fn request_completion_fields(&self) -> Value {
+            self.json_events()
+                .into_iter()
+                .filter_map(|event| event.get("fields").cloned())
+                .find(|fields| fields["message"] == "HTTP request completed")
+                .expect("request completion event")
         }
     }
 
@@ -36150,12 +36174,7 @@ mod tests {
             "test-request-log-redaction"
         );
 
-        let events = logs.json_events();
-        let fields = events
-            .iter()
-            .filter_map(|event| event.get("fields"))
-            .find(|fields| fields["message"] == "HTTP request completed")
-            .expect("request completion event");
+        let fields = logs.request_completion_fields();
         assert_eq!(fields["request_id"], "test-request-log-redaction");
         assert_eq!(fields["method"], "GET");
         assert_eq!(fields["route"], "/v1/auth/session");
@@ -36169,6 +36188,100 @@ mod tests {
         assert!(!output.contains(provider_secret));
         assert!(!output.contains(&caller_credential.value));
         assert!(!output.contains("platform=netease"));
+    }
+
+    #[tokio::test]
+    async fn session_mutation_logs_preserve_credential_ownership_sources() {
+        let caller_credential = CallerCredential::issue(
+            &ProviderCredential::new(
+                Platform::Netease,
+                "cookie",
+                "MUSIC_U=session-log-source",
+                None,
+            )
+            .expect("provider credential"),
+        )
+        .expect("caller credential");
+        let cases = [
+            (
+                Method::POST,
+                "/v1/auth/session/refresh",
+                Some(json!({
+                    "platform": "netease",
+                    "credential_mode": "client"
+                })),
+                true,
+                "caller",
+            ),
+            (
+                Method::POST,
+                "/v1/auth/session/refresh",
+                Some(json!({
+                    "platform": "netease",
+                    "account": "personal",
+                    "credential_mode": "both"
+                })),
+                true,
+                "mixed",
+            ),
+            (
+                Method::DELETE,
+                "/v1/auth/session?platform=netease",
+                None,
+                true,
+                "caller",
+            ),
+            (
+                Method::DELETE,
+                "/v1/auth/session?platform=netease&account=personal&credential_mode=both",
+                None,
+                true,
+                "mixed",
+            ),
+            (
+                Method::DELETE,
+                "/v1/auth/session?platform=netease&account=personal",
+                None,
+                false,
+                "server",
+            ),
+        ];
+
+        for (method, uri, json_body, uses_caller_credential, expected_source) in cases {
+            let mut request = Request::builder().method(method).uri(uri);
+            if uses_caller_credential {
+                request = request.header(CALLER_CREDENTIAL_HEADER, caller_credential.value.clone());
+            }
+            let body = if let Some(json_body) = json_body {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(serde_json::to_vec(&json_body).expect("serialize request JSON"))
+            } else {
+                Body::empty()
+            };
+            let logs = CapturedTestLogs::default();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(logs.clone())
+                .finish();
+            let response = async {
+                test_app_with_provider()
+                    .oneshot(request.body(body).expect("build session mutation request"))
+                    .await
+                    .expect("session mutation request succeeds")
+            }
+            .with_subscriber(subscriber)
+            .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let fields = logs.request_completion_fields();
+            assert_eq!(fields["platform"], "netease", "{uri}");
+            assert_eq!(
+                fields["credential_source"], expected_source,
+                "credential source for {uri}"
+            );
+        }
     }
 
     #[tokio::test]
