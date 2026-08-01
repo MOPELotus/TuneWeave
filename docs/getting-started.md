@@ -27,10 +27,10 @@ TuneWeave 使用环境变量配置。未设置时可直接启动。
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `TUNEWEAVE_BIND` | `127.0.0.1:7832` | HTTP 监听地址 |
-| `TUNEWEAVE_DATA_DIR` | `.local/data` | 账户、设备身份和 Uni Playlist 的私有数据目录 |
+| `TUNEWEAVE_DATA_DIR` | `data` | 账户、设备身份和 Uni Playlist 的私有数据目录 |
 | `TUNEWEAVE_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error` 或 `off`；优先于 `RUST_LOG` |
 | `TUNEWEAVE_LOG_FORMAT` | `human` | `human` 或 `json` |
-| `TUNEWEAVE_LOG_DIR` | `<data-dir>/logs` | 日志目录 |
+| `TUNEWEAVE_LOG_DIR` | `logs` | 日志目录 |
 | `TUNEWEAVE_LOG_FILE` | `tuneweave.log` | 日志文件名前缀 |
 | `TUNEWEAVE_LOG_TO_STDERR` | `true` | 是否输出到标准错误 |
 | `TUNEWEAVE_LOG_TO_FILE` | `true` | 是否输出到文件 |
@@ -61,7 +61,7 @@ TuneWeave 使用环境变量配置。未设置时可直接启动。
 
 ## 数据与安全
 
-`TUNEWEAVE_DATA_DIR` 包含服务器托管账户凭证、平台设备身份和 Server 模式 Uni Playlist。生产环境应把它放在仅服务账户可读写的本地目录中，不要放入公开目录、同步盘或镜像。
+默认情况下，运行目录中的 `data` 保存服务器托管账户凭证、平台设备身份和 Server 模式 Uni Playlist，`logs` 保存运行日志。生产环境应将它们放在仅服务账户可读写的本地目录中，不要放入公开目录、同步盘或镜像；也可以分别通过 `TUNEWEAVE_DATA_DIR` 和 `TUNEWEAVE_LOG_DIR` 指定其他位置。
 
 TuneWeave 不在静态数据文件中保存登录密码或短信验证码，但账户会话仍属于敏感信息。对外提供服务时应在可信反向代理后启用 HTTPS，并禁止代理记录 `X-TuneWeave-Credential`、Cookie、请求体和媒体签名 URL。
 
