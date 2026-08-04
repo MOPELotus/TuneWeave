@@ -4500,10 +4500,27 @@ enum StreamRouting {
         preferred_platform: Option<Platform>,
         fallback: bool,
         fallback_platforms: Vec<Platform>,
+        unblock: bool,
     },
     Unblock {
-        source: Option<Platform>,
+        source: Platform,
+        preferred_platform: Option<Platform>,
+        fallback_platforms: Vec<Platform>,
     },
+}
+
+const AUTOMATIC_UNBLOCK_SOURCES: [Platform; 5] = [
+    Platform::Qq,
+    Platform::Kugou,
+    Platform::Kuwo,
+    Platform::Migu,
+    Platform::Soda,
+];
+
+fn push_stream_platform(platforms: &mut Vec<Platform>, platform: Platform) {
+    if !platforms.contains(&platform) {
+        platforms.push(platform);
+    }
 }
 
 impl StreamControls {
@@ -4513,35 +4530,56 @@ impl StreamControls {
                 preferred_platform,
                 fallback,
                 fallback_platforms,
+                unblock,
             } => {
-                let mut platforms = Vec::new();
-                if let Some(platform) = preferred_platform {
-                    platforms.push(*platform);
-                } else if !fallback_platforms.is_empty() {
-                    platforms.push(origin_platform);
+                let automatic_unblock = *unblock && origin_platform == Platform::Netease;
+                if automatic_unblock {
+                    let mut platforms = Vec::new();
+                    push_stream_platform(
+                        &mut platforms,
+                        preferred_platform.unwrap_or(origin_platform),
+                    );
+                    push_stream_platform(&mut platforms, origin_platform);
+                    for platform in fallback_platforms {
+                        push_stream_platform(&mut platforms, *platform);
+                    }
+                    for platform in AUTOMATIC_UNBLOCK_SOURCES {
+                        push_stream_platform(&mut platforms, platform);
+                    }
+                    (
+                        platforms,
+                        true,
+                        preferred_platform.unwrap_or(origin_platform),
+                    )
+                } else {
+                    let mut platforms = Vec::new();
+                    if let Some(platform) = preferred_platform {
+                        platforms.push(*platform);
+                    } else if !fallback_platforms.is_empty() {
+                        platforms.push(origin_platform);
+                    }
+                    platforms.extend(fallback_platforms.iter().copied());
+                    (
+                        platforms,
+                        *fallback,
+                        preferred_platform.unwrap_or(origin_platform),
+                    )
                 }
-                platforms.extend(fallback_platforms.iter().copied());
-                (
-                    platforms,
-                    *fallback,
-                    preferred_platform.unwrap_or(origin_platform),
-                )
             }
-            StreamRouting::Unblock { source } => {
-                let mut platforms = source.map_or_else(
-                    || {
-                        vec![
-                            Platform::Qq,
-                            Platform::Kugou,
-                            Platform::Kuwo,
-                            Platform::Migu,
-                        ]
-                    },
-                    |source| vec![source],
-                );
-                platforms.push(origin_platform);
-                let account_platform = platforms[0];
-                (platforms, true, account_platform)
+            StreamRouting::Unblock {
+                source,
+                preferred_platform,
+                fallback_platforms,
+            } => {
+                let mut platforms = vec![*source];
+                if let Some(platform) = preferred_platform {
+                    push_stream_platform(&mut platforms, *platform);
+                }
+                for platform in fallback_platforms {
+                    push_stream_platform(&mut platforms, *platform);
+                }
+                push_stream_platform(&mut platforms, origin_platform);
+                (platforms, true, *source)
             }
         };
         let mut request = ResolveRequest {
@@ -4581,13 +4619,24 @@ impl StreamControls {
             StreamRouting::Standard {
                 preferred_platform, ..
             } => preferred_platform.is_none_or(|platform| platform == origin_platform),
-            StreamRouting::Unblock { source } => source.unwrap_or(Platform::Qq) == origin_platform,
+            StreamRouting::Unblock { source, .. } => *source == origin_platform,
         }
     }
 
     fn fallback_enabled(&self) -> bool {
         match self.routing {
-            StreamRouting::Standard { fallback, .. } => fallback,
+            StreamRouting::Standard {
+                fallback, unblock, ..
+            } => fallback || unblock,
+            StreamRouting::Unblock { .. } => true,
+        }
+    }
+
+    fn fallback_enabled_for(&self, origin_platform: Platform) -> bool {
+        match self.routing {
+            StreamRouting::Standard {
+                fallback, unblock, ..
+            } => fallback || (unblock && origin_platform == Platform::Netease),
             StreamRouting::Unblock { .. } => true,
         }
     }
@@ -4597,7 +4646,7 @@ impl StreamControls {
             StreamRouting::Standard {
                 preferred_platform, ..
             } => preferred_platform.unwrap_or(platform),
-            StreamRouting::Unblock { source } => source.unwrap_or(Platform::Qq),
+            StreamRouting::Unblock { source, .. } => source,
         };
         StreamRequest {
             quality: self.quality,
@@ -4651,6 +4700,10 @@ impl ScopedStreamControls {
 
     fn fallback_enabled(&self) -> bool {
         self.controls.fallback_enabled()
+    }
+
+    fn fallback_enabled_for(&self, origin_platform: Platform) -> bool {
+        self.controls.fallback_enabled_for(origin_platform)
     }
 }
 
@@ -4727,28 +4780,32 @@ fn parse_stream_controls(input: StreamControlInput<'_>) -> Result<StreamControls
     let variant = parse_stream_variant(input.variant)?;
     let bitrate = parse_optional_u64_parameter("bitrate", input.bitrate)?;
     let immersive_type = parse_immersive_audio_type(input.immersive_type)?;
-    let unblock = parse_bool_parameter("unblock", input.unblock, false)?;
+    let unblock = parse_bool_parameter("unblock", input.unblock, true)?;
     let fallback = parse_bool_parameter("fallback", input.fallback, true)?;
-    let routing = if unblock {
-        if input.playback_platform.is_some() || input.fallback_platforms.is_some() {
+    let preferred_platform = input
+        .playback_platform
+        .map(parse_platform_parameter)
+        .transpose()?;
+    let fallback_platforms = parse_platform_list(input.fallback_platforms)?;
+    let source = input.source.map(parse_platform_parameter).transpose()?;
+    let routing = if let Some(source) = source {
+        if !unblock {
             return Err(TuneWeaveError::invalid_request(
-                "unblock cannot be combined with playback_platform or fallback_platforms",
+                "source requires unblock to remain enabled",
             )
-            .with_details(json!({
-                "conflicts": ["playback_platform", "fallback_platforms"]
-            })));
+            .with_details(json!({ "conflicts": ["unblock"] })));
         }
         StreamRouting::Unblock {
-            source: input.source.map(parse_platform_parameter).transpose()?,
+            source,
+            preferred_platform,
+            fallback_platforms,
         }
     } else {
         StreamRouting::Standard {
-            preferred_platform: input
-                .playback_platform
-                .map(parse_platform_parameter)
-                .transpose()?,
+            preferred_platform,
             fallback,
-            fallback_platforms: parse_platform_list(input.fallback_platforms)?,
+            fallback_platforms,
+            unblock,
         }
     };
     Ok(StreamControls {
@@ -6317,7 +6374,9 @@ async fn resolve_failed_stream_outcome(
     initial: StreamOutcome,
     controls: &ScopedStreamControls,
 ) -> StreamOutcome {
-    if initial.status == ResolutionStatus::Success || !controls.fallback_enabled() {
+    if initial.status == ResolutionStatus::Success
+        || !controls.fallback_enabled_for(initial.track_ref.platform())
+    {
         return initial;
     }
     let initial_value = serde_json::to_value(&initial)
@@ -27582,7 +27641,7 @@ mod tests {
             "/v1/episodes/netease:1367665101/stream?quality=future",
             "/v1/episodes/netease:1367665101/stream?br=invalid",
             "/v1/episodes/netease:1367665101/stream?immerseType=atmos",
-            "/v1/episodes/netease:1367665101/stream?unblock=true&playback_platform=qq",
+            "/v1/episodes/netease:1367665101/stream?unblock=false&source=qq",
             "/v1/episodes/netease:1367665101/stream?unknown=true",
             "/v1/episodes/netease:1367665101/stream/redirect?unknown=true",
         ] {
@@ -35025,6 +35084,64 @@ mod tests {
         assert_eq!(json["meta"]["account"], "green-vip");
     }
 
+    #[test]
+    fn stream_controls_default_to_automatic_netease_unblock() {
+        let controls =
+            parse_stream_controls(StreamControlInput::default()).expect("default stream controls");
+        let request = controls.resolve_request(Platform::Netease);
+        assert_eq!(
+            request.playback_platforms,
+            vec![
+                Platform::Netease,
+                Platform::Qq,
+                Platform::Kugou,
+                Platform::Kuwo,
+                Platform::Migu,
+                Platform::Soda,
+            ]
+        );
+        assert!(request.fallback);
+
+        let disabled = parse_stream_controls(StreamControlInput {
+            fallback: Some("false"),
+            unblock: Some("false"),
+            ..StreamControlInput::default()
+        })
+        .expect("disabled stream controls");
+        let request = disabled.resolve_request(Platform::Netease);
+        assert!(request.playback_platforms.is_empty());
+        assert!(!request.fallback);
+
+        let selected = parse_stream_controls(StreamControlInput {
+            playback_platform: Some("qq"),
+            fallback_platforms: Some("migu"),
+            unblock: Some("true"),
+            source: Some("kuwo"),
+            ..StreamControlInput::default()
+        })
+        .expect("combined unblock controls");
+        let request = selected.resolve_request(Platform::Netease);
+        assert_eq!(
+            request.playback_platforms,
+            vec![
+                Platform::Kuwo,
+                Platform::Qq,
+                Platform::Migu,
+                Platform::Netease,
+            ]
+        );
+        assert!(request.fallback);
+        assert_eq!(request.accounts, BTreeMap::new());
+
+        let error = parse_stream_controls(StreamControlInput {
+            source: Some("qq"),
+            unblock: Some("false"),
+            ..StreamControlInput::default()
+        })
+        .expect_err("source must not bypass an explicit unblock=false");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
     #[tokio::test]
     async fn kuwo_participates_in_resolver_uni_and_media_redirects() {
         let defaults = AppState::new(ProviderRegistry::new(), Platform::Netease)
@@ -35528,7 +35645,7 @@ mod tests {
             "/v1/tracks/streams?ids=1&platform=unknown",
             "/v1/tracks/streams?ids=1&br=invalid",
             "/v1/tracks/streams?ids=1&immersive_type=atmos",
-            "/v1/tracks/streams?ids=1&unblock=true&playback_platform=qq",
+            "/v1/tracks/streams?ids=1&unblock=false&source=qq",
             "/v1/tracks/streams?ids=1&unknown=true",
         ] {
             let (status, json) = json_response_from(test_app_with_provider(), path).await;
@@ -35660,8 +35777,7 @@ mod tests {
             "/v1/tracks/netease:2709812973/stream?variant=future",
             "/v1/tracks/netease:2709812973/stream?unblock=maybe",
             "/v1/tracks/netease:2709812973/stream?unblock=true&source=unknown",
-            "/v1/tracks/netease:2709812973/stream?unblock=true&playback_platform=qq",
-            "/v1/tracks/netease:2709812973/stream?unblock=true&fallback_platforms=qq",
+            "/v1/tracks/netease:2709812973/stream?unblock=false&source=qq",
             "/v1/tracks/netease:2709812973/stream?immersive_type=atmos",
             "/v1/tracks/netease:2709812973/stream?unknown=true",
             "/v1/tracks/netease:2709812973/stream/redirect?unknown=true",

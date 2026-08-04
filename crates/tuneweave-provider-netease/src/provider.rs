@@ -11456,13 +11456,14 @@ fn map_stream(
     stream: StreamData,
     authenticated: bool,
 ) -> Result<MediaStream> {
-    let url = stream
+    let original_url = stream
         .url
         .as_deref()
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| stream_unavailable(&stream, authenticated))?;
+    let (url, backup_urls) = netease_media_url_variants(original_url);
     let actual_quality = stream_quality(stream.level.as_deref(), stream.br);
     let trial = stream.free_trial_info.and_then(|trial| {
         let start_ms = trial.start?.checked_mul(1_000)?;
@@ -11474,7 +11475,7 @@ fn map_stream(
 
     Ok(MediaStream {
         url,
-        backup_urls: Vec::new(),
+        backup_urls,
         headers: BTreeMap::new(),
         expires_at: stream
             .expi
@@ -11497,6 +11498,33 @@ fn map_stream(
         match_score: Some(1.0),
         attempts: Vec::new(),
     })
+}
+
+fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
+    let Some(mut parsed) = Url::parse(&url).ok() else {
+        return (url, Vec::new());
+    };
+    let Some(host) = parsed.host_str() else {
+        return (url, Vec::new());
+    };
+    let Some(prefix) = host.strip_suffix(".music.126.net") else {
+        return (url, Vec::new());
+    };
+    let Some(digits) = prefix.strip_prefix('m') else {
+        return (url, Vec::new());
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (url, Vec::new());
+    }
+    let compatible_host = format!("{prefix}c.music.126.net");
+    if parsed.set_host(Some(&compatible_host)).is_err() {
+        return (url, Vec::new());
+    }
+    let compatible = parsed.to_string();
+    if compatible == url {
+        return (url, Vec::new());
+    }
+    (compatible, vec![url])
 }
 
 fn map_track_availability(
@@ -27065,6 +27093,31 @@ mod tests {
                 .expires_at
                 .is_some_and(|expires| expires.ends_with('Z'))
         );
+    }
+
+    #[test]
+    fn maps_netease_cdn_compatibility_url_with_original_backup() {
+        let (url, backups) = netease_media_url_variants(
+            "https://m801.music.126.net/song/path.flac?auth=opaque".to_owned(),
+        );
+        assert_eq!(
+            url,
+            "https://m801c.music.126.net/song/path.flac?auth=opaque"
+        );
+        assert_eq!(
+            backups,
+            vec!["https://m801.music.126.net/song/path.flac?auth=opaque"]
+        );
+
+        let (url, backups) =
+            netease_media_url_variants("https://m801c.music.126.net/song/path.flac".to_owned());
+        assert_eq!(url, "https://m801c.music.126.net/song/path.flac");
+        assert!(backups.is_empty());
+
+        let (url, backups) =
+            netease_media_url_variants("https://audio.example.test/song.flac".to_owned());
+        assert_eq!(url, "https://audio.example.test/song.flac");
+        assert!(backups.is_empty());
     }
 
     #[test]
