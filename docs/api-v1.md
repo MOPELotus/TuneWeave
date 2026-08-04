@@ -21,6 +21,8 @@
 | `playback_platform` | 首选播放来源。它只影响媒体解析，不改变原歌曲引用。 |
 | `fallback` | 播放失败时是否继续尝试其他平台，默认 `true`。 |
 | `fallback_platforms` | 本次请求的有序回退列表，逗号分隔；省略时使用服务器策略。 |
+| `unblock` | 是否启用平台受限音源解锁阶段，默认 `true`；设为 `false` 可只请求原始平台或显式回退。 |
+| `source` | 解锁阶段的首选公开音源；可与 `playback_platform`、`fallback_platforms` 组合。 |
 
 当路径中的引用已经带平台时，引用平台是内容来源；查询参数 `platform` 不能覆盖它。账户端点没有内容引用，因此通过 `platform` 选择账户平台。
 
@@ -1957,3 +1959,7 @@ GET /v1/tracks/netease:123456/stream?quality=lossless&playback_platform=qq&accou
 ```
 
 默认音乐回退顺序不包含 B 站，以免把翻唱、现场或二创视频误当成录音室版本。调用者显式加入 `bilibili` 时仍执行严格版本匹配。
+
+歌曲播放默认同时启用解锁阶段。对网易云音乐歌曲，服务端先尝试原始音源；原始 URL 缺失、只有试听片段或权益不足时，再按首选平台、手动回退平台和公开音源顺序匹配。默认公开音源顺序为 QQ 音乐、酷狗、酷我、咪咕、汽水。`unblock=false` 才会关闭该附加阶段；`fallback=false` 不会关闭默认解锁，这是两个独立控制项。`source` 可以把某个公开音源提升到解锁阶段首位，但不会改变歌曲的原始引用。
+
+网易云返回的 `m数字.music.126.net` 媒体 URL 会同时提供兼容的 `m数字c.music.126.net` URL 和原始 URL，调用方应按 `url`、`backup_urls` 顺序尝试；重定向端点会发送 `Referrer-Policy: no-referrer`，避免网易 CDN 因来源页拒绝播放。服务端不会接受调用方注入的媒体 URL、代理或请求头。
