@@ -2,8 +2,8 @@
   "schema_version": 1,
   "status": "complete",
   "routes_source": "docs/acceptance/routes.json",
-  "route_count": 259,
-  "covered_route_count": 259,
+  "route_count": 262,
+  "covered_route_count": 262,
   "entries": [
     {
       "id": "health",
@@ -1301,6 +1301,24 @@
       ]
     },
     {
+      "id": "account_favorite_playlist",
+      "method": "GET",
+      "path": "/v1/account/favorites/playlist",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "favorite_playlist_returns_native_name_cover_and_account_scope"
+      ]
+    },
+    {
       "id": "account_favorite_tracks",
       "method": "GET",
       "path": "/v1/account/favorites/tracks",
@@ -1316,6 +1334,23 @@
       "network": "authenticated",
       "acceptance_cases": [
         "account_favorite_tracks_use_unified_pagination"
+      ]
+    },
+    {
+      "id": "account_favorite_intelligence",
+      "method": "GET",
+      "path": "/v1/account/favorites/tracks/intelligence",
+      "platform_scope": {
+        "mode": "request_selected",
+        "platforms": [
+          "netease"
+        ]
+      },
+      "authentication": "required",
+      "destructive_level": "read_only",
+      "network": "authenticated",
+      "acceptance_cases": [
+        "favorite_intelligence_returns_a_typed_non_paginated_queue"
       ]
     },
     {
@@ -3871,6 +3906,25 @@
       "network": "anonymous",
       "acceptance_cases": [
         "user_favorite_albums_keep_target_identity_and_optional_viewer_account",
+        "public_user_libraries_accept_caller_credentials_without_server_aliases"
+      ]
+    },
+    {
+      "id": "user_favorite_playlist",
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/playlist",
+      "platform_scope": {
+        "mode": "resource_selected",
+        "platforms": [
+          "netease",
+          "qq"
+        ]
+      },
+      "authentication": "optional",
+      "destructive_level": "read_only",
+      "network": "anonymous",
+      "acceptance_cases": [
+        "favorite_playlist_returns_native_name_cover_and_account_scope",
         "public_user_libraries_accept_caller_credentials_without_server_aliases"
       ]
     },
