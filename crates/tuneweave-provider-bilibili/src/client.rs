@@ -427,6 +427,7 @@ pub(crate) struct BilibiliFavoriteMediaPage {
 pub(crate) struct BilibiliFavoriteMedia {
     pub aid: u64,
     pub bvid: Option<String>,
+    pub attributes: u64,
     pub title: String,
     pub cover_url: Option<String>,
     pub description: String,
@@ -5483,15 +5484,9 @@ fn map_favorite_media(item: FavoriteMediaItem) -> Result<BilibiliFavoriteMedia> 
             "Bilibili favorite media returned an unsupported type or identity",
         ));
     }
-    let invalid = match item.attr {
-        0 => false,
-        1 | 9 => true,
-        _ => {
-            return Err(bilibili_upstream_error(
-                "Bilibili favorite media returned an invalid state",
-            ));
-        }
-    };
+    // `attr` is a bitmask. Bit 0 marks an unavailable/deleted item; the
+    // remaining bits are platform flags and must remain forward-compatible.
+    let invalid = item.attr & 1 != 0;
     let raw_bvid = [item.bvid.trim(), item.bv_id.trim()]
         .into_iter()
         .filter(|value| !value.is_empty())
@@ -5539,6 +5534,7 @@ fn map_favorite_media(item: FavoriteMediaItem) -> Result<BilibiliFavoriteMedia> 
     Ok(BilibiliFavoriteMedia {
         aid: item.id,
         bvid,
+        attributes: item.attr,
         title: validated_bilibili_text(&item.title, "favorite media title", 4096)?,
         cover_url: normalize_bilibili_image_url(&item.cover, "favorite media cover")?,
         description: validated_bilibili_multiline_text(
@@ -7340,6 +7336,58 @@ mod tests {
     use super::*;
 
     const QR_KEY: &str = "8587cf8106a0b863c46d6bab913537f6";
+
+    #[test]
+    fn favorite_media_attribute_mask_preserves_new_valid_flags() {
+        let media = map_favorite_media(FavoriteMediaItem {
+            id: 115_512_977_792_498,
+            kind: 2,
+            title: "正常视频".to_owned(),
+            cover: String::new(),
+            intro: String::new(),
+            page: 1,
+            duration: 60,
+            upper: Some(CollectedPlaylistOwner {
+                mid: 47_275_982,
+                name: "荷花-Lotus".to_owned(),
+                face: String::new(),
+            }),
+            attr: 384,
+            cnt_info: FavoriteMediaCounts::default(),
+            ctime: 0,
+            pubtime: 0,
+            fav_time: 0,
+            bv_id: "BV1Ep1SBDERW".to_owned(),
+            bvid: "BV1Ep1SBDERW".to_owned(),
+        })
+        .expect("valid favorite media attribute flags");
+        assert_eq!(media.attributes, 384);
+        assert!(!media.invalid);
+
+        let invalid = map_favorite_media(FavoriteMediaItem {
+            attr: 385,
+            ..FavoriteMediaItem {
+                id: 115_512_977_792_499,
+                kind: 2,
+                title: "失效视频".to_owned(),
+                cover: String::new(),
+                intro: String::new(),
+                page: 1,
+                duration: 0,
+                upper: None,
+                attr: 1,
+                cnt_info: FavoriteMediaCounts::default(),
+                ctime: 0,
+                pubtime: 0,
+                fav_time: 0,
+                bv_id: String::new(),
+                bvid: String::new(),
+            }
+        })
+        .expect("invalid favorite media remains representable");
+        assert_eq!(invalid.attributes, 385);
+        assert!(invalid.invalid);
+    }
 
     #[test]
     fn upstream_summary_separates_business_and_transport_failures() {

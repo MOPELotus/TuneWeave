@@ -3210,6 +3210,7 @@ fn favorite_media_extensions(
         ),
         ("media_id".to_owned(), json!(media_id)),
         ("aid".to_owned(), json!(media.aid)),
+        ("attr".to_owned(), json!(media.attributes)),
         ("invalid".to_owned(), json!(media.invalid)),
         ("part_count".to_owned(), json!(media.part_count)),
         ("collect_count".to_owned(), json!(media.collect_count)),
