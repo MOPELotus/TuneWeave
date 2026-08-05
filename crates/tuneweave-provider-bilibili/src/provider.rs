@@ -5933,6 +5933,21 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live Bilibili video access"]
+    async fn live_long_video_detail_accepts_a_response_above_one_megabyte() {
+        let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
+        let detail = provider
+            .video(
+                "aid:114158368462920",
+                &VideoDetailRequest::new(VideoResourceKind::Video),
+            )
+            .await
+            .expect("large Bilibili video detail");
+        assert_eq!(detail.video.extensions["aid"], 114_158_368_462_920_u64);
+        assert!(!detail.video.title.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Bilibili video access"]
     async fn live_video_statistics_keep_public_counts_anonymous() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
         let stats = provider
