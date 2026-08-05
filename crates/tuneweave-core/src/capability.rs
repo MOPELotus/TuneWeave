@@ -159,6 +159,7 @@ pub enum Capability {
     VideoRecommendations,
     PodcastEpisodeRecommendations,
     PersonalFm,
+    FavoriteIntelligence,
     RecommendationFeedback,
     MusicPartner,
     CommentWrite,

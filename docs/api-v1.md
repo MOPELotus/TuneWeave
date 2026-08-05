@@ -1281,6 +1281,7 @@ B 站 DASH 视频轨道通过 `GET /v1/videos/{ref}/video-stream` 选择，分 P
 | POST | `/v1/resources/{type}/{ref}/comments/{comment_id}/reports` | 查询参数 `account?`；JSON `{reason}` | `CommentReportResult`；举报评论 |
 | GET | `/v1/users/{ref}` | `account?`、`backend?=modern|legacy`（也接受 `variant/source`） | 指定用户的完整 `UserProfile`；引用决定平台；QQ 仅支持 modern 且要求查看者账户 |
 | GET | `/v1/users/{ref}/music-gene` | `account?` | `UserMusicGene`；QQ 音乐基因、听歌报告、个性维度与平台展示顺序，公开用户可匿名读取 |
+| GET | `/v1/users/{ref}/favorites/playlist` | `account?` | 指定用户可见的“喜欢”歌单 `Playlist`；保留平台原封面 |
 | GET | `/v1/users/{ref}/favorites/tracks` | 分页、`account?` | 指定用户公开引用下的 `Track[]`；需要平台登录态时由 `account` 选择 |
 | GET | `/v1/users/{ref}/playlists/created` | 分页、`account?` | 指定用户创建的 `Playlist[]`；平台用户引用的 ID 语义由对应 provider 校验 |
 | GET | `/v1/users/{ref}/favorites/playlists` | 分页、`account?` | 指定用户收藏的外部 `Playlist[]`；需要平台登录态时由 `account` 选择 |
@@ -1597,6 +1598,7 @@ QQ、网易云、B 站与汽水当前均声明 `caller_managed_credentials`：�
 | DELETE | `/v1/auth/session` | `platform + account?` 或一份调用方凭证请求头 | 服务器账户删除结果，或提示调用方丢弃已退出的凭证 |
 | GET | `/v1/account` | `platform`、`account?` | 脱敏账户资料与权益摘要 |
 | GET | `/v1/account/playlists` | `platform`、`account?`、分页 | `Playlist[]` |
+| GET | `/v1/account/favorites/playlist` | `platform`、`account?` | 当前账户的“喜欢”歌单 `Playlist`；保留平台原封面 |
 | GET | `/v1/account/library/albums` | `platform`、`account?`、分页 | 已收藏的 `Album[]`；收藏时间保留在条目扩展，付费专辑计数等保留在分页扩展 |
 | PUT | `/v1/account/library/albums` | JSON `{refs|ids, platform?, account?}`；`refs` 接完整专辑引用，`ids` 与 `platform` 配合，单项、数组和逗号列表均可 | 批量收藏 `SubscriptionResult[]`；顺序与重复项不丢失，同一批次只允许一个平台 |
 | DELETE | `/v1/account/library/albums` | 与批量 PUT 相同的 JSON 契约 | 批量取消收藏 `SubscriptionResult[]`；保留顺序、重复项与平台失败 ID |
@@ -1608,6 +1610,7 @@ QQ、网易云、B 站与汽水当前均声明 `caller_managed_credentials`：�
 | GET | `/v1/account/following/artists/new-works` | `platform`、`account?`、`limit?`、`before?`、`source_type?`、`first_request?` | `ArtistWorkUpdate[]`；歌曲/MV 混合更新流，上游额外续页哨兵不计入本页，未知来源保留原文 |
 | GET | `/v1/account/following/artists/new-tracks/play-all` | `platform`、`account?` | 最近至多 50 首新 `Track[]`；固定快照，不伪装成可翻页目录 |
 | GET | `/v1/account/favorites/tracks` | `platform`、`account?`、分页 | `Track[]` |
+| GET | `/v1/account/favorites/tracks/intelligence` | `platform`、`account?`、`seed`、`start?`、`count?` | `FavoriteIntelligenceQueue`；以喜欢歌单为来源的心动模式/智能播放队列 |
 | GET | `/v1/account/history` | `platform`、`account?`、`period=all_time|week`、分页 | `PlaybackHistoryEntry[]`，含 `track`、`play_count`、`score`、`last_played_at` |
 | GET | `/v1/account/history/podcast-episodes` | `platform?`、`account?`、`limit?`、`offset?=0` | `PodcastEpisodePlaybackHistoryEntry[]`；完整分离节目、承载音频、播放时间与终端信息 |
 | GET | `/v1/account/cloud/tracks` | `platform?`、`account?`、`limit?`、`offset?` | `CloudTrack[]` 分页及云盘容量统计 |
@@ -1666,11 +1669,15 @@ QQ 会话刷新调用 Android `music.login.LoginServer/Login` 并固定 `loginMo
 
 QQ 退出调用同一 Android 登录服务的 `Logout`，并把精确账户凭据同时放入 `comm` 与 Cookie。平台成功或明确返回凭据已经失效时删除本地对应 `(qq, account)`；不存在的别名幂等返回 `removed=false`。限流、未知业务码和网络失败保留本地凭据以便重试，不会影响同平台其他账户；若上游已关闭会话但本地删除失败，则返回明确的本地持久化错误，而不是伪报退出完成。
 
+网易云的当前账户和指定用户喜欢歌单端点固定读取 `/api/user/playlist`，只选择 `specialType=5` 且创建者与目标用户一致的歌单。返回名称使用平台资料昵称生成 `{username}喜欢的音乐`，昵称缺失或为空时为“我喜欢的音乐”；不会用平台原生的通用标题遮蔽昵称，但会在扩展中保留原名。封面、描述、曲目数、创建者和时间等其他歌单元数据保持平台原值。当前账户先从精确登录态取得用户 ID，指定用户端点使用路径引用并允许可选查看者账户；Uni `favorite_tracks` 导入复用同一份元数据，因此来源名称和 `cover_url` 与该歌单一致。
+
 `GET /v1/account/playlists?platform=qq&account=...` 把当前账户创建的歌单和收藏的外部歌单合并为一个连续分页：创建歌单固定在前，收藏歌单随后，跨边界请求不会重复或漏项。创建目录使用账户 music ID，收藏目录使用同一凭据的加密 UIN，不能用占位凭据或其他账户替代；创建与收藏总数、完成/隐藏/更多标记、删除 ID、失败 ID 及两份完整上游响应都保存在分页扩展。普通歌单 ID 为统一 `qq:<id>`；平台以 `id=0, dirid>0` 表示的“我喜欢”等特殊目录使用 `qq:dir:<dirid>`，以便后续详情、完整歌曲分页和 Uni 导入保持稳定身份。普通账户的当前目录与同一数值 UIN 创建目录已真实返回 18 项，平台身份和顺序一致，当前账户路径全部保留可写 `dirId` 引用。
 
 QQ 的 `GET /v1/playlists/{ref}` 与 `/tracks` 固定调用 Android `music.srfDissInfo.DissInfo/CgiGetDiss`。公开 `qq:<playlist-id>` 使用 `disstid`，账户特殊目录 `qq:dir:<dirid>` 使用 `disstid=0/dirid/enc_host_uin` 并要求精确 `account`；详情请求保留标签和创建者，歌曲分页使用 `onlysonglist=true` 并关闭不需要的标签/用户包装。`song_begin/song_num` 精确对应统一 offset/limit，当前页数量、总数和 `hasmore` 必须相互一致；歌曲完整复用 QQ 强类型 Track 映射。公开歌单详情与分页已真实验证；普通账户的 `qq:dir:201` 详情和首个 100 首分页又真实返回总数 158，并与喜欢歌曲目录身份、顺序一致。
 
-QQ 喜欢歌曲使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET /v1/account/favorites/tracks?platform=qq&account=...` 从所选凭据读取 `encryptUin`；`GET /v1/users/qq:<encrypted-uin>/favorites/tracks` 直接使用目标用户的加密 UIN，并允许可选 `account` 作为查看者会话。该分支固定发送 `tag=true/userinfo=true/orderlist=true`，不发送只属于普通歌单精简取曲的 `onlysonglist`；两端共享严格 offset/limit、分页一致性、零进度拒绝和 Track 映射。加密 UIN 作为不透明平台用户 ID 处理，不接受空白、控制字符或超长值，也不会以参考项目的占位凭据代替缺失账户。普通账户的两条路径均以两页完整返回 158 首歌曲，身份、顺序、总数和终止状态完全一致。
+QQ 喜欢歌曲与喜欢歌单元数据使用同一 `CgiGetDiss` 的 `disstid=0/dirid=201` 分支。`GET /v1/account/favorites/playlist?platform=qq&account=...` 和 `/tracks` 从所选凭据读取 `encryptUin`；`GET /v1/users/qq:<encrypted-uin>/favorites/playlist` 和 `/tracks` 直接使用目标用户的加密 UIN，并允许可选 `account` 作为查看者会话。歌单元数据保留 QQ 原生“我喜欢”名称及对应原封面，Uni `favorite_tracks` 来源也复用该名称和 `cover_url`。该分支固定发送 `tag=true/userinfo=true/orderlist=true`，不发送只属于普通歌单精简取曲的 `onlysonglist`；歌曲端点共享严格 offset/limit、分页一致性、零进度拒绝和 Track 映射。加密 UIN 作为不透明平台用户 ID 处理，不接受空白、控制字符或超长值，也不会以参考项目的占位凭据代替缺失账户。普通账户的两条歌曲路径均以两页完整返回 158 首歌曲，身份、顺序、总数和终止状态完全一致。
+
+网易云心动模式使用 `GET /v1/account/favorites/tracks/intelligence`，要求 `seed` 是所选平台的歌曲引用；`start` 省略时使用同一首歌，`count` 默认 1 且范围为 1–100。Provider 先定位当前账户的真实喜欢歌单，再调用 `/api/playmode/intelligence/list`，逐项保留平台 `recommended` 与 `alg`，并校验外层歌曲 ID 和完整歌曲对象身份一致。`count` 保留平台请求语义，不作为统一 offset 分页大小；返回的是当前队列快照，不附加伪造的分页或 continuation。
 
 QQ 的公开用户歌单目录保持两种身份边界：`GET /v1/users/qq:<numeric-uin>/playlists/created` 调用 `PlaylistBaseRead/GetPlaylistByUin`，只接受正整数 UIN，并在完整取得上游创建目录后应用统一 offset/limit；`GET /v1/users/qq:<encrypted-uin>/favorites/playlists` 调用 `PlaylistFavRead/CgiGetPlaylistFavInfo`，把目标加密 UIN、offset 和 size 原样提交。两端的 `account` 都只是可选查看者会话，省略时不会被改写为 `default` 或强制要求本地账户。条目明确标记 created/favorite 与 subscribed 状态，删除/失败 ID、隐藏/完成标记、总数和完整响应均保留。已从公开歌单 `qq:7039749142` 动态取得其创建者两类标识，并通过 provider 与统一 HTTP 真实验证两个匿名目录分支：创建目录总数 6137，收藏目录合法返回空目录；普通登录账户还在可逆写入闭环中读到收藏目录由 0 增至 1，再于取消收藏后恢复为 0。
 
@@ -1732,7 +1739,7 @@ V1 不提供任意扩展对象：顶层只声明 `duplicates_preserved`，项目
 
 `accounts` 是按平台键控的账户别名对象，例如 `{ "netease": "default", "qq": "green-diamond" }`；每个来源只使用自己的别名，不能提交 `uni` 账户或本批次未出现的平台。一次可追加 1–100 项，所有资源完成解析后才执行一次存储发布；失败不会留下半批数据。来源引用可以重复，存储不会静默去重：每次出现都会生成独立 `item_...` ID 和连续零基 `position`，后续删除/重排按项目 ID 工作。读取默认 `limit=50/offset=0`、范围 1–100，分页 `total/next_offset/has_more` 基于实际项目序列。歌曲重复项、MV 和播客节目混合写入时会保留独立项目 ID、真实快照和节目音频引用。
 
-QQ Uni 来源支持两种稳定形态：`type=playlist` 导入一个已选择的公开、用户创建或用户收藏歌单，`id` 使用目录端点返回的普通歌单 ID；当前账户 `dir:*` 特殊目录可同时带 `account`。一次导入最多提交 100 个来源，因此可从 `/v1/users/{ref}/playlists/created` 与 `/favorites/playlists` 选择多个歌单并跨平台合并，不会把可能包含数千个歌单的非可播放目录无界展开。`type=favorite_tracks` 则把本身可播放的用户喜欢歌曲列表作为单一来源，使用 `{platform:"qq",type:"favorite_tracks",id:"<encrypted-uin>",account?}`，完整遍历 `CgiGetDiss` 的 offset/limit 后原子写入；来源摘要保留用户引用、类型、总数和可选查看者账户。统一 HTTP 使用公开非空来源完成 1/1 项导入，来源总数、写入结果、回读页和持久化文件计数一致。
+QQ Uni 来源支持两种稳定形态：`type=playlist` 导入一个已选择的公开、用户创建或用户收藏歌单，`id` 使用目录端点返回的普通歌单 ID；当前账户 `dir:*` 特殊目录可同时带 `account`。一次导入最多提交 100 个来源，因此可从 `/v1/users/{ref}/playlists/created` 与 `/favorites/playlists` 选择多个歌单并跨平台合并，不会把可能包含数千个歌单的非可播放目录无界展开。`type=favorite_tracks` 则把本身可播放的用户喜欢歌曲列表作为单一来源，使用 `{platform:"qq",type:"favorite_tracks",id:"<encrypted-uin>",account?}`，完整遍历 `CgiGetDiss` 的 offset/limit 后原子写入；来源摘要保留 QQ 原生名称、原封面 `cover_url`、用户引用、类型、总数和可选查看者账户。统一 HTTP 使用公开非空来源完成 1/1 项导入，来源总数、写入结果、回读页和持久化文件计数一致。
 
 删除端点只接受项目本身的稳定 ID，因此同一 `source_ref` 出现多次时仅移除指定的一次出现；返回被删除项目的原位置，剩余项目连续重编号。重排端点要求 `item_ids` 与当前项目集合完全一致且每个 ID 恰好出现一次，缺项、未知项、重复 ID 或畸形 ID 均在写入前拒绝，不能用部分顺序隐式移动项目。成功响应返回完整新序列和 `changed`；提交与现状相同的完整顺序返回 `changed=false`，不刷新文件或更新时间。两项操作都通过单次持久化发布完成，失败不留下部分删除或部分重排。
 

@@ -38,7 +38,8 @@ use tuneweave_core::{
     CredentialMode, DigitalAlbum, DigitalAlbumChartEntry, DigitalAlbumChartKind,
     DigitalAlbumChartPeriod, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
     DimensionChartRequest, DimensionChartTrackEntry, DimensionChartTrackSnapshot, ErrorCode,
-    Extensions, ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAction,
+    Extensions, FavoriteIntelligenceItem, FavoriteIntelligenceQueue, FavoriteIntelligenceRequest,
+    ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAction,
     ListeningRightsAd, ListeningRightsAdCatalog, ListeningRightsAdRequest,
     ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsMembershipContent,
     ListeningRightsMembershipPreview, ListeningRightsOffer, ListeningRightsRewardEntry,
@@ -53,30 +54,31 @@ use tuneweave_core::{
     PlaylistItemKind, PlaylistItemMutationAction, PlaylistItemMutationRequest,
     PlaylistItemMutationResult, PlaylistKind, PlaylistMetadataUpdateVariant,
     PlaylistMutationAction, PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility,
-    Podcast, PodcastCatalog, PodcastCategory, PodcastCategoryRecommendation,
-    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
-    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeCover, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
-    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll,
-    ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue,
-    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
-    RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
-    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
-    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
-    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
-    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
-    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
-    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PlaylistPlayableItem, PlaylistTrackOrderRequest, PlaylistTrackOrderResult,
+    PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog, PodcastCategory,
+    PodcastCategoryRecommendation, PodcastCategoryRecommendations, PodcastChartEntry,
+    PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartKind,
+    PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartKind,
+    PodcastEpisodeChartRequest, PodcastEpisodeCover, PodcastEpisodeDeleteRequest,
+    PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter,
+    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeOrderRequest,
+    PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderAuthResult, ProviderCredential,
+    ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
+    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
+    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
+    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
+    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
+    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
+    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
+    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
+    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
     UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
     VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
@@ -103,13 +105,14 @@ use crate::{
         CloudUploadServersEnvelope, CloudVideoDetailEnvelope, CloudVideoUrlEnvelope,
         DigitalAlbumChartEnvelope, DigitalAlbumChartItem, DigitalAlbumEnvelope,
         DigitalAlbumListEnvelope, DigitalAlbumListItem, DimensionChartDetailEnvelope,
-        DimensionChartTrackItem, DimensionChartTracksEnvelope, ImageUploadAllocationEnvelope,
-        LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope, MvDetailEnvelope, MvUrlEnvelope,
-        PersonalFmEnvelope, PersonalizedEnvelope, PlayHistoryEnvelope, PlayHistoryRecord,
-        PlaylistDetail, PlaylistEnvelope, Privilege, RecommendationReason,
-        RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope, SearchEnvelope, Song, StreamData,
-        StreamEnvelope, SubscribedAlbumsEnvelope, SubscribedVideosEnvelope, TrackEntitlementData,
-        TrackEnvelope, UserPlaylistsEnvelope, VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
+        DimensionChartTrackItem, DimensionChartTracksEnvelope, FavoriteIntelligenceEnvelope,
+        ImageUploadAllocationEnvelope, LikedTracksEnvelope, LyricText, LyricUser, LyricsEnvelope,
+        MvDetailEnvelope, MvUrlEnvelope, PersonalFmEnvelope, PersonalizedEnvelope,
+        PlayHistoryEnvelope, PlayHistoryRecord, PlaylistDetail, PlaylistEnvelope, Privilege,
+        RecommendationReason, RecommendedPlaylistsEnvelope, RecommendedTracksEnvelope,
+        SearchEnvelope, Song, StreamData, StreamEnvelope, SubscribedAlbumsEnvelope,
+        SubscribedVideosEnvelope, TrackEntitlementData, TrackEnvelope, UserPlaylistsEnvelope,
+        VideoCreatorItem, VideoStatsEnvelope, VideoUrlItem,
     },
 };
 
@@ -771,6 +774,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountCloudDelete,
             Capability::AccountCloudDownload,
             Capability::Favorites,
+            Capability::FavoriteIntelligence,
             Capability::ListeningHistory,
             Capability::RecentPodcastEpisodeHistory,
             Capability::Recommendations,
@@ -2420,6 +2424,43 @@ impl MusicProvider for NeteaseProvider {
         })
     }
 
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        match source_type {
+            "playlist" => self.playlist(id, account).await,
+            "favorite_tracks" => {
+                let playlist = self.user_favorite_playlist(id, account).await?;
+                map_netease_favorite_playlist_source(id, playlist)
+            }
+            _ => Err(unsupported_netease_playlist_source_type(source_type)),
+        }
+    }
+
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &PageRequest,
+    ) -> Result<Page<PlaylistPlayableItem>> {
+        let page = match source_type {
+            "playlist" => self.playlist_tracks(id, request).await?,
+            "favorite_tracks" => self.user_favorite_tracks(id, request).await?,
+            _ => return Err(unsupported_netease_playlist_source_type(source_type)),
+        };
+        Ok(Page {
+            items: page
+                .items
+                .into_iter()
+                .map(PlaylistPlayableItem::Track)
+                .collect(),
+            pagination: page.pagination,
+        })
+    }
+
     async fn create_playlist(
         &self,
         request: &PlaylistCreateRequest,
@@ -2847,6 +2888,13 @@ impl MusicProvider for NeteaseProvider {
         fetch_favorite_tracks(&client, &user_id, request).await
     }
 
+    async fn favorite_playlist(&self, account: Option<&str>) -> Result<Playlist> {
+        let account = account.unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let user_id = authenticated_user_id(&client, account).await?;
+        fetch_favorite_playlist(&client, &user_id).await
+    }
+
     async fn user_favorite_tracks(
         &self,
         user_id: &str,
@@ -2855,6 +2903,54 @@ impl MusicProvider for NeteaseProvider {
         let user_id = parse_numeric_id("user", user_id)?.to_string();
         let client = self.client_for(request.account.as_deref())?;
         fetch_favorite_tracks(&client, &user_id, request).await
+    }
+
+    async fn user_favorite_playlist(
+        &self,
+        user_id: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        let user_id = parse_numeric_id("user", user_id)?.to_string();
+        let client = self.client_for(account)?;
+        fetch_favorite_playlist(&client, &user_id).await
+    }
+
+    async fn favorite_intelligence(
+        &self,
+        request: &FavoriteIntelligenceRequest,
+    ) -> Result<FavoriteIntelligenceQueue> {
+        validate_favorite_intelligence_request(request)?;
+        let account = request.account.as_deref().unwrap_or("default");
+        let client = self.client_for(Some(account))?;
+        let user_id = authenticated_user_id(&client, account).await?;
+        let playlist = fetch_favorite_playlist(&client, &user_id).await?;
+        let playlist_id = parse_numeric_id("favorite playlist", &playlist.id)?;
+        let seed_track_id = parse_numeric_id("seed track", request.seed_track_ref.id())?;
+        let start_track_ref = request
+            .start_track_ref
+            .clone()
+            .unwrap_or_else(|| request.seed_track_ref.clone());
+        let start_track_id = parse_numeric_id("start track", start_track_ref.id())?;
+        let response = client
+            .request_weapi(
+                "/api/playmode/intelligence/list",
+                json!({
+                    "songId": seed_track_id,
+                    "type": "fromPlayOne",
+                    "playlistId": playlist_id,
+                    "startMusicId": start_track_id,
+                    "count": request.count
+                }),
+            )
+            .await?;
+        ensure_account_access(&client, &response.body, "favorite intelligence queue")?;
+        map_favorite_intelligence_queue(
+            response.body,
+            playlist,
+            request.seed_track_ref.clone(),
+            start_track_ref,
+            request.count,
+        )
     }
 
     async fn account_history(
@@ -5210,6 +5306,219 @@ async fn fetch_favorite_tracks(
     let (selected_ids, pagination) = select_page(response.ids, limit, request.offset);
     let items = fetch_tracks_by_ids(client, &selected_ids).await?;
     Ok(Page { items, pagination })
+}
+
+async fn fetch_favorite_playlist(client: &NeteaseClient, user_id: &str) -> Result<Playlist> {
+    let response = client
+        .request_weapi(
+            "/api/user/playlist",
+            json!({
+                "uid": user_id,
+                "limit": 1,
+                "offset": 0,
+                "includeVideo": true
+            }),
+        )
+        .await?;
+    ensure_success(&response.body)?;
+    let response: UserPlaylistsEnvelope = parse_body(response.body)?;
+    map_favorite_playlist_response(response, user_id)
+}
+
+fn map_favorite_playlist_response(
+    response: UserPlaylistsEnvelope,
+    user_id: &str,
+) -> Result<Playlist> {
+    let raw_playlist = response
+        .playlist
+        .into_iter()
+        .find(|playlist| playlist.special_type == Some(5))
+        .ok_or_else(|| {
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "NetEase favorite playlist is not visible for this user",
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "user_id": user_id }))
+        })?;
+    if raw_playlist
+        .creator
+        .as_ref()
+        .is_some_and(|creator| creator.user_id.to_string() != user_id)
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase favorite playlist returned a conflicting owner",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "user_id": user_id, "playlist_id": raw_playlist.id })));
+    }
+    let native_name = raw_playlist.name.clone();
+    let display_name = favorite_playlist_display_name(
+        raw_playlist
+            .creator
+            .as_ref()
+            .map(|creator| creator.nickname.as_str()),
+    );
+    let mut playlist = map_playlist(raw_playlist)?;
+    playlist.name = display_name;
+    playlist
+        .extensions
+        .insert("source_type".to_owned(), json!("favorite_tracks"));
+    playlist
+        .extensions
+        .insert("favorite_user_id".to_owned(), json!(user_id));
+    playlist
+        .extensions
+        .insert("native_name".to_owned(), json!(native_name));
+    Ok(playlist)
+}
+
+fn favorite_playlist_display_name(nickname: Option<&str>) -> String {
+    nickname
+        .map(str::trim)
+        .filter(|nickname| !nickname.is_empty())
+        .map_or_else(
+            || "我喜欢的音乐".to_owned(),
+            |nickname| format!("{nickname}喜欢的音乐"),
+        )
+}
+
+fn map_netease_favorite_playlist_source(user_id: &str, mut playlist: Playlist) -> Result<Playlist> {
+    let user_id = parse_numeric_id("user", user_id)?.to_string();
+    let source_ref = playlist.resource_ref.clone();
+    let source_id = playlist.id.clone();
+    playlist.resource_ref =
+        ResourceRef::new(Platform::Netease, user_id.clone()).map_err(|error| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                format!("NetEase returned an invalid favorite source user id: {error}"),
+            )
+            .with_platform(Platform::Netease)
+        })?;
+    playlist.id = user_id;
+    playlist
+        .extensions
+        .insert("source_playlist_ref".to_owned(), json!(source_ref));
+    playlist
+        .extensions
+        .insert("source_playlist_id".to_owned(), json!(source_id));
+    Ok(playlist)
+}
+
+fn unsupported_netease_playlist_source_type(source_type: &str) -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::CapabilityNotSupported,
+        format!("netease does not support playlist source type {source_type}"),
+    )
+    .with_platform(Platform::Netease)
+    .with_details(json!({ "source_type": source_type }))
+}
+
+fn validate_favorite_intelligence_request(request: &FavoriteIntelligenceRequest) -> Result<()> {
+    if request.seed_track_ref.platform() != Platform::Netease
+        || request
+            .start_track_ref
+            .as_ref()
+            .is_some_and(|reference| reference.platform() != Platform::Netease)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "NetEase favorite intelligence requires NetEase track references",
+        )
+        .with_platform(Platform::Netease));
+    }
+    if !(1..=100).contains(&request.count) {
+        return Err(TuneWeaveError::invalid_request(
+            "favorite intelligence count must be between 1 and 100",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "count": request.count })));
+    }
+    parse_numeric_id("seed track", request.seed_track_ref.id())?;
+    if let Some(start) = request.start_track_ref.as_ref() {
+        parse_numeric_id("start track", start.id())?;
+    }
+    Ok(())
+}
+
+fn map_favorite_intelligence_queue(
+    raw_response: Value,
+    playlist: Playlist,
+    seed_track_ref: ResourceRef,
+    start_track_ref: ResourceRef,
+    count: u32,
+) -> Result<FavoriteIntelligenceQueue> {
+    ensure_success(&raw_response)?;
+    let response: FavoriteIntelligenceEnvelope = parse_body(raw_response)?;
+    if response.data.len() > 1_000 {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase favorite intelligence queue exceeded the item limit",
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "maximum_items": 1_000 })));
+    }
+    let items = response
+        .data
+        .into_iter()
+        .map(|item| {
+            if item.id == 0 || item.id != item.song_info.id {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase favorite intelligence returned a conflicting track identity",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(json!({
+                    "item_id": item.id,
+                    "song_id": item.song_info.id
+                })));
+            }
+            let algorithm = item
+                .alg
+                .map(|algorithm| algorithm.trim().to_owned())
+                .filter(|algorithm| !algorithm.is_empty());
+            if algorithm.as_ref().is_some_and(|algorithm| {
+                algorithm.len() > 1_024 || algorithm.chars().any(char::is_control)
+            }) {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase favorite intelligence returned an invalid algorithm label",
+                )
+                .with_platform(Platform::Netease));
+            }
+            let recommended = item.recommended;
+            let mut track = map_song(item.song_info, None)?;
+            track.extensions.insert(
+                "intelligence".to_owned(),
+                json!({
+                    "recommended": recommended,
+                    "algorithm": algorithm
+                }),
+            );
+            Ok(FavoriteIntelligenceItem {
+                track,
+                recommended,
+                algorithm,
+                extensions: Extensions::from_iter(item.extra),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let item_count = items.len();
+    Ok(FavoriteIntelligenceQueue {
+        playlist,
+        seed_track_ref,
+        start_track_ref,
+        items,
+        extensions: Extensions::from([
+            ("type".to_owned(), json!("fromPlayOne")),
+            ("count".to_owned(), json!(count)),
+            ("returned_count".to_owned(), json!(item_count)),
+            (
+                "response".to_owned(),
+                Value::Object(response.extra.into_iter().collect()),
+            ),
+        ]),
+    })
 }
 
 async fn fetch_play_history(
@@ -30042,6 +30351,128 @@ mod tests {
         assert_eq!(ids, vec![4]);
         assert_eq!(pagination.next_offset, None);
         assert!(!pagination.has_more);
+    }
+
+    #[test]
+    fn favorite_playlist_uses_profile_name_and_preserves_native_cover() {
+        let response: UserPlaylistsEnvelope = serde_json::from_value(json!({
+            "playlist": [{
+                "id": 749576809,
+                "name": "我喜欢的音乐",
+                "coverImgUrl": "http://p1.music.126.net/favorite.jpg",
+                "trackCount": 668,
+                "specialType": 5,
+                "creator": {
+                    "userId": 499129857,
+                    "nickname": "荷花MopeLotus"
+                }
+            }],
+            "more": true
+        }))
+        .expect("favorite playlist fixture");
+        let playlist =
+            map_favorite_playlist_response(response, "499129857").expect("map favorite playlist");
+        assert_eq!(playlist.resource_ref.to_string(), "netease:749576809");
+        assert_eq!(playlist.name, "荷花MopeLotus喜欢的音乐");
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("http://p1.music.126.net/favorite.jpg")
+        );
+        assert_eq!(playlist.track_count, Some(668));
+        assert_eq!(playlist.extensions["source_type"], "favorite_tracks");
+        assert_eq!(playlist.extensions["native_name"], "我喜欢的音乐");
+        assert_eq!(favorite_playlist_display_name(None), "我喜欢的音乐");
+        assert_eq!(favorite_playlist_display_name(Some("  ")), "我喜欢的音乐");
+
+        let source = map_netease_favorite_playlist_source("499129857", playlist)
+            .expect("map favorite import source");
+        assert_eq!(source.resource_ref.to_string(), "netease:499129857");
+        assert_eq!(source.name, "荷花MopeLotus喜欢的音乐");
+        assert_eq!(
+            source.cover_url.as_deref(),
+            Some("http://p1.music.126.net/favorite.jpg")
+        );
+        assert_eq!(
+            source.extensions["source_playlist_ref"],
+            "netease:749576809"
+        );
+    }
+
+    #[test]
+    fn favorite_intelligence_maps_typed_queue_and_rejects_invalid_controls() {
+        let playlist = Playlist {
+            resource_ref: ResourceRef::new(Platform::Netease, "749576809")
+                .expect("favorite playlist reference"),
+            platform: Platform::Netease,
+            id: "749576809".to_owned(),
+            name: "荷花MopeLotus喜欢的音乐".to_owned(),
+            description: String::new(),
+            cover_url: Some("http://p1.music.126.net/favorite.jpg".to_owned()),
+            creator: None,
+            track_count: Some(668),
+            tags: Vec::new(),
+            subscribed: Some(false),
+            created_at: None,
+            updated_at: None,
+            extensions: Extensions::new(),
+        };
+        let seed = ResourceRef::new(Platform::Netease, "123").expect("seed track reference");
+        let queue = map_favorite_intelligence_queue(
+            json!({
+                "code": 200,
+                "data": [{
+                    "id": 123,
+                    "songInfo": fixture_song_value(),
+                    "recommended": true,
+                    "alg": "Alg_AI_One_123",
+                    "futureField": "kept"
+                }],
+                "message": "success"
+            }),
+            playlist,
+            seed.clone(),
+            seed.clone(),
+            1,
+        )
+        .expect("map favorite intelligence queue");
+        assert_eq!(queue.playlist.id, "749576809");
+        assert_eq!(queue.seed_track_ref, seed);
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].track.resource_ref.to_string(), "netease:123");
+        assert_eq!(queue.items[0].recommended, Some(true));
+        assert_eq!(queue.items[0].algorithm.as_deref(), Some("Alg_AI_One_123"));
+        assert_eq!(queue.items[0].extensions["futureField"], "kept");
+        assert_eq!(queue.extensions["response"]["message"], "success");
+
+        for request in [
+            FavoriteIntelligenceRequest {
+                seed_track_ref: ResourceRef::new(Platform::Qq, "123")
+                    .expect("foreign seed reference"),
+                start_track_ref: None,
+                count: 1,
+                account: None,
+            },
+            FavoriteIntelligenceRequest {
+                seed_track_ref: ResourceRef::new(Platform::Netease, "123").expect("seed reference"),
+                start_track_ref: None,
+                count: 0,
+                account: None,
+            },
+            FavoriteIntelligenceRequest {
+                seed_track_ref: ResourceRef::new(Platform::Netease, "not-a-number")
+                    .expect("opaque seed reference"),
+                start_track_ref: None,
+                count: 1,
+                account: None,
+            },
+        ] {
+            assert_eq!(
+                validate_favorite_intelligence_request(&request)
+                    .expect_err("invalid favorite intelligence request")
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
     }
 
     #[test]

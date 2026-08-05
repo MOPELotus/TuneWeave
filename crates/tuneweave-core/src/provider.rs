@@ -24,31 +24,31 @@ use crate::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart,
     DimensionChartRequest, DimensionChartTrackSnapshot, ErrorCode, Extensions,
-    GeneralSearchRequest, GeneralSearchResult, ImageUploadRequest, ImageUploadResult,
-    ListeningRightsAdCatalog, ListeningRightsAdRequest, ListeningRightsGainRequest,
-    ListeningRightsGainResult, ListeningRightsStatus, ListeningRightsStatusRequest,
-    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
-    MediaStream, MembershipSummary, MultiStyleLyricTranslations, MusicVideoListRequest, Page,
-    PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform, PlatformApiRequest,
-    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
-    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
-    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
-    PlaylistMutationResult, PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem,
-    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast,
-    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartRequest,
-    PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
-    PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeListRequest, PodcastEpisodeLyrics, PodcastEpisodeOrderRequest,
-    PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
-    PodcastEpisodeRecommendationRequest, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
-    PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult, ProviderCredential,
-    ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
-    RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedRequest,
-    RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest, RelatedVideoList,
-    RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    FavoriteIntelligenceQueue, FavoriteIntelligenceRequest, GeneralSearchRequest,
+    GeneralSearchResult, ImageUploadRequest, ImageUploadResult, ListeningRightsAdCatalog,
+    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
+    ListeningRightsStatus, ListeningRightsStatusRequest, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
+    MultiStyleLyricTranslations, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
+    PersonalFmRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
+    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
+    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem, PlaylistTrackOrderRequest,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast, PodcastCategoryRecommendations,
+    PodcastChartEntry, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest,
+    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartRequest,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult,
+    ProviderCredential, ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
+    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationFeed,
+    RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest,
+    RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
     SearchTrendingRequest, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
@@ -1387,6 +1387,13 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn favorite_playlist(&self, _account: Option<&str>) -> Result<Playlist> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Favorites,
+        ))
+    }
+
     async fn user_favorite_tracks(
         &self,
         _user_id: &str,
@@ -1395,6 +1402,27 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::Favorites,
+        ))
+    }
+
+    async fn user_favorite_playlist(
+        &self,
+        _user_id: &str,
+        _account: Option<&str>,
+    ) -> Result<Playlist> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Favorites,
+        ))
+    }
+
+    async fn favorite_intelligence(
+        &self,
+        _request: &FavoriteIntelligenceRequest,
+    ) -> Result<FavoriteIntelligenceQueue> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::FavoriteIntelligence,
         ))
     }
 
