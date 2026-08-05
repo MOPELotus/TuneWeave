@@ -472,7 +472,8 @@
       "network": "anonymous",
       "acceptance_cases": [
         "track_download_accepts_modern_level_backend_and_bitrate_aliases",
-        "track_download_keeps_an_unavailable_url_as_successful_data",
+        "track_download_resolves_an_unavailable_native_url_through_the_stream_chain",
+        "track_download_honors_an_explicit_cross_platform_source",
         "stream_and_download_forward_account_to_origin_metadata_lookup",
         "track_downloads_use_caller_credentials_without_server_account_fallback",
         "track_download_rejects_invalid_or_unknown_parameters"
