@@ -1018,6 +1018,25 @@ pub(crate) struct PersonalFmEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct FavoriteIntelligenceEnvelope {
+    #[serde(default)]
+    pub data: Vec<FavoriteIntelligenceItem>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FavoriteIntelligenceItem {
+    pub id: u64,
+    #[serde(rename = "songInfo")]
+    pub song_info: Song,
+    pub recommended: Option<bool>,
+    pub alg: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PersonalizedEnvelope {
     pub result: Vec<Value>,
     pub category: Option<Value>,

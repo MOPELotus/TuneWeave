@@ -5836,6 +5836,11 @@ impl MusicProvider for QqProvider {
         Ok(page)
     }
 
+    async fn favorite_playlist(&self, account: Option<&str>) -> Result<Playlist> {
+        self.playlist("dir:201", Some(account.unwrap_or("default")))
+            .await
+    }
+
     async fn user_favorite_tracks(
         &self,
         user_id: &str,
@@ -5861,6 +5866,43 @@ impl MusicProvider for QqProvider {
             .extensions
             .insert("user_encrypted_uin".to_owned(), json!(encrypted_uin));
         Ok(page)
+    }
+
+    async fn user_favorite_playlist(
+        &self,
+        user_id: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        let encrypted_uin = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
+        let credential = self.qq_credential(account)?;
+        let locator = QqPlaylistLocator {
+            playlist_id: 0,
+            directory_id: 201,
+        };
+        let response = self
+            .client
+            .request_android_with_credential(
+                &[qq_playlist_detail_request(
+                    locator,
+                    QqPlaylistDetailOptions {
+                        offset: 0,
+                        limit: 1,
+                        only_songs: None,
+                        include_tags: true,
+                        include_user: true,
+                    },
+                    Some(encrypted_uin),
+                )],
+                credential.as_ref(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| qq_data_error("QQ favorite playlist request returned no response"))?;
+        let parsed = parse_qq_playlist_detail(response.data)?;
+        validate_qq_playlist_detail_page(&parsed, 0, 1)?;
+        let playlist = map_qq_playlist(locator, parsed, response.raw)?;
+        map_qq_favorite_playlist_source(encrypted_uin, playlist)
     }
 
     async fn user_created_playlists(
@@ -6022,15 +6064,7 @@ impl MusicProvider for QqProvider {
     ) -> Result<Playlist> {
         match source_type {
             "playlist" => self.playlist(id, account).await,
-            "favorite_tracks" => {
-                let request = tuneweave_core::PageRequest {
-                    limit: 1,
-                    offset: 0,
-                    account: account.map(str::to_owned),
-                };
-                let page = self.user_favorite_tracks(id, &request).await?;
-                map_favorite_tracks_source(id, &page)
-            }
+            "favorite_tracks" => self.user_favorite_playlist(id, account).await,
             _ => Err(unsupported_qq_playlist_source_type(source_type)),
         }
     }
@@ -16708,34 +16742,25 @@ fn map_qq_favorite_mv(video: QqFavoriteMvItem) -> Result<Video> {
     })
 }
 
-fn map_favorite_tracks_source(user_id: &str, page: &Page<Track>) -> Result<Playlist> {
+fn map_qq_favorite_playlist_source(user_id: &str, mut playlist: Playlist) -> Result<Playlist> {
     let user_id = validate_qq_encrypted_uin(user_id, "user encrypted UIN")?;
-    let track_count = page.pagination.total.ok_or_else(|| {
-        qq_data_error("QQ favorite track source did not return a total item count")
-    })?;
-    let mut extensions = Extensions::new();
-    extensions.insert("source_type".to_owned(), json!("favorite_tracks"));
-    extensions.insert("user_encrypted_uin".to_owned(), json!(user_id));
-    extensions.insert(
-        "source_pagination".to_owned(),
-        serde_json::to_value(&page.pagination)
-            .map_err(|_| qq_data_error("QQ favorite track source metadata is malformed"))?,
-    );
-    Ok(Playlist {
-        resource_ref: qq_ref(user_id, "favorite track source")?,
-        platform: Platform::Qq,
-        id: user_id.to_owned(),
-        name: "QQ 用户喜欢歌曲".to_owned(),
-        description: "QQ 音乐公开用户喜欢歌曲列表".to_owned(),
-        cover_url: None,
-        creator: None,
-        track_count: Some(track_count),
-        tags: Vec::new(),
-        subscribed: None,
-        created_at: None,
-        updated_at: None,
-        extensions,
-    })
+    let source_ref = playlist.resource_ref.clone();
+    let source_id = playlist.id.clone();
+    playlist.resource_ref = qq_ref(user_id, "favorite track source")?;
+    playlist.id = user_id.to_owned();
+    playlist
+        .extensions
+        .insert("source_type".to_owned(), json!("favorite_tracks"));
+    playlist
+        .extensions
+        .insert("user_encrypted_uin".to_owned(), json!(user_id));
+    playlist
+        .extensions
+        .insert("source_playlist_ref".to_owned(), json!(source_ref));
+    playlist
+        .extensions
+        .insert("source_playlist_id".to_owned(), json!(source_id));
+    Ok(playlist)
 }
 
 fn unsupported_qq_playlist_source_type(source_type: &str) -> TuneWeaveError {
@@ -25586,30 +25611,34 @@ mod tests {
     }
 
     #[test]
-    fn favorite_track_import_source_keeps_user_identity_and_total() {
-        let page = Page {
-            items: vec![Track::new(
-                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").expect("track reference"),
-                "晴天",
-            )],
-            pagination: PageMeta {
-                limit: 1,
-                offset: 0,
-                total: Some(88),
-                next_offset: Some(1),
-                has_more: true,
-                extensions: Extensions::from([("library_scope".to_owned(), json!("user"))]),
-            },
+    fn favorite_track_import_source_keeps_native_metadata_and_user_identity() {
+        let playlist = Playlist {
+            resource_ref: ResourceRef::new(Platform::Qq, "dir:201")
+                .expect("favorite directory reference"),
+            platform: Platform::Qq,
+            id: "dir:201".to_owned(),
+            name: "我喜欢".to_owned(),
+            description: "QQ 音乐喜欢歌曲".to_owned(),
+            cover_url: Some("https://example.test/favorite.jpg".to_owned()),
+            creator: None,
+            track_count: Some(88),
+            tags: Vec::new(),
+            subscribed: None,
+            created_at: None,
+            updated_at: None,
+            extensions: Extensions::new(),
         };
-        let source =
-            map_favorite_tracks_source("encrypted-uin", &page).expect("favorite track source");
+        let source = map_qq_favorite_playlist_source("encrypted-uin", playlist)
+            .expect("favorite track source");
         assert_eq!(source.resource_ref.to_string(), "qq:encrypted-uin");
+        assert_eq!(source.name, "我喜欢");
+        assert_eq!(
+            source.cover_url.as_deref(),
+            Some("https://example.test/favorite.jpg")
+        );
         assert_eq!(source.track_count, Some(88));
         assert_eq!(source.extensions["source_type"], "favorite_tracks");
-        assert_eq!(
-            source.extensions["source_pagination"]["extensions"]["library_scope"],
-            "user"
-        );
+        assert_eq!(source.extensions["source_playlist_ref"], "qq:dir:201");
 
         let error = unsupported_qq_playlist_source_type("created_playlists");
         assert_eq!(error.code, ErrorCode::CapabilityNotSupported);

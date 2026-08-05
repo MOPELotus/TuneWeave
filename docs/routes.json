@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 259,
+  "route_count": 262,
   "routes": [
     {
       "method": "GET",
@@ -79,6 +79,10 @@
       "path": "/v1/account/dislikes/tracks"
     },
     {
+      "method": "GET",
+      "path": "/v1/account/favorites/playlist"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/account/favorites/playlists/{reference}"
     },
@@ -89,6 +93,10 @@
     {
       "method": "GET",
       "path": "/v1/account/favorites/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/favorites/tracks/intelligence"
     },
     {
       "method": "DELETE",
@@ -917,6 +925,10 @@
     {
       "method": "GET",
       "path": "/v1/users/{reference}/favorites/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/users/{reference}/favorites/playlist"
     },
     {
       "method": "GET",

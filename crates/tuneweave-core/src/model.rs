@@ -2333,6 +2333,31 @@ impl Default for PersonalFmRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FavoriteIntelligenceRequest {
+    pub seed_track_ref: ResourceRef,
+    pub start_track_ref: Option<ResourceRef>,
+    pub count: u32,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FavoriteIntelligenceItem {
+    pub track: Track,
+    pub recommended: Option<bool>,
+    pub algorithm: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FavoriteIntelligenceQueue {
+    pub playlist: Playlist,
+    pub seed_track_ref: ResourceRef,
+    pub start_track_ref: ResourceRef,
+    pub items: Vec<FavoriteIntelligenceItem>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecommendationDislikeRequest {
     pub track_ref: ResourceRef,
     pub account: Option<String>,
@@ -4389,6 +4414,7 @@ pub struct UniPlaylistImportSourceResult {
     #[serde(rename = "type")]
     pub source_type: String,
     pub name: String,
+    pub cover_url: Option<String>,
     pub item_count: u64,
     pub account: Option<String>,
     pub extensions: Extensions,

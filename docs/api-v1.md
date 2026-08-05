@@ -270,6 +270,16 @@ GET /v1/tracks/{ref}/stream?quality=lossless&playback_platform=qq&fallback=true&
 
 账户资料库和收藏操作位于 `/v1/account/*`，包括个人歌单、喜欢歌曲、收藏专辑、播客、视频、广播、历史、会员状态和云盘。写操作需要目标平台凭证，并可能受平台权益、频率和风控限制。
 
+| 方法 | 端点 | 说明 |
+| --- | --- | --- |
+| `GET` | `/v1/account/favorites/playlist` | 当前账户的“喜欢”歌单元数据，包括平台原封面 |
+| `GET` | `/v1/account/favorites/tracks` | 当前账户喜欢的歌曲 |
+| `GET` | `/v1/users/{ref}/favorites/playlist` | 指定用户可见的“喜欢”歌单元数据 |
+| `GET` | `/v1/users/{ref}/favorites/tracks` | 指定用户可见的喜欢歌曲 |
+| `GET` | `/v1/account/favorites/tracks/intelligence` | 以喜欢歌单为来源生成心动模式/智能播放队列 |
+
+网易云“喜欢”歌单名称使用平台资料昵称生成 `{username}喜欢的音乐`，昵称不可用时为“我喜欢的音乐”，封面保持平台歌单原值。QQ 使用“我喜欢”目录的原始名称和封面。心动队列要求 `seed` 歌曲引用，可选 `start` 和 `count`；`count` 保留网易云协议语义，不作为 TuneWeave 分页大小，返回队列不伪造 offset 或 continuation。
+
 ## 登录与 Uni Playlist
 
 登录端点位于 `/v1/auth/*`，详见[登录与凭证](authentication.md)。

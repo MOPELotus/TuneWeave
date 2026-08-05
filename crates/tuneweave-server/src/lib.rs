@@ -50,15 +50,16 @@ use tuneweave_core::{
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
-    DimensionChartTrackSnapshot, ErrorCode, Extensions, GeneralSearchRequest, GeneralSearchResult,
-    ImageUploadRequest, ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog,
-    ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
-    ListeningRightsStatus, ListeningRightsStatusRequest, ListeningRightsTimestamp,
-    LocalTrackMatchRequest, LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload,
-    MediaStream, MembershipSummary, MemoryUniPlaylistStore, MultiStyleLyricTranslations,
-    MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder,
-    MusicVideoType, PageMeta, PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest,
-    PersonalFmVariant, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
+    DimensionChartTrackSnapshot, ErrorCode, Extensions, FavoriteIntelligenceQueue,
+    FavoriteIntelligenceRequest, GeneralSearchRequest, GeneralSearchResult, ImageUploadRequest,
+    ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog, ListeningRightsAdRequest,
+    ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsStatus,
+    ListeningRightsStatusRequest, ListeningRightsTimestamp, LocalTrackMatchRequest,
+    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
+    MemoryUniPlaylistStore, MultiStyleLyricTranslations, MusicProvider, MusicVideoArea,
+    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta,
+    PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant,
+    Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
     PlaybackHistoryPeriod, PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult,
     PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind,
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
@@ -1146,6 +1147,10 @@ pub fn build_router(state: AppState) -> Router {
             get(user_favorite_tracks),
         )
         .route(
+            "/users/{reference}/favorites/playlist",
+            get(user_favorite_playlist),
+        )
+        .route(
             "/users/{reference}/playlists/created",
             get(user_created_playlists),
         )
@@ -1306,7 +1311,15 @@ pub fn build_router(state: AppState) -> Router {
             "/account/following/artists/new-tracks/play-all",
             get(account_artist_new_tracks_play_all),
         )
+        .route(
+            "/account/favorites/playlist",
+            get(account_favorite_playlist),
+        )
         .route("/account/favorites/tracks", get(account_favorite_tracks))
+        .route(
+            "/account/favorites/tracks/intelligence",
+            get(account_favorite_intelligence),
+        )
         .route("/account/history", get(account_history))
         .route(
             "/account/history/podcast-episodes",
@@ -7153,6 +7166,7 @@ async fn load_uni_playlist_import_source(
             id: playlist.id,
             source_type: source.source_type.clone(),
             name: playlist.name,
+            cover_url: playlist.cover_url,
             item_count,
             account: access.response_account,
             extensions: Extensions::from([("complete_pagination".to_owned(), json!(true))]),
@@ -7221,6 +7235,7 @@ fn load_local_uni_playlist_import_source(
             id: playlist.id,
             source_type: source.source_type.clone(),
             name: playlist.name,
+            cover_url: None,
             item_count,
             account: None,
             extensions: Extensions::from([("complete_pagination".to_owned(), json!(true))]),
@@ -11551,6 +11566,35 @@ async fn artist_top_tracks(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserFavoritePlaylistParams {
+    account: Option<String>,
+}
+
+async fn user_favorite_playlist(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    headers: HeaderMap,
+    params: Result<Query<UserFavoritePlaylistParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let playlist = access
+        .provider
+        .user_favorite_playlist(reference.id(), access.provider_account.as_deref())
+        .await?;
+    Ok(Json(access.response(playlist, platform)))
+}
+
 async fn user_favorite_tracks(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -15753,6 +15797,33 @@ async fn account_artist_new_tracks_play_all(
     ))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FavoritePlaylistQuery {
+    platform: Option<String>,
+    account: Option<String>,
+}
+
+async fn account_favorite_playlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<FavoritePlaylistQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let playlist = access
+        .provider
+        .favorite_playlist(Some(access.required_account()))
+        .await?;
+    Ok(Json(access.response(playlist, platform)))
+}
+
 async fn account_favorite_tracks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15783,6 +15854,75 @@ async fn account_favorite_tracks(
             .response(page.items, platform)
             .with_pagination(page.pagination),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FavoriteIntelligenceQuery {
+    platform: Option<String>,
+    account: Option<String>,
+    #[serde(alias = "id", alias = "track", alias = "seed_track")]
+    seed: String,
+    #[serde(alias = "sid", alias = "start_track")]
+    start: Option<String>,
+    count: Option<String>,
+}
+
+async fn account_favorite_intelligence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<FavoriteIntelligenceQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<FavoriteIntelligenceQueue>>, ApiError> {
+    let params = query_params(params)?;
+    let platform = account_platform(&state, params.platform.as_deref())?;
+    let seed_track_ref = parse_reference(params.seed)?;
+    if seed_track_ref.platform() != platform {
+        return Err(TuneWeaveError::invalid_request(
+            "favorite intelligence seed track must use the selected platform",
+        )
+        .with_details(json!({
+            "platform": platform,
+            "seed_ref": seed_track_ref
+        }))
+        .into());
+    }
+    let start_track_ref = params.start.map(parse_reference).transpose()?;
+    if start_track_ref
+        .as_ref()
+        .is_some_and(|reference| reference.platform() != platform)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "favorite intelligence start track must use the selected platform",
+        )
+        .with_details(json!({
+            "platform": platform,
+            "start_ref": start_track_ref
+        }))
+        .into());
+    }
+    let count = parse_u32_parameter("count", params.count.as_deref(), 1)?;
+    if !(1..=100).contains(&count) {
+        return Err(TuneWeaveError::invalid_request(
+            "favorite intelligence count must be between 1 and 100",
+        )
+        .into());
+    }
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let queue = access
+        .provider
+        .favorite_intelligence(&FavoriteIntelligenceRequest {
+            seed_track_ref,
+            start_track_ref,
+            count,
+            account: Some(access.required_account().to_owned()),
+        })
+        .await?;
+    Ok(Json(access.response(queue, platform)))
 }
 
 async fn account_history(
@@ -18298,6 +18438,7 @@ mod tests {
                 Capability::ListeningRightsGain,
                 Capability::ListeningRightsStatus,
                 Capability::Favorites,
+                Capability::FavoriteIntelligence,
                 Capability::ListeningHistory,
                 Capability::RecommendationFeed,
                 Capability::Recommendations,
@@ -20722,6 +20863,17 @@ mod tests {
             })
         }
 
+        async fn favorite_playlist(&self, account: Option<&str>) -> Result<Playlist> {
+            let mut playlist = sample_playlist("749576809");
+            playlist.name = "荷花MopeLotus喜欢的音乐".to_owned();
+            playlist.cover_url = Some("https://example.test/netease-favorite.jpg".to_owned());
+            playlist.track_count = Some(668);
+            playlist
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(playlist)
+        }
+
         async fn user_favorite_tracks(
             &self,
             user_id: &str,
@@ -20738,6 +20890,23 @@ mod tests {
                     extensions: Default::default(),
                 },
             })
+        }
+
+        async fn user_favorite_playlist(
+            &self,
+            user_id: &str,
+            account: Option<&str>,
+        ) -> Result<Playlist> {
+            let mut playlist = sample_playlist("749576809");
+            playlist.name = "荷花MopeLotus喜欢的音乐".to_owned();
+            playlist.cover_url = Some("https://example.test/netease-favorite.jpg".to_owned());
+            playlist
+                .extensions
+                .insert("favorite_user_id".to_owned(), json!(user_id));
+            playlist
+                .extensions
+                .insert("account".to_owned(), json!(account));
+            Ok(playlist)
         }
 
         async fn user_created_playlists(
@@ -21425,6 +21594,32 @@ mod tests {
                         ("sub_mode".to_owned(), json!(request.sub_mode)),
                     ]),
                 },
+            })
+        }
+
+        async fn favorite_intelligence(
+            &self,
+            request: &FavoriteIntelligenceRequest,
+        ) -> Result<FavoriteIntelligenceQueue> {
+            let playlist = self.favorite_playlist(request.account.as_deref()).await?;
+            let start_track_ref = request
+                .start_track_ref
+                .clone()
+                .unwrap_or_else(|| request.seed_track_ref.clone());
+            Ok(FavoriteIntelligenceQueue {
+                playlist,
+                seed_track_ref: request.seed_track_ref.clone(),
+                start_track_ref,
+                items: vec![tuneweave_core::FavoriteIntelligenceItem {
+                    track: sample_track("2755332551"),
+                    recommended: Some(false),
+                    algorithm: Some("Alg_AI_One".to_owned()),
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::from([
+                    ("count".to_owned(), json!(request.count)),
+                    ("account".to_owned(), json!(request.account)),
+                ]),
             })
         }
 
@@ -39011,6 +39206,68 @@ mod tests {
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
         assert_eq!(json["meta"]["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn favorite_playlist_returns_native_name_cover_and_account_scope() {
+        let (status, account) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/favorites/playlist?platform=netease&account=personal",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(account["data"]["ref"], "netease:749576809");
+        assert_eq!(account["data"]["name"], "荷花MopeLotus喜欢的音乐");
+        assert_eq!(
+            account["data"]["cover_url"],
+            "https://example.test/netease-favorite.jpg"
+        );
+        assert_eq!(account["data"]["track_count"], 668);
+        assert_eq!(account["meta"]["account"], "personal");
+
+        let (status, user) = json_response_from(
+            test_app_with_provider(),
+            "/v1/users/netease:499129857/favorites/playlist?account=viewer",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(user["data"]["ref"], "netease:749576809");
+        assert_eq!(user["data"]["extensions"]["favorite_user_id"], "499129857");
+        assert_eq!(user["meta"]["account"], "viewer");
+    }
+
+    #[tokio::test]
+    async fn favorite_intelligence_returns_a_typed_non_paginated_queue() {
+        let (status, response) = json_response_from(
+            test_app_with_provider(),
+            "/v1/account/favorites/tracks/intelligence?platform=netease&account=personal&seed=netease:2023741598&start=netease:2755332551&count=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["playlist"]["ref"], "netease:749576809");
+        assert_eq!(response["data"]["seed_track_ref"], "netease:2023741598");
+        assert_eq!(response["data"]["start_track_ref"], "netease:2755332551");
+        assert_eq!(
+            response["data"]["items"][0]["track"]["ref"],
+            "netease:2755332551"
+        );
+        assert_eq!(response["data"]["items"][0]["recommended"], false);
+        assert_eq!(response["data"]["items"][0]["algorithm"], "Alg_AI_One");
+        assert_eq!(response["data"]["extensions"]["count"], 3);
+        assert_eq!(response["meta"]["account"], "personal");
+        assert!(response["meta"].get("pagination").is_none());
+
+        for path in [
+            "/v1/account/favorites/tracks/intelligence?platform=netease",
+            "/v1/account/favorites/tracks/intelligence?platform=netease&seed=qq:123",
+            "/v1/account/favorites/tracks/intelligence?platform=netease&seed=netease:123&start=qq:456",
+            "/v1/account/favorites/tracks/intelligence?platform=netease&seed=netease:123&count=0",
+            "/v1/account/favorites/tracks/intelligence?platform=netease&seed=netease:123&unknown=true",
+        ] {
+            let (status, body) = json_response_from(test_app_with_provider(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{path}");
+        }
     }
 
     #[tokio::test]

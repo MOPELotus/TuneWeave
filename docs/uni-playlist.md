@@ -70,6 +70,7 @@ Content-Type: application/json
   "name": "跨平台合并",
   "sources": [
     { "platform": "netease", "type": "playlist", "id": "3778678" },
+    { "platform": "netease", "type": "favorite_tracks", "id": "499129857", "account": "personal" },
     { "platform": "qq", "type": "favorite_tracks", "id": "<uin>", "account": "personal" },
     { "platform": "bilibili", "type": "season", "id": "3629748" },
     { "platform": "bilibili", "type": "favorite_folder", "id": "2883236382", "account": "default" }
@@ -77,7 +78,7 @@ Content-Type: application/json
 }
 ```
 
-公开集合不需要账户。私有或账户可见集合可以为每个来源单独指定 `account`。来源按请求顺序展开，来源内部顺序和重复项目都会保留；任一来源失败时不会创建部分歌单。
+公开集合不需要账户。私有或账户可见集合可以为每个来源单独指定 `account`。来源按请求顺序展开，来源内部顺序和重复项目都会保留；任一来源失败时不会创建部分歌单。导入结果的 `sources` 会返回来源名称与 `cover_url`，`favorite_tracks` 使用网易云或 QQ 的真实“喜欢”歌单元数据。
 
 Provider 可以支持不同的 `type`。常用值包括 `playlist`、`favorite_tracks`、`season` 和 `favorite_folder`；请通过 `/v1/capabilities` 确认目标平台能力。
 
