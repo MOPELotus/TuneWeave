@@ -2674,6 +2674,29 @@ pub struct ArtistBiographySection {
     pub text: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistDescriptionRequest {
+    pub include_extra: bool,
+    pub include_wiki: bool,
+    pub include_group_members: bool,
+    pub include_picture: bool,
+    pub include_photos: bool,
+    pub account: Option<String>,
+}
+
+impl Default for ArtistDescriptionRequest {
+    fn default() -> Self {
+        Self {
+            include_extra: true,
+            include_wiki: true,
+            include_group_members: true,
+            include_picture: true,
+            include_photos: true,
+            account: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Artist {
     #[serde(rename = "ref")]

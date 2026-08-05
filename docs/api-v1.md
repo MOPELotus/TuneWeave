@@ -215,6 +215,8 @@ GET /v1/search?q=海阔天空&type=track&platform=all&limit=20&offset=0
 | 视频 | `/v1/videos/{ref}`、`/parts`、`/subtitles`、`/playback`、`/stats` |
 | 播客节目 | `/v1/episodes/{ref}`、`/lyrics` |
 
+`GET/POST /v1/artists/details` 批量读取歌手描述。默认返回扩展资料、百科、组合成员、主图和相册；调用方可分别通过 `ex_singer`、`wiki_singer`、`group_singer`、`pic`、`photos` 控制，POST 也接受对应的 `include_*` 别名。QQ 主图和相册使用强类型字段，所有图片地址在返回前校验并统一为 HTTPS。
+
 批量详情端点通常同时提供 GET 和 POST 形式。GET 适合短引用列表；POST 适合结构化批量请求。
 
 ## 播放与下载
