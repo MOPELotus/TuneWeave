@@ -58,25 +58,25 @@ use tuneweave_core::{
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
-    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderAuthResult, ProviderCredential,
-    ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, Quality, RadioCatalogOption,
-    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
-    RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchMultiMatchSection, SearchOpaqueItem, SearchQuery, SearchSuggestion,
-    SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail,
-    SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest, SearchVariant,
-    StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PodcastEpisodeCover, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
+    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
+    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
+    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll,
+    ProviderQrStart, Quality, RadioCatalogOption, RadioPlaybackItem, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioStyle, RadioStyleCatalog, RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy,
+    RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationRequest, RecommendationSource, ResolutionStatus, ResourceRef, Result,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchMultiMatchSection, SearchOpaqueItem, SearchQuery,
+    SearchSuggestion, SearchSuggestionClient, SearchSuggestionList, SearchSuggestionRequest,
+    SearchTrendingDetail, SearchTrendingEntry, SearchTrendingList, SearchTrendingRequest,
+    SearchVariant, StoredAccountCredential, StreamBatch, StreamOutcome, StreamRequest,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackEntitlement, TrialWindow, TuneWeaveError, User, UserProfile,
     UserProfileBackend, Video, VideoCatalogOption, VideoDetail, VideoDetailRequest, VideoKind,
     VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView, VideoResolution,
@@ -118,6 +118,7 @@ const NETEASE_CREDENTIAL_KIND: &str = "cookie";
 const NETEASE_ANONYMOUS_CREDENTIAL_KIND: &str = "anonymous_cookie_v1";
 const NETEASE_ANONYMOUS_CREDENTIAL_ACCOUNT: &str = "__tuneweave_anonymous__";
 const CAPTCHA_NETWORK_IDENTITY_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_IMAGE_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_VOICE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1505,6 +1506,19 @@ impl MusicProvider for NeteaseProvider {
         let client = self.client_for(request.account.as_deref())?;
         require_authenticated_client(&client, "podcast episode upload")?;
 
+        let (cover_image_id, cover_upload) = match &request.cover {
+            PodcastEpisodeCover::ImageId(image_id) => (json!(image_id), None),
+            PodcastEpisodeCover::Upload(image) => {
+                let (_, allocation, response) = self
+                    .upload_image_blob(image, "podcast episode cover upload")
+                    .await?;
+                (
+                    allocation.result.document_id.clone(),
+                    Some((allocation, response)),
+                )
+            }
+        };
+
         let (path, payload) = netease_podcast_episode_upload_allocation_request(&descriptor);
         let allocation_response = client.request_weapi(path, payload).await?;
         ensure_account_access(
@@ -1527,6 +1541,7 @@ impl MusicProvider for NeteaseProvider {
             podcast_id,
             request,
             &descriptor,
+            cover_image_id.clone(),
             allocation.result.document_id.clone(),
         )?;
         let precheck_dupkey = random_uuid_v4();
@@ -1558,6 +1573,8 @@ impl MusicProvider for NeteaseProvider {
             precheck.body,
             submit.body,
             request.publish_time_ms,
+            cover_image_id,
+            cover_upload,
         )
     }
 
@@ -6525,6 +6542,7 @@ fn netease_podcast_episode_upload_voice_data(
     podcast_id: u64,
     request: &PodcastEpisodeUploadRequest,
     descriptor: &PodcastEpisodeUploadDescriptor,
+    cover_image_id: Value,
     document_id: Value,
 ) -> Result<String> {
     serde_json::to_string(&json!([{
@@ -6533,7 +6551,7 @@ fn netease_podcast_episode_upload_voice_data(
         "autoPublishText": request.auto_publish_text,
         "description": descriptor.description,
         "voiceListId": podcast_id,
-        "coverImgId": descriptor.cover_image_id,
+        "coverImgId": cover_image_id,
         "dfsId": document_id,
         "categoryId": descriptor.category_id,
         "secondCategoryId": descriptor.second_category_id,
@@ -8370,6 +8388,8 @@ fn map_netease_podcast_episode_upload_result(
     precheck_response: Value,
     submit_response: Value,
     publish_time_ms: u64,
+    cover_image_id: Value,
+    cover_upload: Option<(ImageUploadAllocationEnvelope, Value)>,
 ) -> Result<PodcastEpisodeUploadResult> {
     ensure_success(&precheck_response)?;
     ensure_success(&submit_response)?;
@@ -8386,27 +8406,54 @@ fn map_netease_podcast_episode_upload_result(
         .filter_map(|id| ResourceRef::new(Platform::Netease, id).ok())
         .collect();
     let document_id = json_scalar_string(&allocation.result.document_id).unwrap_or_default();
+    let cover_image_id = json_scalar_string(&cover_image_id).ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "NetEase podcast cover upload did not contain an image id",
+        )
+        .with_platform(Platform::Netease)
+    })?;
+    let cover_source = if cover_upload.is_some() {
+        "upload"
+    } else {
+        "image_id"
+    };
+    let mut extensions = Extensions::from([
+        (
+            "allocation".to_owned(),
+            json!({
+                "object_key": allocation.result.object_key,
+                "document_id": document_id,
+                "filename": descriptor.filename,
+                "extension": descriptor.extension,
+                "content_type": descriptor.content_type
+            }),
+        ),
+        ("cover_image_id".to_owned(), json!(cover_image_id)),
+        ("cover_source".to_owned(), json!(cover_source)),
+        ("nos_upload".to_owned(), nos_response),
+        ("precheck_response".to_owned(), precheck_response),
+        ("response".to_owned(), submit_response),
+    ]);
+    if let Some((allocation, response)) = cover_upload {
+        extensions.insert(
+            "cover_upload".to_owned(),
+            json!({
+                "allocation": {
+                    "object_key": allocation.result.object_key,
+                    "document_id": allocation.result.document_id
+                },
+                "response": response
+            }),
+        );
+    }
     Ok(PodcastEpisodeUploadResult {
         podcast_ref,
         episode_refs,
         name: descriptor.name.clone(),
         uploaded: true,
         publish_time_ms,
-        extensions: Extensions::from([
-            (
-                "allocation".to_owned(),
-                json!({
-                    "object_key": allocation.result.object_key,
-                    "document_id": document_id,
-                    "filename": descriptor.filename,
-                    "extension": descriptor.extension,
-                    "content_type": descriptor.content_type
-                }),
-            ),
-            ("nos_upload".to_owned(), nos_response),
-            ("precheck_response".to_owned(), precheck_response),
-            ("response".to_owned(), submit_response),
-        ]),
+        extensions,
     })
 }
 
@@ -8951,9 +8998,13 @@ fn validate_image_upload(request: &ImageUploadRequest) -> Result<(&str, &str)> {
                 .with_platform(Platform::Netease),
         );
     }
-    if filename.len() > 255 || filename.chars().any(char::is_control) {
+    if filename.len() > 255
+        || filename
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
         return Err(TuneWeaveError::invalid_request(
-            "image filename must be at most 255 bytes and contain no control characters",
+            "image filename must be a safe basename of at most 255 bytes",
         )
         .with_platform(Platform::Netease));
     }
@@ -8973,6 +9024,11 @@ fn validate_image_upload(request: &ImageUploadRequest) -> Result<(&str, &str)> {
             TuneWeaveError::invalid_request("image data cannot be empty")
                 .with_platform(Platform::Netease),
         );
+    }
+    if request.data.len() > MAX_IMAGE_UPLOAD_BYTES {
+        return Err(TuneWeaveError::invalid_request("image data exceeds 20 MiB")
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "max_bytes": MAX_IMAGE_UPLOAD_BYTES })));
     }
     if request.image_size == Some(0) {
         return Err(
@@ -8998,7 +9054,6 @@ struct PodcastEpisodeUploadDescriptor {
     name: String,
     extension: String,
     content_type: String,
-    cover_image_id: String,
     category_id: String,
     second_category_id: String,
     description: String,
@@ -9807,12 +9862,25 @@ fn validate_podcast_episode_upload_request(
             Ok(reference.id().to_owned())
         })
         .collect::<Result<Vec<_>>>()?;
+    match &request.cover {
+        PodcastEpisodeCover::ImageId(image_id) => {
+            required_numeric("cover image", image_id)?;
+        }
+        PodcastEpisodeCover::Upload(image) => {
+            validate_image_upload(image)?;
+            if image.account != request.account {
+                return Err(TuneWeaveError::invalid_request(
+                    "podcast episode audio and cover must use the same account",
+                )
+                .with_platform(Platform::Netease));
+            }
+        }
+    }
     Ok(PodcastEpisodeUploadDescriptor {
         filename: filename.to_owned(),
         name: name.to_owned(),
         extension,
         content_type,
-        cover_image_id: required_numeric("cover image", &request.cover_image_id)?,
         category_id: required_numeric("category", &request.category_id)?,
         second_category_id: required_numeric("second category", &request.second_category_id)?,
         description: description.to_owned(),
@@ -21012,7 +21080,7 @@ mod tests {
             content_type: "audio/mpeg".to_owned(),
             data: b"audio".to_vec(),
             name: None,
-            cover_image_id: "109951168000000000".to_owned(),
+            cover: PodcastEpisodeCover::ImageId("109951168000000000".to_owned()),
             category_id: "3".to_owned(),
             second_category_id: "14".to_owned(),
             description: "节目介绍".to_owned(),
@@ -21050,6 +21118,7 @@ mod tests {
             336_355_127,
             &upload,
             &descriptor,
+            json!("109951168000000000"),
             json!("109951169000000000"),
         )
         .expect("voice upload metadata");
@@ -22222,7 +22291,7 @@ mod tests {
             content_type: "audio/mpeg".to_owned(),
             data: b"audio".to_vec(),
             name: Some("第一期".to_owned()),
-            cover_image_id: "109951168000000000".to_owned(),
+            cover: PodcastEpisodeCover::ImageId("109951168000000000".to_owned()),
             category_id: "3".to_owned(),
             second_category_id: "14".to_owned(),
             description: "节目介绍".to_owned(),
@@ -22260,6 +22329,8 @@ mod tests {
                 "futureField": {"kept": true}
             }),
             0,
+            json!("109951168000000000"),
+            None,
         )
         .expect("map voice upload result");
         assert_eq!(result.podcast_ref.to_string(), "netease:336355127");
@@ -22292,6 +22363,8 @@ mod tests {
             json!({"code": 400, "message": "precheck failed"}),
             json!({"code": 200}),
             0,
+            json!("109951168000000000"),
+            None,
         )
         .expect_err("failed voice upload precheck");
         assert_eq!(error.code, ErrorCode::UpstreamError);
@@ -28975,7 +29048,7 @@ mod tests {
             content_type: "audio/mpeg".to_owned(),
             data: b"audio".to_vec(),
             name: Some("第一期".to_owned()),
-            cover_image_id: "109951168000000000".to_owned(),
+            cover: PodcastEpisodeCover::ImageId("109951168000000000".to_owned()),
             category_id: "3".to_owned(),
             second_category_id: "14".to_owned(),
             description: "节目介绍".to_owned(),
@@ -28999,7 +29072,7 @@ mod tests {
         missing_description.description = "  ".to_owned();
         invalid_requests.push(missing_description);
         let mut invalid_cover = valid();
-        invalid_cover.cover_image_id = "cover".to_owned();
+        invalid_cover.cover = PodcastEpisodeCover::ImageId("cover".to_owned());
         invalid_requests.push(invalid_cover);
         let mut zero_order = valid();
         zero_order.order_no = 0;
