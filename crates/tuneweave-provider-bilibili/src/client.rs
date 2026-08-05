@@ -5185,13 +5185,22 @@ fn validate_bilibili_media_url(value: &str) -> Result<String> {
         || host == "bilivideo.cn"
         || host.ends_with(".bilivideo.cn")
         || host.ends_with(".akamaized.net");
+    let mcdn_host = host.ends_with(".mcdn.bilivideo.cn");
+    let allowed_route = match url.port() {
+        None => {
+            url.path().starts_with("/upgcxcode/")
+                || (mcdn_host && url.path().starts_with("/v1/resource/"))
+        }
+        Some(4483) => mcdn_host && url.path().starts_with("/upgcxcode/"),
+        Some(8082) => mcdn_host && url.path().starts_with("/v1/resource/"),
+        Some(_) => false,
+    };
     if url.scheme() != "https"
         || !allowed_host
-        || url.port().is_some()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || !url.path().starts_with("/upgcxcode/")
+        || !allowed_route
     {
         return Err(bilibili_upstream_error(
             "Bilibili playback returned an unsafe media URL",
@@ -8678,6 +8687,33 @@ mod tests {
             },
             "codecid": codec_id
         })
+    }
+
+    #[test]
+    fn playback_media_urls_accept_known_mcdn_routes_only() {
+        for allowed in [
+            "https://xy113x200x108x47xy.mcdn.bilivideo.cn:4483/upgcxcode/65/46/244954665/audio.m4s?deadline=2000000000",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/resource/35306865840-1-30280.m4s?deadline=2000000000",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/resource/upgcxcode/40/58/audio.m4s?deadline=2000000000",
+        ] {
+            assert_eq!(
+                validate_bilibili_media_url(allowed).expect("trusted mcdn media URL"),
+                allowed
+            );
+        }
+
+        for rejected in [
+            "https://upos-sz-mirrorcos.bilivideo.com:8082/upgcxcode/audio.m4s",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8080/v1/resource/audio.m4s",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:4483/v1/resource/audio.m4s",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/upgcxcode/audio.m4s",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/other/audio.m4s",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn.example:8082/v1/resource/audio.m4s",
+        ] {
+            let error = validate_bilibili_media_url(rejected)
+                .expect_err("untrusted mcdn media URL must be rejected");
+            assert_eq!(error.code, ErrorCode::UpstreamError, "{rejected}");
+        }
     }
 
     fn playback_manifest_fixture() -> Value {
