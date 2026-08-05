@@ -81,6 +81,7 @@ const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
 const WEB_DEVICE_B_NUT: &str = "100";
 pub(crate) const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_VIDEO_DETAIL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUBTITLE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const WBI_CACHE_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 const WEB_TICKET_HMAC_KEY: &[u8] = b"XgwSnGZ1p";
@@ -2579,12 +2580,7 @@ impl BilibiliClient {
             if !status.is_success() {
                 return Err(bilibili_http_error("Bilibili video detail", status));
             }
-            let bytes = response.bytes().await.map_err(bilibili_network_error)?;
-            if bytes.len() > MAX_PASSPORT_RESPONSE_BYTES {
-                return Err(bilibili_upstream_error(
-                    "Bilibili video detail response exceeded the size limit",
-                ));
-            }
+            let bytes = read_bounded_video_detail_response(response).await?;
             parse_video_view_response(&bytes, identity)
         }
         .await;
@@ -3842,6 +3838,35 @@ impl BilibiliClient {
         );
         outcome
     }
+}
+
+async fn read_bounded_video_detail_response(response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut response = response;
+    let limit = MAX_VIDEO_DETAIL_RESPONSE_BYTES;
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(bilibili_upstream_error(
+            "Bilibili video detail response exceeded the size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default()
+            .min(limit),
+    );
+    while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(bilibili_upstream_error(
+                "Bilibili video detail response exceeded the size limit",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn parse_device_identity_response(bytes: &[u8]) -> Result<BilibiliWebDevice> {
@@ -7342,6 +7367,11 @@ fn invalid_bilibili_request(message: impl Into<String>) -> TuneWeaveError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
     use super::*;
 
     const QR_KEY: &str = "8587cf8106a0b863c46d6bab913537f6";
@@ -8408,6 +8438,37 @@ mod tests {
             .expect_err("video view drift");
             assert_eq!(error.code, ErrorCode::UpstreamError);
         }
+    }
+
+    #[tokio::test]
+    async fn video_detail_response_budget_is_larger_than_passport_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let body = vec![b'x'; MAX_PASSPORT_RESPONSE_BYTES + 1];
+        let body_length = body.len();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test connection");
+            let mut request = [0_u8; 4096];
+            let request_size = stream.read(&mut request).expect("test request");
+            assert!(request_size > 0, "test request should not be empty");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {body_length}\r\nConnection: close\r\n\r\n"
+            )
+            .expect("test response headers");
+            stream.write_all(&body).expect("test response body");
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/video-detail"))
+            .send()
+            .await
+            .expect("test response");
+        let bytes = read_bounded_video_detail_response(response)
+            .await
+            .expect("video detail body above passport budget");
+        assert_eq!(bytes.len(), body_length);
+        server.join().expect("test server");
     }
 
     #[test]
