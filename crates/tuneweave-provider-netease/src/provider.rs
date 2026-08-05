@@ -11359,12 +11359,23 @@ fn map_netease_download(
         .with_platform(Platform::Netease)
         .with_details(json!({ "expected": id, "actual": download.id })));
     }
-    let url = download
-        .url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned);
+    let url = if download.code.is_some_and(|code| code != 200) {
+        None
+    } else {
+        download
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+    };
+    let (url, backup_urls) = url.map_or_else(
+        || (None, Vec::new()),
+        |url| {
+            let (primary, backups) = netease_media_url_variants(url);
+            (Some(primary), backups)
+        },
+    );
     let actual_quality = stream_quality(download.level.as_deref(), download.br);
     let mut extensions = Extensions::from([
         ("variant".to_owned(), json!(variant)),
@@ -11375,7 +11386,14 @@ fn map_netease_download(
     if let Some(level) = requested_level {
         extensions.insert("requested_level".to_owned(), json!(level));
     }
-    let format = normalized_string(download.kind);
+    if !backup_urls.is_empty() {
+        extensions.insert("backup_urls".to_owned(), json!(backup_urls));
+    }
+    let format = stream_format(
+        download.kind,
+        url.as_deref().unwrap_or_default(),
+        download.br,
+    );
     let codec = normalized_string(download.encode_type).or_else(|| format.clone());
     Ok(MediaDownload {
         track_ref: track.resource_ref.clone(),
@@ -11456,6 +11474,15 @@ fn map_stream(
     stream: StreamData,
     authenticated: bool,
 ) -> Result<MediaStream> {
+    if stream.code.is_some_and(|code| code != 200) {
+        return Err(stream_unavailable(&stream, authenticated));
+    }
+    if !authenticated
+        && stream.fee.is_some_and(|fee| matches!(fee, 1 | 4))
+        && stream.free_trial_info.is_none()
+    {
+        return Err(stream_unavailable(&stream, authenticated));
+    }
     let original_url = stream
         .url
         .as_deref()
@@ -11470,7 +11497,7 @@ fn map_stream(
         let end_ms = trial.end?.checked_mul(1_000)?;
         (end_ms > start_ms).then_some(TrialWindow { start_ms, end_ms })
     });
-    let format = normalized_string(stream.kind);
+    let format = stream_format(stream.kind, &url, stream.br);
     let codec = normalized_string(stream.encode_type).or_else(|| format.clone());
 
     Ok(MediaStream {
@@ -11525,6 +11552,28 @@ fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
         return (url, Vec::new());
     }
     (compatible, vec![url])
+}
+
+fn stream_format(kind: Option<String>, url: &str, bitrate: Option<u64>) -> Option<String> {
+    normalized_string(kind)
+        .or_else(|| {
+            Url::parse(url)
+                .ok()
+                .and_then(|url| {
+                    let name = url.path_segments()?.next_back()?.to_owned();
+                    name.rsplit_once('.')
+                        .map(|(_, extension)| extension.to_ascii_lowercase())
+                })
+                .filter(|format| {
+                    matches!(
+                        format.as_str(),
+                        "aac" | "flac" | "m4a" | "mp3" | "ogg" | "opus" | "wav"
+                    )
+                })
+        })
+        .or_else(|| {
+            bitrate.map(|bitrate| if bitrate >= 999_000 { "flac" } else { "mp3" }.to_owned())
+        })
 }
 
 fn map_track_availability(
@@ -11588,6 +11637,8 @@ fn stream_unavailable(stream: &StreamData, authenticated: bool) -> TuneWeaveErro
         ErrorCode::AuthenticationRequired
     } else if stream.code == Some(404) {
         ErrorCode::ResourceNotFound
+    } else if stream.code.is_some_and(|code| code != 200) {
+        ErrorCode::UpstreamError
     } else {
         ErrorCode::PermissionDenied
     };
@@ -27096,6 +27147,75 @@ mod tests {
     }
 
     #[test]
+    fn paid_netease_url_without_session_is_left_for_source_fallback() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("track reference"),
+            "测试歌曲",
+        );
+        let stream: StreamData = serde_json::from_value(json!({
+            "id": 123,
+            "url": "https://m801.music.126.net/song/path.flac",
+            "br": 999000,
+            "size": 1024,
+            "code": 200,
+            "type": null,
+            "level": "lossless",
+            "encodeType": null,
+            "fee": 1,
+            "freeTrialInfo": null
+        }))
+        .expect("valid paid stream fixture");
+
+        let error = map_stream(&track, &StreamRequest::default(), stream, false)
+            .expect_err("paid URL must be resolved through an available source");
+        assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[test]
+    fn non_success_stream_code_is_not_reported_as_playable() {
+        let track = Track::new(
+            ResourceRef::new(Platform::Netease, "123").expect("track reference"),
+            "测试歌曲",
+        );
+        let stream: StreamData = serde_json::from_value(json!({
+            "id": 123,
+            "url": "https://m801.music.126.net/song/path.mp3",
+            "br": 320000,
+            "size": 1024,
+            "code": 403,
+            "type": "mp3",
+            "level": "exhigh",
+            "fee": 0,
+            "freeTrialInfo": null
+        }))
+        .expect("valid rejected stream fixture");
+
+        let error = map_stream(&track, &StreamRequest::default(), stream, true)
+            .expect_err("non-success URL must be retried elsewhere");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn stream_format_falls_back_to_lossless_extension_and_bitrate() {
+        assert_eq!(
+            stream_format(
+                None,
+                "https://m801c.music.126.net/song/path.flac",
+                Some(320000)
+            ),
+            Some("flac".to_owned())
+        );
+        assert_eq!(
+            stream_format(None, "https://media.example.test/song", Some(999000)),
+            Some("flac".to_owned())
+        );
+        assert_eq!(
+            stream_format(None, "https://media.example.test/song", Some(320000)),
+            Some("mp3".to_owned())
+        );
+    }
+
+    #[test]
     fn maps_netease_cdn_compatibility_url_with_original_backup() {
         let (url, backups) = netease_media_url_variants(
             "https://m801.music.126.net/song/path.flac?auth=opaque".to_owned(),
@@ -27329,6 +27449,39 @@ mod tests {
         assert_eq!(download.extensions["variant"], "legacy");
         assert_eq!(download.extensions["response"]["code"], 200);
 
+        let compatible = map_netease_download(
+            &track,
+            &request,
+            StreamVariant::Legacy,
+            "/api/song/enhance/download/url",
+            None,
+            json!({
+                "code": 200,
+                "data": {
+                    "id": 2709812973_u64,
+                    "url": "https://m801.music.126.net/audio.flac",
+                    "br": 999000,
+                    "size": 1024,
+                    "code": 200,
+                    "type": null,
+                    "level": "lossless",
+                    "encodeType": null,
+                    "fee": 0,
+                    "freeTrialInfo": null
+                }
+            }),
+        )
+        .expect("map compatible download");
+        assert_eq!(
+            compatible.url.as_deref(),
+            Some("https://m801c.music.126.net/audio.flac")
+        );
+        assert_eq!(compatible.format.as_deref(), Some("flac"));
+        assert_eq!(
+            compatible.extensions["backup_urls"][0],
+            "https://m801.music.126.net/audio.flac"
+        );
+
         let unavailable = map_netease_download(
             &track,
             &StreamRequest {
@@ -27345,10 +27498,10 @@ mod tests {
                 "code": 200,
                 "data": [{
                     "id": 2709812973_u64,
-                    "url": null,
                     "br": 0,
                     "size": 0,
                     "code": -110,
+                    "url": "https://m801.music.126.net/preview.flac",
                     "expi": 1200,
                     "type": null,
                     "level": null,
