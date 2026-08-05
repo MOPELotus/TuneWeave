@@ -179,6 +179,8 @@
 
 稳定歌手详情合并平台的身份详情与传记能力。网易云的 `/artist/detail` 提供名称、图片、身份与作品计数，`/artist/desc` 提供简介和分段传记；QQ 将主页头部与批量歌手详情放在同一上游批包中读取。TuneWeave 将这些响应组合为一个 `Artist`。无法跨平台统一的认证、排行、图片版本、组合资料和专题数据保留在扩展字段，不会因统一映射丢失。
 
+`GET/POST /v1/artists/details` 批量读取歌手描述。默认返回扩展资料、百科、组合成员、主图和相册；调用方可分别通过 `ex_singer`、`wiki_singer`、`group_singer`、`pic`、`photos` 控制，POST 也接受对应的 `include_*` 别名。QQ 主图和相册使用强类型字段，所有图片地址在返回前校验并统一为 HTTPS。批量详情保留输入顺序与重复项；GET 适合短引用列表，POST 适合结构化批量请求。
+
 歌手分类目录使用跨平台枚举：`type=all|male|female|group`，`area=all|chinese|western|japanese|korean|other`，`initial` 接受单个英文字母、`hot` 或 `other`。适配器负责转换平台数值；列表上游没有可靠总数时 `total=null`，通过 `has_more/next_offset` 继续翻页。
 
 歌手主页标签使用 `ArtistHomepageTab`，以 `kind=wiki|album|composer|lyricist|producer|arranger|musician|song|video` 区分内容，并显式返回 `page/limit/has_more/next_page`，不把平台原生页码伪装成偏移量。已知音乐资源分别进入强类型 `tracks/albums/videos`；百科等异构介绍块提升为带 `item_type/titles/texts` 的 `introduction`，平台完整动态块仍保留在单项扩展。`tabs` 保存平台提供的标签导航元数据，`need_show/order` 保留页面展示语义。

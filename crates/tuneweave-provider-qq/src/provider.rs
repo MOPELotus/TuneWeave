@@ -14,22 +14,23 @@ use tuneweave_core::{
     AccountDislikeMutationResult, AccountProfile, AiLyricDictionary, AiLyricDictionaryAvailability,
     AiLyricDictionaryEntry, Album, AlbumListRequest, AlbumSummary, Artist, ArtistArea,
     ArtistBiographySection, ArtistCatalog, ArtistCatalogFilterOption, ArtistCatalogFilters,
-    ArtistCatalogRequest, ArtistCategory, ArtistGenre, ArtistHomepageIntroduction,
-    ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabMetadata, ArtistHomepageTabRequest,
-    ArtistSummary, ArtistTrackListRequest, ArtistTrackOrder, ArtistVideoListRequest,
-    AudioCdnDispatch, AudioCdnNode, AudioFileAccess, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AuthChallengeBackend, AuthChallengeRequest, AuthState, Capability,
-    ChallengeMethod, Chart, ChartCatalog, ChartCatalogRequest, ChartGroup, ChartTrackListRequest,
-    ChartTrackPreview, CreatorSummary, CredentialMode, ErrorCode, Extensions, GeneralSearchRelated,
-    GeneralSearchRelatedTerm, GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection,
-    ImmersiveAudioType, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
-    MultiStyleLyricTranslation, MultiStyleLyricTranslations, MusicGeneAge,
-    MusicGeneAiInterpretation, MusicGeneAttribute, MusicGeneGroove, MusicGeneListeningPeriod,
-    MusicGeneListeningReport, MusicGeneMainDescription, MusicGenePersonality, MusicGenePreferences,
-    MusicGeneStatus, MusicGeneStatusEntry, MusicGeneTempo, MusicProvider, MusicVideoArea,
-    MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, Page, PageMeta,
-    Platform, PlatformApiRequest, PlatformBatchRequest, Playlist, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
+    ArtistCatalogRequest, ArtistCategory, ArtistDescriptionRequest, ArtistGenre,
+    ArtistHomepageIntroduction, ArtistHomepageTab, ArtistHomepageTabKind,
+    ArtistHomepageTabMetadata, ArtistHomepageTabRequest, ArtistSummary, ArtistTrackListRequest,
+    ArtistTrackOrder, ArtistVideoListRequest, AudioCdnDispatch, AudioCdnNode, AudioFileAccess,
+    AudioFileBatch, AudioFileRequest, AudioFileRequestItem, AuthChallengeBackend,
+    AuthChallengeRequest, AuthState, Capability, ChallengeMethod, Chart, ChartCatalog,
+    ChartCatalogRequest, ChartGroup, ChartTrackListRequest, ChartTrackPreview, CreatorSummary,
+    CredentialMode, ErrorCode, Extensions, GeneralSearchRelated, GeneralSearchRelatedTerm,
+    GeneralSearchRequest, GeneralSearchResult, GeneralSearchSection, ImmersiveAudioType, Lyrics,
+    LyricsRequest, MediaDownload, MediaStream, MembershipSummary, MultiStyleLyricTranslation,
+    MultiStyleLyricTranslations, MusicGeneAge, MusicGeneAiInterpretation, MusicGeneAttribute,
+    MusicGeneGroove, MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGeneMainDescription,
+    MusicGenePersonality, MusicGenePreferences, MusicGeneStatus, MusicGeneStatusEntry,
+    MusicGeneTempo, MusicProvider, MusicVideoArea, MusicVideoCatalog, MusicVideoListRequest,
+    MusicVideoOrder, MusicVideoType, Page, PageMeta, Platform, PlatformApiRequest,
+    PlatformBatchRequest, Playlist, PlaylistCreateRequest, PlaylistDeleteRequest,
+    PlaylistDeleteResult, PlaylistItemKind, PlaylistItemMutationAction,
     PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistKind, PlaylistMutationAction,
     PlaylistMutationResult, PlaylistPlayableItem, PlaylistVisibility, Podcast, PodcastEpisode,
     ProviderAuthResult, ProviderCredential, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
@@ -3129,6 +3130,37 @@ struct QqSingerDescriptionExtra {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerPicture {
+    #[serde(default)]
+    big_black: String,
+    #[serde(default)]
+    big_white: String,
+    #[serde(default)]
+    pic: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct QqSingerPhoto {
+    #[serde(default)]
+    big: String,
+    #[serde(default)]
+    small: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QqSingerPictureUrls {
+    big_black: Option<String>,
+    big_white: Option<String>,
+    pic: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct QqSingerPhotoUrls {
+    big: Option<String>,
+    small: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct QqSingerDescription {
     #[serde(rename = "basic_info")]
@@ -3143,8 +3175,10 @@ struct QqSingerDescription {
         deserialize_with = "deserialize_qq_vec_or_empty"
     )]
     group_list: Vec<Value>,
+    #[serde(default)]
+    pic: QqSingerPicture,
     #[serde(default, deserialize_with = "deserialize_qq_vec_or_empty")]
-    photos: Vec<Value>,
+    photos: Vec<QqSingerPhoto>,
     #[serde(
         default,
         rename = "group_info",
@@ -4564,7 +4598,8 @@ impl MusicProvider for QqProvider {
         self.validate_public_account(account)?;
         let homepage_request = qq_singer_homepage_request(id)?;
         let requested_mids = vec![id.trim().to_owned()];
-        let description_request = qq_singer_descriptions_request(&requested_mids)?;
+        let description_request =
+            qq_singer_descriptions_request(&requested_mids, &ArtistDescriptionRequest::default())?;
         let mut responses = self
             .client
             .request_android(&[homepage_request, description_request])
@@ -4612,14 +4647,14 @@ impl MusicProvider for QqProvider {
     async fn artist_descriptions(
         &self,
         ids: &[String],
-        account: Option<&str>,
+        request: &ArtistDescriptionRequest,
     ) -> Result<Vec<Artist>> {
-        self.validate_public_account(account)?;
+        self.validate_public_account(request.account.as_deref())?;
         let normalized = ids
             .iter()
             .map(|id| id.trim().to_owned())
             .collect::<Vec<_>>();
-        let request = qq_singer_descriptions_request(&normalized)?;
+        let request = qq_singer_descriptions_request(&normalized, request)?;
         let response = self
             .client
             .request_android(&[request])
@@ -11041,7 +11076,10 @@ fn parse_qq_singer_index(value: Option<&str>) -> Result<i64> {
     }
 }
 
-fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
+fn qq_singer_descriptions_request(
+    mids: &[String],
+    request: &ArtistDescriptionRequest,
+) -> Result<QqApiRequest> {
     if mids.is_empty() || mids.len() > 100 {
         return Err(TuneWeaveError::invalid_request(
             "QQ singer description batch must contain between 1 and 100 MIDs",
@@ -11059,7 +11097,14 @@ fn qq_singer_descriptions_request(mids: &[String]) -> Result<QqApiRequest> {
     Ok(QqApiRequest::new(
         SINGER_DESCRIPTION_MODULE,
         SINGER_DESCRIPTION_METHOD,
-        json!({ "singer_mids": mids, "groups": 1, "wikis": 1 }),
+        json!({
+            "singer_mids": mids,
+            "ex_singer": request.include_extra,
+            "wiki_singer": request.include_wiki,
+            "group_singer": request.include_group_members,
+            "pic": request.include_picture,
+            "photos": request.include_photos
+        }),
     ))
 }
 
@@ -13572,6 +13617,35 @@ fn map_qq_singer_description(
     validate_qq_image_id(image_mid)
         .map_err(|_| qq_data_error("QQ singer description returned an invalid image MID"))?;
     let wiki_url = first_qq_display_url(&[(basic.wikiurl.as_str(), "singer wiki")])?;
+    let picture = QqSingerPictureUrls {
+        big_black: qq_singer_image_url(&[(
+            description.pic.big_black.as_str(),
+            "singer dark cover",
+        )])?,
+        big_white: qq_singer_image_url(&[(
+            description.pic.big_white.as_str(),
+            "singer light cover",
+        )])?,
+        pic: qq_singer_image_url(&[(description.pic.pic.as_str(), "singer picture")])?,
+    };
+    let photos = description
+        .photos
+        .iter()
+        .map(|photo| {
+            Ok(QqSingerPhotoUrls {
+                big: qq_singer_image_url(&[(photo.big.as_str(), "singer photo")])?,
+                small: qq_singer_image_url(&[(photo.small.as_str(), "singer photo thumbnail")])?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let avatar_url = picture
+        .pic
+        .clone()
+        .or_else(|| Some(qq_cover_url("T001", image_mid)));
+    let cover_url = picture
+        .big_white
+        .clone()
+        .or_else(|| picture.big_black.clone());
     let extra = &description.extra_info;
     let summary = extra.desc.trim();
     let wiki = description.wiki.trim();
@@ -13614,7 +13688,8 @@ fn map_qq_singer_description(
         ("has_photo".to_owned(), json!(basic.has_photo)),
         ("blog_flag".to_owned(), json!(extra.blog_flag)),
         ("group_list".to_owned(), json!(&description.group_list)),
-        ("photos".to_owned(), json!(&description.photos)),
+        ("picture".to_owned(), json!(&picture)),
+        ("photos".to_owned(), json!(&photos)),
         ("group_info".to_owned(), json!(&description.group_info)),
         ("detail".to_owned(), detail),
     ]);
@@ -13649,8 +13724,8 @@ fn map_qq_singer_description(
         aliases,
         description: description_text,
         biography_sections,
-        avatar_url: Some(qq_cover_url("T001", image_mid)),
-        cover_url: None,
+        avatar_url,
+        cover_url,
         album_count: None,
         track_count: None,
         mv_count: None,
@@ -14152,6 +14227,29 @@ fn first_qq_display_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
         return Ok(Some(normalized));
     }
     Ok(None)
+}
+
+fn qq_singer_image_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
+    let Some(url) = first_qq_display_url(candidates)? else {
+        return Ok(None);
+    };
+    let parsed =
+        reqwest::Url::parse(&url).map_err(|_| qq_data_error("QQ singer image URL is malformed"))?;
+    let host = parsed
+        .host_str()
+        .expect("display URL validation requires a host")
+        .to_ascii_lowercase();
+    let trusted = ["qq.com", "gtimg.cn", "qpic.cn"]
+        .into_iter()
+        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")));
+    if !trusted {
+        return Err(qq_data_error("QQ singer image URL uses an untrusted host"));
+    }
+    Ok(Some(if url.starts_with("http://") {
+        url.replacen("http://", "https://", 1)
+    } else {
+        url
+    }))
 }
 
 fn map_qq_singer_homepage_tab(
@@ -19681,9 +19779,16 @@ mod tests {
             },
             "wiki": "周杰伦的完整百科介绍。",
             "group_list": [{"name": "组合成员", "futureGroupField": true}],
-            "photos": [{"url": "https://y.gtimg.cn/singer/photo.jpg"}],
+            "photos": [{
+                "big": "https://y.gtimg.cn/singer/photo-big.jpg",
+                "small": "https://y.gtimg.cn/singer/photo-small.jpg"
+            }],
             "group_info": [{"title": "组合信息"}],
-            "pic": {"big_black": "", "big_white": "", "pic": ""},
+            "pic": {
+                "big_black": "https://y.gtimg.cn/singer/cover-dark.jpg",
+                "big_white": "https://y.gtimg.cn/singer/cover-light.jpg",
+                "pic": "https://y.gtimg.cn/singer/avatar.jpg"
+            },
             "futureDetailField": 42
         })
     }
@@ -21933,21 +22038,48 @@ mod tests {
             "001fNHEf1SFEFN".to_owned(),
             "0025NhlN2yWrP4".to_owned(),
         ];
-        let request = qq_singer_descriptions_request(&mids).expect("singer description request");
+        let request = qq_singer_descriptions_request(&mids, &ArtistDescriptionRequest::default())
+            .expect("singer description request");
         assert_eq!(request.module, SINGER_DESCRIPTION_MODULE);
         assert_eq!(request.method, SINGER_DESCRIPTION_METHOD);
         assert_eq!(
             request.param,
             json!({
                 "singer_mids": ["0025NhlN2yWrP4", "001fNHEf1SFEFN", "0025NhlN2yWrP4"],
-                "groups": 1,
-                "wikis": 1
+                "ex_singer": true,
+                "wiki_singer": true,
+                "group_singer": true,
+                "pic": true,
+                "photos": true
             })
         );
 
-        assert!(qq_singer_descriptions_request(&[]).is_err());
-        assert!(qq_singer_descriptions_request(&vec!["0025NhlN2yWrP4".to_owned(); 101]).is_err());
-        assert!(qq_singer_descriptions_request(&["unsafe/singer".to_owned()]).is_err());
+        let selective = qq_singer_descriptions_request(
+            &["0025NhlN2yWrP4".to_owned()],
+            &ArtistDescriptionRequest {
+                include_extra: false,
+                include_wiki: true,
+                include_group_members: false,
+                include_picture: true,
+                include_photos: false,
+                account: Some("ignored-by-protocol".to_owned()),
+            },
+        )
+        .expect("selective singer description request");
+        assert_eq!(selective.param["ex_singer"], false);
+        assert_eq!(selective.param["wiki_singer"], true);
+        assert_eq!(selective.param["group_singer"], false);
+        assert_eq!(selective.param["pic"], true);
+        assert_eq!(selective.param["photos"], false);
+        assert!(selective.param.get("account").is_none());
+
+        let options = ArtistDescriptionRequest::default();
+        assert!(qq_singer_descriptions_request(&[], &options).is_err());
+        assert!(
+            qq_singer_descriptions_request(&vec!["0025NhlN2yWrP4".to_owned(); 101], &options)
+                .is_err()
+        );
+        assert!(qq_singer_descriptions_request(&["unsafe/singer".to_owned()], &options).is_err());
     }
 
     #[test]
@@ -21989,11 +22121,21 @@ mod tests {
         assert_eq!(artists[0].extensions["batch_index"], 0);
         assert_eq!(artists[2].extensions["batch_index"], 2);
         assert_eq!(artists[0].extensions["detail"]["futureDetailField"], 42);
-        assert!(
-            artists[0]
-                .avatar_url
-                .as_deref()
-                .is_some_and(|url| url.contains("0025NhlN2yWrP4_11"))
+        assert_eq!(
+            artists[0].avatar_url.as_deref(),
+            Some("https://y.gtimg.cn/singer/avatar.jpg")
+        );
+        assert_eq!(
+            artists[0].cover_url.as_deref(),
+            Some("https://y.gtimg.cn/singer/cover-light.jpg")
+        );
+        assert_eq!(
+            artists[0].extensions["picture"]["big_black"],
+            "https://y.gtimg.cn/singer/cover-dark.jpg"
+        );
+        assert_eq!(
+            artists[0].extensions["photos"][0]["small"],
+            "https://y.gtimg.cn/singer/photo-small.jpg"
         );
         assert_eq!(artists[1].extensions.get("area"), None);
         assert!(artists[1].identities.iter().all(|value| value != "0"));
@@ -22033,6 +22175,16 @@ mod tests {
             {
                 let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
                 value["group_list"] = json!({});
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["pic"]["pic"] = json!("javascript:alert(1)");
+                json!({"singer_list": [value]})
+            },
+            {
+                let mut value = sample_singer_description("0025NhlN2yWrP4", "周杰伦", 4558);
+                value["photos"][0]["big"] = json!("http://127.0.0.1/private");
                 json!({"singer_list": [value]})
             },
         ] {
@@ -27211,13 +27363,17 @@ mod tests {
             vec!["unsafe/singer".to_owned()],
         ] {
             let error = provider
-                .artist_descriptions(&ids, None)
+                .artist_descriptions(&ids, &ArtistDescriptionRequest::default())
                 .await
                 .expect_err("invalid singer description request");
             assert_eq!(error.code, ErrorCode::InvalidRequest);
         }
+        let missing_account = ArtistDescriptionRequest {
+            account: Some("missing-account".to_owned()),
+            ..ArtistDescriptionRequest::default()
+        };
         let error = provider
-            .artist_descriptions(&["0025NhlN2yWrP4".to_owned()], Some("missing-account"))
+            .artist_descriptions(&["0025NhlN2yWrP4".to_owned()], &missing_account)
             .await
             .expect_err("missing singer description account alias");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
@@ -32260,7 +32416,7 @@ mod tests {
             "0025NhlN2yWrP4".to_owned(),
         ];
         let artists = provider
-            .artist_descriptions(&requested, None)
+            .artist_descriptions(&requested, &ArtistDescriptionRequest::default())
             .await
             .expect("singer description batch");
         assert_eq!(artists.len(), requested.len());
@@ -32283,6 +32439,20 @@ mod tests {
             );
             assert!(
                 artist.extensions["wiki_url"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("https://"))
+            );
+            assert!(
+                artist.extensions["picture"]["pic"]
+                    .as_str()
+                    .is_some_and(|url| url.starts_with("https://"))
+            );
+            let photos = artist.extensions["photos"]
+                .as_array()
+                .expect("typed singer photos");
+            assert!(!photos.is_empty());
+            assert!(
+                photos[0]["big"]
                     .as_str()
                     .is_some_and(|url| url.starts_with("https://"))
             );

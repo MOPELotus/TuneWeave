@@ -29,23 +29,24 @@ use tuneweave_core::{
     AiLyricDictionaryAvailability, Album, AlbumListRequest, AlbumStats, AlbumSummary,
     AnonymousSession, AntiCheatToken, AntiCheatTokenVersion, Artist, ArtistArea, ArtistCatalog,
     ArtistCatalogRequest, ArtistCategory, ArtistChart, ArtistChartArea, ArtistChartRequest,
-    ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind, ArtistHomepageTabRequest,
-    ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary, ArtistTrackListRequest,
-    ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest, ArtistWorkUpdate,
-    ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch, AudioFileRequest,
-    AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest, AuthChallengeBackend,
-    AuthChallengeDelivery, AuthChallengeRequest, AuthChallengeValidation, AuthPrincipalStatus,
-    AuthPrincipalStatusRequest, AuthSecurityChallengeRequest, AuthState, Banner, BannerCatalog,
-    BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential, Capability,
-    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest,
-    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
-    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
-    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
-    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
-    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
-    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
-    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
-    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    ArtistDescriptionRequest, ArtistGenre, ArtistHomepageTab, ArtistHomepageTabKind,
+    ArtistHomepageTabRequest, ArtistListRequest, ArtistOverview, ArtistStats, ArtistSummary,
+    ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
+    ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch,
+    AudioFileRequest, AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest,
+    AuthChallengeBackend, AuthChallengeDelivery, AuthChallengeRequest, AuthChallengeValidation,
+    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthSecurityChallengeRequest, AuthState,
+    Banner, BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER,
+    CallerCredential, Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest,
+    ChartCatalogView, ChartTrackListRequest, CloudImportRequest, CloudImportResult,
+    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
+    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
+    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
+    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
+    CommentReaction, CommentReactionKind, CommentReactionListRequest,
+    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
+    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
+    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -9597,6 +9598,16 @@ struct ArtistDetailBatchParams {
     ids: Option<String>,
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "include_extra")]
+    ex_singer: Option<String>,
+    #[serde(alias = "include_wiki")]
+    wiki_singer: Option<String>,
+    #[serde(alias = "include_group_members")]
+    group_singer: Option<String>,
+    #[serde(alias = "include_picture")]
+    pic: Option<String>,
+    #[serde(alias = "include_photos")]
+    photos: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9607,6 +9618,16 @@ struct ArtistDetailBatchBody {
     ids: Option<StreamReferenceInput>,
     platform: Option<String>,
     account: Option<String>,
+    #[serde(alias = "include_extra")]
+    ex_singer: Option<bool>,
+    #[serde(alias = "include_wiki")]
+    wiki_singer: Option<bool>,
+    #[serde(alias = "include_group_members")]
+    group_singer: Option<bool>,
+    #[serde(alias = "include_picture")]
+    pic: Option<bool>,
+    #[serde(alias = "include_photos")]
+    photos: Option<bool>,
 }
 
 async fn artist_details_get(
@@ -9621,7 +9642,18 @@ async fn artist_details_get(
         params.refs.map(|value| vec![value]),
         params.ids.map(|value| vec![value]),
         params.platform.as_deref(),
-        params.account,
+        ArtistDescriptionRequest {
+            include_extra: parse_bool_parameter("ex_singer", params.ex_singer.as_deref(), true)?,
+            include_wiki: parse_bool_parameter("wiki_singer", params.wiki_singer.as_deref(), true)?,
+            include_group_members: parse_bool_parameter(
+                "group_singer",
+                params.group_singer.as_deref(),
+                true,
+            )?,
+            include_picture: parse_bool_parameter("pic", params.pic.as_deref(), true)?,
+            include_photos: parse_bool_parameter("photos", params.photos.as_deref(), true)?,
+            account: params.account,
+        },
     )
     .await
 }
@@ -9638,7 +9670,14 @@ async fn artist_details_post(
         body.refs.map(StreamReferenceInput::into_values),
         body.ids.map(StreamReferenceInput::into_values),
         body.platform.as_deref(),
-        body.account,
+        ArtistDescriptionRequest {
+            include_extra: body.ex_singer.unwrap_or(true),
+            include_wiki: body.wiki_singer.unwrap_or(true),
+            include_group_members: body.group_singer.unwrap_or(true),
+            include_picture: body.pic.unwrap_or(true),
+            include_photos: body.photos.unwrap_or(true),
+            account: body.account,
+        },
     )
     .await
 }
@@ -9649,7 +9688,7 @@ async fn artist_details_response(
     refs: Option<Vec<String>>,
     ids: Option<Vec<String>>,
     platform: Option<&str>,
-    account: Option<String>,
+    mut request: ArtistDescriptionRequest,
 ) -> Result<Json<ApiResponse<Vec<Artist>>>, ApiError> {
     let references =
         parse_batch_references(refs, ids, platform, state.default_platform, "artist detail")?;
@@ -9675,7 +9714,7 @@ async fn artist_details_response(
         }))
         .into());
     }
-    let account = optional_trimmed(account);
+    let account = optional_trimmed(request.account.take());
     let ids = references
         .iter()
         .map(|reference| reference.id().to_owned())
@@ -9688,7 +9727,13 @@ async fn artist_details_response(
     )?;
     let artists = access
         .provider
-        .artist_descriptions(&ids, access.provider_account.as_deref())
+        .artist_descriptions(
+            &ids,
+            &ArtistDescriptionRequest {
+                account: access.provider_account.clone(),
+                ..request
+            },
+        )
         .await?;
     if artists.len() != references.len() {
         return Err(TuneWeaveError::new(
@@ -22446,11 +22491,11 @@ mod tests {
         async fn artist_descriptions(
             &self,
             ids: &[String],
-            account: Option<&str>,
+            request: &ArtistDescriptionRequest,
         ) -> Result<Vec<Artist>> {
             let mut artists = Vec::with_capacity(ids.len());
             for (index, id) in ids.iter().enumerate() {
-                let mut artist = self.artist(id, account).await?;
+                let mut artist = self.artist(id, request.account.as_deref()).await?;
                 artist.description = "华语流行歌手、词曲作者与制作人。".to_owned();
                 artist.biography_sections = vec![ArtistBiographySection {
                     title: "百科".to_owned(),
@@ -22462,7 +22507,14 @@ mod tests {
                     .insert("batch_index".to_owned(), json!(index));
                 artist.extensions.insert(
                     "description_detail".to_owned(),
-                    json!({"account": account, "groups": 1, "wikis": 1}),
+                    json!({
+                        "account": request.account,
+                        "ex_singer": request.include_extra,
+                        "wiki_singer": request.include_wiki,
+                        "group_singer": request.include_group_members,
+                        "pic": request.include_picture,
+                        "photos": request.include_photos
+                    }),
                 );
                 artists.push(artist);
             }
@@ -28531,8 +28583,29 @@ mod tests {
         assert_eq!(artists["data"][0]["biography_sections"][0]["title"], "百科");
         assert_eq!(artists["data"][0]["extensions"]["batch_index"], 0);
         assert_eq!(artists["data"][2]["extensions"]["batch_index"], 2);
+        assert_eq!(
+            artists["data"][0]["extensions"]["description_detail"]["ex_singer"],
+            true
+        );
+        assert_eq!(
+            artists["data"][0]["extensions"]["description_detail"]["photos"],
+            true
+        );
         assert_eq!(artists["meta"]["platform"], "qq");
         assert_eq!(artists["meta"]["account"], "green-vip");
+
+        let (status, selective) = json_response_from(
+            app.clone(),
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4&ex_singer=false&wiki_singer=true&group_singer=false&pic=true&photos=false",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let controls = &selective["data"][0]["extensions"]["description_detail"];
+        assert_eq!(controls["ex_singer"], false);
+        assert_eq!(controls["wiki_singer"], true);
+        assert_eq!(controls["group_singer"], false);
+        assert_eq!(controls["pic"], true);
+        assert_eq!(controls["photos"], false);
 
         let (status, posted) = json_request_from(
             app.clone(),
@@ -28541,7 +28614,12 @@ mod tests {
             Some(json!({
                 "mids": ["0025NhlN2yWrP4", "001fNHEf1SFEFN"],
                 "platform": "qq",
-                "account": "green-vip"
+                "account": "green-vip",
+                "include_extra": true,
+                "include_wiki": false,
+                "include_group_members": true,
+                "include_picture": false,
+                "include_photos": true
             })),
         )
         .await;
@@ -28555,6 +28633,12 @@ mod tests {
         );
         assert_eq!(posted["data"][0]["ref"], "qq:0025NhlN2yWrP4");
         assert_eq!(posted["data"][1]["ref"], "qq:001fNHEf1SFEFN");
+        let posted_controls = &posted["data"][0]["extensions"]["description_detail"];
+        assert_eq!(posted_controls["ex_singer"], true);
+        assert_eq!(posted_controls["wiki_singer"], false);
+        assert_eq!(posted_controls["group_singer"], true);
+        assert_eq!(posted_controls["pic"], false);
+        assert_eq!(posted_controls["photos"], true);
 
         for path in [
             "/v1/artists/details",
@@ -28562,6 +28646,7 @@ mod tests {
             "/v1/artists/details?refs=qq:0025NhlN2yWrP4&platform=qq",
             "/v1/artists/details?refs=qq:0025NhlN2yWrP4,netease:6452",
             "/v1/artists/details?ids=0025NhlN2yWrP4&platform=unknown",
+            "/v1/artists/details?refs=qq:0025NhlN2yWrP4&photos=maybe",
             "/v1/artists/details?ids=0025NhlN2yWrP4&unknown=true",
         ] {
             let (status, response) = json_response_from(app.clone(), path).await;
