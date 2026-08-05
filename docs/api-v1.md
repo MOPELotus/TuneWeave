@@ -217,6 +217,8 @@ GET /v1/search?q=海阔天空&type=track&platform=all&limit=20&offset=0
 
 `GET/POST /v1/artists/details` 批量读取歌手描述。默认返回扩展资料、百科、组合成员、主图和相册；调用方可分别通过 `ex_singer`、`wiki_singer`、`group_singer`、`pic`、`photos` 控制，POST 也接受对应的 `include_*` 别名。QQ 主图和相册使用强类型字段，所有图片地址在返回前校验并统一为 HTTPS。
 
+`POST /v1/account/podcasts/{ref}/episodes` 兼容原始音频 body（通过 `cover_image_id` 指定已有封面）和 `multipart/form-data`。multipart 请求使用 `audio`/`songFile` 与可选 `cover`/`imgFile` 文件字段；封面文件和 `cover_image_id` 不能同时提供。音频最大 500 MiB，封面最大 20 MiB，文件名、媒体类型和账户范围会在网络请求前校验。
+
 批量详情端点通常同时提供 GET 和 POST 形式。GET 适合短引用列表；POST 适合结构化批量请求。
 
 ## 播放与下载

@@ -1437,13 +1437,19 @@ pub struct PodcastEpisodeDeleteResult {
     pub extensions: Extensions,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PodcastEpisodeCover {
+    ImageId(String),
+    Upload(ImageUploadRequest),
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct PodcastEpisodeUploadRequest {
     pub filename: String,
     pub content_type: String,
     pub data: Vec<u8>,
     pub name: Option<String>,
-    pub cover_image_id: String,
+    pub cover: PodcastEpisodeCover,
     pub category_id: String,
     pub second_category_id: String,
     pub description: String,
@@ -1464,7 +1470,7 @@ impl fmt::Debug for PodcastEpisodeUploadRequest {
             .field("content_type", &self.content_type)
             .field("data_len", &self.data.len())
             .field("name", &self.name)
-            .field("cover_image_id", &self.cover_image_id)
+            .field("cover", &self.cover)
             .field("category_id", &self.category_id)
             .field("second_category_id", &self.second_category_id)
             .field("description", &self.description)
@@ -5664,7 +5670,7 @@ mod tests {
             content_type: "audio/mpeg".to_owned(),
             data: b"private-audio-content".to_vec(),
             name: Some("第一期".to_owned()),
-            cover_image_id: "109951168000000000".to_owned(),
+            cover: PodcastEpisodeCover::ImageId("109951168000000000".to_owned()),
             category_id: "3".to_owned(),
             second_category_id: "14".to_owned(),
             description: "节目介绍".to_owned(),

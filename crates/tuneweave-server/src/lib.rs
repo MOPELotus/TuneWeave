@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{
-        DefaultBodyLimit, Path, Query, State,
+        DefaultBodyLimit, FromRequest, Multipart, Path, Query, State,
         rejection::{BytesRejection, JsonRejection, QueryRejection},
     },
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -68,27 +68,27 @@ use tuneweave_core::{
     PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
     PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
     PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
-    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
-    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
-    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
-    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
-    PodcastTaxonomyRequest, PrincipalType, ProviderAuthResult, ProviderCredential,
-    ProviderRegistry, Quality, RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest,
-    RadioStation, RadioStationCursor, RadioStationListRequest, RadioStyleCatalog,
-    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest,
-    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedDirection,
-    RecommendationFeedRequest, RecommendationRequest, RecommendationSource, RelatedPlaylistList,
-    RelatedPlaylistRequest, RelatedVideoList, RelatedVideoRequest, ResolutionAttempt,
-    ResolutionStatus, ResolveRequest, ResourceRef, SearchDefaultKeyword,
-    SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
-    SearchQuery, SearchSelector, SearchSuggestionClient, SearchSuggestionList,
-    SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList, SearchTrendingRequest,
-    SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource, SimilarArtistList,
-    SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest, SingingAnnotationsAvailability,
-    StreamBatch, StreamOutcome, StreamRequest, StreamResolver, StreamVariant,
-    StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    PodcastEpisodeCover, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
+    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
+    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
+    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
+    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
+    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
+    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
+    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderRegistry, Quality,
+    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
+    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
+    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
+    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
+    RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
+    ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
+    SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
+    SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
+    SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
+    SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
+    SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
     TuneWeaveError, UniPlaylist, UniPlaylistClientItemStream, UniPlaylistCreateRequest,
@@ -128,6 +128,8 @@ const MAX_UNI_PLAYLIST_MATERIALIZE_PAGE_ITEMS: u32 = 500;
 const MAX_UNI_PLAYLIST_SOURCE_PAGES: usize = 2_000;
 const MAX_CLOUD_PROXY_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
 const MAX_PODCAST_EPISODE_UPLOAD_BYTES: usize = 500 * 1024 * 1024;
+const MAX_PODCAST_EPISODE_MULTIPART_BYTES: usize =
+    MAX_PODCAST_EPISODE_UPLOAD_BYTES + MAX_PLAYLIST_COVER_UPLOAD_BYTES + 64 * 1024;
 const MAX_AUDIO_CONTENT_BYTES: usize = 512 * 1024 * 1024;
 
 fn background_task_failure_kind(error: &tokio::task::JoinError) -> &'static str {
@@ -1259,7 +1261,7 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/account/podcasts/{reference}/episodes",
             post(podcast_episode_upload)
-                .layer(DefaultBodyLimit::max(MAX_PODCAST_EPISODE_UPLOAD_BYTES)),
+                .layer(DefaultBodyLimit::max(MAX_PODCAST_EPISODE_MULTIPART_BYTES)),
         )
         .route(
             "/account/podcasts/{reference}/episodes/order",
@@ -8322,6 +8324,144 @@ struct PodcastEpisodeUploadParams {
     composed_songs: Option<String>,
 }
 
+struct PodcastEpisodeCoverPayload {
+    filename: String,
+    content_type: String,
+    data: Vec<u8>,
+}
+
+struct PodcastEpisodeUploadPayload {
+    audio_filename: Option<String>,
+    audio_content_type: String,
+    audio: Vec<u8>,
+    cover: Option<PodcastEpisodeCoverPayload>,
+}
+
+async fn podcast_episode_upload_payload(
+    request: axum::extract::Request,
+    state: &AppState,
+) -> Result<PodcastEpisodeUploadPayload, ApiError> {
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map(str::to_owned)
+                .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("multipart/form-data"))
+    {
+        let audio = axum::body::to_bytes(request.into_body(), MAX_PODCAST_EPISODE_UPLOAD_BYTES)
+            .await
+            .map_err(|_| {
+                TuneWeaveError::invalid_request("audio body is invalid or exceeds 500 MiB")
+                    .with_details(json!({ "max_bytes": MAX_PODCAST_EPISODE_UPLOAD_BYTES }))
+            })?;
+        return Ok(PodcastEpisodeUploadPayload {
+            audio_filename: None,
+            audio_content_type: content_type,
+            audio: audio.into(),
+            cover: None,
+        });
+    }
+
+    let mut multipart = Multipart::from_request(request, state).await.map_err(|_| {
+        TuneWeaveError::invalid_request("podcast episode multipart body is malformed")
+    })?;
+    let mut audio = None;
+    let mut cover = None;
+    while let Some(field) = multipart.next_field().await.map_err(|_| {
+        TuneWeaveError::invalid_request("podcast episode multipart field is malformed")
+    })? {
+        let name = field.name().unwrap_or_default().to_owned();
+        let filename = field.file_name().map(str::to_owned);
+        let field_content_type = field.content_type().map(str::to_owned).unwrap_or_default();
+        let data = field.bytes().await.map_err(|_| {
+            TuneWeaveError::invalid_request("podcast episode multipart file is invalid")
+        })?;
+        match name.as_str() {
+            "audio" | "songFile" | "song_file" => {
+                if audio.is_some() {
+                    return Err(TuneWeaveError::invalid_request(
+                        "podcast episode multipart body contains duplicate audio files",
+                    )
+                    .into());
+                }
+                validate_podcast_episode_upload_size(data.len())?;
+                audio = Some((filename, field_content_type, data.to_vec()));
+            }
+            "cover" | "imgFile" | "cover_image" => {
+                if cover.is_some() {
+                    return Err(TuneWeaveError::invalid_request(
+                        "podcast episode multipart body contains duplicate cover files",
+                    )
+                    .into());
+                }
+                if data.is_empty() || data.len() > MAX_PLAYLIST_COVER_UPLOAD_BYTES {
+                    return Err(TuneWeaveError::invalid_request(
+                        "podcast episode cover must contain 1 byte to 20 MiB",
+                    )
+                    .with_details(json!({ "max_bytes": MAX_PLAYLIST_COVER_UPLOAD_BYTES }))
+                    .into());
+                }
+                let filename = filename.unwrap_or_else(|| "cover.jpg".to_owned());
+                let content_type = if field_content_type.is_empty() {
+                    image_content_type_for_filename(&filename)
+                        .ok_or_else(|| {
+                            TuneWeaveError::invalid_request(
+                                "podcast episode cover requires an image Content-Type",
+                            )
+                        })?
+                        .to_owned()
+                } else {
+                    field_content_type
+                };
+                cover = Some(PodcastEpisodeCoverPayload {
+                    filename,
+                    content_type,
+                    data: data.to_vec(),
+                });
+            }
+            _ => {
+                return Err(TuneWeaveError::invalid_request(
+                    "podcast episode multipart body accepts only audio and cover files",
+                )
+                .into());
+            }
+        }
+    }
+    let (audio_filename, audio_content_type, audio) = audio.ok_or_else(|| {
+        TuneWeaveError::invalid_request("podcast episode multipart body is missing the audio file")
+    })?;
+    Ok(PodcastEpisodeUploadPayload {
+        audio_filename,
+        audio_content_type,
+        audio,
+        cover,
+    })
+}
+
+fn image_content_type_for_filename(filename: &str) -> Option<&'static str> {
+    match filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlaylistAccountParams {
@@ -8709,11 +8849,11 @@ async fn podcast_episode_upload(
     State(state): State<AppState>,
     Path(reference): Path<String>,
     params: Result<Query<PodcastEpisodeUploadParams>, QueryRejection>,
-    headers: HeaderMap,
-    payload: Result<Bytes, BytesRejection>,
+    request: axum::extract::Request,
 ) -> Result<Json<ApiResponse<PodcastEpisodeUploadResult>>, ApiError> {
     let podcast_ref = parse_reference(reference)?;
     let params = query_params(params)?;
+    let headers = request.headers().clone();
     let platform = podcast_ref.platform();
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
@@ -8721,22 +8861,35 @@ async fn podcast_episode_upload(
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
-    let data = payload.map_err(|_| {
-        TuneWeaveError::invalid_request("audio body is invalid or exceeds 500 MiB")
-            .with_details(json!({ "max_bytes": MAX_PODCAST_EPISODE_UPLOAD_BYTES }))
-    })?;
-    validate_podcast_episode_upload_size(data.len())?;
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .map(|value| {
-            value
-                .to_str()
-                .map(str::trim)
-                .map(str::to_owned)
-                .map_err(|_| TuneWeaveError::invalid_request("Content-Type is not valid text"))
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let payload = podcast_episode_upload_payload(request, &state).await?;
+    validate_podcast_episode_upload_size(payload.audio.len())?;
+    let filename = params.filename.or(payload.audio_filename);
+    let cover = match (params.cover_image_id, payload.cover) {
+        (Some(_), Some(_)) => {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast episode cover_image_id and cover file are mutually exclusive",
+            )
+            .into());
+        }
+        (Some(image_id), None) => {
+            PodcastEpisodeCover::ImageId(required_trimmed("cover_image_id", Some(image_id))?)
+        }
+        (None, Some(cover)) => PodcastEpisodeCover::Upload(ImageUploadRequest {
+            filename: cover.filename,
+            content_type: cover.content_type,
+            data: cover.data,
+            image_size: None,
+            crop_x: None,
+            crop_y: None,
+            account: Some(access.required_account().to_owned()),
+        }),
+        (None, None) => {
+            return Err(TuneWeaveError::invalid_request(
+                "podcast episode requires cover_image_id or a cover file",
+            )
+            .into());
+        }
+    };
     let publish_time_ms =
         parse_optional_u64_parameter("publish_time_ms", params.publish_time_ms.as_deref())?
             .unwrap_or(0);
@@ -8754,11 +8907,11 @@ async fn podcast_episode_upload(
         .upload_podcast_episode(
             podcast_ref.id(),
             &PodcastEpisodeUploadRequest {
-                filename: required_trimmed("filename", params.filename)?,
-                content_type,
-                data: data.into(),
+                filename: required_trimmed("filename", filename)?,
+                content_type: payload.audio_content_type,
+                data: payload.audio,
                 name: optional_trimmed(params.name),
-                cover_image_id: required_trimmed("cover_image_id", params.cover_image_id)?,
+                cover,
                 category_id: required_trimmed("category_id", params.category_id)?,
                 second_category_id: required_trimmed(
                     "second_category_id",
@@ -19244,6 +19397,10 @@ mod tests {
             podcast_id: &str,
             request: &PodcastEpisodeUploadRequest,
         ) -> Result<PodcastEpisodeUploadResult> {
+            let cover_image_id = match &request.cover {
+                PodcastEpisodeCover::ImageId(image_id) => image_id.clone(),
+                PodcastEpisodeCover::Upload(_) => "109951168000000099".to_owned(),
+            };
             Ok(PodcastEpisodeUploadResult {
                 podcast_ref: ResourceRef::new(Platform::Netease, podcast_id)
                     .expect("valid podcast upload reference"),
@@ -19261,7 +19418,14 @@ mod tests {
                     ("filename".to_owned(), json!(request.filename)),
                     ("content_type".to_owned(), json!(request.content_type)),
                     ("data_len".to_owned(), json!(request.data.len())),
-                    ("cover_image_id".to_owned(), json!(request.cover_image_id)),
+                    ("cover_image_id".to_owned(), json!(cover_image_id)),
+                    (
+                        "cover_source".to_owned(),
+                        json!(match &request.cover {
+                            PodcastEpisodeCover::ImageId(_) => "image_id",
+                            PodcastEpisodeCover::Upload(_) => "upload",
+                        }),
+                    ),
                     ("category_id".to_owned(), json!(request.category_id)),
                     (
                         "second_category_id".to_owned(),
@@ -24540,6 +24704,50 @@ mod tests {
         (status, json)
     }
 
+    fn multipart_audio_and_cover() -> (&'static str, Vec<u8>) {
+        let boundary = "TuneWeaveTestBoundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"episode.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\naudio\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"imgFile\"; filename=\"cover.png\"\r\nContent-Type: image/png\r\n\r\ncover\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        ("multipart/form-data; boundary=TuneWeaveTestBoundary", body)
+    }
+
+    async fn multipart_request_from(
+        app: Router,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .expect("build multipart request"),
+            )
+            .await
+            .expect("multipart request succeeds");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read multipart response body");
+        let json = serde_json::from_slice(&body).expect("valid multipart response JSON");
+        (status, json)
+    }
+
     async fn caller_binary_request(
         app: Router,
         method: Method,
@@ -27482,6 +27690,38 @@ mod tests {
         assert_eq!(defaults["data"]["extensions"]["order_no"], 1);
         assert_eq!(defaults["data"]["publish_time_ms"], 0);
         assert_eq!(defaults["meta"]["account"], "default");
+    }
+
+    #[tokio::test]
+    async fn podcast_episode_upload_accepts_audio_and_cover_multipart_files() {
+        let (content_type, body) = multipart_audio_and_cover();
+        let (status, json) = multipart_request_from(
+            test_app_with_provider(),
+            "/v1/account/podcasts/netease:336355127/episodes?filename=episode.mp3&categoryId=3&secondCategoryId=14&description=Intro",
+            content_type,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["extensions"]["filename"], "episode.mp3");
+        assert_eq!(json["data"]["extensions"]["content_type"], "audio/mpeg");
+        assert_eq!(json["data"]["extensions"]["data_len"], 5);
+        assert_eq!(
+            json["data"]["extensions"]["cover_image_id"],
+            "109951168000000099"
+        );
+        assert_eq!(json["data"]["extensions"]["cover_source"], "upload");
+
+        let (content_type, body) = multipart_audio_and_cover();
+        let (status, error) = multipart_request_from(
+            test_app_with_provider(),
+            "/v1/account/podcasts/netease:336355127/episodes?filename=episode.mp3&coverImgId=109951168000000000&categoryId=3&secondCategoryId=14&description=Intro",
+            content_type,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]
