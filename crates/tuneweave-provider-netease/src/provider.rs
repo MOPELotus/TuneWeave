@@ -1568,13 +1568,15 @@ impl MusicProvider for NeteaseProvider {
         map_netease_podcast_episode_upload_result(
             podcast_id,
             &descriptor,
-            allocation,
-            nos_response,
-            precheck.body,
-            submit.body,
+            PodcastEpisodeUploadArtifacts {
+                allocation,
+                nos_response,
+                precheck_response: precheck.body,
+                submit_response: submit.body,
+                cover_image_id,
+                cover_upload,
+            },
             request.publish_time_ms,
-            cover_image_id,
-            cover_upload,
         )
     }
 
@@ -8380,17 +8382,29 @@ fn map_netease_podcast_episode_delete_result(
     })
 }
 
-fn map_netease_podcast_episode_upload_result(
-    podcast_id: u64,
-    descriptor: &PodcastEpisodeUploadDescriptor,
+struct PodcastEpisodeUploadArtifacts {
     allocation: ImageUploadAllocationEnvelope,
     nos_response: Value,
     precheck_response: Value,
     submit_response: Value,
-    publish_time_ms: u64,
     cover_image_id: Value,
     cover_upload: Option<(ImageUploadAllocationEnvelope, Value)>,
+}
+
+fn map_netease_podcast_episode_upload_result(
+    podcast_id: u64,
+    descriptor: &PodcastEpisodeUploadDescriptor,
+    artifacts: PodcastEpisodeUploadArtifacts,
+    publish_time_ms: u64,
 ) -> Result<PodcastEpisodeUploadResult> {
+    let PodcastEpisodeUploadArtifacts {
+        allocation,
+        nos_response,
+        precheck_response,
+        submit_response,
+        cover_image_id,
+        cover_upload,
+    } = artifacts;
     ensure_success(&precheck_response)?;
     ensure_success(&submit_response)?;
     let podcast_ref =
@@ -22316,21 +22330,23 @@ mod tests {
         let result = map_netease_podcast_episode_upload_result(
             336_355_127,
             &descriptor,
-            allocation,
-            json!({"part_count": 2}),
-            json!({"code": 200, "data": {"allowed": true}}),
-            json!({
-                "code": 200,
-                "data": [
-                    {"voiceId": 2_058_695_201_u64},
-                    {"programId": "2058695202"},
-                    {"voiceId": 2_058_695_201_u64}
-                ],
-                "futureField": {"kept": true}
-            }),
+            PodcastEpisodeUploadArtifacts {
+                allocation,
+                nos_response: json!({"part_count": 2}),
+                precheck_response: json!({"code": 200, "data": {"allowed": true}}),
+                submit_response: json!({
+                    "code": 200,
+                    "data": [
+                        {"voiceId": 2_058_695_201_u64},
+                        {"programId": "2058695202"},
+                        {"voiceId": 2_058_695_201_u64}
+                    ],
+                    "futureField": {"kept": true}
+                }),
+                cover_image_id: json!("109951168000000000"),
+                cover_upload: None,
+            },
             0,
-            json!("109951168000000000"),
-            None,
         )
         .expect("map voice upload result");
         assert_eq!(result.podcast_ref.to_string(), "netease:336355127");
@@ -22355,16 +22371,18 @@ mod tests {
         let error = map_netease_podcast_episode_upload_result(
             336_355_127,
             &descriptor,
-            serde_json::from_value(json!({
-                "result": {"objectKey": "voice", "token": "secret", "docId": "1"}
-            }))
-            .expect("allocation"),
-            json!({}),
-            json!({"code": 400, "message": "precheck failed"}),
-            json!({"code": 200}),
+            PodcastEpisodeUploadArtifacts {
+                allocation: serde_json::from_value(json!({
+                    "result": {"objectKey": "voice", "token": "secret", "docId": "1"}
+                }))
+                .expect("allocation"),
+                nos_response: json!({}),
+                precheck_response: json!({"code": 400, "message": "precheck failed"}),
+                submit_response: json!({"code": 200}),
+                cover_image_id: json!("109951168000000000"),
+                cover_upload: None,
+            },
             0,
-            json!("109951168000000000"),
-            None,
         )
         .expect_err("failed voice upload precheck");
         assert_eq!(error.code, ErrorCode::UpstreamError);
