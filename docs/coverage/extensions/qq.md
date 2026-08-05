@@ -1,6 +1,6 @@
 # QQ 音乐平台功能扩展候选池
 
-上游快照：`L-1124/QQMusicApi@873255f2774361ac97366bd89a14b8ed9d230aae`
+上游快照：`L-1124/QQMusicApi@8ec78ce3f16805ebe470b8308a96fef925cf8e56`
 
 本表登记该快照 14 个公开 API 类的 104 个公开方法，用于保存协议能力、参考来源和可能用途，不是固定验收分母。QQMusicApi 是异步 Python SDK，不是 HTTP 服务；TuneWeave 只提取协议事实并保持独立 Rust 实现。QQ 音乐的正式完成状态只看[项目范围覆盖账本](../qq-scope.md)。
 

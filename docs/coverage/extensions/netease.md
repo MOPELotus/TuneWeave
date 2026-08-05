@@ -1,6 +1,6 @@
 # 网易云平台功能扩展候选池
 
-上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@8f4873f2e2f677153d398a62d9ca0e3826c3f86d`
+上游快照：`NeteaseCloudMusicApiEnhanced/api-enhanced@4045f1ad3f82987588aaf9ea8eb3c79a61b06bb6`
 
 本表由该快照的 `module/*.js` 文件生成，用于保存已发现的协议能力、参考来源和可能用途，不是完成度验收清单。网易云音乐的正式完成状态只看[项目范围覆盖账本](../netease-scope.md)。候选池没有固定实施顺序、分母、完成率或清零要求。
 

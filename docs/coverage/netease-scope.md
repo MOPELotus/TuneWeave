@@ -1,6 +1,6 @@
 # 网易云音乐项目范围覆盖账本
 
-上游基线为 `NeteaseCloudMusicApiEnhanced/api-enhanced@8f4873f2e2f677153d398a62d9ca0e3826c3f86d`。本表是网易云音乐在 TuneWeave 产品定位内承诺完成的正式能力分母；参考项目中不属于本范围的能力仅登记到[网易云扩展候选池](extensions/netease.md)，不影响平台完成度。
+上游基线为 `NeteaseCloudMusicApiEnhanced/api-enhanced@4045f1ad3f82987588aaf9ea8eb3c79a61b06bb6`。本表是网易云音乐在 TuneWeave 产品定位内承诺完成的正式能力分母；参考项目中不属于本范围的能力仅登记到[网易云扩展候选池](extensions/netease.md)，不影响平台完成度。
 
 状态含义：`pending` 尚未实现，`deferred` 已明确保留但按路线延期，`partial` 只覆盖部分必要模块或分支，`implemented` 已完成代码和离线验证但缺真实账户或后续 provider 前置条件，`verified` 已完成对应真实网络路径验收。一个聚合单元只有列出的必要分支全部达到相应状态时才能升级。
 
@@ -13,6 +13,8 @@
 这些百分比仅统计项目范围。`implemented` 仍算代码完成，但不能当作真实账户或真实跨平台成功态已经验证；网易云项目范围收口前，`pending/partial` 必须清零，跨 provider 前置条件造成的 `implemented` 项要在对应 provider 可用后补验。
 
 全部 64 个项目范围单元均已完成代码和离线验收，网易云项目范围代码据此收口。MV、站内视频、公开播客节目播放与免费听状态等读取链也已真实验收；仍为 `implemented` 的单元只缺真实成功态、可回滚写入或其他 provider 前置条件，不存在以 `partial` 隐藏的必要代码分支。
+
+C11 的声音上传同时支持已有封面 ID 和 multipart 封面文件；文件形态先经受限图片上传链取得图片 ID，再进入同一声音分配、NOS、预检与提交事务。普通持久账户已真实确认登录有效，但 `djStatus=0` 且创作目录为空，因此本项仍保持 `implemented`，不把缺少创作者权限伪装成真实写入成功。
 
 | ID | 范围 | 验收单元 | 状态 | 证据或当前缺口 |
 | --- | --- | --- | --- | --- |
