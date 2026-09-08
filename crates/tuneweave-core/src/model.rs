@@ -83,6 +83,7 @@ pub enum Quality {
     Spatial,
     Dolby,
     Master,
+    Vivid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -4968,6 +4969,9 @@ pub enum StreamVariant {
 #[serde(rename_all = "lowercase")]
 pub enum ImmersiveAudioType {
     C51,
+    C512,
+    Ste2,
+    Aac2,
     Ste,
     Aac,
 }

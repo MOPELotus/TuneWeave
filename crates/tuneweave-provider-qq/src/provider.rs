@@ -18642,9 +18642,14 @@ fn qq_requested_audio_specs(request: &StreamRequest) -> Result<Vec<&'static str>
             None => &["atmos_7_1", "atmos_5_1"][..],
             Some(ImmersiveAudioType::C51) => &["atmos_5_1"][..],
             Some(ImmersiveAudioType::Ste) => &["atmos_2"][..],
-            Some(ImmersiveAudioType::Aac) => {
+            Some(
+                ImmersiveAudioType::Aac
+                | ImmersiveAudioType::C512
+                | ImmersiveAudioType::Ste2
+                | ImmersiveAudioType::Aac2,
+            ) => {
                 return Err(TuneWeaveError::invalid_request(
-                    "QQ spatial audio does not expose an AAC immersive variant",
+                    "QQ spatial audio does not expose the requested immersive variant",
                 )
                 .with_platform(Platform::Qq)
                 .with_details(json!({ "immersive_type": request.immersive_type })));
@@ -18652,6 +18657,12 @@ fn qq_requested_audio_specs(request: &StreamRequest) -> Result<Vec<&'static str>
         },
         Quality::Dolby => &["dolby_atmos"][..],
         Quality::Master => &["master"][..],
+        Quality::Vivid => {
+            return Err(
+                TuneWeaveError::invalid_request("QQ does not expose vivid audio")
+                    .with_platform(Platform::Qq),
+            );
+        }
     };
     Ok(specs.to_vec())
 }

@@ -2491,7 +2491,7 @@ fn bilibili_audio_tier_order(quality: Quality) -> &'static [VideoAudioTier] {
     ];
     match quality {
         Quality::Auto => LOSSLESS,
-        Quality::Lossless | Quality::Hires | Quality::Master => LOSSLESS,
+        Quality::Lossless | Quality::Hires | Quality::Master | Quality::Vivid => LOSSLESS,
         Quality::Surround | Quality::Spatial | Quality::Dolby => DOLBY,
         Quality::Low | Quality::Standard | Quality::Higher | Quality::High => NORMAL,
     }
@@ -2566,7 +2566,7 @@ fn bilibili_audio_downgraded(requested: Quality, tier: VideoAudioTier, actual: Q
     match requested {
         Quality::Auto | Quality::Low => false,
         Quality::Lossless | Quality::Hires => tier != VideoAudioTier::Lossless,
-        Quality::Master => true,
+        Quality::Master | Quality::Vivid => true,
         Quality::Surround | Quality::Spatial | Quality::Dolby => tier != VideoAudioTier::Dolby,
         Quality::Standard => actual == Quality::Low,
         Quality::Higher => matches!(actual, Quality::Low | Quality::Standard),

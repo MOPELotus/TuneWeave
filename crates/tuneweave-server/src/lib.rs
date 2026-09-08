@@ -17022,6 +17022,7 @@ fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
         "spatial" | "sky" => Ok(Quality::Spatial),
         "dolby" | "atmos" => Ok(Quality::Dolby),
         "master" | "jymaster" => Ok(Quality::Master),
+        "vivid" => Ok(Quality::Vivid),
         value => Err(
             TuneWeaveError::invalid_request(format!("unsupported quality: {value}")).with_details(
                 json!({
@@ -17115,10 +17116,13 @@ fn parse_immersive_audio_type(
         "c51" => Ok(Some(ImmersiveAudioType::C51)),
         "ste" => Ok(Some(ImmersiveAudioType::Ste)),
         "aac" => Ok(Some(ImmersiveAudioType::Aac)),
+        "c512" => Ok(Some(ImmersiveAudioType::C512)),
+        "ste2" => Ok(Some(ImmersiveAudioType::Ste2)),
+        "aac2" => Ok(Some(ImmersiveAudioType::Aac2)),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported immersive audio type: {value}"
         ))
-        .with_details(json!({ "allowed": ["c51", "ste", "aac"] }))),
+        .with_details(json!({ "allowed": ["c51", "ste", "aac", "c512", "ste2", "aac2"] }))),
     }
 }
 
@@ -21694,6 +21698,9 @@ mod tests {
                             Some(ImmersiveAudioType::C51) => "c51",
                             Some(ImmersiveAudioType::Ste) => "ste",
                             Some(ImmersiveAudioType::Aac) => "aac",
+                            Some(ImmersiveAudioType::C512) => "c512",
+                            Some(ImmersiveAudioType::Ste2) => "ste2",
+                            Some(ImmersiveAudioType::Aac2) => "aac2",
                             None => "none",
                         }
                         .to_owned(),

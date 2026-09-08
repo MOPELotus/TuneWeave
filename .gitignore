@@ -4,6 +4,7 @@
 **/.local/
 /data/
 /logs/
+**/node_modules/
 
 .env
 .env.*

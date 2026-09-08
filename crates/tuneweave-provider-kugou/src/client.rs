@@ -3214,7 +3214,7 @@ fn select_media_spec(track: &Track, request: &StreamRequest) -> Result<SelectedM
             Quality::Lossless => Quality::Lossless,
             Quality::Hires => Quality::Hires,
             Quality::Master => Quality::Master,
-            Quality::Surround | Quality::Spatial | Quality::Dolby => {
+            Quality::Surround | Quality::Spatial | Quality::Dolby | Quality::Vivid => {
                 return Err(kugou_invalid_media_request(
                     "KuGou public media does not yet expose immersive quality families",
                 ));
@@ -5292,6 +5292,45 @@ mod tests {
             page.tracks
                 .iter()
                 .all(|track| track.platform == Platform::Kugou)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live KuGou access"]
+    async fn live_new_account_auth_does_not_issue_anonymous_authorization() {
+        let client = KugouClient::new(&KugouConfig::default()).unwrap();
+        let identity = client.registered_device().await.unwrap();
+        let now = unix_seconds_now();
+        let mut parameters = BTreeMap::from([
+            ("appid", ANDROID_APP_ID.to_string()),
+            ("clientver", ANDROID_CLIENT_VERSION.to_string()),
+            ("clienttime", now.to_string()),
+            ("dfid", identity.dfid().to_owned()),
+            ("mid", identity.mid.clone()),
+            ("module_id", "51".to_owned()),
+            ("uuid", "-".to_owned()),
+        ]);
+        let signature = android_signature_for_parameters(&parameters, &[]);
+        parameters.insert("signature", signature);
+        let response = client
+            .android_get(
+                "https://trackercdngz.kugou.com/v1/user_verify",
+                now,
+                &identity,
+            )
+            .query(&parameters)
+            .send()
+            .await
+            .unwrap();
+        let bytes = read_bounded_response(response, "KuGou anonymous Auth audit")
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], 0);
+        assert_eq!(body["error_code"], 35002);
+        assert!(
+            body.pointer("/data/auth")
+                .is_none_or(|value| value.as_str().is_none_or(str::is_empty))
         );
     }
 

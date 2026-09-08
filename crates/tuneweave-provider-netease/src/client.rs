@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::identity::{Identities, cookie_value};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest, Md5};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -30,7 +31,7 @@ use crate::crypto::{
 const DEFAULT_BASE_URL: &str = "https://interface.music.163.com";
 const DEFAULT_XEAPI_BASE_URL: &str = "https://interface3.music.163.com";
 const DEFAULT_WEB_BASE_URL: &str = "https://music.163.com";
-const DEFAULT_ANTI_CHEAT_V2_URL: &str = "https://ac.dun.163.com/v2/config/js?pn=YD00000558929251";
+const DEFAULT_ANTI_CHEAT_V2_URL: &str = "";
 const DEFAULT_ANTI_CHEAT_V3_URL: &str = "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251";
 const IMAGE_UPLOAD_BASE_URL: &str = "https://nosup-hz1.127.net/yyimgs";
 const VOICE_UPLOAD_BASE_URL: &str = "https://ymusic.nos-hz.163yun.com";
@@ -61,6 +62,7 @@ pub struct NeteaseConfig {
     pub base_url: String,
     pub xeapi_base_url: String,
     pub web_base_url: String,
+    /// Loopback Watchman SDK adapter endpoint. Empty disables V2 acquisition.
     pub anti_cheat_v2_url: String,
     /// Backward-compatible v3 registration URL override.
     pub anti_cheat_url: String,
@@ -108,12 +110,14 @@ pub struct NeteaseClient {
     anti_cheat_v3_url: String,
     web_user_agent: String,
     cookie: Option<String>,
+    identities: Arc<Identities>,
+    identity_scope: String,
+    vivid_profile: bool,
     device_id: String,
     web_client_id: String,
     real_ip: Option<Ipv4Addr>,
     xeapi_state: Arc<RwLock<XeapiState>>,
-    anti_cheat_v2_token: Arc<RwLock<Option<String>>>,
-    anti_cheat_v3_token: Arc<RwLock<Option<String>>>,
+    anti_cheat_v3_token: Arc<RwLock<Option<(String, Instant)>>>,
     base_upstream_host: &'static str,
     web_upstream_host: &'static str,
     xeapi_upstream_host: &'static str,
@@ -263,6 +267,8 @@ struct EapiHeader<'a> {
     music_u: Option<&'a str>,
     #[serde(rename = "MUSIC_A", skip_serializing_if = "Option::is_none")]
     music_a: Option<&'a str>,
+    #[serde(rename = "NMTID", skip_serializing_if = "Option::is_none")]
+    nmtid: Option<&'a str>,
 }
 
 impl NeteaseClient {
@@ -337,6 +343,7 @@ impl NeteaseClient {
             config.real_ip
         };
 
+        let identities = Arc::new(Identities::new(config.credential_store.clone())?);
         Ok(Self {
             http,
             asset_http,
@@ -347,11 +354,13 @@ impl NeteaseClient {
             anti_cheat_v3_url: config.anti_cheat_url,
             web_user_agent: config.web_user_agent,
             cookie: config.cookie,
+            identities,
+            identity_scope: "anonymous".to_owned(),
+            vivid_profile: false,
             device_id,
             web_client_id,
             real_ip,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
-            anti_cheat_v2_token: Arc::new(RwLock::new(None)),
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
             base_upstream_host,
             web_upstream_host,
@@ -401,11 +410,18 @@ impl NeteaseClient {
         }
 
         let cookie = CookieValues::parse(self.cookie.as_deref());
+        let nmtid = self
+            .identities
+            .current(&self.identity_scope, self.cookie.as_deref())?;
         let header = EapiHeader {
             osver: "Microsoft-Windows-10-Professional-build-19045-64bit",
             device_id: &self.device_id,
-            os: "pc",
-            appver: "3.1.17.204416",
+            os: if self.vivid_profile { "android" } else { "pc" },
+            appver: if self.vivid_profile {
+                "9.5.61"
+            } else {
+                "3.1.17.204416"
+            },
             versioncode: "140",
             mobilename: "",
             buildver: unix_time_seconds().to_string(),
@@ -415,6 +431,7 @@ impl NeteaseClient {
             request_id: request_id(),
             music_u: cookie.music_u,
             music_a: cookie.music_a,
+            nmtid: nmtid.as_deref(),
         };
         let mut payload = payload_object(payload)?;
         let encrypted_response = encrypted_response_requested(&payload);
@@ -459,7 +476,13 @@ impl NeteaseClient {
                 .await
                 .map_err(request_error)?;
             http_status = Some(response.status());
-            parse_response_with_encryption(response, encrypted_response).await
+            let response = parse_response_with_encryption(response, encrypted_response).await?;
+            self.identities.observe(
+                &self.identity_scope,
+                self.cookie.as_deref(),
+                &response.cookies,
+            )?;
+            Ok(response)
         }
         .await;
         self.log_uninspected_upstream_request(
@@ -506,7 +529,7 @@ impl NeteaseClient {
                 .header(
                     header::COOKIE,
                     weapi_cookie_header(
-                        self.cookie.as_deref(),
+                        Some(&self.cookie_with_identity()?),
                         &self.device_id,
                         &self.web_client_id,
                         path,
@@ -539,6 +562,9 @@ impl NeteaseClient {
     pub async fn request_api(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
         validate_api_path(path, "API")?;
         let cookie = CookieValues::parse(self.cookie.as_deref());
+        let nmtid = self
+            .identities
+            .current(&self.identity_scope, self.cookie.as_deref())?;
         let header = EapiHeader {
             osver: "Microsoft-Windows-10-Professional-build-19045-64bit",
             device_id: &self.device_id,
@@ -553,6 +579,7 @@ impl NeteaseClient {
             request_id: request_id(),
             music_u: cookie.music_u,
             music_a: cookie.music_a,
+            nmtid: nmtid.as_deref(),
         };
         let mut payload = payload_object(payload)?;
         payload
@@ -1010,7 +1037,7 @@ impl NeteaseClient {
                 .header(
                     header::COOKIE,
                     weapi_cookie_header(
-                        self.cookie.as_deref(),
+                        Some(&self.cookie_with_identity()?),
                         &self.device_id,
                         &self.web_client_id,
                         path,
@@ -1042,11 +1069,51 @@ impl NeteaseClient {
         version: AntiCheatTokenVersion,
         refresh: bool,
     ) -> Result<(String, bool)> {
-        let (url, cache) = match version {
-            AntiCheatTokenVersion::V2 => (&self.anti_cheat_v2_url, &self.anti_cheat_v2_token),
-            AntiCheatTokenVersion::V3 => (&self.anti_cheat_v3_url, &self.anti_cheat_v3_token),
-        };
-        if !refresh && let Some(token) = cache.read().map_err(|_| anti_cheat_state_error())?.clone()
+        if version == AntiCheatTokenVersion::V2 {
+            let endpoint = Url::parse(&self.anti_cheat_v2_url)
+                .ok()
+                .filter(|url| {
+                    url.scheme() == "http"
+                        && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none()
+                })
+                .ok_or_else(|| {
+                    TuneWeaveError::new(
+                        ErrorCode::PlatformUnavailable,
+                        "NetEase V2 requires a configured loopback Watchman SDK adapter",
+                    )
+                    .with_platform(Platform::Netease)
+                })?;
+            // This client has no platform cookies, proxy, or redirect behavior.
+            let http = Client::builder()
+                .no_proxy()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(45))
+                .build()
+                .map_err(|_| anti_cheat_state_error())?;
+            let mut response = http.post(endpoint).send().await.map_err(request_error)?;
+            if !response.status().is_success() {
+                return Err(anti_cheat_registration_error());
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+                if bytes.len().saturating_add(chunk.len()) > 16_384 {
+                    return Err(anti_cheat_registration_error());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let body = std::str::from_utf8(&bytes).map_err(|_| anti_cheat_registration_error())?;
+            return Ok((parse_anti_cheat_token_v2(body)?, true));
+        }
+        let url = &self.anti_cheat_v3_url;
+        let cache = &self.anti_cheat_v3_token;
+        if !refresh
+            && let Some((token, acquired)) =
+                cache.read().map_err(|_| anti_cheat_state_error())?.clone()
+            && acquired.elapsed() < Duration::from_secs(120)
         {
             return Ok((token, false));
         }
@@ -1079,7 +1146,7 @@ impl NeteaseClient {
                 )
                 .with_platform(Platform::Netease)
             })?;
-            *cache.write().map_err(|_| anti_cheat_state_error())? = Some(token.clone());
+            *cache.write().map_err(|_| anti_cheat_state_error())? = Some((token.clone(), Instant::now()));
             Ok((token, true))
         }
         .await;
@@ -1175,13 +1242,17 @@ impl NeteaseClient {
                 .header("x-deviceid", &self.device_id)
                 .header("x-os", "android")
                 .header("x-osver", "16")
-                .header("x-appver", "9.1.65")
+                .header(
+                    "x-appver",
+                    if self.vivid_profile {
+                        "9.5.61"
+                    } else {
+                        "9.1.65"
+                    },
+                )
                 .header("x-sdeviceid", &self.device_id)
                 .header("x-buildver", &build_version)
-                .header(
-                    header::COOKIE,
-                    xeapi_cookie_header(self.cookie.as_deref(), &self.device_id, &build_version),
-                ),
+                .header(header::COOKIE, self.xeapi_cookie(&build_version)?),
         );
         if let Some(music_u) = cookie.music_u {
             request = request.header("x-music-u", music_u);
@@ -1368,10 +1439,84 @@ impl NeteaseClient {
         self.cookie.as_deref()
     }
 
+    pub(crate) fn for_vivid(&self, enabled: bool) -> Self {
+        let mut client = self.clone();
+        client.vivid_profile = enabled;
+        client
+    }
+
+    fn xeapi_cookie(&self, build_version: &str) -> Result<String> {
+        let cookie = self.cookie_with_identity()?;
+        let cookie = if self.vivid_profile {
+            let mut pairs = BTreeMap::new();
+            for pair in cookie.split(';') {
+                insert_cookie_pair(&mut pairs, pair);
+            }
+            pairs.insert("os".to_owned(), "android".to_owned());
+            pairs.insert("appver".to_owned(), "9.5.61".to_owned());
+            pairs
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            cookie
+        };
+        Ok(xeapi_cookie_header(
+            Some(&cookie),
+            &self.device_id,
+            build_version,
+        ))
+    }
+
+    fn cookie_with_identity(&self) -> Result<String> {
+        let mut cookie = self.cookie.clone().unwrap_or_default();
+        let identity = self
+            .identities
+            .current(&self.identity_scope, self.cookie.as_deref())?;
+        if cookie_value(Some(&cookie), "NMTID").is_none()
+            && let Some(value) = identity
+        {
+            if !cookie.is_empty() {
+                cookie.push_str("; ");
+            }
+            cookie.push_str("NMTID=");
+            cookie.push_str(&value);
+        }
+        Ok(cookie)
+    }
+
     pub(crate) fn with_cookie(&self, cookie: String) -> Self {
         let mut client = self.clone();
+        if cookie_value(Some(&cookie), "MUSIC_U") != cookie_value(self.cookie.as_deref(), "MUSIC_U")
+            || cookie_value(Some(&cookie), "MUSIC_A")
+                != cookie_value(self.cookie.as_deref(), "MUSIC_A")
+        {
+            client.anti_cheat_v3_token = Arc::new(RwLock::new(None));
+        }
+        if cookie_value(Some(&cookie), "MUSIC_U") != cookie_value(self.cookie.as_deref(), "MUSIC_U")
+        {
+            client.identity_scope = format!(
+                "cookie:{}",
+                hex::encode(Md5::digest(
+                    cookie_value(Some(&cookie), "MUSIC_U")
+                        .unwrap_or_default()
+                        .as_bytes()
+                ))
+            );
+        }
         client.cookie = Some(cookie);
         client
+    }
+
+    pub(crate) fn with_account_scope(mut self, account: &str) -> Self {
+        self.identity_scope = format!("account:{account}");
+        self.anti_cheat_v3_token = Arc::new(RwLock::new(None));
+        self
+    }
+
+    pub(crate) fn remove_account_identity(&self, account: &str) -> Result<()> {
+        self.identities.remove(&format!("account:{account}"))
     }
 
     pub(crate) fn with_device_id(&self, device_id: String) -> Self {
@@ -1387,6 +1532,9 @@ impl NeteaseClient {
     pub(crate) fn without_cookie(&self) -> Self {
         let mut client = self.clone();
         client.cookie = None;
+        client.identities = Arc::new(Identities::ephemeral());
+        client.anti_cheat_v3_token = Arc::new(RwLock::new(None));
+        client.identity_scope = "anonymous".to_owned();
         client
     }
 
@@ -1878,20 +2026,26 @@ fn scalar_string(value: Option<&Value>) -> Option<String> {
 }
 
 fn parse_anti_cheat_token_v2(body: &str) -> Result<String> {
-    let response =
-        serde_json::from_str::<Value>(body).map_err(|_| anti_cheat_registration_error())?;
-    let code = response
-        .get("code")
-        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
-    let token = response
-        .pointer("/result/conf")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty());
-    match (code, token) {
-        (Some(200), Some(token)) => Ok(token.to_owned()),
-        _ => Err(anti_cheat_registration_error()),
+    #[derive(Deserialize)]
+    struct SdkToken {
+        code: u16,
+        registered: bool,
+        token: String,
     }
+    let response: SdkToken =
+        serde_json::from_str(body).map_err(|_| anti_cheat_registration_error())?;
+    if response.code != 200
+        || !response.registered
+        || response.token.is_empty()
+        || response.token.len() > 8192
+        || !response
+            .token
+            .bytes()
+            .all(|byte| (33..=126).contains(&byte))
+    {
+        return Err(anti_cheat_registration_error());
+    }
+    Ok(response.token)
 }
 
 fn parse_anti_cheat_token_v3(body: &str) -> Result<String> {
@@ -1986,7 +2140,7 @@ fn weapi_cookie_header(
     cookie: Option<&str>,
     device_id: &str,
     web_client_id: &str,
-    path: &str,
+    _path: &str,
 ) -> String {
     let mut cookies = BTreeMap::new();
     for part in cookie.unwrap_or_default().split(';') {
@@ -2022,9 +2176,6 @@ fn weapi_cookie_header(
     cookies
         .entry("osver".to_owned())
         .or_insert_with(|| "Microsoft-Windows-10-Professional-build-19045-64bit".to_owned());
-    if !path.contains("login") {
-        cookies.insert("NMTID".to_owned(), hex::encode(rand::random::<[u8; 16]>()));
-    }
     cookies
         .into_iter()
         .map(|(name, value)| {
@@ -2236,11 +2387,7 @@ mod tests {
         );
         assert_eq!(
             anti_cheat_upstream_summary(AntiCheatTokenVersion::V2, DEFAULT_ANTI_CHEAT_V2_URL),
-            (
-                "anti_cheat_v2_registration",
-                "ac.dun.163.com",
-                "/v2/config/js"
-            )
+            ("anti_cheat_v2_registration", "configured", "/{configured}")
         );
         assert_eq!(
             anti_cheat_upstream_summary(AntiCheatTokenVersion::V3, DEFAULT_ANTI_CHEAT_V3_URL),
@@ -2472,12 +2619,13 @@ mod tests {
         assert!(cookie.contains("channel=netease"));
         assert!(cookie.contains("_ntes_nuid="));
         assert!(cookie.contains("_ntes_nnid="));
-        assert!(cookie.contains("NMTID="));
+        assert!(!cookie.contains("NMTID="));
     }
 
     #[test]
     fn eapi_cookie_header_matches_javascript_encode_uri_component() {
         let header = EapiHeader {
+            nmtid: Some("server_identity"),
             osver: "Windows 10",
             device_id: "device_id",
             os: "pc",
@@ -2506,10 +2654,7 @@ mod tests {
         assert_eq!(config.base_url, "https://interface.music.163.com");
         assert_eq!(config.xeapi_base_url, "https://interface3.music.163.com");
         assert_eq!(config.web_base_url, "https://music.163.com");
-        assert_eq!(
-            config.anti_cheat_v2_url,
-            "https://ac.dun.163.com/v2/config/js?pn=YD00000558929251"
-        );
+        assert_eq!(config.anti_cheat_v2_url, "");
         assert_eq!(
             config.anti_cheat_url,
             "https://ac.dun.163yun.com/v3/b?pn=YD00000558929251"
@@ -2588,6 +2733,88 @@ mod tests {
         server.join().expect("join test server");
     }
 
+    #[tokio::test]
+    async fn eapi_acquires_identity_and_reuses_it_in_both_wire_headers() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for expected in [None, Some("issued_identity")] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let (headers, body) = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert_ne!(count, 0);
+                    bytes.extend_from_slice(&chunk[..count]);
+                    let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8(bytes[..end].to_vec()).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break (headers, bytes[end + 4..end + 4 + length].to_vec());
+                    }
+                };
+                let cookie = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("cookie").then_some(value.trim())
+                    })
+                    .unwrap();
+                let params = url::form_urlencoded::parse(&body)
+                    .find(|(key, _)| key == "params")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                let plaintext = decrypt_eapi_response(&hex::decode(params).unwrap()).unwrap();
+                let plaintext = String::from_utf8(plaintext).unwrap();
+                let payload: Value =
+                    serde_json::from_str(plaintext.split("-36cd479b6b5-").nth(1).unwrap()).unwrap();
+                assert_eq!(cookie_value(Some(cookie), "NMTID"), expected);
+                assert_eq!(payload["header"]["NMTID"].as_str(), expected);
+                let body = r#"{"code":200}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nSet-Cookie: NMTID=issued_identity; Path=/; HttpOnly\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let client = NeteaseClient::new(NeteaseConfig {
+            base_url: format!("http://{address}"),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        for _ in 0..2 {
+            client
+                .request_eapi("/api/identity/test", json!({}))
+                .await
+                .unwrap();
+        }
+        assert!(
+            client
+                .cookie_with_identity()
+                .unwrap()
+                .contains("NMTID=issued_identity")
+        );
+        assert!(
+            !client
+                .without_cookie()
+                .cookie_with_identity()
+                .unwrap()
+                .contains("NMTID=")
+        );
+        server.join().unwrap();
+    }
+
     #[test]
     fn random_chinese_network_identity_is_selected_once_per_client() {
         let client = NeteaseClient::new(NeteaseConfig {
@@ -2652,12 +2879,12 @@ mod tests {
     #[test]
     fn anti_cheat_token_parsers_accept_both_versions_and_reject_malformed_values() {
         assert_eq!(
-            parse_anti_cheat_token_v2(r#"{"code":200,"result":{"conf":"v2-token"}}"#)
+            parse_anti_cheat_token_v2(r#"{"code":200,"registered":true,"token":"v2-token"}"#)
                 .expect("parse v2 anti-cheat token"),
             "v2-token"
         );
         assert_eq!(
-            parse_anti_cheat_token_v2(r#"{"code":"200","result":{"conf":" token-2 "}}"#)
+            parse_anti_cheat_token_v2(r#"{"code":200,"registered":true,"token":"token-2"}"#)
                 .expect("parse compatible v2 anti-cheat token"),
             "token-2"
         );
@@ -2706,36 +2933,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anti_cheat_token_cache_is_shared_by_account_clients_without_refreshing() {
-        let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
-        *client
-            .anti_cheat_v2_token
-            .write()
-            .expect("write v2 anti-cheat cache") = Some("cached-v2-token".to_owned());
-        *client
-            .anti_cheat_v3_token
-            .write()
-            .expect("write v3 anti-cheat cache") = Some("cached-v3-token".to_owned());
-        let account = client.with_cookie("MUSIC_U=account-session".to_owned());
-        let (v2, refreshed) = account
-            .anti_cheat_token(AntiCheatTokenVersion::V2, false)
-            .await
-            .expect("read cached v2 anti-cheat token");
-        assert_eq!(v2, "cached-v2-token");
-        assert!(!refreshed);
-        let (v3, refreshed) = account
+    async fn anti_cheat_token_cache_is_session_scoped_and_v2_requires_sdk() {
+        let client = NeteaseClient::new(NeteaseConfig::default()).unwrap();
+        *client.anti_cheat_v3_token.write().unwrap() =
+            Some(("cached-v3-token".to_owned(), Instant::now()));
+        let (token, refreshed) = client
+            .clone()
             .anti_cheat_token(AntiCheatTokenVersion::V3, false)
             .await
-            .expect("read cached v3 anti-cheat token");
-        assert_eq!(v3, "cached-v3-token");
+            .unwrap();
+        assert_eq!(token, "cached-v3-token");
         assert!(!refreshed);
+        assert!(
+            client
+                .with_cookie("MUSIC_U=another-session".to_owned())
+                .anti_cheat_v3_token
+                .read()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            client
+                .without_cookie()
+                .anti_cheat_v3_token
+                .read()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            client
+                .anti_cheat_token(AntiCheatTokenVersion::V2, false)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::PlatformUnavailable
+        );
+        assert!(
+            parse_anti_cheat_token_v2(
+                r#"{"code":200,"result":{"conf":"configuration-not-token"}}"#
+            )
+            .is_err()
+        );
+        for body in [
+            r#"{"code":200,"registered":false,"token":"token"}"#,
+            r#"{"code":200,"registered":true,"token":""}"#,
+            r#"{"code":200,"registered":true,"token":"bad\r\nheader"}"#,
+        ] {
+            assert!(parse_anti_cheat_token_v2(body).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn v2_sdk_adapter_uses_fresh_tokens_without_platform_credentials() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for token in ["first", "second"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+                assert!(request.starts_with("post /token "));
+                assert!(!request.contains("cookie:") && !request.contains("authorization:"));
+                let body = json!({"code":200, "registered":true, "token":token}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = NeteaseClient::new(NeteaseConfig {
+            anti_cheat_v2_url: format!("http://{address}/token"),
+            cookie: Some("MUSIC_U=private".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        for token in ["first", "second"] {
+            assert_eq!(
+                client
+                    .anti_cheat_token(AntiCheatTokenVersion::V2, false)
+                    .await
+                    .unwrap(),
+                (token.to_owned(), true)
+            );
+        }
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running local Watchman SDK adapter"]
+    async fn live_v2_sdk_adapter_returns_fresh_business_token() {
+        let client = NeteaseClient::new(NeteaseConfig {
+            anti_cheat_v2_url: std::env::var("TUNEWEAVE_NETEASE_WATCHMAN_URL")
+                .expect("configured SDK adapter"),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        let (token, refreshed) = client
+            .anti_cheat_token(AntiCheatTokenVersion::V2, false)
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+        assert!(refreshed);
     }
 
     #[tokio::test]
     #[ignore = "requires live NetEase anti-cheat access"]
-    async fn live_anti_cheat_token_registration_returns_and_refreshes_both_versions() {
+    async fn live_anti_cheat_v3_token_registration_returns_and_refreshes() {
         let client = NeteaseClient::new(NeteaseConfig::default()).expect("build client");
-        for version in [AntiCheatTokenVersion::V2, AntiCheatTokenVersion::V3] {
+        for version in [AntiCheatTokenVersion::V3] {
             let (first, refreshed) = client
                 .anti_cheat_token(version, false)
                 .await
@@ -2894,6 +3205,14 @@ mod tests {
             response.body["result"]["songs"]
                 .as_array()
                 .is_some_and(|songs| !songs.is_empty())
+        );
+        assert!(
+            client
+                .identities
+                .current(&client.identity_scope, None)
+                .unwrap()
+                .is_some(),
+            "live EAPI response did not issue NMTID"
         );
     }
 

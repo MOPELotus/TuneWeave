@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         log_provider_configuration_failure(Platform::Netease, "random_cn_ip");
     })?;
     let netease_config = NeteaseConfig {
+        anti_cheat_v2_url: nonempty_env("TUNEWEAVE_NETEASE_WATCHMAN_URL").unwrap_or_default(),
         cookie: netease_cookie.clone(),
         proxy_url: netease_proxy.clone(),
         real_ip: netease_real_ip,

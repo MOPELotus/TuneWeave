@@ -26,7 +26,8 @@ use crate::identity::{
 use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decrypt_cenc_audio};
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
-const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
+const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/search/track";
+const TRACK_DETAIL_ENDPOINT: &str = "https://beta-luna.douyin.com/luna/h5/seo_track";
 const PLAYLIST_DETAIL_ENDPOINT: &str = "https://api.qishui.com/luna/pc/playlist/detail";
 const ALBUM_SHARE_ENDPOINT: &str = "https://www.qishui.com/share/album";
 const SODA_APP_ID: &str = "386088";
@@ -95,15 +96,17 @@ struct SodaSearchQuery<'a> {
     q: &'a str,
     aid: &'static str,
     cursor: u32,
+    count: u32,
+    app_name: &'static str,
+    device_platform: &'static str,
+    version_name: &'static str,
+    version_code: &'static str,
 }
 
 #[derive(Serialize)]
 struct SodaTrackDetailQuery<'a> {
     track_id: &'a str,
-    media_type: &'static str,
-    aid: &'static str,
     device_platform: &'static str,
-    channel: &'static str,
 }
 
 #[derive(Serialize)]
@@ -124,11 +127,20 @@ struct SodaAlbumShareQuery<'a> {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SodaTrackDetailEnvelope {
+    status_code: Option<i64>,
     status_info: SodaStatusInfo,
     track: Option<SodaTrack>,
+    seo_track: Option<SodaSeoTrack>,
     risk_result: Option<i64>,
     lyric: SodaLyricPayload,
     track_player: Option<SodaTrackPlayer>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaSeoTrack {
+    track: Option<SodaTrack>,
+    lyric: SodaLyricPayload,
 }
 
 #[derive(Default, Deserialize)]
@@ -445,6 +457,7 @@ struct SodaAlbum {
 struct SodaImage {
     uri: String,
     urls: Vec<String>,
+    template_prefix: String,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -629,6 +642,11 @@ impl SodaClient {
                     q: query,
                     aid: SODA_APP_ID,
                     cursor,
+                    count: UPSTREAM_SEARCH_PAGE_SIZE,
+                    app_name: "luna",
+                    device_platform: "android",
+                    version_name: "19.8.0",
+                    version_code: "100198030",
                 })
                 .send()
                 .await
@@ -641,7 +659,7 @@ impl SodaClient {
         self.log_upstream_request(
             "search",
             "api.qishui.com",
-            "/luna/pc/search/track",
+            "/luna/search/track",
             http_status,
             started,
             &outcome,
@@ -728,7 +746,7 @@ impl SodaClient {
         outcome
     }
 
-    async fn fetch_track_v2_body(
+    async fn fetch_track_body(
         &self,
         identity: &SodaTrackIdentity,
         operation: &'static str,
@@ -738,13 +756,10 @@ impl SodaClient {
         let outcome = async {
             let response = self
                 .http
-                .get("https://api.qishui.com/luna/pc/track_v2")
+                .get(TRACK_DETAIL_ENDPOINT)
                 .query(&SodaTrackDetailQuery {
                     track_id: identity.id(),
-                    media_type: "track",
-                    aid: SODA_APP_ID,
                     device_platform: "web",
-                    channel: "pc_web",
                 })
                 .send()
                 .await
@@ -762,8 +777,8 @@ impl SodaClient {
         };
         self.emit_upstream_request(
             soda_track_v2_operation(operation),
-            "api.qishui.com",
-            "/luna/pc/track_v2",
+            "beta-luna.douyin.com",
+            "/luna/h5/seo_track",
             http_status,
             started,
             business_class,
@@ -773,14 +788,12 @@ impl SodaClient {
     }
 
     pub(crate) async fn track_detail(&self, identity: &SodaTrackIdentity) -> Result<Track> {
-        let body = self
-            .fetch_track_v2_body(identity, "Soda track detail")
-            .await?;
+        let body = self.fetch_track_body(identity, "Soda track detail").await?;
         parse_track_detail_response(&body, identity)
     }
 
     pub(crate) async fn lyrics(&self, identity: &SodaTrackIdentity) -> Result<Lyrics> {
-        let body = self.fetch_track_v2_body(identity, "Soda lyrics").await?;
+        let body = self.fetch_track_body(identity, "Soda lyrics").await?;
         parse_lyrics_response(&body, identity)
     }
 
@@ -790,7 +803,7 @@ impl SodaClient {
         request: &TrackAvailabilityRequest,
     ) -> Result<TrackAvailability> {
         let body = self
-            .fetch_track_v2_body(identity, "Soda track availability")
+            .fetch_track_body(identity, "Soda track availability")
             .await?;
         parse_track_availability_response(&body, identity, request)
     }
@@ -851,9 +864,8 @@ impl SodaClient {
         requested_bitrate: u64,
         operation: &'static str,
     ) -> Result<ValidatedSodaMedia> {
-        let body = self.fetch_track_v2_body(identity, operation).await?;
-        let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(&body)
-            .map_err(|_| soda_upstream_error(format!("{operation} returned malformed JSON")))?;
+        let body = self.fetch_track_body(identity, operation).await?;
+        let envelope = parse_track_envelope(&body)?;
         validate_status_metadata(&envelope.status_info, operation)?;
         if envelope.risk_result.is_some_and(|value| value != 0) {
             return Err(soda_upstream_error(format!(
@@ -1160,7 +1172,7 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
                 soda_upstream_error("Soda track search item omitted its track payload")
             })
         })
-        .map(|track| track.and_then(|track| map_track(track, "official_pc_track_search")))
+        .map(|track| track.and_then(|track| map_track(track, "official_android_track_search")))
         .collect::<Result<Vec<_>>>()?;
     Ok(SodaSearchPage {
         tracks,
@@ -1562,9 +1574,30 @@ fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
     ))
 }
 
+fn parse_track_envelope(body: &[u8]) -> Result<SodaTrackDetailEnvelope> {
+    let mut envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda track response returned malformed JSON"))?;
+    if envelope.status_code.is_some_and(|code| code != 0) {
+        return Err(soda_upstream_error("Soda rejected the track request"));
+    }
+    if let Some(seo) = envelope.seo_track.take() {
+        if let (Some(legacy), Some(current)) = (&envelope.track, &seo.track)
+            && legacy.id != current.id
+        {
+            return Err(soda_upstream_error(
+                "Soda returned conflicting track identities",
+            ));
+        }
+        envelope.track = seo.track.or(envelope.track);
+        if envelope.lyric.content.trim().is_empty() {
+            envelope.lyric = seo.lyric;
+        }
+    }
+    Ok(envelope)
+}
+
 fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Track> {
-    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda track detail returned malformed JSON"))?;
+    let envelope = parse_track_envelope(body)?;
     validate_status_metadata(&envelope.status_info, "Soda track detail")?;
     if envelope.risk_result.is_some_and(|value| value != 0) {
         return Err(soda_upstream_error(
@@ -1584,7 +1617,7 @@ fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Res
             "Soda track detail returned a non-track media type",
         ));
     }
-    let mut mapped = map_track(track, "official_pc_track_v2")?;
+    let mut mapped = map_track(track, "official_seo_track")?;
     mapped.extensions.insert(
         "canonical_share_url".to_owned(),
         json!(identity.canonical_url()),
@@ -1593,8 +1626,7 @@ fn parse_track_detail_response(body: &[u8], identity: &SodaTrackIdentity) -> Res
 }
 
 fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Lyrics> {
-    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda lyrics returned malformed JSON"))?;
+    let envelope = parse_track_envelope(body)?;
     validate_status_metadata(&envelope.status_info, "Soda lyrics")?;
     if envelope.risk_result.is_some_and(|value| value != 0) {
         return Err(soda_upstream_error(
@@ -1627,7 +1659,7 @@ fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Ly
         })
         .collect();
     let mut extensions = Extensions::new();
-    extensions.insert("backend".to_owned(), json!("official_pc_track_v2"));
+    extensions.insert("backend".to_owned(), json!("official_seo_track"));
     extensions.insert("line_count".to_owned(), json!(parsed.line_count));
     extensions.insert("word_count".to_owned(), json!(parsed.word_count));
     extensions.insert("line_time_unit".to_owned(), json!("milliseconds"));
@@ -1656,8 +1688,7 @@ fn parse_track_availability_response(
     identity: &SodaTrackIdentity,
     request: &TrackAvailabilityRequest,
 ) -> Result<TrackAvailability> {
-    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda availability returned malformed JSON"))?;
+    let envelope = parse_track_envelope(body)?;
     validate_status_metadata(&envelope.status_info, "Soda availability")?;
     if envelope.risk_result.is_some_and(|value| value != 0) {
         return Err(soda_upstream_error(
@@ -1679,7 +1710,7 @@ fn parse_track_availability_response(
     }
 
     let mut extensions = Extensions::new();
-    extensions.insert("backend".to_owned(), json!("official_pc_track_v2"));
+    extensions.insert("backend".to_owned(), json!("official_seo_track"));
     extensions.insert(
         "catalog_only_vip_playable".to_owned(),
         json!(track.label_info.only_vip_playable),
@@ -2453,6 +2484,14 @@ fn normalize_image(image: &SodaImage) -> Option<String> {
     {
         return None;
     }
+    let template = image.template_prefix.trim();
+    if template.len() > 128
+        || !template
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
     image.urls.iter().find_map(|base| {
         let url = Url::parse(base.trim()).ok()?;
         let host = url.host_str()?;
@@ -2476,7 +2515,13 @@ fn normalize_image(image: &SodaImage) -> Option<String> {
             && joined.scheme() == "https"
             && joined.query().is_none()
             && joined.fragment().is_none())
-        .then(|| joined.to_string())
+        .then(|| {
+            if template.is_empty() {
+                joined.to_string()
+            } else {
+                format!("{joined}~{template}-resize:960:960.png")
+            }
+        })
     })
 }
 
@@ -2742,6 +2787,52 @@ mod tests {
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn seo_envelope_keeps_identity_and_lyric_precedence_and_rejects_business_errors() {
+        let mut legacy: serde_json::Value = serde_json::from_str(TRACK_DETAIL_RESPONSE).unwrap();
+        let track = legacy.as_object_mut().unwrap().remove("track").unwrap();
+        legacy["seo_track"] = json!({"track": track, "lyric": {"content": "nested"}});
+        let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        assert_eq!(
+            parse_track_detail_response(&bytes, &identity).unwrap().id,
+            identity.id()
+        );
+        assert_eq!(
+            parse_track_envelope(&bytes).unwrap().lyric.content,
+            "not part of track detail"
+        );
+        legacy["lyric"]["content"] = json!("");
+        assert_eq!(
+            parse_track_envelope(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap()
+                .lyric
+                .content,
+            "nested"
+        );
+        legacy["track"] = json!({"id": "123"});
+        assert!(parse_track_envelope(&serde_json::to_vec(&legacy).unwrap()).is_err());
+        legacy.as_object_mut().unwrap().remove("track");
+        legacy["status_code"] = json!(403);
+        assert!(parse_track_envelope(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    }
+
+    #[test]
+    fn seo_image_templates_are_bounded_path_suffixes() {
+        let mut image = SodaImage {
+            uri: "tos-cn-v-2774c002/cover".to_owned(),
+            urls: vec!["https://p3-luna.douyinpic.com/img/".to_owned()],
+            template_prefix: "tplv-b829550vbb".to_owned(),
+        };
+        assert!(
+            normalize_image(&image)
+                .unwrap()
+                .ends_with("~tplv-b829550vbb-resize:960:960.png")
+        );
+        image.template_prefix = "../bad?url=x".to_owned();
+        assert!(normalize_image(&image).is_none());
+    }
+
     const SEARCH_RESPONSE: &str = r#"{
       "status_info":{"log_id":"safe-log","now":1785335031,"now_ts_ms":1785335031384},
       "result_groups":[{
@@ -2835,7 +2926,7 @@ mod tests {
         assert_eq!(track.duration_ms, Some(180_822));
         assert_eq!(track.available_qualities, vec![Quality::Low, Quality::High]);
         assert_eq!(track.playable, None);
-        assert_eq!(track.extensions["backend"], "official_pc_track_v2");
+        assert_eq!(track.extensions["backend"], "official_seo_track");
         assert_eq!(track.extensions["stats"]["count_collected"], 3_548_864);
         assert_eq!(track.extensions["credits"]["composers"][0]["name"], "刘涛");
         assert_eq!(track.extensions["karaoke"]["supported"], true);
@@ -3271,6 +3362,7 @@ mod tests {
     #[test]
     fn images_accept_only_fixed_https_luna_image_nodes_and_paths() {
         let valid = SodaImage {
+            template_prefix: String::new(),
             uri: "tos-cn-v-2774c002/a_b-c.jpg".to_owned(),
             urls: vec!["https://p3-luna.douyinpic.com/img/".to_owned()],
         };
@@ -3289,6 +3381,7 @@ mod tests {
         ] {
             assert!(
                 normalize_image(&SodaImage {
+                    template_prefix: String::new(),
                     uri: uri.to_owned(),
                     urls: vec![base.to_owned()],
                 })
@@ -3478,7 +3571,7 @@ mod tests {
         assert_eq!(track.resource_ref.to_string(), "soda:7304719759323564095");
         assert_eq!(track.name, "落了白");
         assert_eq!(track.duration_ms, Some(180_822));
-        assert_eq!(track.extensions["backend"], "official_pc_track_v2");
+        assert_eq!(track.extensions["backend"], "official_seo_track");
         let serialized = serde_json::to_string(&track).expect("serialize live Soda track");
         assert!(!serialized.contains("url_player_info"));
         assert!(!serialized.contains("video_model"));
@@ -3529,7 +3622,7 @@ mod tests {
         assert!(free.playable);
         assert!(free.actual_bitrate.is_some());
         assert_eq!(free.extensions["preview_available"], false);
-        assert_eq!(free.extensions["encrypted"], true);
+        assert_eq!(free.extensions["encrypted"], false);
 
         let paid =
             SodaTrackIdentity::parse("7304719759323564095").expect("valid paid Soda identity");

@@ -2,6 +2,7 @@ mod auth;
 mod client;
 mod crypto;
 mod dto;
+mod identity;
 mod provider;
 
 pub use auth::{

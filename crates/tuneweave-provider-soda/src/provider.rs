@@ -603,7 +603,7 @@ fn validate_media_request(request: &StreamRequest) -> Result<()> {
     }
     if matches!(
         request.quality,
-        Quality::Surround | Quality::Dolby | Quality::Master
+        Quality::Surround | Quality::Dolby | Quality::Master | Quality::Vivid
     ) {
         return Err(soda_invalid_request(
             "Soda public media does not support the requested quality class",
@@ -620,7 +620,7 @@ fn requested_media_bitrate(request: &StreamRequest) -> u64 {
         Quality::Higher | Quality::High => 500_000,
         Quality::Lossless => 2_000_000,
         Quality::Hires => 5_000_000,
-        Quality::Surround | Quality::Dolby | Quality::Master => 10_000_000,
+        Quality::Surround | Quality::Dolby | Quality::Master | Quality::Vivid => 10_000_000,
     })
 }
 
@@ -646,6 +646,7 @@ const fn quality_parameter(quality: Quality) -> &'static str {
         Quality::Spatial => "spatial",
         Quality::Dolby => "dolby",
         Quality::Master => "master",
+        Quality::Vivid => "vivid",
     }
 }
 

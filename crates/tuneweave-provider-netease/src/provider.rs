@@ -528,7 +528,10 @@ impl NeteaseProvider {
         self.accounts
             .write()
             .map_err(|_| account_store_error())?
-            .insert(account, self.client.with_cookie(cookie));
+            .insert(
+                account.clone(),
+                self.client.with_cookie(cookie).with_account_scope(&account),
+            );
         Ok(())
     }
 
@@ -538,6 +541,7 @@ impl NeteaseProvider {
         };
         for credential in store.load_platform(Platform::Netease)? {
             match credential.kind.as_str() {
+                crate::identity::CREDENTIAL_KIND => {}
                 NETEASE_CREDENTIAL_KIND => {
                     let account = normalize_account_label(Some(&credential.account))?.to_owned();
                     self.install_session_in_memory(account, credential.into_secret())?;
@@ -597,6 +601,7 @@ impl NeteaseProvider {
 
     fn remove_session(&self, account: &str) -> Result<bool> {
         let account = normalize_account_label(Some(account))?;
+        self.client.remove_account_identity(account)?;
         let persisted = self
             .credential_store
             .as_ref()
@@ -708,6 +713,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::PodcastEpisodeLyrics,
             Capability::TrackDetail,
             Capability::TrackAvailability,
+            Capability::TrackSubscriptionWrite,
             Capability::AlbumDetail,
             Capability::AlbumList,
             Capability::AlbumStats,
@@ -2881,6 +2887,32 @@ impl MusicProvider for NeteaseProvider {
         map_artist_new_tracks_play_all_response(response, raw_response)
     }
 
+    async fn set_track_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        let id = parse_numeric_id("track", id)?;
+        let client = self.client_for(account)?;
+        require_authenticated_client(&client, "track subscription")?;
+        let payload = netease_track_subscription_payload(id, subscribed)?;
+        let response = client
+            .request_xeapi_with_check_token("/api/v1/radio/like", payload)
+            .await?;
+        ensure_account_access(&client, &response.body, "track subscription")?;
+        Ok(SubscriptionResult {
+            resource_ref: ResourceRef::new(Platform::Netease, id.to_string())
+                .map_err(|_| TuneWeaveError::invalid_request("invalid NetEase track reference"))?,
+            subscribed,
+            extensions: Extensions::from([
+                ("protocol".to_owned(), json!("xeapi")),
+                ("check_token_version".to_owned(), json!("v3")),
+                ("response".to_owned(), response.body),
+            ]),
+        })
+    }
+
     async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
         let account = request.account.as_deref().unwrap_or("default");
         let client = self.client_for(Some(account))?;
@@ -3150,6 +3182,8 @@ impl MusicProvider for NeteaseProvider {
         let id = validate_netease_stream_track(track)?;
         let client = self.client_for(request.account.as_deref())?;
         let (variant, path, payload, requested_level) = netease_download_request(id, request);
+        let client =
+            client.for_vivid(request.quality == Quality::Vivid && variant == StreamVariant::Modern);
         let response = client.request_eapi(path, payload).await?;
         map_netease_download(
             track,
@@ -11268,6 +11302,12 @@ fn normalize_account_label(account: Option<&str>) -> Result<&str> {
     } else {
         account
     };
+    if account.starts_with(crate::identity::ACCOUNT_PREFIX) {
+        return Err(TuneWeaveError::invalid_request(
+            "account alias uses a reserved identity prefix",
+        )
+        .with_platform(Platform::Netease));
+    }
     if account.len() > 64 {
         return Err(
             TuneWeaveError::invalid_request("account alias cannot exceed 64 bytes")
@@ -11515,6 +11555,8 @@ async fn request_netease_streams(
         .map(validate_netease_stream_track)
         .collect::<Result<Vec<_>>>()?;
     let (variant, path, payload, level) = netease_stream_request(&ids, request);
+    let client =
+        client.for_vivid(request.quality == Quality::Vivid && variant == StreamVariant::Modern);
     let response = match variant {
         StreamVariant::Legacy => client.request_api(path, payload).await?,
         StreamVariant::Modern => client.request_xeapi(path, payload).await?,
@@ -11651,7 +11693,7 @@ fn netease_stream_request(
                     ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
                 ),
                 "level": level,
-                "encodeType": "flac"
+                "encodeType": if level == "vivid" { "mp3" } else { "flac" }
             });
             if level == "sky" {
                 payload["immerseType"] = json!(netease_immersive_type(request.immersive_type));
@@ -11666,11 +11708,37 @@ fn netease_stream_request(
     }
 }
 
+fn netease_track_subscription_payload(id: u64, subscribed: bool) -> Result<Value> {
+    #[derive(serde::Serialize)]
+    struct LikeRequest {
+        #[serde(rename = "trackId")]
+        track_id: String,
+        like: bool,
+        alg: &'static str,
+        time: &'static str,
+    }
+    serde_json::to_value(LikeRequest {
+        track_id: id.to_string(),
+        like: subscribed,
+        alg: "itembased",
+        time: "3",
+    })
+    .map_err(|_| {
+        TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "could not encode NetEase track subscription",
+        )
+    })
+}
+
 fn netease_immersive_type(value: Option<ImmersiveAudioType>) -> &'static str {
     match value.unwrap_or(ImmersiveAudioType::C51) {
         ImmersiveAudioType::C51 => "c51",
         ImmersiveAudioType::Ste => "ste",
         ImmersiveAudioType::Aac => "aac",
+        ImmersiveAudioType::C512 => "c512",
+        ImmersiveAudioType::Ste2 => "ste2",
+        ImmersiveAudioType::Aac2 => "aac2",
     }
 }
 
@@ -11697,7 +11765,7 @@ fn netease_download_request(
                 "/api/song/enhance/download/url/v1",
                 json!({
                     "id": id.to_string(),
-                    "immerseType": "c51",
+                    "immerseType": netease_immersive_type(request.immersive_type),
                     "level": level
                 }),
                 Some(level),
@@ -11824,6 +11892,7 @@ const fn netease_stream_level(quality: Quality) -> &'static str {
         Quality::Spatial => "sky",
         Quality::Dolby => "dolby",
         Quality::Master => "jymaster",
+        Quality::Vivid => "vivid",
     }
 }
 
@@ -12054,7 +12123,8 @@ fn requested_bitrate(quality: Quality) -> u64 {
         | Quality::Surround
         | Quality::Spatial
         | Quality::Dolby
-        | Quality::Master => 999_000,
+        | Quality::Master
+        | Quality::Vivid => 999_000,
     }
 }
 
@@ -12069,6 +12139,7 @@ fn stream_quality(level: Option<&str>, bitrate: Option<u64>) -> Quality {
         "sky" => Quality::Spatial,
         "dolby" => Quality::Dolby,
         "jymaster" => Quality::Master,
+        "vivid" => Quality::Vivid,
         _ => bitrate.map_or(Quality::Auto, quality_for_bitrate),
     }
 }
@@ -12103,6 +12174,7 @@ const fn quality_rank(quality: Quality) -> u8 {
         Quality::Spatial => 8,
         Quality::Dolby => 9,
         Quality::Master => 10,
+        Quality::Vivid => 11,
     }
 }
 
@@ -27640,6 +27712,42 @@ mod tests {
         assert!(backups.is_empty());
     }
 
+    #[tokio::test]
+    async fn track_subscription_preserves_boolean_and_requires_selected_account_before_network() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).unwrap();
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::TrackSubscriptionWrite)
+        );
+        for subscribed in [true, false] {
+            let payload = netease_track_subscription_payload(123, subscribed).unwrap();
+            assert_eq!(
+                payload,
+                json!({"trackId":"123", "like":subscribed, "alg":"itembased", "time":"3"})
+            );
+            let error = provider
+                .set_track_subscription("123", subscribed, None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+            assert!(
+                provider
+                    .set_track_subscription("123", subscribed, Some("missing"))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                provider
+                    .set_track_subscription("bad", subscribed, None)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
     #[test]
     fn modern_stream_requests_cover_every_reference_level_and_sky_payload() {
         for (quality, level) in [
@@ -27652,6 +27760,7 @@ mod tests {
             (Quality::Spatial, "sky"),
             (Quality::Dolby, "dolby"),
             (Quality::Master, "jymaster"),
+            (Quality::Vivid, "vivid"),
         ] {
             let request = StreamRequest {
                 quality,
@@ -27666,7 +27775,15 @@ mod tests {
             assert_eq!(path, "/api/song/enhance/player/url/v1", "{quality:?}");
             assert_eq!(payload["ids"], "[1969519579,33894312]", "{quality:?}");
             assert_eq!(payload["level"], level, "{quality:?}");
-            assert_eq!(payload["encodeType"], "flac", "{quality:?}");
+            assert_eq!(
+                payload["encodeType"],
+                if quality == Quality::Vivid {
+                    "mp3"
+                } else {
+                    "flac"
+                },
+                "{quality:?}"
+            );
             assert_eq!(mapped_level, Some(level), "{quality:?}");
             if quality == Quality::Spatial {
                 assert_eq!(payload["immerseType"], "c51");
@@ -27679,6 +27796,9 @@ mod tests {
             (ImmersiveAudioType::C51, "c51"),
             (ImmersiveAudioType::Ste, "ste"),
             (ImmersiveAudioType::Aac, "aac"),
+            (ImmersiveAudioType::C512, "c512"),
+            (ImmersiveAudioType::Ste2, "ste2"),
+            (ImmersiveAudioType::Aac2, "aac2"),
         ] {
             let request = StreamRequest {
                 quality: Quality::Spatial,
@@ -27774,6 +27894,7 @@ mod tests {
             (Quality::Spatial, "sky"),
             (Quality::Dolby, "dolby"),
             (Quality::Master, "jymaster"),
+            (Quality::Vivid, "vivid"),
         ] {
             let request = StreamRequest {
                 quality,
@@ -32597,6 +32718,7 @@ mod tests {
             (Quality::Spatial, "sky"),
             (Quality::Dolby, "dolby"),
             (Quality::Master, "jymaster"),
+            (Quality::Vivid, "vivid"),
         ] {
             let batch = MusicProvider::streams(
                 &provider,
@@ -32631,6 +32753,9 @@ mod tests {
             (ImmersiveAudioType::C51, "c51"),
             (ImmersiveAudioType::Ste, "ste"),
             (ImmersiveAudioType::Aac, "aac"),
+            (ImmersiveAudioType::C512, "c512"),
+            (ImmersiveAudioType::Ste2, "ste2"),
+            (ImmersiveAudioType::Aac2, "aac2"),
         ] {
             let batch = MusicProvider::streams(
                 &provider,
@@ -32782,6 +32907,7 @@ mod tests {
             (Quality::Spatial, "sky"),
             (Quality::Dolby, "dolby"),
             (Quality::Master, "jymaster"),
+            (Quality::Vivid, "vivid"),
         ] {
             let download = MusicProvider::download(
                 &provider,

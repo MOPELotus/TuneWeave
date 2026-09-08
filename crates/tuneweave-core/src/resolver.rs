@@ -482,6 +482,9 @@ mod tests {
                     Some(ImmersiveAudioType::C51) => "c51",
                     Some(ImmersiveAudioType::Ste) => "ste",
                     Some(ImmersiveAudioType::Aac) => "aac",
+                    Some(ImmersiveAudioType::C512) => "c512",
+                    Some(ImmersiveAudioType::Ste2) => "ste2",
+                    Some(ImmersiveAudioType::Aac2) => "aac2",
                     None => "none",
                 }
                 .to_owned(),
