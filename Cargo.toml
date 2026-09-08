@@ -14,7 +14,7 @@ default-members = ["crates/tuneweave-server"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 authors = ["MOPELotus"]
 edition = "2024"
 rust-version = "1.85"
@@ -29,6 +29,7 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "json
 base64 = "0.22.1"
 bytes = "1.12.1"
 cbc = "0.1.2"
+chacha20 = { version = "0.10.1", default-features = false, features = ["cipher", "zeroize"] }
 ecb = "0.1.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.9"

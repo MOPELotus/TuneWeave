@@ -17,6 +17,53 @@ GET /v1/capabilities
 GET /v1/capabilities?platform=netease
 ```
 
+## 听歌打卡 / scrobble
+
+`POST /v1/tracks/{reference}/scrobble` 提交一次实际收听记录。目前仅网易云支持，能力名为 `scrobble_write`，可通过 `/v1/capabilities?platform=netease` 查询。
+
+```http
+POST /v1/tracks/netease:123456/scrobble
+Content-Type: application/json
+X-TuneWeave-Credential: twc1_<opaque-base64url>
+
+{
+  "played_ms": 90123,
+  "duration_ms": 210456,
+  "bitrate": 320000,
+  "quality": "high"
+}
+```
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| 路径 `reference` | 是 | 实际播放曲目的平台引用，如 `netease:123456`；跨平台回退后使用实际播放来源的引用。 |
+| `played_ms` | 是 | 实际收听毫秒数，正整数；排除暂停和跳转跳过的部分。 |
+| `duration_ms` | 是 | 曲目总毫秒数，正整数；必须不小于 `played_ms`，上限为 4,294,967,295,000。 |
+| `bitrate` | 是 | 实际音频码率，单位 **bit/s**，范围 1–4,294,967,295；320 kbps 填 `320000`。 |
+| `quality` | 是 | 实际音质：`standard`、`higher`、`high`、`lossless`、`hires`、`surround`、`spatial`、`dolby`、`master`、`vivid`。不能填 `auto` 或 `low`。 |
+| `account` | 否 | TuneWeave 托管账号别名，省略时使用 `default`；使用调用方凭据头时不得同时指定非空别名。 |
+
+不要把请求音质误当作实际音质：资源降级或回退后应填实际播放结果。毫秒和 bit/s 到平台日志单位的转换由 TuneWeave 处理，调用方无需截断为整数秒或 kbps。重复播放应分别上报，不能累加成超过曲目总长的一次记录。
+
+成功返回现有 `ApiResponse` 信封，其中 `data` 为：
+
+```json
+{
+  "track_ref": "netease:123456",
+  "accepted": true,
+  "played_ms": 90123,
+  "duration_ms": 210456,
+  "bitrate": 320000,
+  "quality": "high"
+}
+```
+
+`accepted: true` 表示网易云已确认接收开始及结束两个阶段的日志，不保证听歌榜、打卡计数或历史记录立即更新。TuneWeave 不决定提交阈值、不自动统计收听、不调度重复上报。
+
+失败沿用规范化 `error`：参数错误为 `400 invalid_request`，未登录或会话失效为 `401 authentication_required`，权限拒绝为 `403 permission_denied`，限流为 `429 rate_limited`，不支持的平台为 `422 capability_not_supported`，上游异常为 `502 upstream_error`。上传失败时 `error.details` 包含 `stage`（`start` / `complete`）、`start_accepted`、`delivery_may_have_occurred` 和经过筛选的 `upstream` 状态。错误为 `retryable: false`，禁止把超时或部分成功当成未送达直接重试；该接口不提供跨请求幂等保证。返回或传输结果不确定时应由客户端保留该状态，避免重复统计同一次播放。
+
+Minecraft 客户端直接与 TuneWeave 通信，凭据按[登录与凭证](authentication.md)保存在客户端或 TuneWeave 中，不经过 Minecraft 服务器。凭据只放 `X-TuneWeave-Credential` 请求头，不放请求体、URL 或曲目 reference；平台日志协议、加密和账号鉴权由 TuneWeave 内部处理。
+
 ## 请求关联
 
 调用方可以发送 `X-Request-ID`。值必须为 1–64 个 ASCII 字符，以字母或数字开头，其余字符只能是字母、数字、`-`、`_`、`.` 或 `:`。服务端会在响应头和 JSON 的 `meta.request_id` 中返回最终值。

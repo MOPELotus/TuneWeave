@@ -12,6 +12,7 @@ mod platform;
 mod provider;
 mod registry;
 mod resolver;
+mod scrobble;
 mod uni_playlist_document;
 mod uni_playlist_store;
 
@@ -140,6 +141,7 @@ pub use platform::{ParsePlatformError, ParseResourceRefError, Platform, Resource
 pub use provider::MusicProvider;
 pub use registry::ProviderRegistry;
 pub use resolver::StreamResolver;
+pub use scrobble::{ScrobbleRequest, ScrobbleResult};
 pub use uni_playlist_document::UNI_PLAYLIST_DOCUMENT_FORMAT;
 pub use uni_playlist_store::{
     DirectoryUniPlaylistStore, FileUniPlaylistStore, MemoryUniPlaylistStore, UniPlaylistStore,

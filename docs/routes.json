@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 262,
+  "route_count": 263,
   "routes": [
     {
       "method": "GET",
@@ -829,6 +829,10 @@
     {
       "method": "GET",
       "path": "/v1/tracks/{reference}/related-videos"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/tracks/{reference}/scrobble"
     },
     {
       "method": "GET",

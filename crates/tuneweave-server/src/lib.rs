@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tuneweave_core::{ScrobbleRequest, ScrobbleResult};
 
 use axum::{
     Json, Router,
@@ -908,6 +909,7 @@ pub fn build_router(state: AppState) -> Router {
             put(playlist_subscribe).delete(playlist_unsubscribe),
         )
         .route("/tracks/{reference}/files", get(track_files))
+        .route("/tracks/{reference}/scrobble", post(track_scrobble))
         .route("/tracks/{reference}/availability", get(track_availability))
         .route(
             "/tracks/{reference}/download/redirect",
@@ -4040,6 +4042,27 @@ async fn track_unsubscribe(
 #[serde(deny_unknown_fields)]
 struct TrackSubscriptionParams {
     account: Option<String>,
+}
+
+async fn track_scrobble(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    payload: Result<Json<ScrobbleRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ScrobbleResult>>, ApiError> {
+    let mut request = json_body(payload)?;
+    request.validate()?;
+    let reference = parse_reference(reference)?;
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        request.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    request.account = Some(access.required_account().to_owned());
+    let result = access.provider.scrobble(reference.id(), &request).await?;
+    Ok(Json(access.response(result, platform)))
 }
 
 async fn set_track_subscription(
@@ -18129,6 +18152,81 @@ mod tests {
 
     struct TestProvider;
 
+    #[tokio::test]
+    async fn scrobble_http_accepts_account_or_caller_credential_and_normalizes_errors() {
+        let path = "/v1/tracks/netease:123/scrobble";
+        let body =
+            json!({"played_ms":90123,"duration_ms":210456,"bitrate":320000,"quality":"high"});
+        let mut server_body = body.clone();
+        server_body["account"] = json!("listener");
+        let (status, result) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            path,
+            Some(server_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            result["data"],
+            json!({"track_ref":"netease:123","accepted":true,"played_ms":90123,"duration_ms":210456,"bitrate":320000,"quality":"high"})
+        );
+        assert_eq!(result["meta"]["account"], "listener");
+        let credential = netease_caller_credential();
+        let (status, result) = caller_json_request(
+            test_app_with_provider(),
+            Method::POST,
+            path,
+            Some(body.clone()),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(result["meta"].get("account").is_none());
+        let (status, _) = caller_json_request(
+            test_app_with_provider(),
+            Method::POST,
+            path,
+            Some(server_body),
+            &credential,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, result) = json_request_from(
+            test_app_with_provider(),
+            Method::POST,
+            "/v1/tracks/netease:fail/scrobble",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(result["error"]["code"], "upstream_error");
+        assert_eq!(result["error"]["details"]["stage"], "complete");
+        assert_eq!(result["error"]["retryable"], false);
+        for (field, value) in [
+            ("played_ms", json!(0)),
+            ("quality", json!("auto")),
+            ("cookie", json!("secret")),
+            ("duration_ms", json!(-1)),
+        ] {
+            let mut bad = body.clone();
+            bad[field] = value;
+            let (status, result) =
+                json_request_from(test_app_with_provider(), Method::POST, path, Some(bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(result["error"]["code"], "invalid_request");
+        }
+        let (status, result) = json_request_from(
+            test_app_with_import_providers(),
+            Method::POST,
+            "/v1/tracks/qq:123/scrobble",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(result["error"]["code"], "capability_not_supported");
+    }
+
     fn test_auth_result(profile: AccountProfile, mode: CredentialMode) -> ProviderAuthResult {
         ProviderAuthResult {
             profile,
@@ -18290,6 +18388,24 @@ mod tests {
 
     #[async_trait]
     impl MusicProvider for TestProvider {
+        async fn scrobble(&self, id: &str, request: &ScrobbleRequest) -> Result<ScrobbleResult> {
+            if id == "fail" {
+                return Err(
+                    TuneWeaveError::new(ErrorCode::UpstreamError, "scrobble failed")
+                        .with_platform(Platform::Netease)
+                        .with_details(json!({"stage":"complete","start_accepted":true})),
+                );
+            }
+            assert!(request.account.is_some());
+            Ok(ScrobbleResult {
+                track_ref: ResourceRef::new(Platform::Netease, id).unwrap(),
+                accepted: true,
+                played_ms: request.played_ms,
+                duration_ms: request.duration_ms,
+                bitrate: request.bitrate,
+                quality: request.quality,
+            })
+        }
         fn platform(&self) -> Platform {
             Platform::Netease
         }

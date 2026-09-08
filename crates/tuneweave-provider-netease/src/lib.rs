@@ -4,6 +4,7 @@ mod crypto;
 mod dto;
 mod identity;
 mod provider;
+mod scrobble;
 
 pub use auth::{
     NeteaseAccountSummary, NeteaseCaptchaVerification, NeteaseCellphoneStatus, NeteaseLoginResult,

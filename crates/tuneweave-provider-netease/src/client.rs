@@ -59,6 +59,8 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct NeteaseConfig {
+    /// Server-controlled endpoint for encrypted listening logs.
+    pub clientlog_base_url: String,
     pub base_url: String,
     pub xeapi_base_url: String,
     pub web_base_url: String,
@@ -82,6 +84,7 @@ pub struct NeteaseConfig {
 impl Default for NeteaseConfig {
     fn default() -> Self {
         Self {
+            clientlog_base_url: "https://clientlog3.music.163.com".to_owned(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             xeapi_base_url: DEFAULT_XEAPI_BASE_URL.to_owned(),
             web_base_url: DEFAULT_WEB_BASE_URL.to_owned(),
@@ -101,6 +104,7 @@ impl Default for NeteaseConfig {
 
 #[derive(Clone)]
 pub struct NeteaseClient {
+    clientlog_base_url: String,
     http: Client,
     asset_http: Client,
     base_url: String,
@@ -292,6 +296,7 @@ impl NeteaseClient {
         let http = configure_proxy(
             Client::builder()
                 .timeout(config.timeout)
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(8))
                 .user_agent(config.user_agent)
                 .redirect(Policy::none()),
@@ -345,6 +350,7 @@ impl NeteaseClient {
 
         let identities = Arc::new(Identities::new(config.credential_store.clone())?);
         Ok(Self {
+            clientlog_base_url: config.clientlog_base_url.trim_end_matches('/').to_owned(),
             http,
             asset_http,
             base_url: config.base_url.trim_end_matches('/').to_owned(),
@@ -371,6 +377,105 @@ impl NeteaseClient {
 
     pub async fn request_eapi(&self, path: &str, payload: Value) -> Result<NeteaseResponse> {
         self.request_eapi_inner(path, payload, None, None).await
+    }
+
+    pub(crate) async fn submit_listening_log(&self, record: &[u8]) -> Result<()> {
+        use crate::scrobble::{LogIdentity, UploadResponse};
+        let cookie = self.cookie.as_deref();
+        let session = cookie_value(cookie, "MUSIC_U")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "NetEase scrobble requires a logged-in session",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+        let nmtid = self.identities.current(&self.identity_scope, cookie)?;
+        let metadata = LogIdentity {
+            session,
+            session_id: cookie_value(cookie, "JSESSIONID-WYYY").unwrap_or(""),
+            nmtid: nmtid.as_deref().unwrap_or(""),
+            namespace: "1.0.0",
+            client_id: &self.web_client_id,
+            csrf: cookie_value(cookie, "__csrf").unwrap_or(""),
+            device_id: &self.device_id,
+            appver: "3.1.35.205293",
+            channel: "netease",
+            os: "pc",
+            osver: "Microsoft-Windows-10-Professional-build-19045-64bit",
+        };
+        let metadata = serde_json::to_vec(&metadata).map_err(json_error)?;
+        let encrypted = crate::scrobble::encrypt(&metadata, record)?;
+        let name = format!("op_{}_0_{}", process::id(), rand::random::<u32>());
+        let boundary = hex::encode(rand::random::<[u8; 16]>());
+        let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: multipart/form-data\r\n\r\n").into_bytes();
+        body.extend_from_slice(&encrypted);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let endpoint = format!(
+            "{}/api/clientlog/encrypt/upload?multiupload=true",
+            self.clientlog_base_url
+        );
+        let request = self
+            .apply_network_identity(self.http.post(endpoint))
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .header(header::REFERER, "https://music.163.com/di")
+            .header(header::USER_AGENT, "NeteaseMusicDesktop/3.1.35")
+            // Credentials are encoded in the protocol metadata. A minimal cookie
+            // retains the selected session without forwarding unrelated cookies.
+            .header(
+                header::COOKIE,
+                format!("MUSIC_U={session}; os=pc; appver=3.1.35.205293"),
+            )
+            .body(body);
+        let started = Instant::now();
+        let mut status = None;
+        let outcome = async {
+            let response = request.send().await.map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "NetEase listening log transport failed",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            status = Some(response.status());
+            if !response.status().is_success() {
+                let code = match response.status().as_u16() {
+                    401 => ErrorCode::AuthenticationRequired,
+                    403 => ErrorCode::PermissionDenied,
+                    429 => ErrorCode::RateLimited,
+                    _ => ErrorCode::UpstreamError,
+                };
+                return Err(
+                    TuneWeaveError::new(code, "NetEase listening log HTTP request failed")
+                        .with_platform(Platform::Netease)
+                        .with_details(json!({"upstream_status":response.status().as_u16()})),
+                );
+            }
+            // Do not include arbitrary upstream text: it may echo encrypted
+            // metadata or credentials. Keep only the typed acknowledgement.
+            let receipt = response.json::<UploadResponse>().await.map_err(|_| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    "invalid NetEase listening log receipt",
+                )
+                .with_platform(Platform::Netease)
+            })?;
+            crate::scrobble::check_receipt(receipt, &name)
+        }
+        .await;
+        self.log_uninspected_upstream_request(
+            "scrobble_upload",
+            "clientlog3.music.163.com",
+            "/api/clientlog/encrypt/upload",
+            status,
+            started,
+            &outcome,
+        );
+        outcome
     }
 
     pub async fn request_eapi_with_check_token_v2(

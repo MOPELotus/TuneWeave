@@ -61,6 +61,7 @@ pub enum Capability {
     PodcastEpisodeLyrics,
     TrackDetail,
     TrackSubscriptionWrite,
+    ScrobbleWrite,
     TrackAvailability,
     AlbumDetail,
     AlbumList,

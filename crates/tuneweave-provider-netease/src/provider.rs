@@ -85,6 +85,7 @@ use tuneweave_core::{
     VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
     VideoTaxonomyRequest,
 };
+use tuneweave_core::{ScrobbleRequest, ScrobbleResult};
 use url::Url;
 
 use crate::{
@@ -714,6 +715,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::TrackDetail,
             Capability::TrackAvailability,
             Capability::TrackSubscriptionWrite,
+            Capability::ScrobbleWrite,
             Capability::AlbumDetail,
             Capability::AlbumList,
             Capability::AlbumStats,
@@ -2885,6 +2887,43 @@ impl MusicProvider for NeteaseProvider {
         let raw_response = response.body.clone();
         let response: ArtistNewTracksPlayAllEnvelope = parse_body(response.body)?;
         map_artist_new_tracks_play_all_response(response, raw_response)
+    }
+
+    async fn scrobble(&self, id: &str, request: &ScrobbleRequest) -> Result<ScrobbleResult> {
+        request.validate()?;
+        let id = parse_numeric_id("track", id)?.to_string();
+        let track_ref = ResourceRef::new(Platform::Netease, &id)
+            .map_err(|_| TuneWeaveError::invalid_request("invalid NetEase track reference"))?;
+        let records = crate::scrobble::records(
+            &id,
+            request,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )?;
+        let client = self.client_for(request.account.as_deref())?;
+        require_authenticated_client(&client, "scrobble")?;
+        for (index, (stage, record)) in records.into_iter().enumerate() {
+            if let Err(mut error) = client.submit_listening_log(&record).await {
+                error.retryable = false;
+                error.details = json!({
+                    "stage": if stage == "_plv" { "start" } else { "complete" },
+                    "start_accepted": index > 0,
+                    "delivery_may_have_occurred": true,
+                    "upstream": error.details,
+                });
+                return Err(error);
+            }
+        }
+        Ok(ScrobbleResult {
+            track_ref,
+            accepted: true,
+            played_ms: request.played_ms,
+            duration_ms: request.duration_ms,
+            bitrate: request.bitrate,
+            quality: request.quality,
+        })
     }
 
     async fn set_track_subscription(
@@ -17086,6 +17125,97 @@ fn parse_body<T: DeserializeOwned>(body: Value) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scrobble_requires_auth_and_validates_before_network() {
+        let provider = NeteaseProvider::new(NeteaseConfig::default()).unwrap();
+        assert!(provider.capabilities().contains(&Capability::ScrobbleWrite));
+        let mut request = crate::scrobble::tests::request();
+        assert_eq!(
+            provider.scrobble("123", &request).await.unwrap_err().code,
+            ErrorCode::AuthenticationRequired
+        );
+        assert_eq!(
+            provider
+                .scrobble("invalid", &request)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        request.account = Some("missing".to_owned());
+        assert!(provider.scrobble("123", &request).await.is_err());
+        request.played_ms = 0;
+        assert_eq!(
+            provider.scrobble("123", &request).await.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn scrobble_uploads_are_account_isolated_and_acknowledge_both_stages() {
+        let (endpoint, server) = crate::scrobble::tests::mock_uploads(vec![200, 200, 200, 200]);
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            clientlog_base_url: endpoint,
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        provider
+            .install_session("alice", "MUSIC_U=alice-test-only".to_owned())
+            .unwrap();
+        provider
+            .install_session("bob", "MUSIC_U=bob-test-only".to_owned())
+            .unwrap();
+        for account in ["alice", "bob"] {
+            let mut request = crate::scrobble::tests::request();
+            request.account = Some(account.to_owned());
+            let response = provider.scrobble("123", &request).await.unwrap();
+            assert!(response.accepted);
+            assert_eq!(response.track_ref.to_string(), "netease:123");
+            assert_eq!(response.played_ms, 90123);
+            assert_eq!(response.bitrate, 320000);
+        }
+        let captured = server.join().unwrap();
+        assert_eq!(captured.len(), 4);
+        for (index, meta) in captured.iter().enumerate() {
+            assert_eq!(
+                meta["MUSIC_U"],
+                if index < 2 {
+                    "alice-test-only"
+                } else {
+                    "bob-test-only"
+                }
+            );
+            assert_eq!(meta["os"], "pc");
+        }
+    }
+
+    #[tokio::test]
+    async fn scrobble_failure_reports_stage_without_retry_or_credential_leak() {
+        for (codes, stage, accepted) in [
+            (vec![401], "start", false),
+            (vec![200, 500], "complete", true),
+            (vec![200, 201], "complete", true),
+            (vec![429], "start", false),
+        ] {
+            let (endpoint, server) = crate::scrobble::tests::mock_uploads(codes);
+            let provider = NeteaseProvider::new(NeteaseConfig {
+                clientlog_base_url: endpoint,
+                cookie: Some("MUSIC_U=test-only".to_owned()),
+                ..NeteaseConfig::default()
+            })
+            .unwrap();
+            let error = provider
+                .scrobble("123", &crate::scrobble::tests::request())
+                .await
+                .unwrap_err();
+            assert!(!error.retryable);
+            assert_eq!(error.details["stage"], stage);
+            assert_eq!(error.details["start_accepted"], accepted);
+            assert!(!format!("{error:?}").contains("secret-echo"));
+            server.join().unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn captcha_send_verify_and_login_reuse_the_provider_network_and_device_identity() {

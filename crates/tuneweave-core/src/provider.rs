@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use crate::{ScrobbleRequest, ScrobbleResult};
 use async_trait::async_trait;
 
 use crate::{
@@ -588,6 +589,13 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::TrackAvailability,
+        ))
+    }
+
+    async fn scrobble(&self, _id: &str, _request: &ScrobbleRequest) -> Result<ScrobbleResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ScrobbleWrite,
         ))
     }
 
