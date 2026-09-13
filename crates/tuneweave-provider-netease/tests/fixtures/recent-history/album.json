@@ -1,0 +1,30 @@
+{
+  "code": 200,
+  "data": {
+    "total": 8,
+    "list": [
+      {
+        "resourceId": "456",
+        "resourceType": "ALBUM",
+        "playTime": 1704067200123,
+        "os": "android",
+        "multiTerminalInfo": {
+          "osText": "Android",
+          "icon": "https://example.test/android.png"
+        },
+        "data": {
+          "id": 456,
+          "name": "Example album",
+          "artists": [
+            {
+              "id": 7,
+              "name": "Example artist"
+            }
+          ],
+          "picUrl": "https://example.test/album.jpg",
+          "size": 10
+        }
+      }
+    ]
+  }
+}

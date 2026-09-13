@@ -17,6 +17,14 @@ GET /v1/capabilities
 GET /v1/capabilities?platform=netease
 ```
 
+## 当前账号的最近记录
+
+alpha.11 新增 `GET /v1/account/history/tracks`、`/v1/account/history/albums`、`/v1/account/history/playlists`，分别对应 `recent_track_history`、`recent_album_history`、`recent_playlist_history`。目前网易云支持，其他平台返回 `422 capability_not_supported`。
+
+查询参数为 `platform`、`account`、`limit`（默认 100，1–100）、`offset`（仅 0）。可使用 `X-TuneWeave-Credential`，但不能同时指定 `account`。响应记录包含规范化 `track` / `album` / `playlist`、毫秒精度 RFC 3339 `played_at`、可选 `device` 和 `extensions`；使用标准列表包络与 `meta.pagination`。
+
+这些是最近记录，原有 `/v1/account/history` 周榜/累计统计保持原义。网易云只提供最近 N 条窗口，因此 `next_offset=null`、`has_more=false`、`extensions.continuation_supported=false`；`total` 不代表可翻页读取的数量。字段语义、完整记录示例和异常处理见 [最近记录契约](recent-history.md)。
+
 ## 听歌打卡 / scrobble
 
 `POST /v1/tracks/{reference}/scrobble` 提交一次实际收听记录。目前仅网易云支持，能力名为 `scrobble_write`，可通过 `/v1/capabilities?platform=netease` 查询。

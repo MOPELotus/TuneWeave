@@ -1,0 +1,34 @@
+{
+  "code": 200,
+  "data": {
+    "total": 8,
+    "list": [
+      {
+        "resourceId": "123",
+        "resourceType": "SONG",
+        "playTime": 1704067200123,
+        "os": "android",
+        "multiTerminalInfo": {
+          "osText": "Android",
+          "icon": "https://example.test/android.png"
+        },
+        "data": {
+          "id": 123,
+          "name": "Example track",
+          "ar": [
+            {
+              "id": 7,
+              "name": "Example artist"
+            }
+          ],
+          "al": {
+            "id": 456,
+            "name": "Example album",
+            "picUrl": "https://example.test/album.jpg"
+          },
+          "dt": 180123
+        }
+      }
+    ]
+  }
+}

@@ -47,6 +47,7 @@ use crate::{
     ProviderCredential, ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
     RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
     RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry, RecentTrackHistoryEntry,
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationFeed,
     RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest,
     RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
@@ -1474,6 +1475,36 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ListeningHistory,
+        ))
+    }
+
+    async fn recent_track_history(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<RecentTrackHistoryEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecentTrackHistory,
+        ))
+    }
+
+    async fn recent_album_history(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<RecentAlbumHistoryEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecentAlbumHistory,
+        ))
+    }
+
+    async fn recent_playlist_history(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<RecentPlaylistHistoryEntry>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecentPlaylistHistory,
         ))
     }
 

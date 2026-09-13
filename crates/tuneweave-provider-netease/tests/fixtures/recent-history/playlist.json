@@ -1,0 +1,28 @@
+{
+  "code": 200,
+  "data": {
+    "total": 8,
+    "list": [
+      {
+        "resourceId": "789",
+        "resourceType": "PLAYLIST",
+        "playTime": 1704067200123,
+        "os": "android",
+        "multiTerminalInfo": {
+          "osText": "Android",
+          "icon": "https://example.test/android.png"
+        },
+        "data": {
+          "id": 789,
+          "name": "Example playlist",
+          "creator": {
+            "userId": 8,
+            "nickname": "Example owner"
+          },
+          "coverImgUrl": "https://example.test/playlist.jpg",
+          "trackCount": 12
+        }
+      }
+    ]
+  }
+}

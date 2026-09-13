@@ -1658,6 +1658,33 @@ pub struct PlaybackDevice {
     pub extensions: Extensions,
 }
 
+/// A provider's recent listening record, distinct from aggregate listening statistics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecentTrackHistoryEntry {
+    pub track: Track,
+    pub played_at: Option<String>,
+    pub device: Option<PlaybackDevice>,
+    pub extensions: Extensions,
+}
+
+/// A provider's recent listening record, distinct from aggregate listening statistics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecentAlbumHistoryEntry {
+    pub album: Album,
+    pub played_at: Option<String>,
+    pub device: Option<PlaybackDevice>,
+    pub extensions: Extensions,
+}
+
+/// A provider's recent listening record, distinct from aggregate listening statistics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecentPlaylistHistoryEntry {
+    pub playlist: Playlist,
+    pub played_at: Option<String>,
+    pub device: Option<PlaybackDevice>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PodcastEpisodePlaybackHistoryEntry {
     pub episode: PodcastEpisode,

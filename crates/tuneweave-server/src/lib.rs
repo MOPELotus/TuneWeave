@@ -80,7 +80,8 @@ use tuneweave_core::{
     PrincipalType, ProviderAuthResult, ProviderCredential, ProviderRegistry, Quality,
     RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
     RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecommendationDislikeRequest, RecommendationDislikeResult,
+    RadioTaxonomy, RadioTaxonomyRequest, RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry,
+    RecentTrackHistoryEntry, RecommendationDislikeRequest, RecommendationDislikeResult,
     RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
     RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
     RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
@@ -1323,6 +1324,12 @@ pub fn build_router(state: AppState) -> Router {
             get(account_favorite_intelligence),
         )
         .route("/account/history", get(account_history))
+        .route("/account/history/tracks", get(account_recent_track_history))
+        .route("/account/history/albums", get(account_recent_album_history))
+        .route(
+            "/account/history/playlists",
+            get(account_recent_playlist_history),
+        )
         .route(
             "/account/history/podcast-episodes",
             get(account_recent_podcast_episode_history),
@@ -15982,6 +15989,84 @@ async fn account_history(
     ))
 }
 
+fn recent_history_access(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: RecentPodcastEpisodeHistoryQuery,
+) -> Result<(Platform, ProviderAccess, PageRequest), ApiError> {
+    let platform = account_platform(state, params.platform.as_deref())?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request(
+            "recent history limit must be between 1 and 100",
+        )
+        .into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    if offset != 0 {
+        return Err(
+            TuneWeaveError::invalid_request("recent history does not support offset").into(),
+        );
+    }
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let request = PageRequest {
+        limit,
+        offset,
+        account: Some(access.required_account().to_owned()),
+    };
+    Ok((platform, access, request))
+}
+
+async fn account_recent_track_history(
+    State(state): State<AppState>,
+    params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<RecentTrackHistoryEntry>>>, ApiError> {
+    let (platform, access, request) =
+        recent_history_access(&state, &headers, query_params(params)?)?;
+    let page = access.provider.recent_track_history(&request).await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn account_recent_album_history(
+    State(state): State<AppState>,
+    params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<RecentAlbumHistoryEntry>>>, ApiError> {
+    let (platform, access, request) =
+        recent_history_access(&state, &headers, query_params(params)?)?;
+    let page = access.provider.recent_album_history(&request).await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
+}
+
+async fn account_recent_playlist_history(
+    State(state): State<AppState>,
+    params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<RecentPlaylistHistoryEntry>>>, ApiError> {
+    let (platform, access, request) =
+        recent_history_access(&state, &headers, query_params(params)?)?;
+    let page = access.provider.recent_playlist_history(&request).await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
+}
+
 async fn account_recent_podcast_episode_history(
     State(state): State<AppState>,
     params: Result<Query<RecentPodcastEpisodeHistoryQuery>, QueryRejection>,
@@ -21492,6 +21577,114 @@ mod tests {
                     next_offset: None,
                     has_more: false,
                     extensions: Default::default(),
+                },
+            })
+        }
+
+        async fn recent_track_history(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<RecentTrackHistoryEntry>> {
+            if request.account.as_deref() == Some("upstream-failure") {
+                return Err(
+                    TuneWeaveError::new(ErrorCode::UpstreamError, "recent history failed")
+                        .with_platform(Platform::Netease),
+                );
+            }
+            Ok(Page {
+                items: vec![RecentTrackHistoryEntry {
+                    track: sample_track("123"),
+                    played_at: Some("2024-01-01T00:00:00.123Z".to_owned()),
+                    device: Some(tuneweave_core::PlaybackDevice {
+                        operating_system: Some("android".to_owned()),
+                        name: Some("Android".to_owned()),
+                        icon_url: None,
+                        extensions: Extensions::new(),
+                    }),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: None,
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "continuation_supported".to_owned(),
+                        json!(false),
+                    )]),
+                },
+            })
+        }
+
+        async fn recent_album_history(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<RecentAlbumHistoryEntry>> {
+            if request.account.as_deref() == Some("upstream-failure") {
+                return Err(
+                    TuneWeaveError::new(ErrorCode::UpstreamError, "recent history failed")
+                        .with_platform(Platform::Netease),
+                );
+            }
+            Ok(Page {
+                items: vec![RecentAlbumHistoryEntry {
+                    album: sample_album("123"),
+                    played_at: Some("2024-01-01T00:00:00.123Z".to_owned()),
+                    device: Some(tuneweave_core::PlaybackDevice {
+                        operating_system: Some("android".to_owned()),
+                        name: Some("Android".to_owned()),
+                        icon_url: None,
+                        extensions: Extensions::new(),
+                    }),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: None,
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "continuation_supported".to_owned(),
+                        json!(false),
+                    )]),
+                },
+            })
+        }
+
+        async fn recent_playlist_history(
+            &self,
+            request: &PageRequest,
+        ) -> Result<Page<RecentPlaylistHistoryEntry>> {
+            if request.account.as_deref() == Some("upstream-failure") {
+                return Err(
+                    TuneWeaveError::new(ErrorCode::UpstreamError, "recent history failed")
+                        .with_platform(Platform::Netease),
+                );
+            }
+            Ok(Page {
+                items: vec![RecentPlaylistHistoryEntry {
+                    playlist: sample_playlist("123"),
+                    played_at: Some("2024-01-01T00:00:00.123Z".to_owned()),
+                    device: Some(tuneweave_core::PlaybackDevice {
+                        operating_system: Some("android".to_owned()),
+                        name: Some("Android".to_owned()),
+                        icon_url: None,
+                        extensions: Extensions::new(),
+                    }),
+                    extensions: Extensions::from([("account".to_owned(), json!(request.account))]),
+                }],
+                pagination: PageMeta {
+                    limit: request.limit,
+                    offset: 0,
+                    total: None,
+                    next_offset: None,
+                    has_more: false,
+                    extensions: Extensions::from([(
+                        "continuation_supported".to_owned(),
+                        json!(false),
+                    )]),
                 },
             })
         }
@@ -39815,6 +40008,95 @@ mod tests {
         assert_eq!(json["data"][0]["score"], 99);
         assert_eq!(json["meta"]["account"], "personal");
         assert_eq!(json["meta"]["pagination"]["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn recent_resource_history_http_contract_and_account_selection() {
+        let app = test_app_with_provider();
+        let credential = netease_caller_credential();
+        for resource in ["track", "album", "playlist"] {
+            let base = format!("/v1/account/history/{resource}s?platform=netease");
+            let (status, body) =
+                json_response_from(app.clone(), &format!("{base}&account=personal&limit=2")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"][0][resource]["ref"], "netease:123");
+            assert_eq!(body["data"][0]["played_at"], "2024-01-01T00:00:00.123Z");
+            assert_eq!(body["data"][0]["device"]["operating_system"], "android");
+            assert_eq!(body["meta"]["account"], "personal");
+            assert_eq!(body["meta"]["pagination"]["limit"], 2);
+            assert_eq!(body["meta"]["pagination"]["next_offset"], Value::Null);
+            assert_eq!(body["meta"]["pagination"]["has_more"], false);
+            assert_eq!(
+                body["meta"]["pagination"]["extensions"]["continuation_supported"],
+                false
+            );
+            let (status, caller) =
+                caller_json_request(app.clone(), Method::GET, &base, None, &credential).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(caller["data"][0]["extensions"]["account"], "default");
+            assert!(caller["meta"].get("account").is_none());
+            assert_eq!(caller["meta"]["pagination"]["limit"], 100);
+            assert!(!caller.to_string().contains(&credential.value));
+            let (status, error) = caller_json_request(
+                app.clone(),
+                Method::GET,
+                &format!("{base}&account=personal"),
+                None,
+                &credential,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error["error"]["code"], "invalid_request");
+            let (status, error) =
+                json_response_from(app.clone(), &format!("{base}&account=upstream-failure")).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(error["error"]["code"], "upstream_error");
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_resource_history_http_rejects_malformed_queries_and_unsupported_providers() {
+        for resource in ["track", "album", "playlist"] {
+            for query in [
+                "limit=0",
+                "limit=101",
+                "limit=-1",
+                "limit=4294967296",
+                "limit=1.5",
+                "limit=bad",
+                "limit=1&limit=2",
+                "offset=1",
+                "offset=-1",
+                "offset=bad",
+                "unknown=true",
+                "period=week",
+                "platform=unknown",
+            ] {
+                let path = format!("/v1/account/history/{resource}s?{query}");
+                let (status, error) = json_response_from(test_app_with_provider(), &path).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+                assert_eq!(error["error"]["code"], "invalid_request", "{path}");
+            }
+            let path = format!("/v1/account/history/{resource}s?platform=qq");
+            let (status, error) = json_response_from(test_app_with_import_providers(), &path).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error["error"]["code"], "capability_not_supported");
+            assert_eq!(
+                error["error"]["details"]["capability"],
+                format!("recent_{resource}_history")
+            );
+            let mut registry = ProviderRegistry::new();
+            registry
+                .register(
+                    tuneweave_provider_netease::NeteaseProvider::new(Default::default()).unwrap(),
+                )
+                .unwrap();
+            let app = build_router(AppState::new(registry, Platform::Netease));
+            let path = format!("/v1/account/history/{resource}s?platform=netease");
+            let (status, error) = json_response_from(app, &path).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(error["error"]["code"], "authentication_required");
+        }
     }
 
     #[tokio::test]

@@ -38,6 +38,7 @@ curl http://127.0.0.1:7832/v1/capabilities
 
 - [安装与配置](docs/getting-started.md)
 - [HTTP API v1](docs/api-v1.md)
+- [最近歌曲、专辑与歌单记录](docs/recent-history.md)（网易云，alpha.11 起）
 - [登录与调用方托管凭证](docs/authentication.md)
 - [网易云易盾 V2 适配服务](tools/netease-watchman/README.md)（评论等 V2 功能需要单独部署）
 - [Uni Playlist](docs/uni-playlist.md)

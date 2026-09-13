@@ -8,6 +8,9 @@ future ports can be audited precisely.
 
 - Source: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
 - Reviewed commit: `8f4873f2e2f677153d398a62d9ca0e3826c3f86d`
+- Additional reviewed commit: `a8c781fd64faab17fedfd46e0615a2609307f163`
+  (`module/record_recent_song.js`, `module/record_recent_album.js`,
+  `module/record_recent_playlist.js`; recent-history WeAPI endpoint/limit behavior).
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.

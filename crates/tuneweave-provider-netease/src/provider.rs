@@ -1,3 +1,6 @@
+#[path = "recent_history.rs"]
+mod recent_history;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Cursor,
@@ -71,6 +74,7 @@ use tuneweave_core::{
     RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
     RadioStationCursor, RadioStationListRequest, RadioStyle, RadioStyleCatalog,
     RadioStyleCatalogRequest, RadioStyleSource, RadioTaxonomy, RadioTaxonomyRequest,
+    RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry, RecentTrackHistoryEntry,
     RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationRequest,
     RecommendationSource, ResolutionStatus, ResourceRef, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
@@ -784,6 +788,9 @@ impl MusicProvider for NeteaseProvider {
             Capability::Favorites,
             Capability::FavoriteIntelligence,
             Capability::ListeningHistory,
+            Capability::RecentTrackHistory,
+            Capability::RecentAlbumHistory,
+            Capability::RecentPlaylistHistory,
             Capability::RecentPodcastEpisodeHistory,
             Capability::Recommendations,
             Capability::VideoRecommendations,
@@ -3042,6 +3049,27 @@ impl MusicProvider for NeteaseProvider {
         let user_id = parse_numeric_id("user", user_id)?.to_string();
         let client = self.client_for(request.account.as_deref())?;
         fetch_play_history(&client, &user_id, request).await
+    }
+
+    async fn recent_track_history(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<RecentTrackHistoryEntry>> {
+        recent_history::tracks(self, request).await
+    }
+
+    async fn recent_album_history(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<RecentAlbumHistoryEntry>> {
+        recent_history::albums(self, request).await
+    }
+
+    async fn recent_playlist_history(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<RecentPlaylistHistoryEntry>> {
+        recent_history::playlists(self, request).await
     }
 
     async fn recent_podcast_episode_history(

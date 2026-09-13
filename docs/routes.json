@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 263,
+  "route_count": 266,
   "routes": [
     {
       "method": "GET",
@@ -140,7 +140,19 @@
     },
     {
       "method": "GET",
+      "path": "/v1/account/history/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/history/playlists"
+    },
+    {
+      "method": "GET",
       "path": "/v1/account/history/podcast-episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/history/tracks"
     },
     {
       "method": "DELETE",
