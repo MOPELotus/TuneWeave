@@ -58,6 +58,7 @@ TuneWeave 使用环境变量配置。未设置时可直接启动。
 - `TUNEWEAVE_NETEASE_COOKIE`：为 `default` 账户提供启动 Cookie。
 - `TUNEWEAVE_NETEASE_REAL_IP`：为 provider 固定一个 IPv4 请求身份。
 - `TUNEWEAVE_NETEASE_RANDOM_CN_IP=true`：启动时生成并复用一个中国 IPv4 请求身份，不能与固定地址同时使用。
+- `TUNEWEAVE_NETEASE_WATCHMAN_URL`：易盾 V2 适配服务地址，例如 `http://127.0.0.1:17863/token`。默认未配置，评论发布/删除等需要 V2 的操作会明确报不可用。服务需单独安装和启动，见 [易盾适配服务部署说明](../tools/netease-watchman/README.md)；新版喜欢使用 V3，不依赖该服务。
 
 ## 数据与安全
 

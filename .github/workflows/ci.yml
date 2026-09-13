@@ -16,6 +16,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  watchman:
+    name: Watchman adapter (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: tools/netease-watchman
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/netease-watchman/package-lock.json
+      - name: Install locked adapter dependencies
+        run: npm ci
+      - name: Test adapter boundaries and SDK lifecycle
+        run: npm test
+
   quality:
     name: Format, lint, and test
     runs-on: ubuntu-latest
