@@ -1,14 +1,53 @@
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use serde_json::json;
 use tuneweave_core::{
-    Capability, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream, MusicProvider, Page,
-    PageMeta, PageRequest, Platform, Playlist, Result, SearchKind, SearchQuery, SearchVariant,
-    StreamRequest, Track, TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
+    AccountCredentialStore, AccountProfile, Album, Capability, CredentialImportRequest,
+    CredentialMode, DigitalAlbum, Extensions, Lyrics, LyricsRequest, MediaDownload, MediaStream,
+    MusicProvider, Page, PageMeta, PageRequest, Platform, Playlist, ProviderAuthResult,
+    ProviderCredential, ProviderLogoutResult, Result, SearchItem, SearchKind, SearchQuery,
+    SearchVariant, StreamRequest, Track, TrackAvailability, TrackAvailabilityRequest,
+    TuneWeaveError, UserProfileBackend,
 };
 
 use crate::client::{MiguClient, MiguConfig, MiguSearchCondition};
+
+mod account_avatar;
+mod account_download;
+mod account_media;
+mod account_playlists;
+mod account_read;
+mod album_collections;
+mod albums;
+mod artist_directory;
+mod artist_subscription;
+mod artists;
+mod catalog;
+mod charts;
+mod favorites;
+mod following_artists;
+mod library;
+mod membership;
+mod password;
+mod playlist_collection;
+mod playlist_write;
+mod purchase_source;
+mod purchased_album_source;
+mod purchased_albums;
+mod purchases;
+mod search_suggestions;
+mod search_trending;
+mod session;
+mod similar_artists;
+mod sms;
+mod user_profile;
+mod video_playback;
+mod videos;
 
 const UPSTREAM_PAGE_SIZE: u32 = 20;
 const MAX_UPSTREAM_PAGES: u32 = 6;
@@ -18,6 +57,11 @@ const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 3;
 #[derive(Clone)]
 pub struct MiguProvider {
     client: MiguClient,
+    credential_store: Option<Arc<dyn AccountCredentialStore>>,
+    caller_credential: Option<Arc<Mutex<crate::credential::MiguCredential>>>,
+    response_credential: Arc<Mutex<Option<ProviderCredential>>>,
+    auth_mutation: Arc<tokio::sync::Mutex<()>>,
+    passport_transactions: Arc<Mutex<sms::PassportTransactions>>,
 }
 
 impl fmt::Debug for MiguProvider {
@@ -32,12 +76,24 @@ impl MiguProvider {
     pub fn new(config: MiguConfig) -> Result<Self> {
         Ok(Self {
             client: MiguClient::new(&config)?,
+            credential_store: config.credential_store.clone(),
+            caller_credential: None,
+            response_credential: Arc::default(),
+            auth_mutation: Arc::default(),
+            passport_transactions: Arc::default(),
         })
     }
 
     #[must_use]
-    pub const fn from_client(client: MiguClient) -> Self {
-        Self { client }
+    pub fn from_client(client: MiguClient) -> Self {
+        Self {
+            client,
+            credential_store: None,
+            caller_credential: None,
+            response_credential: Arc::default(),
+            auth_mutation: Arc::default(),
+            passport_transactions: Arc::default(),
+        }
     }
 }
 
@@ -51,98 +107,690 @@ impl MusicProvider for MiguProvider {
         "Migu Music"
     }
 
+    async fn begin_password_login(
+        &self,
+        request: &tuneweave_core::PasswordLoginRequest,
+        mode: CredentialMode,
+    ) -> Result<tuneweave_core::PasswordLoginProgress> {
+        self.begin_password(request, mode).await
+    }
+
+    async fn advance_password_login(
+        &self,
+        challenge: &tuneweave_core::ProviderPasswordChallenge,
+        action: &tuneweave_core::PasswordChallengeAction,
+    ) -> Result<tuneweave_core::PasswordLoginProgress> {
+        self.advance_password(challenge, action).await
+    }
+
+    async fn begin_auth_challenge(
+        &self,
+        request: &tuneweave_core::AuthChallengeRequest,
+        mode: CredentialMode,
+    ) -> Result<tuneweave_core::ProviderAuthChallenge> {
+        self.begin_sms(request, mode).await
+    }
+
+    async fn complete_auth_challenge(
+        &self,
+        challenge: &tuneweave_core::ProviderAuthChallenge,
+        code: &str,
+    ) -> Result<ProviderAuthResult> {
+        self.complete_sms(challenge, code).await
+    }
+
+    async fn auth_challenge_status(
+        &self,
+        challenge: &tuneweave_core::ProviderAuthChallenge,
+    ) -> Result<tuneweave_core::AuthChallengeStatus> {
+        self.sms_status(challenge)
+    }
+
+    async fn advance_auth_challenge(
+        &self,
+        challenge: &tuneweave_core::ProviderAuthChallenge,
+        action: &tuneweave_core::AuthChallengeAction,
+    ) -> Result<tuneweave_core::AuthChallengeProgress> {
+        match action {
+            tuneweave_core::AuthChallengeAction::SubmitCode { code } => {
+                self.submit_sms(challenge, code).await
+            }
+            _ => self.advance_sms_image(challenge, action).await,
+        }
+    }
+
+    fn with_caller_credential(
+        &self,
+        credential: &ProviderCredential,
+    ) -> Result<Arc<dyn MusicProvider>> {
+        Ok(Arc::new(self.caller_scope(credential)?))
+    }
+    fn take_response_credential(&self) -> Result<Option<ProviderCredential>> {
+        Ok(self
+            .response_credential
+            .lock()
+            .map_err(|_| {
+                crate::credential::error(
+                    tuneweave_core::ErrorCode::InternalError,
+                    "Migu caller response state is unavailable",
+                )
+            })?
+            .take())
+    }
+    async fn password_login(
+        &self,
+        request: &tuneweave_core::PasswordLoginRequest,
+    ) -> Result<AccountProfile> {
+        Ok(self
+            .password_session(request, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+    async fn password_login_with_mode(
+        &self,
+        request: &tuneweave_core::PasswordLoginRequest,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        self.password_session(request, mode).await
+    }
+    async fn import_credential(
+        &self,
+        request: &CredentialImportRequest,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        self.import_session(request, mode).await
+    }
+    async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+        self.read_session_profile(account).await
+    }
+    async fn user_profile(
+        &self,
+        id: &str,
+        backend: UserProfileBackend,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::UserProfile> {
+        self.read_user_profile(id, backend, account).await
+    }
+    async fn user_membership(
+        &self,
+        id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::MembershipSummary> {
+        self.read_membership(id, account, false).await
+    }
+    async fn user_membership_client_info(
+        &self,
+        id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::MembershipSummary> {
+        self.read_membership(id, account, true).await
+    }
+    async fn refresh_session(&self, account: &str) -> Result<AccountProfile> {
+        Ok(self
+            .refresh_owned_session(account, None, CredentialMode::Server)
+            .await?
+            .profile)
+    }
+    async fn refresh_session_with_ownership(
+        &self,
+        account: &str,
+        source: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        self.refresh_owned_session(account, source, mode).await
+    }
+    async fn logout(&self, account: &str) -> Result<bool> {
+        Ok(self
+            .logout_owned_session(account, None, CredentialMode::Server)
+            .await?
+            .removed)
+    }
+    async fn logout_with_ownership(
+        &self,
+        account: &str,
+        source: Option<&ProviderCredential>,
+        mode: CredentialMode,
+    ) -> Result<ProviderLogoutResult> {
+        self.logout_owned_session(account, source, mode).await
+    }
+
     fn capabilities(&self) -> BTreeSet<Capability> {
         BTreeSet::from([
+            Capability::PasswordLogin,
+            Capability::PhoneLogin,
+            Capability::CredentialImport,
+            Capability::SessionManagement,
+            Capability::CallerManagedCredentials,
+            Capability::AccountProfile,
+            Capability::AccountAvatarWrite,
+            Capability::UserProfileModern,
+            Capability::AccountPurchasedTracks,
+            Capability::AccountPurchasedAlbums,
+            Capability::AccountPlaylists,
+            Capability::AccountAlbums,
+            Capability::AccountDigitalAlbums,
+            Capability::AccountFollowingArtists,
+            Capability::ArtistSubscriptionWrite,
+            Capability::AlbumSubscriptionWrite,
+            Capability::DigitalAlbumSubscriptionWrite,
+            Capability::Favorites,
+            Capability::TrackSubscriptionWrite,
+            Capability::PlaylistSubscriptionWrite,
+            Capability::PlaylistWrite,
+            Capability::PlaylistOccurrenceRead,
+            Capability::PlaylistOccurrenceWrite,
+            Capability::UserMembership,
+            Capability::UserMembershipClientInfo,
             Capability::AudioDownload,
             Capability::AudioStream,
             Capability::Lyrics,
             Capability::PlaylistRead,
             Capability::SearchTracks,
+            Capability::SearchPlaylists,
+            Capability::SearchArtists,
+            Capability::SearchSuggestions,
+            Capability::SearchTrending,
+            Capability::ArtistCatalog,
+            Capability::ArtistDetail,
+            Capability::ArtistOverview,
+            Capability::SimilarArtists,
+            Capability::ArtistTracks,
+            Capability::ArtistAlbums,
+            Capability::ArtistDigitalAlbums,
+            Capability::ArtistVideos,
+            Capability::SearchMvs,
+            Capability::VideoDetail,
+            Capability::VideoStats,
+            Capability::VideoStream,
+            Capability::SearchAlbums,
+            Capability::AlbumDetail,
+            Capability::DigitalAlbumDetail,
+            Capability::DigitalAlbumTracks,
             Capability::TrackAvailability,
             Capability::TrackDetail,
+            Capability::ChartCatalog,
+            Capability::ChartTracks,
+            Capability::ChartHistoricalTracks,
         ])
     }
 
-    async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
-        validate_search_query(query)?;
-        let start_page = query.offset / UPSTREAM_PAGE_SIZE + 1;
-        let first_skip = usize::try_from(query.offset % UPSTREAM_PAGE_SIZE)
-            .map_err(|_| migu_invalid_request("Migu search offset is too large"))?;
-        let requested = usize::try_from(query.limit)
-            .map_err(|_| migu_invalid_request("Migu search limit is too large"))?;
-        let required = u32::try_from(first_skip.saturating_add(requested)).unwrap_or(u32::MAX);
-        let page_budget = required
-            .saturating_add(UPSTREAM_PAGE_SIZE - 1)
-            .checked_div(UPSTREAM_PAGE_SIZE)
-            .unwrap_or(MAX_UPSTREAM_PAGES)
-            .clamp(1, MAX_UPSTREAM_PAGES);
+    async fn chart_catalog(
+        &self,
+        request: &tuneweave_core::ChartCatalogRequest,
+    ) -> Result<tuneweave_core::ChartCatalog> {
+        self.read_chart_catalogue(request).await
+    }
 
-        let mut tracks = Vec::with_capacity(requested);
-        let mut sequences = Vec::new();
-        let mut conditions: Vec<MiguSearchCondition> = Vec::new();
-        let mut fetched_pages = 0_u32;
-        let mut has_more = false;
-        for page_index in 0..page_budget {
-            let page_number = start_page.checked_add(page_index).ok_or_else(|| {
-                migu_invalid_request("Migu search offset exceeds the upstream page range")
-            })?;
-            let page = self
-                .client
-                .search_tracks_page(query.query.trim(), page_number)
-                .await?;
-            fetched_pages = fetched_pages.saturating_add(1);
-            if page.has_next && page.tracks.is_empty() {
-                return Err(migu_upstream_error(
-                    "Migu search reported another page without returning any tracks",
+    async fn chart_tracks(
+        &self,
+        id: &str,
+        request: &tuneweave_core::ChartTrackListRequest,
+    ) -> Result<Page<Track>> {
+        self.read_chart_tracks(id, request).await
+    }
+
+    async fn set_track_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::SubscriptionResult> {
+        self.set_favorite_track(id, subscribed, account).await
+    }
+
+    async fn account_albums(&self, request: &PageRequest) -> Result<Page<Album>> {
+        self.ordinary_album_collections(None, request).await
+    }
+
+    async fn account_following_artists(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::Artist>> {
+        self.read_following_artists(None, request).await
+    }
+
+    async fn set_artist_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::SubscriptionResult> {
+        self.change_artist_subscription(id, subscribed, account)
+            .await
+    }
+
+    async fn user_following_artists(
+        &self,
+        user_id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::Artist>> {
+        self.read_following_artists(Some(user_id), request).await
+    }
+
+    async fn account_purchased_tracks(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::PurchasedTrack>> {
+        self.read_purchased_tracks(request).await
+    }
+
+    async fn account_purchased_albums(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::PurchasedAlbum>> {
+        self.read_purchased_albums(request).await
+    }
+    async fn user_favorite_albums(&self, uid: &str, request: &PageRequest) -> Result<Page<Album>> {
+        self.ordinary_album_collections(Some(uid), request).await
+    }
+    async fn account_digital_albums(&self, request: &PageRequest) -> Result<Page<DigitalAlbum>> {
+        self.digital_album_collections(None, request).await
+    }
+    async fn user_favorite_digital_albums(
+        &self,
+        uid: &str,
+        request: &PageRequest,
+    ) -> Result<Page<DigitalAlbum>> {
+        self.digital_album_collections(Some(uid), request).await
+    }
+    async fn set_album_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::SubscriptionResult> {
+        self.change_album_collection(
+            crate::client::albums::AlbumKind::Ordinary,
+            id,
+            subscribed,
+            account,
+        )
+        .await
+    }
+    async fn set_album_subscriptions(
+        &self,
+        ids: &[String],
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<Vec<tuneweave_core::SubscriptionResult>> {
+        self.change_album_collections(
+            crate::client::albums::AlbumKind::Ordinary,
+            ids,
+            subscribed,
+            account,
+        )
+        .await
+    }
+    async fn set_digital_album_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::SubscriptionResult> {
+        self.change_album_collection(
+            crate::client::albums::AlbumKind::Digital,
+            id,
+            subscribed,
+            account,
+        )
+        .await
+    }
+    async fn set_digital_album_subscriptions(
+        &self,
+        ids: &[String],
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<Vec<tuneweave_core::SubscriptionResult>> {
+        self.change_album_collections(
+            crate::client::albums::AlbumKind::Digital,
+            ids,
+            subscribed,
+            account,
+        )
+        .await
+    }
+
+    async fn create_playlist(
+        &self,
+        request: &tuneweave_core::PlaylistCreateRequest,
+    ) -> Result<tuneweave_core::PlaylistMutationResult> {
+        self.create_owned_playlist(request).await
+    }
+    async fn update_playlist(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PlaylistUpdateRequest,
+    ) -> Result<tuneweave_core::PlaylistMutationResult> {
+        if request.description.is_some() || request.tags.is_some() {
+            return self.update_owned_playlist_metadata(id, request).await;
+        }
+        self.rename_owned_playlist(id, request).await
+    }
+    async fn update_playlist_cover(
+        &self,
+        id: &str,
+        request: &tuneweave_core::ImageUploadRequest,
+    ) -> Result<tuneweave_core::PlaylistCoverUpdateResult> {
+        self.update_owned_playlist_cover(id, request).await
+    }
+    async fn audio_download_content(
+        &self,
+        track: &Track,
+        request: &StreamRequest,
+    ) -> Result<tuneweave_core::AudioContent> {
+        self.download_account_content(track, request).await
+    }
+    async fn upload_account_avatar(
+        &self,
+        request: &tuneweave_core::ImageUploadRequest,
+    ) -> Result<tuneweave_core::ImageUploadResult> {
+        self.upload_static_account_avatar(request).await
+    }
+    async fn reorder_playlist_tracks(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PlaylistTrackOrderRequest,
+    ) -> Result<tuneweave_core::PlaylistTrackOrderResult> {
+        self.reorder_owned_playlist_tracks(id, request).await
+    }
+    async fn playlist_track_occurrences(
+        &self,
+        id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::PlaylistTrackOccurrence>> {
+        self.read_owned_playlist_occurrences(id, request).await
+    }
+    async fn reorder_playlist_occurrences(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PlaylistOccurrenceOrderRequest,
+    ) -> Result<tuneweave_core::PlaylistOccurrenceOrderResult> {
+        self.reorder_owned_playlist_occurrences(id, request).await
+    }
+    async fn delete_playlists(
+        &self,
+        request: &tuneweave_core::PlaylistDeleteRequest,
+    ) -> Result<tuneweave_core::PlaylistDeleteResult> {
+        self.delete_owned_playlists(request).await
+    }
+    async fn mutate_playlist_items(
+        &self,
+        id: &str,
+        action: tuneweave_core::PlaylistItemMutationAction,
+        request: &tuneweave_core::PlaylistItemMutationRequest,
+    ) -> Result<tuneweave_core::PlaylistItemMutationResult> {
+        self.write_owned_playlist_tracks(id, action, request).await
+    }
+
+    async fn set_playlist_subscription(
+        &self,
+        id: &str,
+        subscribed: bool,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::SubscriptionResult> {
+        self.set_collected_playlist(id, subscribed, account).await
+    }
+
+    async fn favorite_playlist(&self, account: Option<&str>) -> Result<Playlist> {
+        Ok(self
+            .read_account_playlist(None, None, account)
+            .await?
+            .playlist)
+    }
+    async fn favorite_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
+        account_playlists::validate_page(request)?;
+        Ok(self
+            .read_account_playlist(None, None, request.account.as_deref())
+            .await?
+            .into_page(request))
+    }
+    async fn user_favorite_playlist(&self, uid: &str, account: Option<&str>) -> Result<Playlist> {
+        Ok(self
+            .read_account_playlist(None, Some(uid), account)
+            .await?
+            .playlist)
+    }
+    async fn user_favorite_tracks(&self, uid: &str, request: &PageRequest) -> Result<Page<Track>> {
+        account_playlists::validate_page(request)?;
+        Ok(self
+            .read_account_playlist(None, Some(uid), request.account.as_deref())
+            .await?
+            .into_page(request))
+    }
+    async fn playlist_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        account: Option<&str>,
+    ) -> Result<Playlist> {
+        match source_type {
+            "playlist" => self.playlist(id, account).await,
+            "favorite_tracks" => self.user_favorite_playlist(id, account).await,
+            "purchased_tracks" => self.purchased_tracks_source(id, account).await,
+            "purchased_albums" => self.purchased_albums_source(id, account).await,
+            "favorite_albums" => self.favorite_albums_source(id, account).await,
+            _ => Err(TuneWeaveError::unsupported(
+                Platform::Migu,
+                Capability::PlaylistRead,
+            )),
+        }
+    }
+    async fn playlist_source_items(
+        &self,
+        id: &str,
+        source_type: &str,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::PlaylistPlayableItem>> {
+        if source_type == "purchased_tracks" {
+            return self.purchased_tracks_source_items(id, request).await;
+        }
+        if source_type == "purchased_albums" {
+            return self.purchased_albums_source_items(id, request).await;
+        }
+        if source_type == "favorite_albums" {
+            return self.favorite_albums_source_items(id, request).await;
+        }
+        let page = match source_type {
+            "playlist" => self.playlist_tracks(id, request).await?,
+            "favorite_tracks" => self.user_favorite_tracks(id, request).await?,
+            _ => {
+                return Err(TuneWeaveError::unsupported(
+                    Platform::Migu,
+                    Capability::PlaylistRead,
                 ));
             }
-            if let Some(sequence) = page.sequence {
-                sequences.push(sequence);
-            }
-            if conditions.is_empty() {
-                conditions = page.conditions;
-            }
-            let skip = if page_index == 0 { first_skip } else { 0 };
-            let mut unconsumed = false;
-            for track in page.tracks.into_iter().skip(skip) {
-                if tracks.len() == requested {
-                    unconsumed = true;
-                    break;
-                }
-                tracks.push(track);
-            }
-            has_more = unconsumed || page.has_next;
-            if tracks.len() == requested || !page.has_next {
-                break;
-            }
-        }
-
-        let returned = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
-        let consumed = query.offset.saturating_add(returned);
-        let mut extensions = Extensions::new();
-        extensions.insert("backend".to_owned(), json!("bmw_song_search_v1"));
-        extensions.insert("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE));
-        extensions.insert("upstream_pages_fetched".to_owned(), json!(fetched_pages));
-        if !sequences.is_empty() {
-            extensions.insert("upstream_sequences".to_owned(), json!(sequences));
-        }
-        if !conditions.is_empty() {
-            extensions.insert("conditions".to_owned(), json!(conditions));
-        }
+        };
         Ok(Page {
-            items: tracks,
-            pagination: PageMeta {
-                limit: query.limit,
-                offset: query.offset,
-                total: None,
-                next_offset: (has_more && returned > 0).then_some(consumed),
-                has_more,
-                extensions,
-            },
+            items: page
+                .items
+                .into_iter()
+                .map(tuneweave_core::PlaylistPlayableItem::Track)
+                .collect(),
+            pagination: page.pagination,
         })
     }
 
+    async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
+        self.read_account_library(None, request, None).await
+    }
+
+    async fn user_created_playlists(
+        &self,
+        user_id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<Playlist>> {
+        self.read_account_library(
+            Some(user_id),
+            request,
+            Some(crate::client::library::Section::Created),
+        )
+        .await
+    }
+
+    async fn user_favorite_playlists(
+        &self,
+        user_id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<Playlist>> {
+        self.read_account_library(
+            Some(user_id),
+            request,
+            Some(crate::client::library::Section::Saved),
+        )
+        .await
+    }
+
+    async fn search(&self, query: &SearchQuery) -> Result<Page<Track>> {
+        if query.account.is_some() || self.caller_credential.is_some() {
+            return self.search_account_tracks(query).await;
+        }
+        self.require_public_source()?;
+        validate_search_query(query)?;
+        self.search_tracks_public(query, || Ok(())).await
+    }
+
+    async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
+        if query.kind == SearchKind::Mv {
+            return self.search_mvs(query).await;
+        }
+        if query.kind == SearchKind::Track {
+            let page = self.search(query).await?;
+            return Ok(Page {
+                items: page.items.into_iter().map(SearchItem::Track).collect(),
+                pagination: page.pagination,
+            });
+        }
+        self.require_public_source()?;
+        self.search_public_catalog(query).await
+    }
+
+    async fn album(&self, id: &str, account: Option<&str>) -> Result<Album> {
+        self.require_public_source()?;
+        albums::validate_source(id, account)?;
+        self.client.album_metadata(id).await
+    }
+
+    async fn video(
+        &self,
+        id: &str,
+        request: &tuneweave_core::VideoDetailRequest,
+    ) -> Result<tuneweave_core::VideoDetail> {
+        Ok(self.read_mv(id, request).await?.detail)
+    }
+    async fn video_stats(
+        &self,
+        id: &str,
+        request: &tuneweave_core::VideoDetailRequest,
+    ) -> Result<tuneweave_core::VideoStats> {
+        Ok(self.read_mv(id, request).await?.stats)
+    }
+    async fn video_stream(
+        &self,
+        id: &str,
+        request: &tuneweave_core::VideoStreamRequest,
+    ) -> Result<tuneweave_core::VideoStream> {
+        self.read_mv_stream(id, request).await
+    }
+    async fn migu_native_mv_stream(
+        &self,
+        id: &str,
+        request: &tuneweave_core::MiguNativeMvStreamRequest,
+    ) -> Result<tuneweave_core::VideoStream> {
+        self.read_native_mv_stream(id, request).await
+    }
+    async fn video_streams(
+        &self,
+        ids: &[String],
+        request: &tuneweave_core::VideoStreamRequest,
+    ) -> Result<Vec<tuneweave_core::VideoStream>> {
+        self.read_mv_streams(ids, request).await
+    }
+    async fn artist_videos(
+        &self,
+        id: &str,
+        request: &tuneweave_core::ArtistVideoListRequest,
+    ) -> Result<Page<tuneweave_core::Video>> {
+        self.read_artist_mvs(id, request).await
+    }
+
+    async fn search_suggestions(
+        &self,
+        request: &tuneweave_core::SearchSuggestionRequest,
+    ) -> Result<tuneweave_core::SearchSuggestionList> {
+        self.read_pc_search_suggestions(request).await
+    }
+
+    async fn trending_searches(
+        &self,
+        request: &tuneweave_core::SearchTrendingRequest,
+    ) -> Result<tuneweave_core::SearchTrendingList> {
+        self.read_pc_search_trending(request).await
+    }
+
+    async fn artist_catalog(
+        &self,
+        request: &tuneweave_core::ArtistCatalogRequest,
+    ) -> Result<tuneweave_core::ArtistCatalog> {
+        self.read_artist_directory(request).await
+    }
+
+    async fn similar_artists(
+        &self,
+        id: &str,
+        request: &tuneweave_core::SimilarArtistRequest,
+    ) -> Result<tuneweave_core::SimilarArtistList> {
+        self.read_similar_artists(id, request).await
+    }
+
+    async fn artist(&self, id: &str, account: Option<&str>) -> Result<tuneweave_core::Artist> {
+        self.read_artist(id, account).await
+    }
+    async fn artist_overview(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::ArtistOverview> {
+        self.read_artist_overview(id, account).await
+    }
+    async fn artist_tracks(
+        &self,
+        id: &str,
+        request: &tuneweave_core::ArtistTrackListRequest,
+    ) -> Result<Page<Track>> {
+        self.read_artist_tracks(id, request).await
+    }
+    async fn artist_albums(&self, id: &str, request: &PageRequest) -> Result<Page<Album>> {
+        self.read_artist_albums(id, request).await
+    }
+    async fn artist_digital_albums(
+        &self,
+        id: &str,
+        request: &PageRequest,
+    ) -> Result<Page<DigitalAlbum>> {
+        self.read_artist_digital_albums(id, request).await
+    }
+
+    async fn digital_album(&self, id: &str, account: Option<&str>) -> Result<DigitalAlbum> {
+        self.require_public_source()?;
+        albums::validate_source(id, account)?;
+        self.client.digital_album_metadata(id).await
+    }
+
+    async fn album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        self.require_public_source()?;
+        self.read_album_tracks(id, request, false).await
+    }
+
+    async fn digital_album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        self.require_public_source()?;
+        self.read_album_tracks(id, request, true).await
+    }
+
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
+        if account.is_some() || self.caller_credential.is_some() {
+            return self.read_account_track(id, account).await;
+        }
+        self.require_public_source()?;
         if account.is_some() {
             return Err(migu_invalid_request(
                 "Migu public track detail does not accept an account",
@@ -157,12 +805,17 @@ impl MusicProvider for MiguProvider {
         id: &str,
         request: &TrackAvailabilityRequest,
     ) -> Result<TrackAvailability> {
+        if request.account.is_some() || self.caller_credential.is_some() {
+            return self.account_track_availability(id, request).await;
+        }
+        self.require_public_source()?;
         validate_availability_request(request)?;
         let content_id = parse_content_id(id)?;
         self.client.track_availability(content_id, request).await
     }
 
     async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+        self.require_public_source()?;
         if account.is_some() {
             return Err(migu_invalid_request(
                 "Migu public lyrics do not accept an account",
@@ -173,20 +826,40 @@ impl MusicProvider for MiguProvider {
     }
 
     async fn lyrics_with_options(&self, id: &str, request: &LyricsRequest) -> Result<Lyrics> {
+        self.require_public_source()?;
         validate_lyrics_request(request)?;
         let content_id = parse_content_id(id)?;
         self.client.lyrics(content_id).await
     }
 
     async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
+        if request.account.is_some() || self.caller_credential.is_some() {
+            return self.stream_account_track(track, request).await;
+        }
+        self.require_public_source()?;
         self.client.stream(track, request).await
     }
 
+    fn requires_download_authorization(&self, account: Option<&str>) -> bool {
+        account.is_some() || self.caller_credential.is_some()
+    }
+
     async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
+        if self.requires_download_authorization(request.account.as_deref()) {
+            return self.download_account_track(track, request).await;
+        }
+        self.require_public_source()?;
         self.client.download(track, request).await
     }
 
     async fn playlist(&self, id: &str, account: Option<&str>) -> Result<Playlist> {
+        if account.is_some() || self.caller_credential.is_some() {
+            return Ok(self
+                .read_account_playlist(Some(id), None, account)
+                .await?
+                .playlist);
+        }
+        self.require_public_source()?;
         if account.is_some() {
             return Err(migu_invalid_request(
                 "Migu public playlists do not accept an account",
@@ -197,6 +870,14 @@ impl MusicProvider for MiguProvider {
     }
 
     async fn playlist_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
+        if request.account.is_some() || self.caller_credential.is_some() {
+            account_playlists::validate_page(request)?;
+            return Ok(self
+                .read_account_playlist(Some(id), None, request.account.as_deref())
+                .await?
+                .into_page(request));
+        }
+        self.require_public_source()?;
         let playlist_id = parse_playlist_id(id)?;
         validate_playlist_page(request)?;
         let start_page = request.offset / UPSTREAM_PLAYLIST_PAGE_SIZE + 1;
@@ -378,24 +1059,28 @@ fn validate_search_query(query: &SearchQuery) -> Result<()> {
             capability_for_search(query.kind),
         ));
     }
+    validate_public_search_options(query)
+}
+
+fn validate_public_search_options(query: &SearchQuery) -> Result<()> {
     if query.variant != SearchVariant::Default {
         return Err(migu_invalid_request(
-            "Migu public track search only supports the default backend",
+            "Migu public search only supports the default backend",
         ));
     }
     if query.account.is_some() {
         return Err(migu_invalid_request(
-            "Migu public track search does not accept an account",
+            "Migu public search does not accept an account",
         ));
     }
     if query.search_id.is_some() || query.highlight || !query.selectors.is_empty() {
         return Err(migu_invalid_request(
-            "Migu public track search does not accept search_id, highlight, or selectors",
+            "Migu public search does not accept search_id, highlight, or selectors",
         ));
     }
     if query.video_filters.is_some() {
         return Err(migu_invalid_request(
-            "Migu track search does not accept video filters",
+            "Migu public search does not accept video filters",
         ));
     }
     let keyword = query.query.trim();
@@ -439,6 +1124,93 @@ fn migu_upstream_error(message: impl Into<String>) -> TuneWeaveError {
         .with_platform(Platform::Migu)
 }
 
+impl MiguProvider {
+    async fn search_tracks_public(
+        &self,
+        query: &SearchQuery,
+        check: impl Fn() -> Result<()> + Send + Sync,
+    ) -> Result<Page<Track>> {
+        let start_page = query.offset / UPSTREAM_PAGE_SIZE + 1;
+        let first_skip = usize::try_from(query.offset % UPSTREAM_PAGE_SIZE)
+            .map_err(|_| migu_invalid_request("Migu search offset is too large"))?;
+        let requested = usize::try_from(query.limit)
+            .map_err(|_| migu_invalid_request("Migu search limit is too large"))?;
+        let required = u32::try_from(first_skip.saturating_add(requested)).unwrap_or(u32::MAX);
+        let page_budget = required
+            .saturating_add(UPSTREAM_PAGE_SIZE - 1)
+            .checked_div(UPSTREAM_PAGE_SIZE)
+            .unwrap_or(MAX_UPSTREAM_PAGES)
+            .clamp(1, MAX_UPSTREAM_PAGES);
+
+        let mut tracks = Vec::with_capacity(requested);
+        let mut sequences = Vec::new();
+        let mut conditions: Vec<MiguSearchCondition> = Vec::new();
+        let mut fetched_pages = 0_u32;
+        let mut has_more = false;
+        for page_index in 0..page_budget {
+            check()?;
+            let page_number = start_page.checked_add(page_index).ok_or_else(|| {
+                migu_invalid_request("Migu search offset exceeds the upstream page range")
+            })?;
+            let page = self
+                .client
+                .search_tracks_page(query.query.trim(), page_number)
+                .await;
+            check()?;
+            let page = page?;
+            fetched_pages = fetched_pages.saturating_add(1);
+            if page.has_next && page.tracks.is_empty() {
+                return Err(migu_upstream_error(
+                    "Migu search reported another page without returning any tracks",
+                ));
+            }
+            if let Some(sequence) = page.sequence {
+                sequences.push(sequence);
+            }
+            if conditions.is_empty() {
+                conditions = page.conditions;
+            }
+            let skip = if page_index == 0 { first_skip } else { 0 };
+            let mut unconsumed = false;
+            for track in page.tracks.into_iter().skip(skip) {
+                if tracks.len() == requested {
+                    unconsumed = true;
+                    break;
+                }
+                tracks.push(track);
+            }
+            has_more = unconsumed || page.has_next;
+            if tracks.len() == requested || !page.has_next {
+                break;
+            }
+        }
+
+        let returned = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+        let consumed = query.offset.saturating_add(returned);
+        let mut extensions = Extensions::new();
+        extensions.insert("backend".to_owned(), json!("bmw_song_search_v1"));
+        extensions.insert("upstream_page_size".to_owned(), json!(UPSTREAM_PAGE_SIZE));
+        extensions.insert("upstream_pages_fetched".to_owned(), json!(fetched_pages));
+        if !sequences.is_empty() {
+            extensions.insert("upstream_sequences".to_owned(), json!(sequences));
+        }
+        if !conditions.is_empty() {
+            extensions.insert("conditions".to_owned(), json!(conditions));
+        }
+        Ok(Page {
+            items: tracks,
+            pagination: PageMeta {
+                limit: query.limit,
+                offset: query.offset,
+                total: None,
+                next_offset: (has_more && returned > 0).then_some(consumed),
+                has_more,
+                extensions,
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,19 +1220,67 @@ mod tests {
     }
 
     #[test]
-    fn provider_advertises_only_implemented_public_capabilities() {
+    fn provider_advertises_only_implemented_capabilities() {
         let provider = MiguProvider::new(MiguConfig::default()).expect("create Migu provider");
         assert_eq!(provider.platform(), Platform::Migu);
         assert_eq!(
             provider.capabilities(),
             BTreeSet::from([
+                Capability::PasswordLogin,
+                Capability::PhoneLogin,
+                Capability::CredentialImport,
+                Capability::SessionManagement,
+                Capability::CallerManagedCredentials,
+                Capability::AccountProfile,
+                Capability::AccountAvatarWrite,
+                Capability::UserProfileModern,
+                Capability::AccountPurchasedTracks,
+                Capability::AccountPurchasedAlbums,
+                Capability::AccountPlaylists,
+                Capability::AccountAlbums,
+                Capability::AccountDigitalAlbums,
+                Capability::AccountFollowingArtists,
+                Capability::ArtistSubscriptionWrite,
+                Capability::AlbumSubscriptionWrite,
+                Capability::DigitalAlbumSubscriptionWrite,
+                Capability::Favorites,
+                Capability::TrackSubscriptionWrite,
+                Capability::PlaylistSubscriptionWrite,
+                Capability::PlaylistWrite,
+                Capability::PlaylistOccurrenceRead,
+                Capability::PlaylistOccurrenceWrite,
+                Capability::UserMembership,
+                Capability::UserMembershipClientInfo,
                 Capability::AudioDownload,
                 Capability::AudioStream,
                 Capability::Lyrics,
                 Capability::PlaylistRead,
                 Capability::SearchTracks,
+                Capability::SearchPlaylists,
+                Capability::SearchArtists,
+                Capability::SearchSuggestions,
+                Capability::SearchTrending,
+                Capability::ArtistCatalog,
+                Capability::ArtistDetail,
+                Capability::ArtistOverview,
+                Capability::SimilarArtists,
+                Capability::ArtistTracks,
+                Capability::ArtistAlbums,
+                Capability::ArtistDigitalAlbums,
+                Capability::ArtistVideos,
+                Capability::SearchMvs,
+                Capability::VideoDetail,
+                Capability::VideoStats,
+                Capability::VideoStream,
+                Capability::SearchAlbums,
+                Capability::AlbumDetail,
+                Capability::DigitalAlbumDetail,
+                Capability::DigitalAlbumTracks,
                 Capability::TrackAvailability,
-                Capability::TrackDetail
+                Capability::TrackDetail,
+                Capability::ChartCatalog,
+                Capability::ChartTracks,
+                Capability::ChartHistoricalTracks,
             ])
         );
     }

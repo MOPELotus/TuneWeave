@@ -1,4 +1,7 @@
 mod client;
+mod credential;
+mod device;
+mod passport;
 mod provider;
 mod tv;
 

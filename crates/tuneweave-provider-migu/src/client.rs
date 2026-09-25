@@ -19,6 +19,37 @@ use tuneweave_core::{
 };
 use url::Url;
 
+pub(crate) mod account;
+pub(crate) mod account_avatar;
+pub(crate) mod account_download;
+pub(crate) mod account_media;
+pub(crate) mod account_playlist;
+pub(crate) mod album_collections;
+pub(crate) mod albums;
+pub(crate) mod artist_directory;
+pub(crate) mod artists;
+pub(crate) mod catalog;
+pub(crate) mod charts;
+mod favorites;
+pub(crate) mod following_artists;
+pub(crate) mod library;
+pub(crate) mod membership;
+pub(crate) mod mg3d;
+pub(crate) mod native_http;
+pub(crate) mod passport;
+mod playlist_collection;
+pub(crate) mod playlist_order;
+pub(crate) mod playlist_tags;
+pub(crate) mod playlist_write;
+pub(crate) mod purchased_albums;
+mod purchases;
+pub(crate) mod search_suggestions;
+pub(crate) mod search_trending;
+pub(crate) mod similar_artists;
+pub(crate) mod user_profile;
+pub(crate) mod video_playback;
+pub(crate) mod videos;
+
 const SEARCH_ENDPOINT: &str = "https://app.c.nf.migu.cn/bmw/search/song/v1.0";
 const PLAYLIST_DETAIL_ENDPOINT: &str = "https://app.c.nf.migu.cn/resource/playlist/v2.0";
 const PLAYLIST_TRACKS_ENDPOINT: &str =
@@ -47,12 +78,19 @@ const MRC_KEY: [i64; 4] = [
 #[derive(Clone, Default)]
 pub struct MiguConfig {
     pub proxy_url: Option<String>,
+    pub device_path: Option<std::path::PathBuf>,
+    pub credential_store: Option<std::sync::Arc<dyn tuneweave_core::AccountCredentialStore>>,
 }
 
 impl fmt::Debug for MiguConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MiguConfig")
+            .field("device_persistence_configured", &self.device_path.is_some())
+            .field(
+                "credential_store_configured",
+                &self.credential_store.is_some(),
+            )
             .field(
                 "proxy_url",
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
@@ -64,8 +102,11 @@ impl fmt::Debug for MiguConfig {
 #[derive(Clone)]
 pub struct MiguClient {
     http: Client,
+    music_device: std::sync::Arc<crate::device::MusicDeviceStore>,
     tv_device: crate::tv::Device,
     proxy_configured: bool,
+    #[cfg(test)]
+    catalog_test_origin: Option<Url>,
 }
 
 impl fmt::Debug for MiguClient {
@@ -717,7 +758,10 @@ impl MiguLyricKind {
 
 impl MiguClient {
     pub fn new(config: &MiguConfig) -> Result<Self> {
+        // Some official library mutations use GET. Never replay these requests
+        // automatically, even when a transport policy would normally allow it.
         let mut builder = Client::builder()
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .redirect(Policy::none())
@@ -734,8 +778,13 @@ impl MiguClient {
         })?;
         Ok(Self {
             http,
+            music_device: std::sync::Arc::new(crate::device::MusicDeviceStore::new(
+                config.device_path.clone(),
+            )),
             tv_device: crate::tv::Device::default(),
             proxy_configured: config.proxy_url.is_some(),
+            #[cfg(test)]
+            catalog_test_origin: None,
         })
     }
 
@@ -754,7 +803,7 @@ impl MiguClient {
         let outcome = async {
             let response = self
                 .http
-                .get(SEARCH_ENDPOINT)
+                .get(self.catalog_endpoint(SEARCH_ENDPOINT)?)
                 .header(ACCEPT, "application/json")
                 .query(&MiguSearchRequest {
                     page_no: page,
@@ -1271,7 +1320,7 @@ impl MiguClient {
         let outcome = async {
             let response = self
                 .http
-                .get(RESOURCE_INFO_ENDPOINT)
+                .get(self.catalog_endpoint(RESOURCE_INFO_ENDPOINT)?)
                 .header(ACCEPT, "application/json")
                 .query(&MiguResourceInfoRequest {
                     resource_id: content_id,
@@ -1387,20 +1436,20 @@ fn migu_upstream_classification<T>(
     match outcome {
         Ok(_) => (UpstreamBusinessClass::Success, UpstreamOutcome::Success),
         Err(error) => {
-            let business_class = if error
-                .details
-                .get("platform_code")
-                .and_then(serde_json::Value::as_i64)
-                .is_some()
-                || matches!(
-                    error.code,
-                    ErrorCode::AuthenticationRequired
-                        | ErrorCode::PermissionDenied
-                        | ErrorCode::ResourceNotFound
-                        | ErrorCode::Conflict
-                        | ErrorCode::RateLimited
-                        | ErrorCode::MatchRejected
-                ) {
+            let business_class = if error.details.get("platform_code").is_some_and(|value| {
+                value.as_i64().is_some()
+                    || value.as_str().is_some_and(|code| {
+                        matches!(code.len(), 4 | 6) && code.bytes().all(|b| b.is_ascii_digit())
+                    })
+            }) || matches!(
+                error.code,
+                ErrorCode::AuthenticationRequired
+                    | ErrorCode::PermissionDenied
+                    | ErrorCode::ResourceNotFound
+                    | ErrorCode::Conflict
+                    | ErrorCode::RateLimited
+                    | ErrorCode::MatchRejected
+            ) {
                 UpstreamBusinessClass::RejectedError
             } else {
                 UpstreamBusinessClass::Unavailable
@@ -1753,6 +1802,11 @@ fn migu_track_ref(content_id: &str) -> Result<ResourceRef> {
 }
 
 fn select_media_tone(track: &Track, request: &StreamRequest) -> Result<MiguSelectedTone> {
+    if matches!(request.quality, Quality::Vinyl | Quality::Dtsx) {
+        return Err(migu_invalid_request(
+            "Migu public media does not expose vinyl or DTS:X quality",
+        ));
+    }
     if request.variant != StreamVariant::Default {
         return Err(migu_invalid_request(
             "Migu public media only supports the default stream variant",
@@ -1799,7 +1853,9 @@ fn select_media_tone(track: &Track, request: &StreamRequest) -> Result<MiguSelec
             | Quality::Spatial
             | Quality::Dolby
             | Quality::Master
-            | Quality::Vivid => {
+            | Quality::Vivid
+            | Quality::Vinyl
+            | Quality::Dtsx => {
                 return Err(migu_invalid_request(
                     "Migu public media does not expose immersive or master quality families",
                 ));
@@ -3466,6 +3522,14 @@ mod tests {
             )
         );
 
+        let session_rejected = Err::<(), _>(
+            migu_upstream_error("Session rejected").with_details(json!({"platform_code":"299999"})),
+        );
+        assert_eq!(
+            migu_upstream_classification(&session_rejected).0,
+            UpstreamBusinessClass::RejectedError
+        );
+
         let timeout = Err::<(), _>(
             TuneWeaveError::new(ErrorCode::UpstreamTimeout, "sensitive transport text")
                 .with_platform(Platform::Migu)
@@ -4121,11 +4185,37 @@ mod tests {
                 ..StreamRequest::default()
             },
             StreamRequest {
+                quality: Quality::Vinyl,
+                ..StreamRequest::default()
+            },
+            StreamRequest {
+                quality: Quality::Vinyl,
+                bitrate: Some(192_000),
+                ..StreamRequest::default()
+            },
+            StreamRequest {
                 bitrate: Some(320_001),
                 ..StreamRequest::default()
             },
         ] {
             assert!(select_media_tone(&track, &request).is_err());
+        }
+    }
+
+    #[test]
+    fn media_selection_rejects_dtsx_even_with_supported_bitrate() {
+        let track = parse_resource_response(RESOURCE_RESPONSE.as_bytes(), "600908000007288315")
+            .expect("parse resource detail");
+        for bitrate in [None, Some(128_000), Some(192_000), Some(320_000)] {
+            let request = StreamRequest {
+                quality: Quality::Dtsx,
+                bitrate,
+                ..StreamRequest::default()
+            };
+            let error = select_media_tone(&track, &request)
+                .err()
+                .expect("DTS:X is not supported");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
         }
     }
 
@@ -4276,6 +4366,7 @@ mod tests {
     fn configuration_debug_redacts_proxy_credentials() {
         let config = MiguConfig {
             proxy_url: Some("http://secret@example.test:8080".to_owned()),
+            ..MiguConfig::default()
         };
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret"));

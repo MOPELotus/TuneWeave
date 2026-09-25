@@ -1,0 +1,23 @@
+{
+  "description": "Disposable public test keys. Generated locally with cryptography/OpenSSL; reference ciphertext computed independently with Python integer pow and UTF-16 code-unit encoding. Never use these keys for real credentials.",
+  "vectors": [
+    {
+      "modulus": "ec5eb87d0d6b0c0b067f266f3aebc2f6ea872802ec1b4e52103529ce34b5531fafcd875dce8859256cd5423c4c269a30997d683303da5a0921195ff890e861106425db9355cae7a68ff721e1e4054ffc093f8d37889e400f55975aae2fdf79dce62dbe2d8a6a6b37e57ff726848be9c034deb684ef3600b65353a62799c58db5",
+      "exponent": "10001",
+      "private_exponent": "40ba93b513269c6eac81c769b06dfdbf166c9ac56a18f432bee380264b02d8d79592281ec53f4b825732736805c69074fca37e14725aaa4b53b81a32fca3d6685ae841fc289266e082a7c61f9eddc08111bd060b25de69a3dbd9e910bd27f2bc3f06c28fc5269779b1a15306438191ba133f19704147d9c0e6695255f6202d21",
+      "text": "测试😀-248",
+      "message_hex": "e6b58be8af95eda0bdedb8802d323438",
+      "ciphertext_hex": "ac7514762ab02a34f79c26e32adfc5e0edf54a1ff8654ebfe1089a320e22727226c5f18256981f281c1627edb85c429d947d5837ef75cef8cdbebd474901fcd4b2c2922fd3e085ce2a7df3b2c6a935dca5d63c67a5933146067e4f6f31d3bdead4495a72eccdf1e39c704627b75b6fdc1652dd8764ac14e0f04e4cde3bfe97",
+      "padding_hex": "42"
+    },
+    {
+      "modulus": "c7bc5a064dfe83dfb5ac06cd4b537394f7a768708291efb4edcbdb6a717d87d43894e785f3dbdb2ad433d8c63d93a821a8756a474e05a8c0fbf4f40a79184dc4a5ffb2a6ab3501ade7d1c3bab560fd69ff33d4b079695b93a5458c65af39331bce1d53c9047e24aae0935f894830efc07cf7cd362fa7a04c22e77aaf664a5dd7",
+      "exponent": "10001",
+      "private_exponent": "3ff7bda9393f6302b98f3f9a6e1e6aecf1a7c6d609ab2d66f7a58b3efadbe62d7c758bf4a595eb0a3b6de3661200811f4e71543943eea20e34634de930c12cde56240468c98c50310ede23883336848a2448b6b3553b5ab180b87cb91d8d531671fda0b8f36e91e9f1ce76620ef263905676262c66457db81be42c6d22af35f9",
+      "text": "测试😀-140",
+      "message_hex": "e6b58be8af95eda0bdedb8802d313430",
+      "ciphertext_hex": "d9bb00691a0aca8bec2455270dfe5a27b652e74f38a567e19f0f90aa7f1bd77308111ff61e894ac2466d5e52b031ecca825540a04184a0715768b69a608f072da50aca7f3216567a20dae0ba0a88f25292d7a85c10e5240cc5865c58d783f25c2f47d3bb1334b1fe445d27c2a111f4d6ca99780584d64c831f79f2eebf8d61",
+      "padding_hex": "42"
+    }
+  ]
+}
